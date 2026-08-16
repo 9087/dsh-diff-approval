@@ -3,7 +3,7 @@
 // navigation, live-state warnings, and the line-selection copy toolbar.
 
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import type { ComponentProps } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingFileDiff } from '../src/types.ts'
@@ -38,6 +38,7 @@ function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
     onRefresh: vi.fn(),
     onKeep: vi.fn(async () => {}),
     onRevert: vi.fn(async () => {}),
+    onOpen: vi.fn(async () => {}),
     t: (key: string, params?: Record<string, unknown>) => params === undefined ? key : `${key} ${JSON.stringify(params)}`,
   } as unknown as PanelProps
 }
@@ -52,6 +53,8 @@ describe('PendingPanel', () => {
     fireEvent.click(badge)
     expect(props.onRefresh).toHaveBeenCalledWith(S1)
     expect(screen.getByText('panel.title')).toBeDefined()
+    // No composer in jsdom: the panel keeps the fixed bottom offset.
+    expect(document.querySelector('[data-diff-approval-panel]')!.style.bottom).toBe('128px')
   })
 
   it('groups the current session first and other sessions below', () => {
@@ -176,6 +179,56 @@ describe('PendingPanel', () => {
     expect(screen.queryByText('0')).toBeNull()
   })
 
+  it('resizes the file list by dragging the divider within its bounds', () => {
+    const second = entry({ id: 'entry-2', path: '/repo/b.txt' })
+    const props = panelProps({ read: true, files: [FILE, second], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const list = document.querySelector('[data-diff-approval-file-list]') as HTMLElement
+    const handle = document.querySelector('[data-diff-resize]') as HTMLElement
+    expect(list.style.width).toBe('240px')
+
+    fireEvent.mouseDown(handle, { button: 0, clientX: 100 })
+    act(() => {
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 180 }))
+      window.dispatchEvent(new MouseEvent('mouseup'))
+    })
+    expect(list.style.width).toBe('320px')
+
+    // Clamped at both ends on an extreme drag.
+    fireEvent.mouseDown(handle, { button: 0, clientX: 100 })
+    act(() => {
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 1200 }))
+      window.dispatchEvent(new MouseEvent('mouseup'))
+    })
+    expect(list.style.width).toBe('560px')
+  })
+
+  it('opens or reveals the selected file through the injected face', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    fireEvent.click(screen.getByText('action.openFile'))
+    expect(props.onOpen).toHaveBeenCalledWith(FILE.sessionId, FILE.id, 'open')
+    fireEvent.click(screen.getByText('action.revealFile'))
+    expect(props.onOpen).toHaveBeenCalledWith(FILE.sessionId, FILE.id, 'reveal')
+  })
+
+  it('shows the per-file line change counts on each row', () => {
+    const second = entry({ id: 'entry-2', path: '/repo/b.txt', oldText: 'x\n', newText: 'x\ny\nz\n' })
+    const props = panelProps({ read: true, files: [FILE, second], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    expect(screen.getAllByText('row.added {"added":1}')).toHaveLength(1)
+    expect(screen.getAllByText('row.removed {"removed":1}')).toHaveLength(1)
+    expect(screen.getAllByText('row.added {"added":2}')).toHaveLength(1)
+    expect(screen.getAllByText('row.removed {"removed":0}')).toHaveLength(1)
+  })
+
   it('moves the focus between contiguous change blocks', () => {
     const twoBlocks = entry({ id: 'entry-blocks', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [twoBlocks], busy: new Set() })
@@ -188,16 +241,16 @@ describe('PendingPanel', () => {
     expect(focusedLines()).toHaveLength(2)
     expect(focusedLines()[0]!.textContent).toContain('a')
 
-    fireEvent.click(screen.getByText('action.nextDiff'))
+    fireEvent.click(screen.getByLabelText('action.nextDiff'))
     expect(focusedLines()).toHaveLength(2)
     expect(focusedLines()[0]!.textContent).toContain('c')
 
-    fireEvent.click(screen.getByText('action.prevDiff'))
+    fireEvent.click(screen.getByLabelText('action.prevDiff'))
     expect(focusedLines()[0]!.textContent).toContain('a')
 
     // From the last block, next wraps back to the first.
-    fireEvent.click(screen.getByText('action.nextDiff'))
-    fireEvent.click(screen.getByText('action.nextDiff'))
+    fireEvent.click(screen.getByLabelText('action.nextDiff'))
+    fireEvent.click(screen.getByLabelText('action.nextDiff'))
     expect(focusedLines()[0]!.textContent).toContain('a')
   })
 
@@ -221,7 +274,7 @@ describe('PendingPanel', () => {
       return { top: 0, bottom: 100, left: 0, right: 100, width: 100, height: 100, x: 0, y: 0, toJSON: () => ({}) } as DOMRect
     })
 
-    fireEvent.click(screen.getByText('action.nextDiff'))
+    fireEvent.click(screen.getByLabelText('action.nextDiff'))
     const focused = view.container.querySelector('[data-diff-focused]')
     expect(focused).not.toBeNull()
     expect(focused!.textContent).toContain('e')

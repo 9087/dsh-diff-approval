@@ -6,7 +6,9 @@
  */
 
 import type { ClientConnectionRpc, SessionId } from '@deepseek-ai/dsh-client-connection/client'
-import type { DiffApprovalActionValue, PendingFileDiff } from '../types.ts'
+import type {
+  DiffApprovalActionValue, DiffApprovalOpenAction, DiffApprovalOpenValue, PendingFileDiff,
+} from '../types.ts'
 
 /** The channel the host half registers and this port calls. */
 export const DIFF_APPROVAL_CHANNEL = '/diff-approval'
@@ -19,6 +21,8 @@ export interface DiffApprovalPort {
   keep(sessionId: SessionId, id: string): Promise<DiffApprovalActionValue>
   /** Revert one operation. */
   revert(sessionId: SessionId, id: string): Promise<DiffApprovalActionValue>
+  /** Open one file with its default application or reveal it in the folder. */
+  open(sessionId: SessionId, id: string, action: DiffApprovalOpenAction): Promise<DiffApprovalOpenValue>
 }
 
 /** Build the port over one generic RPC caller.
@@ -35,6 +39,9 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
     },
     async revert(sessionId, id) {
       return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'revert', { sessionId, id }))
+    },
+    async open(sessionId, id, action) {
+      return openOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'open', { sessionId, id, action }))
     },
   }
 }
@@ -87,6 +94,18 @@ function actionOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): Dif
   if (typeof value !== 'object' || value === null) throw new Error('the action returned a malformed value')
   const outcome = (value as Record<string, unknown>).outcome
   if (outcome !== 'kept' && outcome !== 'reverted' && outcome !== 'missing') {
+    throw new Error('the action returned a malformed outcome')
+  }
+  return { outcome }
+}
+
+/** Narrow the open endpoint's value; a malformed wire value is an open failure. */
+function openOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffApprovalOpenValue {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+  const value: unknown = result.value
+  if (typeof value !== 'object' || value === null) throw new Error('the action returned a malformed value')
+  const outcome = (value as Record<string, unknown>).outcome
+  if (outcome !== 'opened' && outcome !== 'missing') {
     throw new Error('the action returned a malformed outcome')
   }
   return { outcome }

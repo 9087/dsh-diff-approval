@@ -4,10 +4,11 @@
  * executions because scoped emissions route through the shared root hook
  * table), folds each operation into its file's entry in the
  * {@link PendingDiffStore} (one entry per path), serves the `/diff-approval`
- * connection RPC channel (list/keep/revert), and applies a revert by writing
- * the entry's `oldText` back through `ctx.fs` (a created file's revert
- * removes it, and a tracked file that has since disappeared is restored by
- * its revert).
+ * connection RPC channel (list/keep/revert/open), and applies a revert by
+ * writing the entry's `oldText` back through `ctx.fs` (a created file's
+ * revert removes it, and a tracked file that has since disappeared is
+ * restored by its revert). `open` launches the file with its default
+ * application or reveals it in the file manager.
  *
  * Mount this row in any profile's `cordis.patch.yml`:
  *
@@ -44,15 +45,20 @@ import type {} from '@deepseek-ai/dsh-fs'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import { PendingDiffStore } from './pending.ts'
 import { PendingPersistence, defaultStorageDir } from './persist.ts'
+import { defaultOpenPath } from './open.ts'
+import type { OpenAction } from './open.ts'
 import type {
-  DiffApprovalActionValue, DiffApprovalListValue, PendingEntry, PendingEntryKind, PendingFileDiff,
+  DiffApprovalActionValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue,
+  PendingEntry, PendingEntryKind, PendingFileDiff,
 } from './types.ts'
 
 export type {
-  DiffApprovalActionOutcome, DiffApprovalActionValue, DiffApprovalListValue, PendingEntry, PendingEntryKind, PendingFileDiff,
+  DiffApprovalActionOutcome, DiffApprovalActionValue, DiffApprovalListValue, DiffApprovalOpenAction,
+  DiffApprovalOpenValue, PendingEntry, PendingEntryKind, PendingFileDiff,
 } from './types.ts'
 export { PendingDiffStore } from './pending.ts'
 export { PendingPersistence, defaultStorageDir } from './persist.ts'
+export { defaultOpenPath } from './open.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'diff-approval'
@@ -73,6 +79,11 @@ export interface DiffApprovalConfig {
    * `~` prefixes expand to the OS home.
    */
   storageDir?: string
+  /**
+   * Launcher for the `open` endpoint, defaulting to the platform commands.
+   * Injectable for tests; receives the backend execution-world path.
+   */
+  openPath?: (path: string, action: DiffApprovalOpenAction) => Promise<void>
 }
 
 /** One tool result's fields this plugin consumes, narrowed from the tool's JSON value. */
@@ -146,6 +157,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   }
   const store = new PendingDiffStore()
   const persistence = new PendingPersistence(resolve(expandHomePath(storageDir ?? defaultStorageDir())))
+  const launchPath = config?.openPath ?? defaultOpenPath
   const loaded = new Set<string>()
   const loading = new Map<string, Promise<void>>()
 
@@ -319,6 +331,24 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const value: DiffApprovalActionValue = { outcome: 'reverted' }
         return { ok: true, value }
       }
+      case 'open': {
+        const target = openTargetOf(payload)
+        if (target === undefined) return rpcError('sessionId, id, and action must be valid')
+        await ensureLoaded(target.sessionId)
+        const entry = store.get(target.sessionId, target.id)
+        if (entry === undefined) {
+          const value: DiffApprovalOpenValue = { outcome: 'missing' }
+          return { ok: true, value }
+        }
+        try {
+          const resolved = await ctx.fs.resolve(entry.path, { signal })
+          await launchPath(ctx.fs.processPath(resolved), target.action)
+        } catch (error: unknown) {
+          return rpcError(`${target.action} failed: ${errorMessage(error)}`)
+        }
+        const value: DiffApprovalOpenValue = { outcome: 'opened' }
+        return { ok: true, value }
+      }
       default:
         return rpcError(`unknown endpoint ${JSON.stringify(endpoint)}`)
     }
@@ -345,4 +375,13 @@ function targetOf(payload: unknown): { sessionId: SessionId; id: string } | unde
   const id = (payload as Record<string, unknown>).id
   if (typeof id !== 'string' || id.length === 0) return undefined
   return { sessionId, id }
+}
+
+/** Narrow a wire payload to one open target: the keep/revert pair plus the action. */
+function openTargetOf(payload: unknown): { sessionId: SessionId; id: string; action: OpenAction } | undefined {
+  const target = targetOf(payload)
+  if (target === undefined) return undefined
+  const action = (payload as Record<string, unknown>).action
+  if (action !== 'open' && action !== 'reveal') return undefined
+  return { ...target, action }
 }

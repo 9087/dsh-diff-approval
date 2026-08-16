@@ -30,6 +30,7 @@ interface TestHarness {
   options: ConnectionRpcHandlerOptions
   handleCalls: number
   storageDir: string
+  openPath: ReturnType<typeof vi.fn>
   dispose(): Promise<void>
 }
 
@@ -44,6 +45,7 @@ afterEach(async () => {
 async function harness(options: {
   sessionIds?: readonly SessionId[]
   storageDir?: string
+  openPath?: (path: string, action: 'open' | 'reveal') => Promise<void>
 } = {}): Promise<TestHarness> {
   const ctx = new Context()
   contexts.push(ctx)
@@ -63,7 +65,8 @@ async function harness(options: {
   ctx.provide('workspaceRegistry', { list: () => workspaces } as unknown as WorkspaceRegistry)
   const storageDir = options.storageDir ?? await mkdtemp(join(tmpdir(), 'dsh-diff-approval-'))
   tempDirs.push(storageDir)
-  await ctx.plugin(apply, { storageDir })
+  const openPath = options.openPath ?? vi.fn(async () => {})
+  await ctx.plugin(apply, { storageDir, openPath })
   const calls = handle.mock.calls
   const first = calls[0]
   if (first === undefined) throw new Error('diff-approval did not register its channel')
@@ -75,6 +78,7 @@ async function harness(options: {
     options: first[2],
     handleCalls: calls.length,
     storageDir,
+    openPath,
     dispose: () => ctx.fiber.dispose(),
   }
 }
@@ -231,6 +235,55 @@ describe('revert', () => {
       ok: false, error: { code: 'internal', message: 'revert failed: disk full', details: {} },
     })
     expect(await listEntries(handle, 'session-1')).toHaveLength(1)
+  })
+})
+
+describe('open', () => {
+  it('launches the file through the injected launcher with the execution-world path', async () => {
+    const { ctx, handle, openPath } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'before', 'after'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    await expect(handle('open', { sessionId: 'session-1', id: entry!.id, action: 'open' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'opened' } })
+    expect(openPath).toHaveBeenCalledWith('key:/repo/a.txt', 'open')
+  })
+
+  it('reveals the file location for the reveal action', async () => {
+    const { ctx, handle, openPath } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'before', 'after'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    await expect(handle('open', { sessionId: 'session-1', id: entry!.id, action: 'reveal' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'opened' } })
+    expect(openPath).toHaveBeenCalledWith('key:/repo/a.txt', 'reveal')
+  })
+
+  it('reports missing without touching the launcher when no entry exists', async () => {
+    const { handle, openPath } = await harness()
+    await expect(handle('open', { sessionId: 'session-1', id: 'none', action: 'open' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+    expect(openPath).not.toHaveBeenCalled()
+  })
+
+  it('reports an internal error when the launcher fails', async () => {
+    const { ctx, handle } = await harness({ openPath: async () => { throw new Error('no handler') } })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'before', 'after'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    const answer = await handle('open', { sessionId: 'session-1', id: entry!.id, action: 'open' }, signal())
+    expect(answer).toEqual({
+      ok: false, error: { code: 'internal', message: 'open failed: no handler', details: {} },
+    })
+  })
+
+  it('rejects a malformed action with an internal error', async () => {
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'before', 'after'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    const answer = await handle('open', { sessionId: 'session-1', id: entry!.id, action: 'edit' }, signal())
+    expect(answer).toEqual({ ok: false, error: { code: 'internal', message: expect.any(String) as string, details: {} } })
   })
 })
 

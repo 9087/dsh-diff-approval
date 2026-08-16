@@ -88,3 +88,23 @@ describe('keep and revert', () => {
     await expect(createDiffApprovalPort(seam.rpc).revert(S1, '/repo/a.txt')).rejects.toThrow('internal: busy')
   })
 })
+
+describe('open', () => {
+  it('narrows the open outcome and passes the action through', async () => {
+    const seam = fakeRpc({
+      open: { ok: true, value: { outcome: 'opened' } },
+    })
+    await expect(createDiffApprovalPort(seam.rpc).open(S1, 'e1', 'reveal')).resolves.toEqual({ outcome: 'opened' })
+    expect(seam.call).toHaveBeenCalledWith('/diff-approval', 'open', { sessionId: 'session-1', id: 'e1', action: 'reveal' })
+  })
+
+  it('accepts the missing outcome', async () => {
+    const seam = fakeRpc({ open: { ok: true, value: { outcome: 'missing' } } })
+    await expect(createDiffApprovalPort(seam.rpc).open(S1, 'none', 'open')).resolves.toEqual({ outcome: 'missing' })
+  })
+
+  it('rejects a malformed open outcome', async () => {
+    const seam = fakeRpc({ open: { ok: true, value: { outcome: 'maybe' } } })
+    await expect(createDiffApprovalPort(seam.rpc).open(S1, 'e1', 'open')).rejects.toThrow('malformed outcome')
+  })
+})

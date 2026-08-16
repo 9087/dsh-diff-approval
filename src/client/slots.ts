@@ -2,7 +2,7 @@
 
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
-import type { PendingFileDiff } from '../types.ts'
+import type { DiffApprovalOpenAction, PendingFileDiff } from '../types.ts'
 
 /** What the panel reads and drives: the pending list plus in-flight entries. */
 export interface PendingDiffSnapshot {
@@ -28,4 +28,6 @@ export interface PendingPanelFace {
   onKeep: (sessionId: SessionId, id: string) => Promise<void>
   /** Revert one operation (restore its prior content, or remove a created file). */
   onRevert: (sessionId: SessionId, id: string) => Promise<void>
+  /** Open one file with its default application or reveal it in the folder. */
+  onOpen: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
 }

@@ -58,6 +58,15 @@ export interface DiffApprovalListValue {
   files: PendingFileDiff[]
 }
 
+/** What the open endpoint asks the OS to do with a file. */
+export type DiffApprovalOpenAction = 'open' | 'reveal'
+
+/** Value returned by the channel's open endpoint. */
+export interface DiffApprovalOpenValue {
+  /** What the request did; `missing` means no pending entry existed. */
+  outcome: 'opened' | 'missing'
+}
+
 /** Outcome of one keep/revert request. */
 export type DiffApprovalActionOutcome = 'kept' | 'reverted' | 'missing'
 

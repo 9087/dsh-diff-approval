@@ -8,6 +8,7 @@
 
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
+import type { DiffApprovalOpenAction } from '../types.ts'
 import type { PendingDiffSnapshot } from './slots.ts'
 import type { DiffApprovalPort } from './port.ts'
 
@@ -19,6 +20,8 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   keep: (sessionId: SessionId, id: string) => Promise<void>
   /** Revert one operation. */
   revert: (sessionId: SessionId, id: string) => Promise<void>
+  /** Open one file with its default application or reveal it in the folder. */
+  open: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
   /** Drop every local fact (used on connection reset). */
   reset: () => void
 }
@@ -88,6 +91,16 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
     },
     revert(sessionId, id) {
       return withBusy(id, async () => { await port.revert(sessionId, id) })
+    },
+    async open(sessionId, id, action) {
+      try {
+        await port.open(sessionId, id, action)
+      } catch (error: unknown) {
+        publish({
+          ...snapshot,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
     },
     reset() {
       publish({ read: false, files: [], busy: EMPTY_BUSY })

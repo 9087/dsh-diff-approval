@@ -1,12 +1,12 @@
-/** Sidebar-foot pending-edit review action and the whole-file diff list it opens. */
+/** Sidebar-foot pending-edit review action and the split review panel it opens. */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react'
-import { IconListPenOutline16, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconChevronDownOutline14, IconChevronUpOutline14, IconListPenOutline16, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import type { PendingFileDiff } from '../types.ts'
+import type { DiffApprovalOpenAction, PendingFileDiff } from '../types.ts'
 import type { PendingPanelFace } from './slots.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import { computeWholeFileDiff } from './whole-file-diff.ts'
@@ -24,20 +24,41 @@ import css from './PendingPanel.module.css'
  */
 const POLL_INTERVAL_MS = 1000
 
+/** Panel bottom offset when the composer cannot be measured, in px. */
+const FALLBACK_BOTTOM_PX = 128
+/** Gap kept between the composer's top edge and the panel bottom, in px. */
+const COMPOSER_GAP_PX = 12
+/** The harness composer's stable hook (ui-conversation InputBar). */
+const COMPOSER_SELECTOR = '[data-composer-card]'
+/** File-list pane width bounds for the manual split drag, in px. */
+const MIN_LIST_WIDTH_PX = 160
+const MAX_LIST_WIDTH_PX = 560
+
 /** Full panel props composed by the sidebar footer-action slot. */
 export type PendingPanelProps =
   PropsRuntime<'sidebar.footer.action'> & InjectFace<PendingPanelFace> & PropsLocale<'diff-approval'>
 
-/** One pending file row: expandable head plus the merged whole-file diff. */
-interface PendingRowProps {
+/** Locale translator used by the panel and its rows. */
+type Translator = (key: DiffApprovalKey, params?: Record<string, unknown>) => string
+
+/** One file row in the left list pane. */
+interface PendingFileRowProps {
   file: PendingFileDiff
   files: readonly PendingFileDiff[]
   selected: boolean
-  busy: boolean
-  t: (key: DiffApprovalKey, params?: Record<string, unknown>) => string
+  t: Translator
   onSelect: (id: string) => void
+}
+
+/** The right detail pane for one selected file: actions plus the merged diff. */
+interface PendingDiffProps {
+  file: PendingFileDiff
+  files: readonly PendingFileDiff[]
+  busy: boolean
+  t: Translator
   onKeep: (sessionId: SessionId, id: string) => Promise<void>
   onRevert: (sessionId: SessionId, id: string) => Promise<void>
+  onOpen: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
 }
 
 /** The diff body's row class per line kind. */
@@ -47,7 +68,7 @@ const ROW_CLASS = {
   add: css.add,
 } as const
 
-/** One expanded row's derived view: diff rows, change blocks, highlight runs. */
+/** One file's derived view: diff rows, change blocks, highlight runs. */
 interface RowModel {
   diff: ReturnType<typeof computeWholeFileDiff>
   /** Maximal runs of changed rows (inclusive row indices); one per modification. */
@@ -84,10 +105,36 @@ function changeBlocksOf(diff: ReturnType<typeof computeWholeFileDiff>): ChangeBl
   return blocks
 }
 
-function PendingRow({ file, files, selected, busy, t, onSelect, onKeep, onRevert }: PendingRowProps) {
+/** One row of the file list: the clickable head in the left pane. */
+function PendingFileRow({ file, files, selected, t, onSelect }: PendingFileRowProps) {
+  const stats = useMemo(
+    () => computeWholeFileDiff(file.oldText, file.newText),
+    [file.oldText, file.newText],
+  )
+  return (
+    <li className={css.row}>
+      <button
+        type="button"
+        className={css.rowHead}
+        data-selected={selected || undefined}
+        onClick={() => { onSelect(selected ? '' : file.id) }}
+      >
+        <span className={css.rowPath} title={file.path}>{copyDisplayPath(file.path, files)}</span>
+        {file.kind === 'create' && <span className={css.kindTag}>{t('row.create')}</span>}
+        {file.missing && <span className={css.missing} title={t('panel.missingHint')}>{t('panel.missing')}</span>}
+        <span className={css.rowMeta}>
+          <span className={css.addCount}>{t('row.added', { added: stats.added })}</span>
+          <span className={css.delCount}>{t('row.removed', { removed: stats.removed })}</span>
+        </span>
+      </button>
+    </li>
+  )
+}
+
+/** The selected file's diff, actions, jump controls, and copy toolbar. */
+function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: PendingDiffProps) {
   const lang = useMemo(() => langFromPath(file.path), [file.path])
-  const model = useMemo<RowModel | undefined>(() => {
-    if (!selected) return undefined
+  const model = useMemo<RowModel>(() => {
     const diff = computeWholeFileDiff(file.oldText, file.newText)
     return {
       diff,
@@ -95,7 +142,7 @@ function PendingRow({ file, files, selected, busy, t, onSelect, onKeep, onRevert
       oldRuns: highlightLines(file.oldText, lang),
       newRuns: highlightLines(file.newText, lang),
     }
-  }, [selected, file.oldText, file.newText, lang])
+  }, [file.oldText, file.newText, lang])
 
   const rowRefs = useRef(new Map<number, HTMLDivElement>())
   const bodyRef = useRef<HTMLDivElement>(null)
@@ -104,17 +151,17 @@ function PendingRow({ file, files, selected, busy, t, onSelect, onKeep, onRevert
   const [range, setRange] = useState<RowRange | undefined>()
   const [copied, setCopied] = useState(false)
 
-  // Reset transient viewer state whenever the expanded target changes.
+  // Reset transient viewer state whenever the selected file changes.
   useEffect(() => {
     setFocus(0)
     setDrag(undefined)
     setRange(undefined)
     setCopied(false)
-  }, [file.id, selected])
+  }, [file.id])
 
   // Center the focused change block after focus or content changes.
   useEffect(() => {
-    if (model === undefined || model.blocks.length === 0) return
+    if (model.blocks.length === 0) return
     const block = model.blocks[focus]
     if (block === undefined) return
     rowRefs.current.get(block.start)?.scrollIntoView({ block: 'center' })
@@ -122,7 +169,7 @@ function PendingRow({ file, files, selected, busy, t, onSelect, onKeep, onRevert
 
   const jump = (direction: -1 | 1) => {
     setFocus(current => {
-      if (model === undefined || model.blocks.length === 0) return current
+      if (model.blocks.length === 0) return current
       if (direction === -1) {
         return (current - 1 + model.blocks.length) % model.blocks.length
       }
@@ -171,7 +218,7 @@ function PendingRow({ file, files, selected, busy, t, onSelect, onKeep, onRevert
     })
   }
 
-  const selection = drag === undefined && range !== undefined && model !== undefined ? range : undefined
+  const selection = drag === undefined && range !== undefined ? range : undefined
   // Anchor the toolbar to the selected range's first row as seen inside the
   // scrolled body, clamped so it never floats out of the visible diff area.
   const selectionTop = (() => {
@@ -186,7 +233,7 @@ function PendingRow({ file, files, selected, busy, t, onSelect, onKeep, onRevert
   })()
 
   const copySelection = async () => {
-    if (selection === undefined || model === undefined) return
+    if (selection === undefined) return
     const rows = model.diff.rows.slice(selection.start, selection.end + 1)
     // New-side numbers where they exist; a pure deletion falls back to the
     // old side, which is the only side those lines have.
@@ -205,101 +252,118 @@ function PendingRow({ file, files, selected, busy, t, onSelect, onKeep, onRevert
   /** One line's text: token spans when highlighted, plain text otherwise. */
   const renderLine = (row: WholeFileDiffRow): ReactNode => {
     const lineNumber = row.kind === 'del' ? row.oldLine : row.newLine
-    const runs = model === undefined || lineNumber === undefined
+    const runs = lineNumber === undefined
       ? undefined
       : (row.kind === 'del' ? model.oldRuns : model.newRuns)?.[lineNumber - 1]
     if (runs === undefined || runs.length === 0) return row.text === '' ? '\u00a0' : row.text
     return runs.map((span, index) => <span key={index} style={span.style}>{span.text}</span>)
   }
 
-  const focusedBlock = model !== undefined && model.blocks.length > 0 ? model.blocks[focus] : undefined
+  const focusedBlock = model.blocks.length > 0 ? model.blocks[focus] : undefined
   const inFocusedBlock = (index: number): boolean =>
     focusedBlock !== undefined && index >= focusedBlock.start && index <= focusedBlock.end
 
   return (
-    <li className={css.row}>
-      <button
-        type="button"
-        className={css.rowHead}
-        data-selected={selected || undefined}
-        aria-expanded={selected}
-        onClick={() => { onSelect(selected ? '' : file.id) }}
-      >
-        <span className={css.rowPath} title={file.path}>{copyDisplayPath(file.path, files)}</span>
-        {file.kind === 'create' && <span className={css.kindTag}>{t('row.create')}</span>}
-        {file.missing && <span className={css.missing} title={t('panel.missingHint')}>{t('panel.missing')}</span>}
-      </button>
-      {selected && model !== undefined && (
-        <div className={css.diff} data-diff-approval-diff onMouseUp={endDrag}>
-          <div className={css.diffActions}>
-            <span className={css.diffStats}>{t('panel.stats', { added: model.diff.added, removed: model.diff.removed })}</span>
-            {file.kind === 'create' && <span className={css.kindHint}>{t('panel.createHint')}</span>}
-            {model.blocks.length > 0 && (
-              <>
-                <button type="button" className={css.action} data-diff-prev disabled={busy} onClick={() => { jump(-1) }}>
-                  {t('action.prevDiff')}
-                </button>
-                <button type="button" className={css.action} data-diff-next disabled={busy} onClick={() => { jump(1) }}>
-                  {t('action.nextDiff')}
-                </button>
-              </>
-            )}
-            <span className={css.flexSpacer} />
+    <div className={css.diff} data-diff-approval-diff onMouseUp={endDrag}>
+      <div className={css.diffActions}>
+        <span className={css.diffStats}>{t('panel.stats', { added: model.diff.added, removed: model.diff.removed })}</span>
+        {file.kind === 'create' && <span className={css.kindHint}>{t('panel.createHint')}</span>}
+        {model.blocks.length > 0 && (
+          <>
             <button
               type="button"
-              className={css.action}
-              data-diff-keep
+              className={`${css.action} ${css.iconAction}`}
+              data-diff-prev
+              aria-label={t('action.prevDiff')}
+              title={t('action.prevDiff')}
               disabled={busy}
-              onClick={() => { void onKeep(file.sessionId, file.id) }}
+              onClick={() => { jump(-1) }}
             >
-              {busy ? t('action.busy') : t('action.keep')}
+              <IconChevronUpOutline14 size={14} />
             </button>
             <button
               type="button"
-              className={css.action}
-              data-diff-revert
+              className={`${css.action} ${css.iconAction}`}
+              data-diff-next
+              aria-label={t('action.nextDiff')}
+              title={t('action.nextDiff')}
               disabled={busy}
-              onClick={() => { void onRevert(file.sessionId, file.id) }}
+              onClick={() => { jump(1) }}
             >
-              {busy ? t('action.busy') : t('action.revert')}
+              <IconChevronDownOutline14 size={14} />
             </button>
-          </div>
-          {file.missing && <p className={css.missingHint}>{t('panel.missingHint')}</p>}
-          <div className={css.diffBody} ref={bodyRef}>
-            <div className={css.lines}>
-              {model.diff.rows.map((row, index) => (
-                <div
-                  key={index}
-                  ref={registerRow(index)}
-                  className={`${css.line} ${ROW_CLASS[row.kind]}`}
-                  data-diff-line={row.kind}
-                  data-diff-focused={inFocusedBlock(index) ? '' : undefined}
-                  onMouseDown={rowMouseDown(index)}
-                  onMouseEnter={rowMouseEnter(index)}
-                >
-                  <span className={css.gutter}>{row.oldLine ?? ''}</span>
-                  <span className={css.gutter}>{row.newLine ?? ''}</span>
-                  <span className={css.code}>{renderLine(row)}</span>
-                </div>
-              ))}
+          </>
+        )}
+        <button
+          type="button"
+          className={css.action}
+          data-diff-open
+          onClick={() => { void onOpen(file.sessionId, file.id, 'open') }}
+        >
+          {t('action.openFile')}
+        </button>
+        <button
+          type="button"
+          className={css.action}
+          data-diff-reveal
+          onClick={() => { void onOpen(file.sessionId, file.id, 'reveal') }}
+        >
+          {t('action.revealFile')}
+        </button>
+        <span className={css.flexSpacer} />
+        <button
+          type="button"
+          className={css.action}
+          data-diff-keep
+          disabled={busy}
+          onClick={() => { void onKeep(file.sessionId, file.id) }}
+        >
+          {busy ? t('action.busy') : t('action.keep')}
+        </button>
+        <button
+          type="button"
+          className={css.action}
+          data-diff-revert
+          disabled={busy}
+          onClick={() => { void onRevert(file.sessionId, file.id) }}
+        >
+          {busy ? t('action.busy') : t('action.revert')}
+        </button>
+      </div>
+      {file.missing && <p className={css.missingHint}>{t('panel.missingHint')}</p>}
+      <div className={css.diffBody} ref={bodyRef}>
+        <div className={css.lines}>
+          {model.diff.rows.map((row, index) => (
+            <div
+              key={index}
+              ref={registerRow(index)}
+              className={`${css.line} ${ROW_CLASS[row.kind]}`}
+              data-diff-line={row.kind}
+              data-diff-focused={inFocusedBlock(index) ? '' : undefined}
+              onMouseDown={rowMouseDown(index)}
+              onMouseEnter={rowMouseEnter(index)}
+            >
+              <span className={css.gutter}>{row.oldLine ?? ''}</span>
+              <span className={css.gutter}>{row.newLine ?? ''}</span>
+              <span className={css.code}>{renderLine(row)}</span>
             </div>
-          </div>
-          {selection !== undefined && (
-            <div className={css.toolbar} style={{ top: selectionTop }} data-diff-selection-toolbar>
-              <button type="button" className={css.toolbarButton} data-diff-copy onClick={() => { void copySelection() }}>
-                {copied ? t('action.copied') : t('action.copyRange')}
-              </button>
-            </div>
-          )}
+          ))}
+        </div>
+      </div>
+      {selection !== undefined && (
+        <div className={css.toolbar} style={{ top: selectionTop }} data-diff-selection-toolbar>
+          <button type="button" className={css.toolbarButton} data-diff-copy onClick={() => { void copySelection() }}>
+            {copied ? t('action.copied') : t('action.copyRange')}
+          </button>
         </div>
       )}
-    </li>
+    </div>
   )
 }
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, usePending, onRefresh, onKeep, onRevert, t,
+  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onOpen, t,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
   const snapshot = usePending(snapshot => snapshot)
@@ -307,12 +371,47 @@ export function PendingPanel({
   const [selected, setSelected] = useState('')
   /** Pending count captured at open time; auto-close needs a list that emptied. */
   const [openedCount, setOpenedCount] = useState(0)
+  /** Bottom offset tracking the chat composer's top edge so the input stays visible. */
+  const [bottomPx, setBottomPx] = useState(FALLBACK_BOTTOM_PX)
+  /** File-list pane width, adjustable by dragging the divider. */
+  const [listWidth, setListWidth] = useState(240)
+  const resizeDrag = useRef<{ startX: number; startWidth: number } | null>(null)
 
   useEffect(() => {
     onRefresh(current)
     const timer = setInterval(() => { onRefresh(current) }, POLL_INTERVAL_MS)
     return () => { clearInterval(timer) }
   }, [current, onRefresh])
+
+  // While the panel is open, sit just above the chat composer: measure its top
+  // edge against the viewport bottom and follow its height changes (the input
+  // grows when content wraps). A missing or unlaid-out composer falls back to
+  // the fixed offset.
+  useEffect(() => {
+    if (!open) return
+    const measure = () => {
+      const composer = document.querySelector(COMPOSER_SELECTOR)
+      if (composer === null) {
+        setBottomPx(FALLBACK_BOTTOM_PX)
+        return
+      }
+      const top = composer.getBoundingClientRect().top
+      // top === 0 means the composer is not laid out; keep the current offset.
+      if (top <= 0) return
+      setBottomPx(Math.round(window.innerHeight - top) + COMPOSER_GAP_PX)
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const composer = document.querySelector(COMPOSER_SELECTOR)
+    if (composer === null) return
+    const observer = new ResizeObserver(measure)
+    observer.observe(composer)
+    window.addEventListener('resize', measure)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', measure)
+    }
+  }, [open])
 
   const files = snapshot.files
   const mine = files.filter(file => file.sessionId === current)
@@ -334,49 +433,97 @@ export function PendingPanel({
   }
 
   const renderEntry = (entry: PendingFileDiff) => (
-    <PendingRow
+    <PendingFileRow
       key={entry.id}
       file={entry}
       files={files}
       selected={selected === entry.id}
-      busy={snapshot.busy.has(entry.id)}
       t={t}
       onSelect={setSelected}
-      onKeep={onKeep}
-      onRevert={onRevert}
     />
   )
+
+  const selectedFile = files.find(file => file.id === selected)
+
+  /** Drag the list/detail divider; width follows the pointer within its bounds. */
+  const startResize = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    resizeDrag.current = { startX: event.clientX, startWidth: listWidth }
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'col-resize'
+    const onMove = (move: MouseEvent) => {
+      const start = resizeDrag.current
+      if (start === null) return
+      const next = start.startWidth + (move.clientX - start.startX)
+      setListWidth(Math.min(Math.max(next, MIN_LIST_WIDTH_PX), MAX_LIST_WIDTH_PX))
+    }
+    const onUp = () => {
+      resizeDrag.current = null
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
 
   return (
     <div className={wide ? css.layer : `${css.layer} ${css.rail}`}>
       {open && (
-        <section className={css.panel} data-diff-approval-panel aria-label={t('panel.title')}>
+        <section
+          className={css.panel}
+          style={{ bottom: bottomPx }}
+          data-diff-approval-panel
+          aria-label={t('panel.title')}
+        >
           <header className={css.header}>
             <span className={css.title}>{t('panel.title')}</span>
           </header>
-          <div className={css.body}>
-            {snapshot.error !== undefined && (
-              <p className={css.readError} role="alert">{t('panel.readFailed', { message: snapshot.error })}</p>
-            )}
-            {!snapshot.read && snapshot.error === undefined && <p className={css.note}>{t('panel.loading')}</p>}
-            {snapshot.read && snapshot.error === undefined && files.length === 0
-              && <p className={css.note}>{t('panel.empty')}</p>}
-            {snapshot.read && files.length > 0 && (
-              <p className={css.hint}>{t('panel.selectHint')}</p>
-            )}
-            {mine.length > 0 && (
-              <section>
-                <h3 className={css.group}>{t('panel.group.current')}</h3>
-                <ul className={css.rows}>{mine.map(renderEntry)}</ul>
-              </section>
-            )}
-            {theirs.length > 0 && (
-              <section>
-                <h3 className={css.group}>{t('panel.group.others')}</h3>
-                <ul className={css.rows}>{theirs.map(renderEntry)}</ul>
-              </section>
-            )}
-          </div>
+          {snapshot.error !== undefined || !snapshot.read || files.length === 0 ? (
+            <div className={css.states}>
+              {snapshot.error !== undefined && (
+                <p className={css.readError} role="alert">{t('panel.readFailed', { message: snapshot.error })}</p>
+              )}
+              {!snapshot.read && snapshot.error === undefined && <p className={css.note}>{t('panel.loading')}</p>}
+              {snapshot.read && snapshot.error === undefined && files.length === 0
+                && <p className={css.note}>{t('panel.empty')}</p>}
+            </div>
+          ) : (
+            <div className={css.split}>
+              <nav className={css.fileList} style={{ width: listWidth }} data-diff-approval-file-list>
+                {mine.length > 0 && (
+                  <section>
+                    <h3 className={css.group}>{t('panel.group.current')}</h3>
+                    <ul className={css.rows}>{mine.map(renderEntry)}</ul>
+                  </section>
+                )}
+                {theirs.length > 0 && (
+                  <section>
+                    <h3 className={css.group}>{t('panel.group.others')}</h3>
+                    <ul className={css.rows}>{theirs.map(renderEntry)}</ul>
+                  </section>
+                )}
+              </nav>
+              <div className={css.resizeHandle} data-diff-resize onMouseDown={startResize} />
+              <div className={css.detail}>
+                {selectedFile === undefined ? (
+                  <p className={css.detailEmpty}>{t('panel.selectHint')}</p>
+                ) : (
+                  <PendingDiff
+                    file={selectedFile}
+                    files={files}
+                    busy={snapshot.busy.has(selectedFile.id)}
+                    t={t}
+                    onKeep={onKeep}
+                    onRevert={onRevert}
+                    onOpen={onOpen}
+                  />
+                )}
+              </div>
+            </div>
+          )}
         </section>
       )}
       <div className={css.footerButtons}>

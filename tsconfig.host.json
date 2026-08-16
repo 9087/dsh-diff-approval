@@ -26,6 +26,7 @@
   },
   "files": [
     "src/index.ts",
+    "src/open.ts",
     "src/pending.ts",
     "src/persist.ts",
     "src/types.ts"

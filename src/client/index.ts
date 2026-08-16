@@ -39,6 +39,7 @@ export function apply(ctx: ClientContext): void {
       onRefresh: (sessionId) => { void store.refresh(sessionId) },
       onKeep: (sessionId, path) => store.keep(sessionId, path),
       onRevert: (sessionId, path) => store.revert(sessionId, path),
+      onOpen: (sessionId, id, action) => store.open(sessionId, id, action),
     }),
   }, PendingPanel))
 }
