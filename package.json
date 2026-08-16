@@ -40,7 +40,8 @@
   "scripts": {
     "typecheck": "tsc -b tsconfig.json",
     "build": "tsc -b tsconfig.json && tsdown --env.DSH_BUILD_FACE client",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepare": "tsc -b tsconfig.json && tsdown --env.DSH_BUILD_FACE client"
   },
   "license": "MIT",
   "dependencies": {
