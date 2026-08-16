@@ -1,0 +1,357 @@
+// The host half: capture, per-operation entries, channel serving, keep,
+// kind-aware revert, live file state, and persistence.
+
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import type { FileSystem } from '@deepseek-ai/dsh-fs'
+import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
+import type { Workspace, WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
+import type { ConnectionRpcHandler, ConnectionRpcHandlerOptions, HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
+import type { PendingFileDiff } from '../src/types.ts'
+import { apply, DIFF_APPROVAL_CHANNEL } from '../src/index.ts'
+import { removeTempDir } from './cleanup.ts'
+
+interface FsDouble {
+  resolve: ReturnType<typeof vi.fn>
+  readText: ReturnType<typeof vi.fn>
+  writeText: ReturnType<typeof vi.fn>
+  processPath: ReturnType<typeof vi.fn>
+}
+
+interface TestHarness {
+  ctx: Context
+  fs: FsDouble
+  handle: ConnectionRpcHandler
+  channel: string
+  options: ConnectionRpcHandlerOptions
+  handleCalls: number
+  storageDir: string
+  dispose(): Promise<void>
+}
+
+const contexts: Context[] = []
+const tempDirs: string[] = []
+
+afterEach(async () => {
+  await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.dispose()))
+  await Promise.all(tempDirs.splice(0).map(removeTempDir))
+})
+
+async function harness(options: {
+  sessionIds?: readonly SessionId[]
+  storageDir?: string
+} = {}): Promise<TestHarness> {
+  const ctx = new Context()
+  contexts.push(ctx)
+  const fs: FsDouble = {
+    resolve: vi.fn(async (path: string) => ({ displayPath: path, targetKey: `key:${path}` })),
+    readText: vi.fn(async () => undefined),
+    writeText: vi.fn(async () => ({ version: 1 })),
+    processPath: vi.fn((target: { targetKey: string }) => target.targetKey),
+  }
+  ctx.provide('fs', fs as unknown as FileSystem)
+  const handle = vi.fn<(channel: string, handler: ConnectionRpcHandler, options: ConnectionRpcHandlerOptions) => () => void>(() => () => {})
+  ctx.provide('connection', { rpc: { handle } } as unknown as HostConnectionHandle)
+  const workspaces: Workspace[] = (options.sessionIds ?? []).length === 0 ? [] : [{
+    id: WorkspaceId('workspace-1'),
+    sessionIds: [...options.sessionIds!],
+  } as unknown as Workspace]
+  ctx.provide('workspaceRegistry', { list: () => workspaces } as unknown as WorkspaceRegistry)
+  const storageDir = options.storageDir ?? await mkdtemp(join(tmpdir(), 'dsh-diff-approval-'))
+  tempDirs.push(storageDir)
+  await ctx.plugin(apply, { storageDir })
+  const calls = handle.mock.calls
+  const first = calls[0]
+  if (first === undefined) throw new Error('diff-approval did not register its channel')
+  return {
+    ctx,
+    fs,
+    handle: first[1],
+    channel: first[0],
+    options: first[2],
+    handleCalls: calls.length,
+    storageDir,
+    dispose: () => ctx.fiber.dispose(),
+  }
+}
+
+/** Emit one tools/result event through the root context, the way the registry does. */
+function emitResult(ctx: Context, exec: unknown, result: unknown): void {
+  const emit = ctx.emit.bind(ctx) as unknown as (name: string, ...args: unknown[]) => void
+  emit('tools/result', exec, result)
+}
+
+/** Read one session's listed entries through the channel. */
+async function listEntries(handle: ConnectionRpcHandler, sessionId: string): Promise<PendingFileDiff[]> {
+  const answer = await handle('list', { sessionId }, signal())
+  if (!answer.ok) throw new Error('list failed')
+  return (answer.value as { files: PendingFileDiff[] }).files
+}
+
+function editExec(): unknown {
+  return { name: 'edit', agent: { id: SessionId('session-1') } }
+}
+
+function editSuccess(path: string, before: string, after: string): unknown {
+  return { isError: false, value: { path, before, after } }
+}
+
+function writeExec(): unknown {
+  return { name: 'write', agent: { id: SessionId('session-1') } }
+}
+
+function writeSuccess(path: string, operation: 'create' | 'update', before: string | null, after: string): unknown {
+  return { isError: false, value: { path, operation, before, after } }
+}
+
+function signal(): AbortSignal {
+  return new AbortController().signal
+}
+
+describe('channel registration', () => {
+  it('registers the review channel once with trusted-host authority', async () => {
+    const { channel, options, handleCalls } = await harness()
+    expect(channel).toBe(DIFF_APPROVAL_CHANNEL)
+    expect(options).toEqual({ authority: 'trusted-host' })
+    expect(handleCalls).toBe(1)
+  })
+})
+
+describe('capturing operations', () => {
+  it('folds consecutive edits into one entry per path', async () => {
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'v1\n', 'v2\n'))
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'v2\n', 'v3\n'))
+
+    const entries = await listEntries(handle, 'session-1')
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({ kind: 'edit', oldText: 'v1\n', newText: 'v3\n' })
+  })
+
+  it('records a write create as a create entry and folds later edits into it', async () => {
+    const { ctx, handle } = await harness()
+    emitResult(ctx, writeExec(), writeSuccess('/repo/new.txt', 'create', null, 'content'))
+    emitResult(ctx, editExec(), editSuccess('/repo/new.txt', 'content', 'content2'))
+    emitResult(ctx, writeExec(), writeSuccess('/repo/old.txt', 'update', 'before', 'after'))
+
+    const entries = await listEntries(handle, 'session-1')
+    expect(entries).toHaveLength(2)
+    expect(entries[0]).toMatchObject({ path: '/repo/new.txt', kind: 'create', oldText: '', newText: 'content2' })
+    expect(entries[1]).toMatchObject({ path: '/repo/old.txt', kind: 'edit', oldText: 'before', newText: 'after' })
+  })
+
+  it('ignores other tools, failures, malformed values, agent-less calls, and basis-less updates', async () => {
+    const { ctx, handle } = await harness()
+    emitResult(ctx, { name: 'bash', agent: { id: SessionId('session-1') } }, { isError: false, value: { text: 'rm x' } })
+    emitResult(ctx, editExec(), { isError: true, error: { name: 'boom', code: 'boom' } })
+    emitResult(ctx, editExec(), { isError: false, value: { path: 42 } })
+    emitResult(ctx, { name: 'edit' }, editSuccess('/repo/a.txt', 'a', 'b'))
+    emitResult(ctx, writeExec(), writeSuccess('/repo/w.txt', 'update', null, 'x'))
+
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+  })
+
+  it('records nothing for a no-op operation', async () => {
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'same', 'same'))
+    emitResult(ctx, writeExec(), writeSuccess('/repo/w.txt', 'update', 'same', 'same'))
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+  })
+})
+
+describe('keep', () => {
+  it('removes the entry and reports missing on a repeat', async () => {
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    await expect(handle('keep', { sessionId: 'session-1', id: entry!.id }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'kept' } })
+    await expect(handle('keep', { sessionId: 'session-1', id: entry!.id }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+  })
+
+  it('rejects a malformed payload with an internal error', async () => {
+    const { handle } = await harness()
+    const answer = await handle('keep', { sessionId: '' }, signal())
+    expect(answer).toEqual({ ok: false, error: { code: 'internal', message: expect.any(String) as string, details: {} } })
+  })
+})
+
+describe('revert', () => {
+  it('writes the old content back through fs and removes the entry', async () => {
+    const { ctx, fs, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'before', 'after'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    await expect(handle('revert', { sessionId: 'session-1', id: entry!.id }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'reverted' } })
+    expect(fs.resolve).toHaveBeenCalledWith('/repo/a.txt', { signal: expect.anything() as AbortSignal })
+    expect(fs.writeText).toHaveBeenCalledWith(
+      { displayPath: '/repo/a.txt', targetKey: 'key:/repo/a.txt' }, 'before', undefined, expect.anything() as AbortSignal,
+    )
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+  })
+
+  it('removes the file when reverting a creation', async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-diff-approval-'))
+    tempDirs.push(storageDir)
+    const created = join(storageDir, 'created.txt')
+    await writeFile(created, 'content', 'utf8')
+    const { ctx, fs, handle } = await harness()
+    fs.resolve.mockImplementation(async (path: string) => ({ displayPath: path, targetKey: path }))
+    emitResult(ctx, writeExec(), writeSuccess(created, 'create', null, 'content'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    await expect(handle('revert', { sessionId: 'session-1', id: entry!.id }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'reverted' } })
+    await expect(readFile(created, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('reports missing without touching fs when no entry exists', async () => {
+    const { fs, handle } = await harness()
+    await expect(handle('revert', { sessionId: 'session-1', id: 'none' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+    expect(fs.resolve).not.toHaveBeenCalled()
+    expect(fs.writeText).not.toHaveBeenCalled()
+  })
+
+  it('reports an internal error and keeps the entry when the write fails', async () => {
+    const { ctx, fs, handle } = await harness()
+    fs.writeText.mockRejectedValue(new Error('disk full'))
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'before', 'after'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    const answer = await handle('revert', { sessionId: 'session-1', id: entry!.id }, signal())
+    expect(answer).toEqual({
+      ok: false, error: { code: 'internal', message: 'revert failed: disk full', details: {} },
+    })
+    expect(await listEntries(handle, 'session-1')).toHaveLength(1)
+  })
+})
+
+describe('live file state', () => {
+  it('marks entries diverged when the current content differs from the newest tracked content', async () => {
+    const { ctx, handle, fs } = await harness()
+    fs.readText.mockResolvedValue('external edit\n')
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'v1\n', 'v2\n'))
+
+    const entries = await listEntries(handle, 'session-1')
+    expect(entries).toEqual([
+      expect.objectContaining({ missing: false, diverged: true }) as object,
+    ])
+  })
+
+  it('marks an entry clean when the current content matches the tracked text', async () => {
+    const { ctx, handle, fs } = await harness()
+    fs.readText.mockResolvedValue('v2\n')
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'v1\n', 'v2\n'))
+
+    const entries = await listEntries(handle, 'session-1')
+    expect(entries).toEqual([
+      expect.objectContaining({ missing: false, diverged: false }) as object,
+    ])
+  })
+
+  it('marks entries missing when the path no longer resolves', async () => {
+    const { ctx, handle, fs } = await harness()
+    fs.resolve.mockRejectedValue(new Error('not found'))
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'v1\n', 'v2\n'))
+
+    const entries = await listEntries(handle, 'session-1')
+    expect(entries).toEqual([
+      expect.objectContaining({ missing: true, diverged: false }) as object,
+    ])
+  })
+
+  it('marks entries diverged when the file resolves but cannot be read', async () => {
+    const { ctx, handle, fs } = await harness()
+    fs.readText.mockRejectedValue(new Error('permission denied'))
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'v1\n', 'v2\n'))
+
+    const entries = await listEntries(handle, 'session-1')
+    expect(entries).toEqual([
+      expect.objectContaining({ missing: false, diverged: true }) as object,
+    ])
+  })
+})
+
+describe('persistence', () => {
+  it('persists an operation and hydrates it into a fresh harness', async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-diff-approval-'))
+    tempDirs.push(storageDir)
+    const first = await harness({ sessionIds: [SessionId('session-1')], storageDir })
+    emitResult(first.ctx, editExec(), editSuccess('/repo/a.txt', 'v1\n', 'v2\n'))
+    await vi.waitFor(async () => {
+      await expect(readdir(first.storageDir)).resolves.toContain('workspace-1.json')
+    })
+
+    const second = await harness({ sessionIds: [SessionId('session-1')], storageDir })
+    second.fs.readText.mockResolvedValue('v2\n')
+    const entries = await listEntries(second.handle, 'session-1')
+    expect(entries).toEqual([
+      expect.objectContaining({
+        sessionId: 'session-1', path: '/repo/a.txt', kind: 'edit',
+        oldText: 'v1\n', newText: 'v2\n', missing: false, diverged: false,
+      }) as object,
+    ])
+  })
+
+  it('removes the persisted entry when it is kept', async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-diff-approval-'))
+    tempDirs.push(storageDir)
+    const first = await harness({ sessionIds: [SessionId('session-1')], storageDir })
+    emitResult(first.ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const [entry] = await listEntries(first.handle, 'session-1')
+    await expect(first.handle('keep', { sessionId: 'session-1', id: entry!.id }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'kept' } })
+
+    const second = await harness({ sessionIds: [SessionId('session-1')], storageDir })
+    expect(await listEntries(second.handle, 'session-1')).toEqual([])
+  })
+
+  it('leaves a session without a workspace in memory only', async () => {
+    const { ctx, handle, storageDir } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    expect(await listEntries(handle, 'session-1')).toHaveLength(1)
+    await expect(readdir(storageDir)).resolves.toEqual([])
+  })
+
+  it('serves the live in-memory view when the persisted file is corrupt', async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-diff-approval-'))
+    tempDirs.push(storageDir)
+    const first = await harness({ sessionIds: [SessionId('session-1')], storageDir })
+    emitResult(first.ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    await vi.waitFor(async () => {
+      await expect(readdir(first.storageDir)).resolves.toContain('workspace-1.json')
+    })
+    await writeFile(join(storageDir, 'workspace-1.json'), '{not json', 'utf8')
+
+    const second = await harness({ sessionIds: [SessionId('session-1')], storageDir })
+    expect(await listEntries(second.handle, 'session-1')).toEqual([])
+  })
+
+  it('rejects a blank storageDir config', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    await expect(ctx.plugin(apply, { storageDir: '   ' })).rejects.toThrow(/storageDir/)
+  })
+})
+
+describe('channel safety', () => {
+  it('answers an unknown endpoint with an internal error', async () => {
+    const { handle } = await harness()
+    const answer = await handle('nope', {}, signal())
+    expect(answer).toEqual({ ok: false, error: { code: 'internal', message: expect.any(String) as string, details: {} } })
+  })
+
+  it('list requires a sessionId', async () => {
+    const { handle } = await harness()
+    const answer = await handle('list', { sessionId: 42 }, signal())
+    expect(answer).toEqual({ ok: false, error: { code: 'internal', message: expect.any(String) as string, details: {} } })
+  })
+})

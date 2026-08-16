@@ -1,0 +1,6 @@
+# dsh-diff-approval bundle patch: the row that mounts the pending-change
+# review plugin into every profile that lists this bundle. Applied as a
+# bundle layer (before the profile's own cordis.patch.yml).
+- insert:
+    - id: diff-approval
+      name: dsh-diff-approval

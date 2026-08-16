@@ -1,0 +1,396 @@
+/* Sidebar-foot pending-edit review action and the fixed diff list it opens.
+   Geometry mirrors the stock Cordis panel (fixed card above the footer,
+   body-only scroll); the diff body reuses the DiffBlock line vocabulary. */
+
+.layer {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 49px;
+  margin: 8px 0 0;
+}
+
+.footerButtons {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 49px;
+  padding: 0 8px 0 6px;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.badge:hover {
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+}
+
+.badge[data-active] {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.badgeLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badgeCount {
+  flex: none;
+  margin-left: auto;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.layer.rail {
+  width: 36px;
+  height: 36px;
+  margin: 0;
+}
+
+.rail .badge {
+  justify-content: center;
+  gap: 0;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.rail .badgeLabel {
+  display: none;
+}
+
+/* The collapsed mode carries the pending count as a corner bubble. */
+.rail .badgeCount {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: absolute;
+  top: -3px;
+  right: -7px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: 9px;
+  background: var(--dsw-alias-state-business-primary);
+  color: var(--dsw-alias-label-primary-foreground);
+  font-size: 11px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.panel {
+  position: fixed;
+  left: 8px;
+  right: 8px;
+  bottom: 128px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  width: auto;
+  max-width: none;
+  max-height: 86vh;
+  overflow: hidden;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-base);
+  box-shadow: var(--dsw-shadow-lv2);
+  /* Only `.body` scrolls; the header remains fixed above it. */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+.header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 44px;
+  padding: 10px 12px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 12px 12px;
+}
+
+.title {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.note,
+.readError,
+.hint {
+  margin: 4px 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.readError {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.group {
+  margin: 8px 0 4px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.row {
+  margin: 2px 0;
+  border: 1px solid transparent;
+  border-radius: 10px;
+}
+
+.rowHead {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rowHead:hover {
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+}
+
+.rowHead[data-selected] {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.rowPath {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--dsw-font-markdown-code-block);
+  /* RTL direction truncates the leading segments, keeping the tail (the
+     file name and deepest directories) visible when paths share a prefix. */
+  direction: rtl;
+  text-align: left;
+}
+
+.kindTag {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+.kindHint {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.divergedHint,
+.missingHint {
+  margin: 0;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.missing {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--dsw-alias-state-warn-primary);
+  border-radius: 6px;
+  color: var(--dsw-alias-state-warn-label, var(--dsw-alias-state-warn-primary));
+  font-size: 11px;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+.missingHint {
+  color: var(--dsw-alias-state-warn-label, var(--dsw-alias-state-warn-primary));
+}
+
+.rowMeta {
+  flex: none;
+  margin-left: auto;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.diff {
+  position: relative;
+  margin: 4px 0 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background: var(--dsw-alias-markdown-code-block);
+  overflow: hidden;
+}
+
+.diffActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.diffStats {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.flexSpacer {
+  flex: 1;
+}
+
+.action {
+  padding: 3px 12px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.action:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.action:disabled {
+  color: var(--dsw-alias-label-tertiary);
+  cursor: default;
+}
+
+.diffBody {
+  max-height: 360px;
+  overflow: auto;
+  padding: 8px 10px;
+  font: var(--dsw-font-markdown-code-block);
+}
+
+/* No wrapping, no word-break: a diff is read by its indentation. The whole
+   body disables selection so drag-scrubbing never fights the browser. A table
+   layout makes every line the width of the widest line's content — kind
+   backgrounds align to the content, not to the scroll box. */
+.lines {
+  display: table;
+  width: max-content;
+  border-spacing: 0;
+}
+
+.line {
+  display: table-row;
+  user-select: none;
+}
+
+.gutter {
+  display: table-cell;
+  width: 44px;
+  padding-right: 10px;
+  box-sizing: border-box;
+  text-align: right;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.code {
+  display: table-cell;
+  white-space: pre;
+}
+
+.context {
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Diff semantics live on the line background; text color comes from the
+   syntax highlight tokens or the primary label when unhighlighted. */
+.del {
+  background-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent);
+}
+
+.add {
+  background-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent);
+}
+
+.toolbar {
+  position: absolute;
+  right: 10px;
+  z-index: 2;
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+  box-shadow: var(--dsw-shadow-lv2);
+}
+
+.toolbarButton {
+  padding: 3px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.toolbarButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}

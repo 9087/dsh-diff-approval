@@ -1,0 +1,348 @@
+/**
+ * Pending-edit review, host half. Captures every successful `edit` and `write`
+ * tool result (an unscoped `tools/result` listener receives per-session tool
+ * executions because scoped emissions route through the shared root hook
+ * table), folds each operation into its file's entry in the
+ * {@link PendingDiffStore} (one entry per path), serves the `/diff-approval`
+ * connection RPC channel (list/keep/revert), and applies a revert by writing
+ * the entry's `oldText` back through `ctx.fs` (a created file's revert
+ * removes it, and a tracked file that has since disappeared is restored by
+ * its revert).
+ *
+ * Mount this row in any profile's `cordis.patch.yml`:
+ *
+ * ```yaml
+ * - insert:
+ *     - id: diff-approval
+ *       name: 'dsh-diff-approval'
+ *       # Optional: relocate durable pending state (defaults to
+ *       # <dshHome>/diff-approval/workspaces).
+ *       # config:
+ *       #   storageDir: ~/.dsh/diff-approval/workspaces
+ * ```
+ *
+ * Pending entries persist per (workspace, session) so an unhandled operation
+ * survives a harness restart; the list endpoint re-reads the live file, so a
+ * change or deletion made after the tracked operation is reported after
+ * restart exactly as it is mid-session.
+ *
+ * @module dsh-diff-approval
+ */
+
+import { randomUUID } from 'node:crypto'
+import { rm } from 'node:fs/promises'
+import { resolve } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import { expandHomePath } from '@deepseek-ai/dsh-home-paths'
+import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
+// Type-only: brings the `ctx.fs` Context merge into this program.
+import type {} from '@deepseek-ai/dsh-fs'
+// Type-only: brings the `ctx.workspaceRegistry` Context merge into this program.
+import type { Workspace } from '@deepseek-ai/dsh-workspace'
+import { PendingDiffStore } from './pending.ts'
+import { PendingPersistence, defaultStorageDir } from './persist.ts'
+import type {
+  DiffApprovalActionValue, DiffApprovalListValue, PendingEntry, PendingEntryKind, PendingFileDiff,
+} from './types.ts'
+
+export type {
+  DiffApprovalActionOutcome, DiffApprovalActionValue, DiffApprovalListValue, PendingEntry, PendingEntryKind, PendingFileDiff,
+} from './types.ts'
+export { PendingDiffStore } from './pending.ts'
+export { PendingPersistence, defaultStorageDir } from './persist.ts'
+
+/** Stable Cordis plugin name. */
+export const name = 'diff-approval'
+
+/** Services required before the review surface activates. */
+export const inject = ['fs', 'connection', 'workspaceRegistry']
+
+/** The connection RPC channel this plugin serves. */
+export const DIFF_APPROVAL_CHANNEL = '/diff-approval'
+
+/**
+ * Plugin configuration overridable from the profile's `cordis.patch.yml`.
+ */
+export interface DiffApprovalConfig {
+  /**
+   * Root directory for durable pending state, defaulting to
+   * `<dshHome>/diff-approval/workspaces`. Must be a non-empty string when set;
+   * `~` prefixes expand to the OS home.
+   */
+  storageDir?: string
+}
+
+/** One tool result's fields this plugin consumes, narrowed from the tool's JSON value. */
+interface OperationOutcome {
+  path: string
+  kind: PendingEntryKind
+  oldText: string
+  newText: string
+}
+
+/**
+ * Narrow a successful `edit` result value to an operation outcome. The edit
+ * tool's output schema declares exactly `{ path, before, after }`; anything
+ * else is another tool's value or malformed data, which this recorder skips.
+ * @param value - the successful result's JSON value.
+ * @returns the outcome, or `undefined` when the value is not an edit outcome.
+ */
+function editOutcomeOf(value: unknown): OperationOutcome | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const { path, before, after } = value as Record<string, unknown>
+  if (typeof path !== 'string' || path.length === 0) return undefined
+  if (typeof before !== 'string' || typeof after !== 'string') return undefined
+  return { path, kind: 'edit', oldText: before, newText: after }
+}
+
+/**
+ * Narrow a successful `write` result value to an operation outcome. The write
+ * tool's output schema declares `{ path, operation, before, after }`;
+ * `operation: 'create'` becomes a `create` entry (revert removes the file),
+ * `operation: 'update'` becomes an `edit` entry. An update whose `before` is
+ * null carried no contextual basis, so it is skipped rather than tracked as
+ * an un-revertable overwrite.
+ * @param value - the successful result's JSON value.
+ * @returns the outcome, or `undefined` when the value is not a trackable write.
+ */
+function writeOutcomeOf(value: unknown): OperationOutcome | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const { path, operation, before, after } = value as Record<string, unknown>
+  if (typeof path !== 'string' || path.length === 0) return undefined
+  if (operation !== 'create' && operation !== 'update') return undefined
+  if (typeof after !== 'string') return undefined
+  if (operation === 'create') return { path, kind: 'create', oldText: '', newText: after }
+  if (typeof before !== 'string') return undefined
+  return { path, kind: 'edit', oldText: before, newText: after }
+}
+
+/** Human-readable message from an arbitrary thrown value. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Build one channel error in the closed RPC error vocabulary. `internal` is
+ * the catch-all: business misses ride the success branch as `outcome: 'missing'`.
+ * @param message - the handler-side description.
+ * @returns the error branch.
+ */
+function rpcError(message: string): RpcResult<unknown> {
+  return { ok: false, error: { code: 'internal', message, details: {} } }
+}
+
+/**
+ * Mount the pending-edit review surface.
+ * @param ctx - Cordis context carrying the filesystem, connection, and workspace registry services.
+ * @param config - optional plugin configuration (`storageDir` relocates durable state).
+ */
+export function apply(ctx: Context, config?: DiffApprovalConfig): void {
+  const storageDir = config?.storageDir
+  if (storageDir !== undefined && (typeof storageDir !== 'string' || storageDir.trim().length === 0)) {
+    throw new Error('diff-approval: storageDir must be a non-empty string')
+  }
+  const store = new PendingDiffStore()
+  const persistence = new PendingPersistence(resolve(expandHomePath(storageDir ?? defaultStorageDir())))
+  const loaded = new Set<string>()
+  const loading = new Map<string, Promise<void>>()
+
+  /**
+   * Read one path's live state: present content, an unresolvable (missing)
+   * path, or a resolved-but-unreadable file.
+   * @param path - backend display path to probe through `ctx.fs`.
+   * @returns the live state.
+   */
+  async function liveStateOf(path: string): Promise<
+    { present: true; content: string } | { present: false; kind: 'missing' | 'unreadable' }
+  > {
+    let target
+    try {
+      target = await ctx.fs.resolve(path, {})
+    } catch {
+      // Resolution is how this seam reports a gone path; absence is a state,
+      // not a fault, so the missing branch answers.
+      return { present: false, kind: 'missing' }
+    }
+    try {
+      return { present: true, content: await ctx.fs.readText(target, undefined) }
+    } catch {
+      // Resolved but unreadable: the content cannot be verified, which the
+      // panel reports as divergence — the safe reading.
+      return { present: false, kind: 'unreadable' }
+    }
+  }
+
+  /**
+   * Attach the live file state to each listed entry. Reading runs once per
+   * path (the panel polls once a second and the review set stays small).
+   * @param entries - the store's entries for one session.
+   * @returns entries with `missing` and `diverged` set from the live file.
+   */
+  async function listWithState(entries: readonly PendingEntry[]): Promise<PendingFileDiff[]> {
+    const byPath = new Map<string, PendingEntry[]>()
+    for (const entry of entries) {
+      const group = byPath.get(entry.path)
+      if (group === undefined) byPath.set(entry.path, [entry])
+      else group.push(entry)
+    }
+    const listed: PendingFileDiff[] = []
+    for (const group of byPath.values()) {
+      const newest = group[group.length - 1]
+      if (newest === undefined) continue
+      const live = await liveStateOf(newest.path)
+      const state = live.present
+        ? { missing: false, diverged: live.content !== newest.newText }
+        : { missing: live.kind === 'missing', diverged: live.kind === 'unreadable' }
+      for (const entry of group) listed.push({ ...entry, ...state })
+    }
+    return listed
+  }
+
+  /**
+   * The workspace whose session account holds `sessionId`. Web sessions are
+   * attached to a workspace at creation, so an unowned session is the
+   * memory-only edge (its entries never persist).
+   * @param sessionId - the session to locate.
+   * @returns the owning workspace, or `undefined` when none accounts it.
+   */
+  function workspaceOf(sessionId: SessionId): Workspace | undefined {
+    for (const workspace of ctx.workspaceRegistry.list()) {
+      if (workspace.sessionIds.includes(sessionId)) return workspace
+    }
+    return undefined
+  }
+
+  /**
+   * Merge one session's persisted entries into the store, once per session.
+   * Concurrent callers share the in-flight load, and folds arriving while the
+   * load runs stay safe: `hydrate` never overwrites a live entry.
+   * @param sessionId - the session to hydrate.
+   * @returns resolution after the session's persisted state is merged (or skipped).
+   */
+  function ensureLoaded(sessionId: SessionId): Promise<void> {
+    const key = String(sessionId)
+    if (loaded.has(key)) return Promise.resolve()
+    const pending = loading.get(key)
+    if (pending !== undefined) return pending
+    const task = (async () => {
+      const workspace = workspaceOf(sessionId)
+      if (workspace !== undefined) {
+        try {
+          store.hydrate(sessionId, await persistence.load(String(workspace.id), key))
+        } catch (error: unknown) {
+          ctx.logger.warn(`diff-approval: loading persisted state for session ${key} failed: ${errorMessage(error)}`)
+        }
+      }
+      loaded.add(key)
+      loading.delete(key)
+    })()
+    loading.set(key, task)
+    return task
+  }
+
+  /**
+   * Mirror one session's entries to disk. A write fault logs a warning and
+   * leaves the in-memory view intact: the review flow must not break on a
+   * storage fault, and the next successful mutation rewrites the whole file.
+   * @param sessionId - the session whose complete entry list to save.
+   * @returns resolution after the write settles (successful or logged).
+   */
+  async function persistSession(sessionId: SessionId): Promise<void> {
+    await ensureLoaded(sessionId)
+    const workspace = workspaceOf(sessionId)
+    if (workspace === undefined) return
+    try {
+      await persistence.save(String(workspace.id), String(sessionId), store.list(sessionId))
+    } catch (error: unknown) {
+      ctx.logger.warn(`diff-approval: persisting session ${String(sessionId)} failed: ${errorMessage(error)}`)
+    }
+  }
+
+  ctx.on('tools/result', (exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>) => {
+    if (result.isError || exec.agent === undefined) return
+    const outcome = exec.name === 'edit' ? editOutcomeOf(result.value) : exec.name === 'write' ? writeOutcomeOf(result.value) : undefined
+    if (outcome === undefined || outcome.oldText === outcome.newText) return
+    const sessionId = exec.agent.id
+    const entry: PendingEntry = { id: randomUUID(), sessionId, ...outcome, updatedAt: Date.now() }
+    void (async () => {
+      await ensureLoaded(sessionId)
+      if (store.fold(entry)) await persistSession(sessionId)
+    })()
+  })
+
+  const handle: ConnectionRpcHandler = async (endpoint, payload, signal): Promise<RpcResult<unknown>> => {
+    switch (endpoint) {
+      case 'list': {
+        const sessionId = sessionOf(payload)
+        if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
+        await ensureLoaded(sessionId)
+        const files = await listWithState(store.list(sessionId))
+        const value: DiffApprovalListValue = { files }
+        return { ok: true, value }
+      }
+      case 'keep': {
+        const target = targetOf(payload)
+        if (target === undefined) return rpcError('sessionId and id must be non-empty strings')
+        await ensureLoaded(target.sessionId)
+        const removed = store.remove(target.sessionId, target.id)
+        if (removed) await persistSession(target.sessionId)
+        const value: DiffApprovalActionValue = { outcome: removed ? 'kept' : 'missing' }
+        return { ok: true, value }
+      }
+      case 'revert': {
+        const target = targetOf(payload)
+        if (target === undefined) return rpcError('sessionId and id must be non-empty strings')
+        await ensureLoaded(target.sessionId)
+        const entry = store.get(target.sessionId, target.id)
+        if (entry === undefined) {
+          const value: DiffApprovalActionValue = { outcome: 'missing' }
+          return { ok: true, value }
+        }
+        try {
+          const resolved = await ctx.fs.resolve(entry.path, { signal })
+          if (entry.kind === 'create') {
+            // The fs seam has no delete; `processPath` exists to hand a path
+            // to OS-level code, so the revert of a created file removes it
+            // through the backend's own execution-world path.
+            await rm(ctx.fs.processPath(resolved), { force: true })
+          } else {
+            await ctx.fs.writeText(resolved, entry.oldText, undefined, signal)
+          }
+        } catch (error: unknown) {
+          return rpcError(`revert failed: ${errorMessage(error)}`)
+        }
+        store.remove(target.sessionId, target.id)
+        await persistSession(target.sessionId)
+        const value: DiffApprovalActionValue = { outcome: 'reverted' }
+        return { ok: true, value }
+      }
+      default:
+        return rpcError(`unknown endpoint ${JSON.stringify(endpoint)}`)
+    }
+  }
+
+  ctx.effect(
+    () => ctx.connection.rpc.handle(DIFF_APPROVAL_CHANNEL, handle, { authority: 'trusted-host' }),
+    'diff-approval: review channel',
+  )
+}
+
+/** Narrow a wire payload's `sessionId` field to a branded session id. */
+function sessionOf(payload: unknown): SessionId | undefined {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
+  const value = (payload as Record<string, unknown>).sessionId
+  return typeof value === 'string' && value.length > 0 ? SessionId(value) : undefined
+}
+
+/** Narrow a wire payload to one keep/revert target. */
+function targetOf(payload: unknown): { sessionId: SessionId; id: string } | undefined {
+  const sessionId = sessionOf(payload)
+  if (sessionId === undefined) return undefined
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
+  const id = (payload as Record<string, unknown>).id
+  if (typeof id !== 'string' || id.length === 0) return undefined
+  return { sessionId, id }
+}
