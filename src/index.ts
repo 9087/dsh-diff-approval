@@ -2,7 +2,10 @@
  * Pending-edit review, host half. Captures every successful `edit` and `write`
  * tool result (an unscoped `tools/result` listener receives per-session tool
  * executions because scoped emissions route through the shared root hook
- * table), folds each operation into its file's entry in the
+ * table) and every `str_replace_editor` mutation (whose result carries only a
+ * success message, so its pre-write basis is snapshotted at the
+ * `fs/edit-intent` / `fs/write-intent` seams and paired with the settle),
+ * folds each operation into its file's entry in the
  * {@link PendingDiffStore} (one entry per path), serves the `/diff-approval`
  * connection RPC channel (list/keep/revert/open), and applies a revert by
  * writing the entry's `oldText` back through `ctx.fs` (a created file's
@@ -40,7 +43,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 // Type-only: brings the `ctx.fs` Context merge into this program.
-import type {} from '@deepseek-ai/dsh-fs'
+import type { FsTarget } from '@deepseek-ai/dsh-fs'
 // Type-only: brings the `ctx.workspaceRegistry` Context merge into this program.
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import { PendingDiffStore } from './pending.ts'
@@ -135,6 +138,20 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/** Narrow a tool-execution-shaped value to its name, call id, and agent. */
+function actorOf(value: unknown): { name: unknown; callId: unknown; agent: unknown } | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const { name, callId, agent } = value as Record<string, unknown>
+  return { name, callId, agent }
+}
+
+/** Narrow an agent-shaped value to its session id. */
+function sessionOfAgent(agent: unknown): SessionId | undefined {
+  if (typeof agent !== 'object' || agent === null) return undefined
+  const id = (agent as Record<string, unknown>).id
+  return typeof id === 'string' && id.length > 0 ? SessionId(id) : undefined
+}
+
 /**
  * Build one channel error in the closed RPC error vocabulary. `internal` is
  * the catch-all: business misses ride the success branch as `outcome: 'missing'`.
@@ -160,6 +177,74 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   const launchPath = config?.openPath ?? defaultOpenPath
   const loaded = new Set<string>()
   const loading = new Map<string, Promise<void>>()
+
+  /** Pre-write bases captured at the intent seams, keyed by the tool call id. */
+  const editorIntents = new Map<string, IntentBasis>()
+
+  /**
+   * Snapshot one str_replace_editor mutation's basis at its intent seam. A
+   * `create` has an empty basis; an edit reads the pre-write content. Any
+   * failure tracks nothing — the settle-side pairing then sees no basis.
+   * @param target - the resolved target about to be written.
+   * @param actor - the tool execution running the mutation.
+   * @param kind - whether the mutation creates or edits the file.
+   */
+  async function stashEditorIntent(target: FsTarget, actor: object | undefined, kind: PendingEntryKind): Promise<void> {
+    const shaped = actorOf(actor)
+    if (shaped === undefined || shaped.name !== 'str_replace_editor') return
+    if (typeof shaped.callId !== 'string') return
+    const sessionId = sessionOfAgent(shaped.agent)
+    if (sessionId === undefined) return
+    if (kind === 'create') {
+      editorIntents.set(shaped.callId, { target, kind, before: '', sessionId })
+      return
+    }
+    try {
+      const before = await ctx.fs.readText(target, undefined) ?? ''
+      editorIntents.set(shaped.callId, { target, kind, before, sessionId })
+    } catch {
+      // Unreadable at intent time: no trustworthy basis to revert to.
+    }
+  }
+
+  /**
+   * Fold one str_replace_editor mutation into its file's entry. The tool's
+   * result carries only a success message, so the settle reads the post-write
+   * content and pairs it with the basis snapshotted at the intent seam.
+   * @param exec - the settled str_replace_editor execution.
+   * @param result - its outcome.
+   */
+  async function captureEditorMutation(exec: ToolExecution, result: ToolExecutionResult): Promise<void> {
+    const basis = editorIntents.get(exec.callId)
+    editorIntents.delete(exec.callId)
+    if (basis === undefined || basis.sessionId === undefined || result.isError) return
+    const argumentsValue = exec.arguments
+    const command = typeof argumentsValue === 'object' && argumentsValue !== null
+      ? (argumentsValue as Record<string, unknown>).command : undefined
+    const mutates = basis.kind === 'create'
+      ? command === 'create'
+      : command === 'str_replace' || command === 'insert'
+    if (!mutates) return
+    let after: string
+    try {
+      after = await ctx.fs.readText(basis.target, undefined) ?? ''
+    } catch {
+      return
+    }
+    if (basis.kind === 'edit' && after === basis.before) return
+    const sessionId = basis.sessionId
+    const entry: PendingEntry = {
+      id: randomUUID(),
+      sessionId,
+      path: basis.target.displayPath,
+      kind: basis.kind,
+      oldText: basis.before,
+      newText: after,
+      updatedAt: Date.now(),
+    }
+    await ensureLoaded(sessionId)
+    if (store.fold(entry)) await persistSession(sessionId)
+  }
 
   /**
    * Read one path's live state: present content, an unresolvable (missing)
@@ -274,6 +359,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   }
 
   ctx.on('tools/result', (exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>) => {
+    if (exec.name === 'str_replace_editor') {
+      void captureEditorMutation(exec, result)
+      return
+    }
     if (result.isError || exec.agent === undefined) return
     const outcome = exec.name === 'edit' ? editOutcomeOf(result.value) : exec.name === 'write' ? writeOutcomeOf(result.value) : undefined
     if (outcome === undefined || outcome.oldText === outcome.newText) return
@@ -358,6 +447,28 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     () => ctx.connection.rpc.handle(DIFF_APPROVAL_CHANNEL, handle, { authority: 'trusted-host' }),
     'diff-approval: review channel',
   )
+
+  // Observe the mutation intent seams without owning the decision: capture
+  // the pre-write basis, then hand the chain on untouched so policy plugins
+  // and the tool's default remain in charge. `prepend` matters: the harness
+  // policy occupies these single-slot waterfalls and never calls `next()`, so
+  // a later-registered listener would never run.
+  ctx.effect(() => ctx.on('fs/edit-intent', async (target, actor, next) => {
+    await stashEditorIntent(target, actor, 'edit')
+    return next()
+  }, { prepend: true }), 'diff-approval: str_replace_editor edit basis')
+  ctx.effect(() => ctx.on('fs/write-intent', async (target, actor, next) => {
+    await stashEditorIntent(target, actor, 'create')
+    return next()
+  }, { prepend: true }), 'diff-approval: str_replace_editor create basis')
+}
+
+/** One mutation's basis captured at its intent seam. */
+interface IntentBasis {
+  target: FsTarget
+  kind: PendingEntryKind
+  before: string
+  sessionId: SessionId | undefined
 }
 
 /** Narrow a wire payload's `sessionId` field to a branded session id. */

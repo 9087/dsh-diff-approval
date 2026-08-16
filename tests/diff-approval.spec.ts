@@ -46,6 +46,7 @@ async function harness(options: {
   sessionIds?: readonly SessionId[]
   storageDir?: string
   openPath?: (path: string, action: 'open' | 'reveal') => Promise<void>
+  prepare?: (ctx: Context) => void
 } = {}): Promise<TestHarness> {
   const ctx = new Context()
   contexts.push(ctx)
@@ -66,6 +67,7 @@ async function harness(options: {
   const storageDir = options.storageDir ?? await mkdtemp(join(tmpdir(), 'dsh-diff-approval-'))
   tempDirs.push(storageDir)
   const openPath = options.openPath ?? vi.fn(async () => {})
+  options.prepare?.(ctx)
   await ctx.plugin(apply, { storageDir, openPath })
   const calls = handle.mock.calls
   const first = calls[0]
@@ -110,6 +112,15 @@ function writeExec(): unknown {
 
 function writeSuccess(path: string, operation: 'create' | 'update', before: string | null, after: string): unknown {
   return { isError: false, value: { path, operation, before, after } }
+}
+
+function strReplaceExec(command: string, callId = 'call-1'): unknown {
+  return {
+    name: 'str_replace_editor',
+    callId,
+    arguments: { command, path: '/repo/a.txt' },
+    agent: { id: SessionId('session-1') },
+  }
 }
 
 function signal(): AbortSignal {
@@ -235,6 +246,93 @@ describe('revert', () => {
       ok: false, error: { code: 'internal', message: 'revert failed: disk full', details: {} },
     })
     expect(await listEntries(handle, 'session-1')).toHaveLength(1)
+  })
+})
+
+describe('str_replace_editor capture', () => {
+  it('captures a str_replace mutation through the edit-intent and result seams', async () => {
+    const { ctx, fs, handle } = await harness()
+    let content = 'before\n'
+    fs.readText.mockImplementation(async () => content)
+    const exec = strReplaceExec('str_replace')
+
+    await ctx.waterfall(
+      'fs/edit-intent', { displayPath: '/repo/a.txt', targetKey: 'key:/repo/a.txt' }, exec, () => undefined,
+    )
+    content = 'after\n'
+    emitResult(ctx, exec, { isError: false, value: 'The file /repo/a.txt has been edited successfully.' })
+    // The capture reads the post-write content asynchronously; let it settle.
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 0))
+
+    const files = await listEntries(handle, 'session-1')
+    expect(files).toHaveLength(1)
+    expect(files[0]).toMatchObject({
+      path: '/repo/a.txt', kind: 'edit', oldText: 'before\n', newText: 'after\n', missing: false, diverged: false,
+    })
+  })
+
+  it('captures a create command through the write-intent seam', async () => {
+    const { ctx, fs, handle } = await harness()
+    fs.readText.mockImplementation(async () => 'created\n')
+    const exec = strReplaceExec('create', 'call-2')
+
+    await ctx.waterfall(
+      'fs/write-intent', { displayPath: '/repo/new.txt', targetKey: 'key:/repo/new.txt' }, exec,
+      () => ({ kind: 'createIfAbsent' }),
+    )
+    emitResult(ctx, exec, { isError: false, value: 'New file created successfully at: /repo/new.txt' })
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 0))
+
+    const files = await listEntries(handle, 'session-1')
+    expect(files).toHaveLength(1)
+    expect(files[0]).toMatchObject({ path: '/repo/new.txt', kind: 'create', oldText: '', newText: 'created\n' })
+  })
+
+  it('captures even when an earlier listener owns the decision slot', async () => {
+    const { ctx, fs, handle } = await harness({
+      prepare: prepared => {
+        // The harness policy occupies the intent waterfalls without calling
+        // next(); our observer must still run (prepend) while the policy wins.
+        prepared.on('fs/edit-intent', () => Promise.resolve({ version: 1 }))
+      },
+    })
+    let content = 'before\n'
+    fs.readText.mockImplementation(async () => content)
+    const exec = strReplaceExec('str_replace', 'call-policy')
+
+    await ctx.waterfall(
+      'fs/edit-intent', { displayPath: '/repo/a.txt', targetKey: 'key:/repo/a.txt' }, exec, () => undefined,
+    )
+    content = 'after\n'
+    emitResult(ctx, exec, { isError: false, value: 'The file /repo/a.txt has been edited successfully.' })
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 0))
+
+    const files = await listEntries(handle, 'session-1')
+    expect(files).toHaveLength(1)
+    expect(files[0]).toMatchObject({ path: '/repo/a.txt', kind: 'edit', oldText: 'before\n', newText: 'after\n' })
+  })
+
+  it('tracks nothing for view commands, failed mutations, or other tools on the same seams', async () => {
+    const { ctx, fs, handle } = await harness()
+    fs.readText.mockImplementation(async () => 'same\n')
+
+    // view: no intent basis exists; the settle must not invent an entry.
+    emitResult(ctx, strReplaceExec('view', 'call-3'), { isError: false, value: 'content' })
+    // failed str_replace: the intent basis is discarded on the error settle.
+    await ctx.waterfall(
+      'fs/edit-intent', { displayPath: '/repo/a.txt', targetKey: 'key:/repo/a.txt' }, strReplaceExec('str_replace', 'call-4'),
+      () => undefined,
+    )
+    emitResult(ctx, strReplaceExec('str_replace', 'call-4'), { isError: true, value: { message: 'nope' } })
+    // The edit tool rides the same edit-intent seam but keeps its own capture path.
+    await ctx.waterfall(
+      'fs/edit-intent', { displayPath: '/repo/b.txt', targetKey: 'key:/repo/b.txt' }, editExec(), () => undefined,
+    )
+    emitResult(ctx, editExec(), editSuccess('/repo/b.txt', 'x', 'y'))
+
+    const files = await listEntries(handle, 'session-1')
+    expect(files).toHaveLength(1)
+    expect(files[0]).toMatchObject({ path: '/repo/b.txt', kind: 'edit', oldText: 'x', newText: 'y' })
   })
 })
 
