@@ -1,0 +1,16 @@
+{
+  "plugins": {
+    "@release-it/conventional-changelog": {
+      "infile": "CHANGELOG.md",
+      "preset": "conventionalcommits"
+    }
+  },
+  "npm": {
+    "publishArgs": ["--registry=https://registry.npmjs.org/"]
+  },
+  "git": {
+    "push": false,
+    "commitMessage": "chore: release v${version}",
+    "tagName": "v${version}"
+  }
+}
