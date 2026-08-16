@@ -389,8 +389,8 @@ export function PendingPanel({
           aria-expanded={open}
           onClick={toggleOpen}
         >
-          {wide && <IconListPenOutline16 size={16} />}
-          <span className={css.badgeLabel}>{t('panel.aria')}</span>
+          <IconListPenOutline16 size={wide ? 16 : 18} />
+          {wide && <span className={css.badgeLabel}>{t('panel.aria')}</span>}
           {(wide || files.length > 0) && <span className={css.badgeCount}>{files.length}</span>}
         </button>
       </div>

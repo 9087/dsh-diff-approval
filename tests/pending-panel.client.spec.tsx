@@ -162,14 +162,17 @@ describe('PendingPanel', () => {
     expect(screen.getByText('panel.empty')).toBeDefined()
   })
 
-  it('shows the pending count as a bubble in the collapsed rail mode', () => {
+  it('shows the icon and the pending count as a bubble in the collapsed rail mode', () => {
     const rail = { ...panelProps({ read: true, files: [FILE], busy: new Set() }), wide: false }
     render(<PendingPanel {...rail} />)
+    const badge = screen.getByLabelText('panel.aria')
+    expect(badge.querySelector('svg')).not.toBeNull()
     expect(screen.getByText('1')).toBeDefined()
     cleanup()
 
     const railEmpty = { ...panelProps({ read: true, files: [], busy: new Set() }), wide: false }
     render(<PendingPanel {...railEmpty} />)
+    expect(screen.getByLabelText('panel.aria').querySelector('svg')).not.toBeNull()
     expect(screen.queryByText('0')).toBeNull()
   })
 
