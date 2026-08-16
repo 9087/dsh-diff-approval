@@ -12,10 +12,11 @@ and CI publishes to npm automatically when a `v*` tag is pushed.
 - Working tree clean; `pnpm run typecheck`, `pnpm test`, `pnpm run build` pass.
 - Commit messages carry a conventional prefix (`feat:` / `fix:` / `perf:` /
   `chore:` / ...), are one-line English, and end with punctuation.
-- npm is logged in as the package owner: `npm whoami --registry=https://registry.npmjs.org/`
-  prints `9087_`. The machine's default registry is a mirror, so the official
-  registry is always passed explicitly (the `release` config already pins it
-  for publishing).
+- CI publishes via npm **Trusted Publishing** (OIDC): the npm package's
+  *Trusted Publishers* list grants `github.com/9087/dsh-diff-approval` +
+  `.github/workflows/release.yml` publish rights — no long-lived token. The
+  machine's default registry is a mirror; the repo `.npmrc` pins the official
+  registry, so resolution and publishing always use npmjs.
 
 ## Bump rules
 
@@ -36,9 +37,8 @@ git push --tags
   commits `chore: release vX.Y.Z`, and tags `vX.Y.Z` — all locally, without
   publishing.
 - Pushing the tag triggers `.github/workflows/release.yml`: it builds and runs
-  `npm publish` with the `NPM_TOKEN` repository secret (a granular npm token
-  with read/write on `dsh-diff-approval`, which bypasses the account 2FA), then
-  creates a GitHub Release with generated release notes.
+  `npm publish --provenance` authenticated by the OIDC identity (no secrets),
+  then creates a GitHub Release with generated release notes.
 
 ## If SSH to GitHub fails in the environment
 
@@ -58,9 +58,11 @@ git push
 npm publish --registry=https://registry.npmjs.org/
 ```
 
-The npm account has 2FA on writes: npm prints a browser-auth URL or asks for
-an OTP. The human must complete this step; the command runs `prepare` first
-and publishes the built artifacts.
+Requires a local `npm login` as the package owner. The npm account has 2FA on
+writes: npm prints a browser-auth URL or asks for an OTP. The human must
+complete this step; the command runs `prepare` first and publishes the built
+artifacts. Prefer the CI path — manual publishes skip the provenance
+attestation.
 
 ## Rules for agents
 
