@@ -80,6 +80,30 @@ describe('PendingPanel', () => {
     scroll.remove()
   })
 
+  it('prefers the harness-published composer height when present', () => {
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
+    const scroll = document.createElement('div')
+    scroll.setAttribute('data-conversation-scroll', '')
+    scroll.style.setProperty('--dsh-composer-height', '150px')
+    const seat = document.createElement('div')
+    seat.setAttribute('data-composer-seat', '')
+    scroll.appendChild(seat)
+    document.body.appendChild(scroll)
+    const rect = {
+      top: 600, bottom: 800, height: 200, left: 0, right: 0, width: 0, x: 0, y: 0,
+      toJSON: () => ({}),
+    } as DOMRect
+    seat.getBoundingClientRect = () => rect
+
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // Inherited height wins over the measured seat top: 150 + 12 = 162.
+    expect(document.querySelector('[data-diff-approval-panel]')!.style.bottom).toBe('162px')
+    scroll.remove()
+  })
+
   it('keeps the fixed offset when the seat is not docked (hero)', () => {
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
     const scroll = document.createElement('div')

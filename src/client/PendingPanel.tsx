@@ -31,6 +31,8 @@ const COMPOSER_GAP_PX = 12
 /** The harness composer seat (conversation scroll body + seat div). */
 const SCROLL_SELECTOR = '[data-conversation-scroll]'
 const SEAT_SELECTOR = '[data-composer-seat]'
+/** Seat height ui-conversation publishes for floating controls (its own seat observer). */
+const COMPOSER_HEIGHT_VAR = '--dsh-composer-height'
 /** Interactive composer/approval cards; clicking these keeps the panel open.
     Deliberately the cards themselves, not the seat: the approval frame's wide
     side gutters are blank space, so a click there must still close. */
@@ -437,7 +439,15 @@ export function PendingPanel({
         const docked = seatRect.bottom >= window.innerHeight - DOCKED_TOLERANCE_PX
           && seatRect.top > 0 && seatRect.top < window.innerHeight
         if (!docked) continue
-        setBottomPx(Math.round(window.innerHeight - seatRect.top) + COMPOSER_GAP_PX)
+        // Inherit the harness's own live seat height: ui-conversation keeps
+        // --dsh-composer-height current on this scroll body (its seat
+        // ResizeObserver), so the panel tracks the composer even if its
+        // layout changes. Fall back to measuring the seat's top edge.
+        const height = Number.parseFloat((scroller as HTMLElement).style.getPropertyValue(COMPOSER_HEIGHT_VAR))
+        const clearance = Number.isFinite(height) && height > 0
+          ? height
+          : window.innerHeight - seatRect.top
+        setBottomPx(Math.round(clearance) + COMPOSER_GAP_PX)
         return
       }
       setBottomPx(FALLBACK_BOTTOM_PX)

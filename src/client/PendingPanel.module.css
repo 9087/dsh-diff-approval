@@ -2,6 +2,12 @@
    Geometry mirrors the stock Cordis panel (fixed card above the footer,
    body-only scroll); the diff body reuses the DiffBlock line vocabulary. */
 
+/* The entry button mirrors the harness settings trigger (ui-settings-general
+   SettingsRoot.module.css .trigger). Its class name is a build-hashed
+   CSS-module token, so it cannot be shared across packages — geometry is
+   mirrored here, while colors inherit the harness's --dsw-alias-* theme
+   tokens. If the settings trigger's geometry changes upstream, update this
+   block to match. */
 .layer {
   position: relative;
   flex: none;
@@ -72,7 +78,9 @@
 .layer.rail {
   width: 36px;
   height: 36px;
-  /* Same rail circle rhythm as the settings rail trigger. */
+  /* Mirrors ui-settings-general SettingsRoot.module.css .trigger.rail (36x36
+     circle, 8px top / 10px bottom margin). Upstream geometry changes need a
+     manual sync here. */
   margin: 8px 0 10px;
 }
 
@@ -113,7 +121,11 @@
    edges are anchored, so the height adapts to the window and can never
    overflow. Its bottom offset is measured from the composer's top edge at
    runtime (inline style); 128px is the fallback when the composer cannot be
-   measured. */
+   measured. The 8px fixed insets mirror the stock Cordis panel (which this
+   plugin clones); z-index 30 deliberately clears the ui-conversation composer
+   seat (z-index 7) and markdown code-block sticky banners (z-index 6) in
+   ConversationRoot.module.css — if the harness raises its own stacking above
+   30, this panel can be overlapped. */
 .panel {
   position: fixed;
   left: 8px;
@@ -417,7 +429,9 @@
 
 /* Panel close button: quiet header chrome — no border or fill at rest, a
    lighter tertiary glyph. Only a soft hover adds fill and deepens the icon
-   to make it feel clickable. */
+   to make it feel clickable. The 28x28 / 28px-radius box mirrors
+   ui-settings-general SettingsRoot.module.css .close (28x28, r28); its
+   tertiary-at-rest color is our own quieter choice. */
 .close {
   display: inline-flex;
   align-items: center;
@@ -483,8 +497,12 @@
   color: var(--dsw-alias-label-primary);
 }
 
-/* Diff semantics live on the line background; text color comes from the
-   syntax highlight tokens or the primary label when unhighlighted. */
+/* Diff semantics: the hue inherits the same --dsw-alias-state-*-primary
+   tokens ui-primitives DiffBlock.module.css uses for its +/- markers, but the
+   presentation differs — native DiffBlock colors the markers and line text,
+   while this panel tints the whole line background at its own strength
+   (12% / 10%). Both keep the semantic hue token-driven, so a theme change
+   stays consistent; only the per-line presentation is this package's own. */
 .del {
   background-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent);
 }
