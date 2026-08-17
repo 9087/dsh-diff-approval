@@ -31,7 +31,8 @@
     "lib/index.js",
     "lib/client.js",
     "lib/types/**/*.d.ts",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "docs/images/**"
   ],
   "dsh": {
     "bundle": {
