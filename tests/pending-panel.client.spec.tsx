@@ -76,18 +76,19 @@ describe('PendingPanel', () => {
 
     expect(screen.getAllByText('a.txt')).toHaveLength(1)
     expect(screen.getAllByText('b.txt')).toHaveLength(1)
-    expect(screen.getByText('a.txt').getAttribute('title')).toBe(FILE.path)
   })
 
-  it('shows absolute paths when basenames collide', () => {
+  it('always shows the short file name with the full path on hover, even when basenames collide', () => {
     const sibling = entry({ id: 'entry-dup', path: '/repo/sub/a.txt' })
     const props = panelProps({ read: true, files: [FILE, sibling], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
-    expect(screen.getAllByText(FILE.path)).toHaveLength(1)
-    expect(screen.getAllByText(sibling.path)).toHaveLength(1)
-    expect(screen.queryByText('a.txt')).toBeNull()
+    // Both rows show only the basename; the full path lives in a hover
+    // tooltip and in the auto-selected detail's header.
+    expect(screen.getAllByText('a.txt')).toHaveLength(2)
+    expect(screen.getAllByText(FILE.path).length).toBeGreaterThan(0)
+    expect(screen.queryByText(sibling.path)).toBeNull()
   })
 
   it('tags a created file on its row and shows the revert hint when expanded', () => {
@@ -205,16 +206,40 @@ describe('PendingPanel', () => {
     expect(list.style.width).toBe('560px')
   })
 
-  it('opens or reveals the selected file through the injected face', () => {
+  it('opens or reveals the selected file through the header icon buttons', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
-    fireEvent.click(screen.getByText('a.txt'))
 
-    fireEvent.click(screen.getByText('action.openFile'))
+    fireEvent.click(screen.getByLabelText('action.openFile'))
     expect(props.onOpen).toHaveBeenCalledWith(FILE.sessionId, FILE.id, 'open')
-    fireEvent.click(screen.getByText('action.revealFile'))
+    fireEvent.click(screen.getByLabelText('action.revealFile'))
     expect(props.onOpen).toHaveBeenCalledWith(FILE.sessionId, FILE.id, 'reveal')
+  })
+
+  it('auto-selects the first pending file and advances to the next after handling', () => {
+    const second = entry({ id: 'entry-2', path: '/repo/b.txt' })
+    const props = panelProps({ read: true, files: [FILE, second], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // The first file opens automatically.
+    expect(view.container.querySelector('[data-diff-approval-diff]')).not.toBeNull()
+    expect(screen.getByText('/repo/a.txt')).toBeDefined()
+
+    // Handling it removes it; the next file takes its place.
+    fireEvent.click(screen.getByText('action.keep'))
+    view.rerender(<PendingPanel {...panelProps({ read: true, files: [second], busy: new Set() })} />)
+    expect(screen.getByText('/repo/b.txt')).toBeDefined()
+  })
+
+  it('cannot be deselected by clicking the selected row again', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    fireEvent.click(screen.getByText('a.txt'))
+    expect(view.container.querySelector('[data-diff-approval-diff]')).not.toBeNull()
   })
 
   it('shows the per-file line change counts on each row', () => {

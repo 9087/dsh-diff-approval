@@ -262,10 +262,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font: var(--dsw-font-markdown-code-block);
-  /* RTL direction truncates the leading segments, keeping the tail (the
-     file name and deepest directories) visible when paths share a prefix. */
-  direction: rtl;
-  text-align: left;
 }
 
 .kindTag {
@@ -339,6 +335,26 @@
   flex-direction: column;
   background: var(--dsw-alias-markdown-code-block);
   overflow: hidden;
+}
+
+.diffHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.diffPath {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-markdown-code-block);
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .diffActions {

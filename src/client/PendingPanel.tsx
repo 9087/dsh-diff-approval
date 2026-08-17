@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react'
-import { IconChevronDownOutline14, IconChevronUpOutline14, IconListPenOutline16, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconFolderOpenOutline16, IconListPenOutline16, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
@@ -13,7 +13,7 @@ import { computeWholeFileDiff } from './whole-file-diff.ts'
 import type { WholeFileDiffRow } from './whole-file-diff.ts'
 import { highlightLines } from './highlight.ts'
 import { langFromPath } from './lang.ts'
-import { copyDisplayPath, referenceOf } from './reference.ts'
+import { referenceOf } from './reference.ts'
 import css from './PendingPanel.module.css'
 
 /**
@@ -41,10 +41,15 @@ export type PendingPanelProps =
 /** Locale translator used by the panel and its rows. */
 type Translator = (key: DiffApprovalKey, params?: Record<string, unknown>) => string
 
+/** The trailing file-name segment of a path, used for row display. */
+function basenameOf(path: string): string {
+  const index = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  return index < 0 ? path : path.slice(index + 1)
+}
+
 /** One file row in the left list pane. */
 interface PendingFileRowProps {
   file: PendingFileDiff
-  files: readonly PendingFileDiff[]
   selected: boolean
   t: Translator
   onSelect: (id: string) => void
@@ -106,7 +111,7 @@ function changeBlocksOf(diff: ReturnType<typeof computeWholeFileDiff>): ChangeBl
 }
 
 /** One row of the file list: the clickable head in the left pane. */
-function PendingFileRow({ file, files, selected, t, onSelect }: PendingFileRowProps) {
+function PendingFileRow({ file, selected, t, onSelect }: PendingFileRowProps) {
   const stats = useMemo(
     () => computeWholeFileDiff(file.oldText, file.newText),
     [file.oldText, file.newText],
@@ -117,9 +122,11 @@ function PendingFileRow({ file, files, selected, t, onSelect }: PendingFileRowPr
         type="button"
         className={css.rowHead}
         data-selected={selected || undefined}
-        onClick={() => { onSelect(selected ? '' : file.id) }}
+        onClick={() => { onSelect(file.id) }}
       >
-        <span className={css.rowPath} title={file.path}>{copyDisplayPath(file.path, files)}</span>
+        <Tooltip label={file.path} delayMs={500} maxWidth={560}>
+          <span className={css.rowPath}>{basenameOf(file.path)}</span>
+        </Tooltip>
         {file.kind === 'create' && <span className={css.kindTag}>{t('row.create')}</span>}
         {file.missing && <span className={css.missing} title={t('panel.missingHint')}>{t('panel.missing')}</span>}
         <span className={css.rowMeta}>
@@ -265,6 +272,29 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
 
   return (
     <div className={css.diff} data-diff-approval-diff onMouseUp={endDrag}>
+      <div className={css.diffHeader}>
+        <span className={css.diffPath}>{file.path}</span>
+        <button
+          type="button"
+          className={`${css.action} ${css.iconAction}`}
+          data-diff-open
+          aria-label={t('action.openFile')}
+          title={t('action.openFile')}
+          onClick={() => { void onOpen(file.sessionId, file.id, 'open') }}
+        >
+          <IconBrowseOutline16 size={14} />
+        </button>
+        <button
+          type="button"
+          className={`${css.action} ${css.iconAction}`}
+          data-diff-reveal
+          aria-label={t('action.revealFile')}
+          title={t('action.revealFile')}
+          onClick={() => { void onOpen(file.sessionId, file.id, 'reveal') }}
+        >
+          <IconFolderOpenOutline16 size={14} />
+        </button>
+      </div>
       <div className={css.diffActions}>
         <span className={css.diffStats}>{t('panel.stats', { added: model.diff.added, removed: model.diff.removed })}</span>
         {file.kind === 'create' && <span className={css.kindHint}>{t('panel.createHint')}</span>}
@@ -294,22 +324,6 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
             </button>
           </>
         )}
-        <button
-          type="button"
-          className={css.action}
-          data-diff-open
-          onClick={() => { void onOpen(file.sessionId, file.id, 'open') }}
-        >
-          {t('action.openFile')}
-        </button>
-        <button
-          type="button"
-          className={css.action}
-          data-diff-reveal
-          onClick={() => { void onOpen(file.sessionId, file.id, 'reveal') }}
-        >
-          {t('action.revealFile')}
-        </button>
         <span className={css.flexSpacer} />
         <button
           type="button"
@@ -417,6 +431,16 @@ export function PendingPanel({
   const mine = files.filter(file => file.sessionId === current)
   const theirs = files.filter(file => file.sessionId !== current)
 
+  // Auto-open the first pending file when the panel opens, and advance to the
+  // next one once the selected file is handled. Selection is single and cannot
+  // be cleared by clicking — only an empty list shows the empty state.
+  useEffect(() => {
+    if (!open) return
+    if (selected !== '' && files.some(file => file.id === selected)) return
+    const next = [...mine, ...theirs][0]
+    if (next !== undefined && next.id !== selected) setSelected(next.id)
+  }, [open, current, files, selected])
+
   // A list that empties through Keep/Revert closes the panel; opening an
   // already-empty list stays open so the empty note stays readable. An error
   // also keeps it open.
@@ -436,7 +460,6 @@ export function PendingPanel({
     <PendingFileRow
       key={entry.id}
       file={entry}
-      files={files}
       selected={selected === entry.id}
       t={t}
       onSelect={setSelected}
