@@ -7,7 +7,7 @@
 
 一个 DeepSeek Harness（DSH）待处理改动审核插件：自动跟踪每次成功的 `edit` / `write` / 编辑器（`str_replace_editor`）改动，把一个文件的全部未处理改动合并为一条待处理条目，在侧边栏展示每个文件的完整差异，支持保留 / 回退——全程不依赖 git。
 
-![待处理改动面板](docs/images/pending-panel.png)
+![待处理改动面板](docs/images/pending-panel.zh.png)
 
 ## ✨ 功能
 
