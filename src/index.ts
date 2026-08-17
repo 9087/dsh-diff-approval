@@ -26,9 +26,10 @@
  * ```
  *
  * Pending entries persist per (workspace, session) so an unhandled operation
- * survives a harness restart; the list endpoint re-reads the live file, so a
- * change or deletion made after the tracked operation is reported after
- * restart exactly as it is mid-session.
+ * survives a harness restart; the list endpoint hydrates the whole workspace
+ * and merges every registered session's entries, so a fresh session after a
+ * restart still reports the earlier sessions' pending changes, live-verified
+ * exactly as it is mid-session.
  *
  * @module dsh-diff-approval
  */
@@ -175,8 +176,11 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   const store = new PendingDiffStore()
   const persistence = new PendingPersistence(resolve(expandHomePath(storageDir ?? defaultStorageDir())))
   const launchPath = config?.openPath ?? defaultOpenPath
-  const loaded = new Set<string>()
-  const loading = new Map<string, Promise<void>>()
+  /** Sessions seen per workspace, so the list can merge a workspace's sessions. */
+  const sessionsByWorkspace = new Map<string, Set<string>>()
+  /** Workspace ids whose persisted state has been hydrated into the store. */
+  const loadedWorkspaces = new Set<string>()
+  const loadingWorkspaces = new Map<string, Promise<void>>()
 
   /** Pre-write bases captured at the intent seams, keyed by the tool call id. */
   const editorIntents = new Map<string, IntentBasis>()
@@ -313,31 +317,95 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   }
 
   /**
-   * Merge one session's persisted entries into the store, once per session.
-   * Concurrent callers share the in-flight load, and folds arriving while the
-   * load runs stay safe: `hydrate` never overwrites a live entry.
-   * @param sessionId - the session to hydrate.
-   * @returns resolution after the session's persisted state is merged (or skipped).
+   * Record one session in its workspace's account. Every path that touches a
+   * session registers it, so the list merges all of a workspace's sessions'
+   * entries — a fresh session after restart still sees the workspace's
+   * persisted pending changes.
+   * @param sessionId - the session to register.
+   * @returns the owning workspace, or `undefined` when none accounts it.
    */
-  function ensureLoaded(sessionId: SessionId): Promise<void> {
-    const key = String(sessionId)
-    if (loaded.has(key)) return Promise.resolve()
-    const pending = loading.get(key)
+  function registerSession(sessionId: SessionId): Workspace | undefined {
+    const workspace = workspaceOf(sessionId)
+    if (workspace === undefined) return undefined
+    const key = String(workspace.id)
+    const sessions = sessionsByWorkspace.get(key)
+    if (sessions === undefined) sessionsByWorkspace.set(key, new Set([String(sessionId)]))
+    else sessions.add(String(sessionId))
+    return workspace
+  }
+
+  /**
+   * Merge one workspace's persisted entries into the store, once per
+   * workspace. Hydration is workspace-scoped: after a restart the current
+   * session has a fresh id while the persisted entries live under their
+   * original session ids in the same workspace file, so the whole workspace
+   * is loaded and every persisted session is accounted. Concurrent callers
+   * share the in-flight load, and folds arriving while the load runs stay
+   * safe: `hydrate` never overwrites a live entry.
+   * @param workspace - the workspace whose persisted state to merge.
+   * @returns resolution after the workspace's persisted state is merged (or skipped).
+   */
+  function ensureWorkspaceLoaded(workspace: Workspace): Promise<void> {
+    const key = String(workspace.id)
+    if (loadedWorkspaces.has(key)) return Promise.resolve()
+    const pending = loadingWorkspaces.get(key)
     if (pending !== undefined) return pending
     const task = (async () => {
-      const workspace = workspaceOf(sessionId)
-      if (workspace !== undefined) {
-        try {
-          store.hydrate(sessionId, await persistence.load(String(workspace.id), key))
-        } catch (error: unknown) {
-          ctx.logger.warn(`diff-approval: loading persisted state for session ${key} failed: ${errorMessage(error)}`)
+      try {
+        const persisted = await persistence.loadWorkspace(key)
+        const bySession = new Map<string, PendingEntry[]>()
+        for (const entry of persisted) {
+          const sessionKey = String(entry.sessionId)
+          const group = bySession.get(sessionKey)
+          if (group === undefined) bySession.set(sessionKey, [entry])
+          else group.push(entry)
         }
+        for (const [sessionKey, entries] of bySession) {
+          const sessions = sessionsByWorkspace.get(key) ?? new Set<string>()
+          sessions.add(sessionKey)
+          sessionsByWorkspace.set(key, sessions)
+          store.hydrate(SessionId(sessionKey), entries)
+        }
+      } catch (error: unknown) {
+        ctx.logger.warn(`diff-approval: loading persisted state for workspace ${key} failed: ${errorMessage(error)}`)
       }
-      loaded.add(key)
-      loading.delete(key)
+      loadedWorkspaces.add(key)
+      loadingWorkspaces.delete(key)
     })()
-    loading.set(key, task)
+    loadingWorkspaces.set(key, task)
     return task
+  }
+
+  /**
+   * Merge the session's workspace's persisted state into the store (a session
+   * with no workspace is the memory-only edge and has nothing to load).
+   * @param sessionId - the session to hydrate for.
+   * @returns resolution after the workspace's persisted state is merged.
+   */
+  function ensureLoaded(sessionId: SessionId): Promise<void> {
+    const workspace = registerSession(sessionId)
+    if (workspace === undefined) return Promise.resolve()
+    return ensureWorkspaceLoaded(workspace)
+  }
+
+  /**
+   * All entries visible to one session: every registered session of its
+   * workspace, merged oldest capture first. This is what makes an unhandled
+   * change survive a restart — the new session lists the workspace's whole
+   * pending set, its own live folds plus the earlier sessions' persisted
+   * entries.
+   * @param sessionId - the viewing session.
+   * @returns the merged entries; a session with no workspace lists only itself.
+   */
+  async function workspaceEntries(sessionId: SessionId): Promise<PendingEntry[]> {
+    await ensureLoaded(sessionId)
+    const workspace = workspaceOf(sessionId)
+    if (workspace === undefined) return store.list(sessionId)
+    const sessions = sessionsByWorkspace.get(String(workspace.id))
+    if (sessions === undefined) return store.list(sessionId)
+    const entries: PendingEntry[] = []
+    for (const sessionKey of sessions) entries.push(...store.list(SessionId(sessionKey)))
+    return entries.sort((left, right) => left.updatedAt - right.updatedAt)
   }
 
   /**
@@ -379,8 +447,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       case 'list': {
         const sessionId = sessionOf(payload)
         if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
-        await ensureLoaded(sessionId)
-        const files = await listWithState(store.list(sessionId))
+        const files = await listWithState(await workspaceEntries(sessionId))
         const value: DiffApprovalListValue = { files }
         return { ok: true, value }
       }

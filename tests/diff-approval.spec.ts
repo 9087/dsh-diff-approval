@@ -452,6 +452,31 @@ describe('persistence', () => {
     ])
   })
 
+  it("surfaces an earlier session's persisted entries to a fresh session after restart", async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-diff-approval-'))
+    tempDirs.push(storageDir)
+    // First run: an earlier session in the workspace records an edit, which
+    // is persisted under that session's id in the workspace file.
+    const first = await harness({ sessionIds: [SessionId('session-old')], storageDir })
+    emitResult(first.ctx, { name: 'edit', agent: { id: SessionId('session-old') } },
+      editSuccess('/repo/a.txt', 'v1\n', 'v2\n'))
+    await vi.waitFor(async () => {
+      await expect(readdir(first.storageDir)).resolves.toContain('workspace-1.json')
+    })
+
+    // Second run: a fresh session id in the same workspace must still list
+    // the earlier session's persisted change (workspace-level hydration).
+    const second = await harness({ sessionIds: [SessionId('session-new')], storageDir })
+    second.fs.readText.mockResolvedValue('v2\n')
+    const entries = await listEntries(second.handle, 'session-new')
+    expect(entries).toEqual([
+      expect.objectContaining({
+        sessionId: 'session-old', path: '/repo/a.txt', kind: 'edit',
+        oldText: 'v1\n', newText: 'v2\n', missing: false, diverged: false,
+      }) as object,
+    ])
+  })
+
   it('removes the persisted entry when it is kept', async () => {
     const storageDir = await mkdtemp(join(tmpdir(), 'dsh-diff-approval-'))
     tempDirs.push(storageDir)

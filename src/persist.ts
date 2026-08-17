@@ -138,6 +138,30 @@ export class PendingPersistence {
   }
 
   /**
+   * Load every session's entries for one workspace, oldest capture first.
+   * The list shows a workspace's pending changes across sessions — a session
+   * that restarted carries a fresh id while its earlier entries sit under the
+   * original session ids in the same workspace file — so hydration reads the
+   * whole workspace, not one session.
+   * @param workspaceId - the owning workspace's stable id.
+   * @returns the persisted entries across all sessions; empty when none were saved.
+   */
+  async loadWorkspace(workspaceId: string): Promise<PendingEntry[]> {
+    const envelope = await this.readWorkspace(this.fileOf(workspaceId))
+    if (envelope === undefined) return []
+    const entries: PendingEntry[] = []
+    for (const sessionId of Object.keys(envelope.sessions)) {
+      const rows = envelope.sessions[sessionId]
+      if (!Array.isArray(rows)) continue
+      for (const row of rows) {
+        const entry = pendingEntryOf(row)
+        if (entry !== undefined) entries.push(entry)
+      }
+    }
+    return entries.sort((left, right) => left.updatedAt - right.updatedAt)
+  }
+
+  /**
    * Replace one session's entries durably. Saves to one file are serialized;
    * a previous save's failure does not block the next one.
    * @param workspaceId - the owning workspace's stable id.
