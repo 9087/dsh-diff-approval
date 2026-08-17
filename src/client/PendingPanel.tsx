@@ -80,11 +80,15 @@ const ROW_CLASS = {
   add: css.add,
 } as const
 
-/** One file's derived view: diff rows, change blocks, highlight runs. */
+/** One file's synchronous view: diff rows and change blocks. */
 interface RowModel {
   diff: ReturnType<typeof computeWholeFileDiff>
   /** Maximal runs of changed rows (inclusive row indices); one per modification. */
   blocks: ChangeBlock[]
+}
+
+/** One file's deferred syntax-highlight runs, one entry per side. */
+interface HighlightRuns {
   oldRuns: ReturnType<typeof highlightLines>
   newRuns: ReturnType<typeof highlightLines>
 }
@@ -150,13 +154,22 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
   const lang = useMemo(() => langFromPath(file.path), [file.path])
   const model = useMemo<RowModel>(() => {
     const diff = computeWholeFileDiff(file.oldText, file.newText)
-    return {
-      diff,
-      blocks: changeBlocksOf(diff),
-      oldRuns: highlightLines(file.oldText, lang),
-      newRuns: highlightLines(file.newText, lang),
-    }
-  }, [file.oldText, file.newText, lang])
+    return { diff, blocks: changeBlocksOf(diff) }
+  }, [file.oldText, file.newText])
+
+  // Syntax highlight arrives a tick after selection so clicking a file never
+  // blocks the diff paint on tokenization; the plain-text diff shows first.
+  const [runs, setRuns] = useState<HighlightRuns | undefined>(undefined)
+  useEffect(() => {
+    setRuns(undefined)
+    const timer = window.setTimeout(() => {
+      setRuns({
+        oldRuns: highlightLines(file.oldText, lang),
+        newRuns: highlightLines(file.newText, lang),
+      })
+    }, 0)
+    return () => { window.clearTimeout(timer) }
+  }, [file.id, file.oldText, file.newText, lang])
 
   const rowRefs = useRef(new Map<number, HTMLDivElement>())
   const bodyRef = useRef<HTMLDivElement>(null)
@@ -266,11 +279,10 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
   /** One line's text: token spans when highlighted, plain text otherwise. */
   const renderLine = (row: WholeFileDiffRow): ReactNode => {
     const lineNumber = row.kind === 'del' ? row.oldLine : row.newLine
-    const runs = lineNumber === undefined
-      ? undefined
-      : (row.kind === 'del' ? model.oldRuns : model.newRuns)?.[lineNumber - 1]
-    if (runs === undefined || runs.length === 0) return row.text === '' ? '\u00a0' : row.text
-    return runs.map((span, index) => <span key={index} style={span.style}>{span.text}</span>)
+    const sideRuns = row.kind === 'del' ? runs?.oldRuns : runs?.newRuns
+    const lineRuns = lineNumber === undefined ? undefined : sideRuns?.[lineNumber - 1]
+    if (lineRuns === undefined || lineRuns.length === 0) return row.text === '' ? '\u00a0' : row.text
+    return lineRuns.map((span, index) => <span key={index} style={span.style}>{span.text}</span>)
   }
 
   const focusedBlock = model.blocks.length > 0 ? model.blocks[focus] : undefined
