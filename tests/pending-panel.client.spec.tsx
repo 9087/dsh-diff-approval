@@ -57,6 +57,127 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-approval-panel]')!.style.bottom).toBe('128px')
   })
 
+  it('sits above a docked composer seat (approval takeover included)', () => {
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
+    const scroll = document.createElement('div')
+    scroll.setAttribute('data-conversation-scroll', '')
+    const seat = document.createElement('div')
+    seat.setAttribute('data-composer-seat', '')
+    scroll.appendChild(seat)
+    document.body.appendChild(scroll)
+    const rect = {
+      top: 600, bottom: 800, height: 200, left: 0, right: 0, width: 0, x: 0, y: 0,
+      toJSON: () => ({}),
+    } as DOMRect
+    seat.getBoundingClientRect = () => rect
+
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // bottom = innerHeight - seatTop + gap = 800 - 600 + 12 = 212.
+    expect(document.querySelector('[data-diff-approval-panel]')!.style.bottom).toBe('212px')
+    scroll.remove()
+  })
+
+  it('keeps the fixed offset when the seat is not docked (hero)', () => {
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
+    const scroll = document.createElement('div')
+    scroll.setAttribute('data-conversation-scroll', '')
+    const seat = document.createElement('div')
+    seat.setAttribute('data-composer-seat', '')
+    scroll.appendChild(seat)
+    document.body.appendChild(scroll)
+    // A centered hero seat: nowhere near the window bottom.
+    const rect = {
+      top: 400, bottom: 600, height: 200, left: 0, right: 0, width: 0, x: 0, y: 0,
+      toJSON: () => ({}),
+    } as DOMRect
+    seat.getBoundingClientRect = () => rect
+
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    expect(document.querySelector('[data-diff-approval-panel]')!.style.bottom).toBe('128px')
+    scroll.remove()
+  })
+
+  it('closes when clicking outside the panel', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeTruthy()
+
+    fireEvent.pointerDown(document.body)
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+  })
+
+  it('stays open when clicking inside the panel', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const panel = document.querySelector('[data-diff-approval-panel]')!
+    fireEvent.pointerDown(panel)
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+  })
+
+  it('stays open on the input card but closes on its seat gutter', () => {
+    const seat = document.createElement('div')
+    seat.setAttribute('data-composer-seat', '')
+    const card = document.createElement('div')
+    card.setAttribute('data-composer-card', '')
+    seat.appendChild(card)
+    document.body.appendChild(seat)
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    fireEvent.pointerDown(card)
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+
+    fireEvent.pointerDown(seat)
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+    seat.remove()
+  })
+
+  it('stays open on the approval card but closes on its blank gutter', () => {
+    const frame = document.createElement('div')
+    frame.setAttribute('data-question-key', 'q-1')
+    const card = document.createElement('section')
+    frame.appendChild(card)
+    document.body.appendChild(frame)
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    fireEvent.pointerDown(card)
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+
+    fireEvent.pointerDown(frame)
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+    frame.remove()
+  })
+
+  it('closes via the header close button', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeTruthy()
+
+    fireEvent.click(screen.getByLabelText('action.close'))
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+  })
+
+  it('still toggles closed through the badge while open', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeTruthy()
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+  })
+
   it('groups the current session first and other sessions below', () => {
     const other = entry({ id: 'entry-other', sessionId: 'session-2' as SessionId, path: '/repo/other.txt' })
     const props = panelProps({ read: true, files: [other, FILE], busy: new Set() })

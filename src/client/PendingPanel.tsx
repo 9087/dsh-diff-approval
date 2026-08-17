@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react'
-import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconFolderOpenOutline16, IconListPenOutline16, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconListPenOutline16, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
@@ -28,8 +28,15 @@ const POLL_INTERVAL_MS = 1000
 const FALLBACK_BOTTOM_PX = 128
 /** Gap kept between the composer's top edge and the panel bottom, in px. */
 const COMPOSER_GAP_PX = 12
-/** The harness composer's stable hook (ui-conversation InputBar). */
-const COMPOSER_SELECTOR = '[data-composer-card]'
+/** The harness composer seat (conversation scroll body + seat div). */
+const SCROLL_SELECTOR = '[data-conversation-scroll]'
+const SEAT_SELECTOR = '[data-composer-seat]'
+/** Interactive composer/approval cards; clicking these keeps the panel open.
+    Deliberately the cards themselves, not the seat: the approval frame's wide
+    side gutters are blank space, so a click there must still close. */
+const KEEP_OPEN_SELECTOR = '[data-composer-card],[data-question-key] > *,[data-plan-review-key] > *'
+/** Seat counts as docked when its bottom is this close to the window bottom. */
+const DOCKED_TOLERANCE_PX = 48
 /** File-list pane width bounds for the manual split drag, in px. */
 const MIN_LIST_WIDTH_PX = 160
 const MAX_LIST_WIDTH_PX = 560
@@ -397,34 +404,67 @@ export function PendingPanel({
     return () => { clearInterval(timer) }
   }, [current, onRefresh])
 
-  // While the panel is open, sit just above the chat composer: measure its top
-  // edge against the viewport bottom and follow its height changes (the input
-  // grows when content wraps). A missing or unlaid-out composer falls back to
-  // the fixed offset.
+  // While the panel is open, sit above the docked composer seat. The seat
+  // hosts the input card OR an elected approval/question takeover (the input
+  // bar is kept mounted but hidden during a takeover), so its top is the one
+  // true line to clear. It is measured directly — never the input card, whose
+  // rect is all zeros while hidden. A docked seat sits pinned to the window
+  // bottom (sticky/absolute); a centered hero seat is not something to avoid,
+  // so it falls back to the fixed offset. A ResizeObserver makes the response
+  // immediate when the seat grows (a takeover mounting, a draft expanding);
+  // a slow interval catches a seat that mounts after the panel opens.
   useEffect(() => {
     if (!open) return
+    const MEASURE_INTERVAL_MS = 400
     const measure = () => {
-      const composer = document.querySelector(COMPOSER_SELECTOR)
-      if (composer === null) {
-        setBottomPx(FALLBACK_BOTTOM_PX)
+      const scrollers = document.querySelectorAll(SCROLL_SELECTOR)
+      for (const scroller of scrollers) {
+        const seat = scroller.querySelector(SEAT_SELECTOR)
+        if (seat === null) continue
+        const seatRect = seat.getBoundingClientRect()
+        const docked = seatRect.bottom >= window.innerHeight - DOCKED_TOLERANCE_PX
+          && seatRect.top > 0 && seatRect.top < window.innerHeight
+        if (!docked) continue
+        setBottomPx(Math.round(window.innerHeight - seatRect.top) + COMPOSER_GAP_PX)
         return
       }
-      const top = composer.getBoundingClientRect().top
-      // top === 0 means the composer is not laid out; keep the current offset.
-      if (top <= 0) return
-      setBottomPx(Math.round(window.innerHeight - top) + COMPOSER_GAP_PX)
+      setBottomPx(FALLBACK_BOTTOM_PX)
     }
     measure()
-    if (typeof ResizeObserver === 'undefined') return
-    const composer = document.querySelector(COMPOSER_SELECTOR)
-    if (composer === null) return
-    const observer = new ResizeObserver(measure)
-    observer.observe(composer)
+    const seats = [...document.querySelectorAll(SEAT_SELECTOR)]
+    const observer = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(measure)
+    for (const seat of seats) observer?.observe(seat)
+    const timer = window.setInterval(measure, MEASURE_INTERVAL_MS)
     window.addEventListener('resize', measure)
     return () => {
-      observer.disconnect()
+      observer?.disconnect()
+      window.clearInterval(timer)
       window.removeEventListener('resize', measure)
     }
+  }, [open])
+
+  // Clicking outside the panel closes it, except on the entry badge itself
+  // (whose own click toggles) and on the interactive composer/approval cards
+  // — the input capsule and the approval/question card must keep the review
+  // panel open, but the approval frame's blank side gutters are outside.
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null
+      if (target === null) return
+      const element = target instanceof Element ? target : target.parentElement
+      if (element !== null
+        && (element.closest('[data-diff-approval-panel]') !== null
+          || element.closest('[data-diff-approval-badge]') !== null
+          || element.closest(KEEP_OPEN_SELECTOR) !== null)) {
+        return
+      }
+      setOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    return () => { document.removeEventListener('pointerdown', onPointerDown, true) }
   }, [open])
 
   const files = snapshot.files
@@ -503,6 +543,16 @@ export function PendingPanel({
         >
           <header className={css.header}>
             <span className={css.title}>{t('panel.title')}</span>
+            <button
+              type="button"
+              className={css.close}
+              data-diff-approval-close
+              aria-label={t('action.close')}
+              title={t('action.close')}
+              onClick={() => { setOpen(false) }}
+            >
+              <IconCloseOutline16 size={14} />
+            </button>
           </header>
           {snapshot.error !== undefined || !snapshot.read || files.length === 0 ? (
             <div className={css.states}>
@@ -554,7 +604,7 @@ export function PendingPanel({
           type="button"
           className={css.badge}
           data-diff-approval-badge={files.length}
-          data-active={open || files.length > 0 ? '' : undefined}
+          data-active={open ? '' : undefined}
           aria-label={t('panel.aria')}
           aria-expanded={open}
           onClick={toggleOpen}
