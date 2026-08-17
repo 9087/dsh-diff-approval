@@ -461,22 +461,81 @@ describe('PendingPanel', () => {
     expect(screen.getByText('panel.missingHint')).toBeDefined()
   })
 
-  it('opens a copy toolbar after a line drag selection', () => {
+  it('shows the selection reference in the status bar when text is selected', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     const view = render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
 
-    const firstLine = view.container.querySelector('[data-diff-line]')
-    if (firstLine === null) throw new Error('no diff line rendered')
-    fireEvent.mouseDown(firstLine)
-    fireEvent.mouseUp(view.container.querySelector('[data-diff-approval-diff]')!)
+    const rows = [...view.container.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    expect(rows.length).toBeGreaterThan(1)
+    const code0 = rows[0]!.querySelector('[data-diff-code]') ?? rows[0]!
+    const code1 = rows[1]!.querySelector('[data-diff-code]') ?? rows[1]!
+    const selection = {
+      isCollapsed: false,
+      anchorNode: code0.firstChild ?? code0,
+      focusNode: code1.firstChild ?? code1,
+      rangeCount: 1,
+      getRangeAt: () => ({
+        startContainer: code0.firstChild ?? code0,
+        startOffset: 1,
+        endContainer: code1.firstChild ?? code1,
+        endOffset: 1,
+      }),
+    } as unknown as Selection
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
 
-    const toolbar = view.container.querySelector('[data-diff-selection-toolbar]')
-    expect(toolbar).not.toBeNull()
-    const copy = view.container.querySelector('[data-diff-copy]')
-    expect(copy).not.toBeNull()
-    fireEvent.click(copy!)
-    expect(screen.getByText('action.copyRange')).toBeDefined()
+    // The status bar shows the line-range reference once lines are selected.
+    expect(view.container.querySelector('[data-diff-status-bar]')).not.toBeNull()
+    expect(screen.getByText('a.txt:1')).toBeDefined()
+    expect(view.container.querySelector('[data-diff-copy]')).not.toBeNull()
+  })
+
+  it('copies the reference with Ctrl+L', async () => {
+    const writeText = vi.fn(async () => {})
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const rows = [...view.container.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    expect(rows.length).toBeGreaterThan(1)
+    const code0 = rows[0]!.querySelector('[data-diff-code]') ?? rows[0]!
+    const code1 = rows[1]!.querySelector('[data-diff-code]') ?? rows[1]!
+    const selection = {
+      isCollapsed: false,
+      anchorNode: code0.firstChild ?? code0,
+      focusNode: code1.firstChild ?? code1,
+      rangeCount: 1,
+      getRangeAt: () => ({
+        startContainer: code0.firstChild ?? code0,
+        startOffset: 1,
+        endContainer: code1.firstChild ?? code1,
+        endOffset: 1,
+      }),
+    } as unknown as Selection
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    expect(screen.getByText('a.txt:1')).toBeDefined()
+
+    fireEvent.keyDown(document, { key: 'l', ctrlKey: true })
+    await vi.waitFor(() => { expect(writeText).toHaveBeenCalledWith('a.txt:1') })
+    await vi.waitFor(() => { expect(screen.getByText('action.copied')).toBeDefined() })
+  })
+
+  it('lets the status bar pick the highlight language', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const trigger = view.container.querySelector('[data-diff-lang]') as HTMLElement
+    expect(trigger).not.toBeNull()
+    fireEvent.click(trigger)
+    const typescript = screen.getByText('typescript')
+    fireEvent.click(typescript)
+    expect(trigger.textContent).toContain('typescript')
   })
 })

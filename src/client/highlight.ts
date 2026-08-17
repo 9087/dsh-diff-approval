@@ -69,6 +69,9 @@ const LANGS = [
   langYaml,
 ]
 
+/** Supported grammar ids, in picker order, for the viewer's language selector. */
+export const HIGHLIGHT_LANGS = [...new Set(LANGS.flat().map(lang => lang.name))]
+
 /** All token colors resolve through `--shiki-*` custom properties (theme package sheets). */
 const cssVariablesTheme = createCssVariablesTheme({
   name: 'css-variables',

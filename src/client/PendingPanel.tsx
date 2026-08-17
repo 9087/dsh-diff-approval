@@ -1,8 +1,9 @@
 /** Sidebar-foot pending-edit review action and the split review panel it opens. */
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react'
-import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconListPenOutline16, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconListPenOutline16, Menu, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
@@ -11,7 +12,7 @@ import type { PendingPanelFace } from './slots.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import { computeWholeFileDiff } from './whole-file-diff.ts'
 import type { WholeFileDiffRow } from './whole-file-diff.ts'
-import { highlightLines } from './highlight.ts'
+import { HIGHLIGHT_LANGS, highlightLines } from './highlight.ts'
 import { langFromPath } from './lang.ts'
 import { referenceOf } from './reference.ts'
 import css from './PendingPanel.module.css'
@@ -123,6 +124,70 @@ function changeBlocksOf(diff: ReturnType<typeof computeWholeFileDiff>): ChangeBl
   return blocks
 }
 
+/** The diff-row index containing a node, or undefined. */
+function rowIndexAt(node: Node | null): number | undefined {
+  if (node === null) return undefined
+  const element = node instanceof Element ? node : node.parentElement
+  const row = element?.closest('[data-diff-row]')
+  if (row === null || row === undefined) return undefined
+  const index = Number((row as HTMLElement).dataset.diffRow)
+  return Number.isFinite(index) ? index : undefined
+}
+
+/** Character offset of a selection boundary within its line's code text. */
+function lineOffsetAt(node: Node, offset: number): number {
+  const code = (node instanceof Element ? node : node.parentElement)?.closest('[data-diff-code]')
+  if (code === null || code === undefined) return 0
+  let before = 0
+  const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT)
+  let current: Node | null = walker.nextNode()
+  while (current !== null) {
+    if (current === node) return before + offset
+    // A boundary on an element (the code cell or a highlight span) stops at
+    // the first text inside it; its own first `offset` children are added
+    // below.
+    if (node instanceof Element && node.contains(current)) break
+    before += (current as Text).length
+    current = walker.nextNode()
+  }
+  if (node instanceof Element) {
+    const children = [...node.childNodes]
+    for (let i = 0; i < Math.min(offset, children.length); i++) {
+      const inner = document.createTreeWalker(children[i]!, NodeFilter.SHOW_TEXT)
+      let text: Node | null = inner.nextNode()
+      while (text !== null) {
+        before += (text as Text).length
+        text = inner.nextNode()
+      }
+    }
+  }
+  return before
+}
+
+/** Length of the code text on the line holding a node. */
+function lineLengthAt(node: Node): number {
+  const code = (node instanceof Element ? node : node.parentElement)?.closest('[data-diff-code]')
+  return code?.textContent?.length ?? 0
+}
+
+/**
+ * Derive the selected diff-row range from a native text selection. A
+ * boundary sitting exactly at a line edge contributes no content: a start at
+ * the line's end skips to the next line, an end at the line's start falls
+ * back to the previous line.
+ */
+function rowRangeOf(selection: Selection | null): RowRange | undefined {
+  if (selection === null || selection.isCollapsed || selection.rangeCount === 0) return undefined
+  const range = selection.getRangeAt(0)
+  let start = rowIndexAt(range.startContainer)
+  let end = rowIndexAt(range.endContainer)
+  if (start === undefined || end === undefined) return undefined
+  if (lineOffsetAt(range.startContainer, range.startOffset) >= lineLengthAt(range.startContainer)) start += 1
+  if (lineOffsetAt(range.endContainer, range.endOffset) === 0) end -= 1
+  if (start > end) return undefined
+  return { start, end }
+}
+
 /** One row of the file list: the clickable head in the left pane. */
 function PendingFileRow({ file, selected, t, onSelect }: PendingFileRowProps) {
   const stats = useMemo(
@@ -153,7 +218,22 @@ function PendingFileRow({ file, selected, t, onSelect }: PendingFileRowProps) {
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
 function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: PendingDiffProps) {
-  const lang = useMemo(() => langFromPath(file.path), [file.path])
+  // A manual highlight-language override; undefined means auto-detect from the
+  // file extension. The picker is DSH's own Menu dropdown, portaled so the
+  // list escapes the diff's overflow clip.
+  const [langOverride, setLangOverride] = useState<string | undefined>(undefined)
+  const [langMenuOpen, setLangMenuOpen] = useState(false)
+  const langMenuItems = useMemo<MenuEntry[]>(() => [
+    { id: '', label: t('action.langAuto') },
+    ...HIGHLIGHT_LANGS.map(language => ({ id: language, label: language })),
+  ], [t])
+  const detectedLang = useMemo(() => langFromPath(file.path), [file.path])
+  const lang = useMemo(() => langOverride ?? detectedLang, [detectedLang, langOverride])
+  // The trigger label: the override, or auto with the detected language named
+  // so the user sees what auto resolved to (plain text when none is detected).
+  const langLabel = langOverride ?? (detectedLang === undefined
+    ? t('action.langAuto')
+    : t('action.langAutoDetected', { lang: detectedLang }))
   const model = useMemo<RowModel>(() => {
     const diff = computeWholeFileDiff(file.oldText, file.newText)
     return { diff, blocks: changeBlocksOf(diff) }
@@ -176,15 +256,15 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
   const rowRefs = useRef(new Map<number, HTMLDivElement>())
   const bodyRef = useRef<HTMLDivElement>(null)
   const [focus, setFocus] = useState(0)
-  const [drag, setDrag] = useState<{ anchor: number; end: number } | undefined>()
-  const [range, setRange] = useState<RowRange | undefined>()
+  const [selection, setSelection] = useState<RowRange | undefined>(undefined)
   const [copied, setCopied] = useState(false)
 
   // Reset transient viewer state whenever the selected file changes.
   useEffect(() => {
     setFocus(0)
-    setDrag(undefined)
-    setRange(undefined)
+    setSelection(undefined)
+    setLangOverride(undefined)
+    setLangMenuOpen(false)
     setCopied(false)
   }, [file.id])
 
@@ -223,60 +303,52 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
     else rowRefs.current.set(index, element)
   }
 
-  const rowMouseDown = (index: number) => (event: ReactMouseEvent) => {
-    if (event.button !== 0) return
-    event.preventDefault()
-    setDrag({ anchor: index, end: index })
-    setRange({ start: index, end: index })
-  }
+  // Track the native text selection inside the diff: the copy-reference
+  // toolbar appears once lines are selected and hides when the selection
+  // collapses. The toolbar's own mousedown prevents the default so the
+  // selection survives the click that triggers the copy.
+  useEffect(() => {
+    const update = () => setSelection(rowRangeOf(window.getSelection()))
+    document.addEventListener('selectionchange', update)
+    update()
+    return () => { document.removeEventListener('selectionchange', update) }
+  }, [file.id])
 
-  const rowMouseEnter = (index: number) => () => {
-    setDrag(current => {
-      if (current === undefined) return current
-      const next = { ...current, end: index }
-      setRange({ start: Math.min(next.anchor, next.end), end: Math.max(next.anchor, next.end) })
-      return next
-    })
-  }
-
-  const endDrag = () => {
-    setDrag(current => {
-      if (current === undefined) return undefined
-      setRange({ start: Math.min(current.anchor, current.end), end: Math.max(current.anchor, current.end) })
-      return undefined
-    })
-  }
-
-  const selection = drag === undefined && range !== undefined ? range : undefined
-  // Anchor the toolbar to the selected range's first row as seen inside the
-  // scrolled body, clamped so it never floats out of the visible diff area.
-  const selectionTop = (() => {
-    if (selection === undefined) return 0
-    const row = rowRefs.current.get(selection.start)
-    const body = bodyRef.current
-    if (row === undefined || body === null) return 0
-    const bodyTop = body.offsetTop
-    const rowTop = bodyTop + row.getBoundingClientRect().top - body.getBoundingClientRect().top
-    const clamped = Math.max(rowTop - 36, bodyTop)
-    return Math.min(clamped, Math.max(bodyTop, bodyTop + body.clientHeight - 36))
-  })()
-
-  const copySelection = async () => {
-    if (selection === undefined) return
+  // The reference text for the current selection, shown in the status bar and
+  // copied on click; undefined when no lines are selected.
+  const selectionReference = (() => {
+    if (selection === undefined) return undefined
     const rows = model.diff.rows.slice(selection.start, selection.end + 1)
     // New-side numbers where they exist; a pure deletion falls back to the
     // old side, which is the only side those lines have.
     const lineNumbers = rows
       .map(row => row.newLine ?? row.oldLine)
       .filter((number): number is number => number !== undefined)
-    if (lineNumbers.length === 0) return
-    const accepted = await writeClipboard(
-      referenceOf(file.path, files, Math.min(...lineNumbers), Math.max(...lineNumbers)),
-    )
+    if (lineNumbers.length === 0) return undefined
+    return referenceOf(file.path, files, Math.min(...lineNumbers), Math.max(...lineNumbers))
+  })()
+
+  const copySelection = useCallback(async () => {
+    if (selectionReference === undefined) return
+    const accepted = await writeClipboard(selectionReference)
     if (!accepted) return
     setCopied(true)
     window.setTimeout(() => { setCopied(false) }, 1500)
-  }
+  }, [selectionReference])
+
+  // Ctrl/Cmd+L copies the selected line range; the chord is left to the
+  // browser's own default when there is no selection to reference.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return
+      if (event.key.toLowerCase() !== 'l') return
+      if (selectionReference === undefined) return
+      event.preventDefault()
+      void copySelection()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => { document.removeEventListener('keydown', onKeyDown) }
+  }, [copySelection])
 
   /** One line's text: token spans when highlighted, plain text otherwise. */
   const renderLine = (row: WholeFileDiffRow): ReactNode => {
@@ -292,7 +364,7 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
     focusedBlock !== undefined && index >= focusedBlock.start && index <= focusedBlock.end
 
   return (
-    <div className={css.diff} data-diff-approval-diff onMouseUp={endDrag}>
+    <div className={css.diff} data-diff-approval-diff>
       <div className={css.diffHeader}>
         <span className={css.diffPath}>{file.path}</span>
         <button
@@ -374,24 +446,57 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
               ref={registerRow(index)}
               className={`${css.line} ${ROW_CLASS[row.kind]}`}
               data-diff-line={row.kind}
+              data-diff-row={index}
               data-diff-focused={inFocusedBlock(index) ? '' : undefined}
-              onMouseDown={rowMouseDown(index)}
-              onMouseEnter={rowMouseEnter(index)}
             >
               <span className={css.gutter}>{row.oldLine ?? ''}</span>
               <span className={css.gutter}>{row.newLine ?? ''}</span>
-              <span className={css.code}>{renderLine(row)}</span>
+              <span className={css.code} data-diff-code>{renderLine(row)}</span>
             </div>
           ))}
         </div>
       </div>
-      {selection !== undefined && (
-        <div className={css.toolbar} style={{ top: selectionTop }} data-diff-selection-toolbar>
-          <button type="button" className={css.toolbarButton} data-diff-copy onClick={() => { void copySelection() }}>
-            {copied ? t('action.copied') : t('action.copyRange')}
-          </button>
-        </div>
-      )}
+      <div className={css.statusBar} data-diff-status-bar>
+        {selectionReference === undefined ? null : (
+          <Tooltip label={copied ? t('action.copied') : `${t('action.copyHint')} (Ctrl+L)`} side="top" delayMs={300}>
+            <button
+              type="button"
+              className={css.statusAction}
+              data-diff-copy
+              // Keep the native selection alive across the click so the
+              // reference stays in the status bar after copying.
+              onMouseDown={(event) => { event.preventDefault() }}
+              onClick={() => { void copySelection() }}
+            >
+              {copied ? t('action.copied') : selectionReference}
+            </button>
+          </Tooltip>
+        )}
+        <span className={css.flexSpacer} />
+        <Menu
+          open={langMenuOpen}
+          portal
+          compact
+          align="end"
+          items={langMenuItems}
+          selectedId={langOverride ?? ''}
+          onSelect={(id) => { setLangOverride(id === '' ? undefined : id); setLangMenuOpen(false) }}
+          onClose={() => { setLangMenuOpen(false) }}
+          anchor={(
+            <button
+              type="button"
+              className={css.langSelect}
+              data-diff-lang
+              aria-label={t('action.langSelect')}
+              title={t('action.langSelect')}
+              onClick={() => { setLangMenuOpen(value => !value) }}
+            >
+              <span className={css.langLabel}>{langLabel}</span>
+              <IconChevronDownOutline14 size={12} />
+            </button>
+          )}
+        />
+      </div>
     </div>
   )
 }

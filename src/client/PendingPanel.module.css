@@ -459,12 +459,12 @@
   font: var(--dsw-font-markdown-code-block);
 }
 
-/* No wrapping, no word-break: a diff is read by its indentation. The whole
-   body disables selection so drag-scrubbing never fights the browser. A table
+/* No wrapping, no word-break: a diff is read by its indentation. A table
    layout makes every line the width of the widest line's content — kind
    backgrounds align to the content — while min-width stretches the table (and
    thus each row's background) to fill the scroll area whenever the content is
-   narrower than the viewport. */
+   narrower than the viewport. Lines stay selectable: native text selection
+   drives the copy-reference toolbar; only the line-number gutters opt out. */
 .lines {
   display: table;
   width: max-content;
@@ -474,7 +474,6 @@
 
 .line {
   display: table-row;
-  user-select: none;
 }
 
 .gutter {
@@ -511,23 +510,32 @@
   background-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent);
 }
 
-.toolbar {
-  position: absolute;
-  right: 10px;
-  z-index: 2;
+/* Selection status bar: a slim footer under the diff. It carries no own
+   background so it shares the diff's code-block surface with the header and
+   actions rows above. Its height and button chrome match the path header, and
+   it shows the selected line-range reference as a button that copies on
+   click. */
+.statusBar {
+  flex: none;
   display: flex;
-  gap: 4px;
-  padding: 3px;
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-base);
-  box-shadow: var(--dsw-shadow-lv2);
+  align-items: center;
+  /* Same fixed height as the path header above (6px padding + 22px button),
+     so showing the reference button never changes the bar. */
+  height: 34px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-tertiary);
+  font-family: var(--dsw-font-markdown-code-block);
+  font-size: 12px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
 }
 
-.toolbarButton {
-  padding: 3px 10px;
-  border: none;
-  border-radius: 6px;
+.statusAction {
+  padding: 3px 12px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
   background: transparent;
   color: var(--dsw-alias-label-primary);
   font-family: inherit;
@@ -537,6 +545,33 @@
   cursor: pointer;
 }
 
-.toolbarButton:hover {
+.statusAction:hover {
   background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.langSelect {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 12px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.langSelect:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.langLabel {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
