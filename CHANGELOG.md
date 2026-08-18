@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.0](https://github.com/9087/dsh-diff-approval/compare/v0.4.0...v0.5.0) (2026-08-18)
+
+### Features
+
+* add a fullscreen expand toggle that pins the panel to the window edge and persists. ([6a3d506](https://github.com/9087/dsh-diff-approval/commit/6a3d50617a41d6440e0d93f435bc0565920a778e))
+* overlay changed-line markers on the diff scrollbar as an overview ruler. ([68e5c7a](https://github.com/9087/dsh-diff-approval/commit/68e5c7afb765e43a710292d13173d0af25b2c147))
+
+### Bug Fixes
+
+* align the pending-changes entry height with the live settings trigger. ([7f75685](https://github.com/9087/dsh-diff-approval/commit/7f756851aa3a733e255a85cf3e1ef9921fd30654))
+* re-center the focused diff block on every jump even with a single block. ([a946644](https://github.com/9087/dsh-diff-approval/commit/a946644d9a88eb5148ee541a3961a0d10ebcf3d3))
+* use a curated alphabetical grammar list in the highlight picker. ([369a12d](https://github.com/9087/dsh-diff-approval/commit/369a12db911633d3a1c65fdcfdd6e94635438b10))
+
+### Performance Improvements
+
+* cap highlight cost with line/time limits, whole-file degradation, and a tokenize cache. ([638aeba](https://github.com/9087/dsh-diff-approval/commit/638aeba82b434d417101e116719b4ee284ec31e4))
+* virtualize the diff list to a viewport window and memoize rows. ([26bb6b4](https://github.com/9087/dsh-diff-approval/commit/26bb6b4e25bb5c42b5c42bcf5e8fff3de936af3a))
+
 ## [0.4.0](https://github.com/9087/dsh-diff-approval/compare/v0.3.0...v0.4.0) (2026-08-17)
 
 ### Features
