@@ -424,6 +424,23 @@ describe('PendingPanel', () => {
     expect(focusedLines()[0]!.textContent).toContain('a')
   })
 
+  it('re-centers the sole block on every jump when it is the only one', () => {
+    const single = entry({ id: 'entry-single', oldText: 'a\nb\n', newText: 'A\nb\n' })
+    const props = panelProps({ read: true, files: [single], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const scroller = vi.spyOn(Element.prototype, 'scrollIntoView')
+    scroller.mockClear()
+
+    // With one block the focus never changes, yet each click must re-center.
+    fireEvent.click(screen.getByLabelText('action.nextDiff'))
+    expect(scroller).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByLabelText('action.prevDiff'))
+    expect(scroller).toHaveBeenCalledTimes(2)
+  })
+
   it('skips blocks scrolled above the viewport when jumping to the next one', () => {
     const threeBlocks = entry({
       id: 'entry-three',

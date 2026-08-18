@@ -256,6 +256,7 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
   const rowRefs = useRef(new Map<number, HTMLDivElement>())
   const bodyRef = useRef<HTMLDivElement>(null)
   const [focus, setFocus] = useState(0)
+  const [scrollTick, setScrollTick] = useState(0)
   const [selection, setSelection] = useState<RowRange | undefined>(undefined)
   const [copied, setCopied] = useState(false)
 
@@ -268,17 +269,17 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
     setCopied(false)
   }, [file.id])
 
-  // Center the focused change block after focus or content changes.
+  // Center the focused change block after focus, content changes, or a jump.
   useEffect(() => {
     if (model.blocks.length === 0) return
     const block = model.blocks[focus]
     if (block === undefined) return
     rowRefs.current.get(block.start)?.scrollIntoView({ block: 'center' })
-  }, [model, focus])
+  }, [model, focus, scrollTick])
 
   const jump = (direction: -1 | 1) => {
+    if (model.blocks.length === 0) return
     setFocus(current => {
-      if (model.blocks.length === 0) return current
       if (direction === -1) {
         return (current - 1 + model.blocks.length) % model.blocks.length
       }
@@ -296,6 +297,9 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
       // Past the last block — wrap to the first.
       return 0
     })
+    // Bump the centering effect even when the focus is unchanged (a single
+    // block), so an out-of-view block is always scrolled back into view.
+    setScrollTick(tick => tick + 1)
   }
 
   const registerRow = (index: number) => (element: HTMLDivElement | null) => {
