@@ -1,7 +1,7 @@
 /** Sidebar-foot pending-edit review action and the split review panel it opens. */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { MouseEvent as ReactMouseEvent } from 'react'
 import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, Menu, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
@@ -45,6 +45,10 @@ const DOCKED_TOLERANCE_PX = 48
 /** File-list pane width bounds for the manual split drag, in px. */
 const MIN_LIST_WIDTH_PX = 160
 const MAX_LIST_WIDTH_PX = 560
+/** Fixed diff-row height in px; the virtual window and jump math are built on it. */
+const ROW_HEIGHT_PX = 22
+/** Rows rendered beyond the visible window in each direction. */
+const OVERSCAN_ROWS = 8
 
 /** Full panel props composed by the sidebar footer-action slot. */
 export type PendingPanelProps =
@@ -84,6 +88,37 @@ const ROW_CLASS = {
   del: css.del,
   add: css.add,
 } as const
+
+/**
+ * One rendered diff row, memoized so a poll or an unrelated state change
+ * does not re-render rows whose content, highlight, and focus are unchanged.
+ */
+const DiffRow = memo(function DiffRow(props: {
+  index: number
+  row: WholeFileDiffRow
+  runs: HighlightRuns | undefined
+  focused: boolean
+}) {
+  const { index, row, runs, focused } = props
+  const lineNumber = row.kind === 'del' ? row.oldLine : row.newLine
+  const sideRuns = row.kind === 'del' ? runs?.oldRuns : runs?.newRuns
+  const lineRuns = lineNumber === undefined ? undefined : sideRuns?.[lineNumber - 1]
+  const content = lineRuns === undefined || lineRuns.length === 0
+    ? row.text === '' ? '\u00a0' : row.text
+    : lineRuns.map((span, spanIndex) => <span key={spanIndex} style={span.style}>{span.text}</span>)
+  return (
+    <div
+      className={`${css.line} ${ROW_CLASS[row.kind]}`}
+      data-diff-line={row.kind}
+      data-diff-row={index}
+      data-diff-focused={focused ? '' : undefined}
+    >
+      <span className={css.gutter}>{row.oldLine ?? ''}</span>
+      <span className={css.gutter}>{row.newLine ?? ''}</span>
+      <span className={css.code} data-diff-code>{content}</span>
+    </div>
+  )
+})
 
 /** One file's synchronous view: diff rows and change blocks. */
 interface RowModel {
@@ -288,46 +323,88 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
     return () => { window.clearTimeout(timer) }
   }, [file.id, file.oldText, file.newText, lang])
 
-  const rowRefs = useRef(new Map<number, HTMLDivElement>())
   const bodyRef = useRef<HTMLDivElement>(null)
   const [focus, setFocus] = useState(0)
   const [scrollTick, setScrollTick] = useState(0)
+  const [scrollTop, setScrollTop] = useState(0)
+  const [viewportHeight, setViewportHeight] = useState(0)
   const [selection, setSelection] = useState<RowRange | undefined>(undefined)
   const [copied, setCopied] = useState(false)
 
   // Reset transient viewer state whenever the selected file changes.
   useEffect(() => {
     setFocus(0)
+    setScrollTop(0)
+    if (bodyRef.current !== null) bodyRef.current.scrollTop = 0
     setSelection(undefined)
     setLangOverride(undefined)
     setLangMenuOpen(false)
     setCopied(false)
   }, [file.id])
 
-  // Center the focused change block after focus, content changes, or a jump.
+  // Virtual window over the fixed-height diff rows: only rows near the viewport
+  // render, so a huge file never mounts tens of thousands of nodes. An unmounted
+  // or jsdom scroller (no height) falls back to rendering the whole file.
+  const rows = model.diff.rows
+  const rowCount = rows.length
+  const viewport = viewportHeight > 0 ? viewportHeight : rowCount * ROW_HEIGHT_PX
+  const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT_PX) - OVERSCAN_ROWS)
+  const end = Math.min(rowCount, Math.ceil((scrollTop + viewport) / ROW_HEIGHT_PX) + OVERSCAN_ROWS)
+  const visibleRows = rows.slice(start, end)
+
+  // Widest line in the file, in characters: pins the table's width so the
+  // added/deleted tint spans the same width at every scroll position (the
+  // rendered window's own widest line alone would make it jump).
+  const widestLine = useMemo(() => {
+    let widest = 0
+    for (const row of model.diff.rows) {
+      if (row.text.length > widest) widest = row.text.length
+    }
+    return widest
+  }, [model])
+
+  // Measure the scroller's viewport once it mounts and on resize, so the
+  // render window tracks the visible area.
   useEffect(() => {
-    if (model.blocks.length === 0) return
+    const body = bodyRef.current
+    if (body === null) return
+    const measure = () => { setViewportHeight(body.clientHeight) }
+    measure()
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
+    observer?.observe(body)
+    return () => { observer?.disconnect() }
+  }, [file.id])
+
+  // Center the focused change block after focus, content changes, or a jump.
+  // Arithmetic on the fixed row height works even when the block's rows are
+  // outside the rendered window. A programmatic scrollTop does not fire a
+  // scroll event, so the DOM write is mirrored into state to re-render the
+  // window; onScroll covers real user scrolling.
+  useEffect(() => {
+    if (rowCount === 0) return
     const block = model.blocks[focus]
     if (block === undefined) return
-    rowRefs.current.get(block.start)?.scrollIntoView({ block: 'center' })
-  }, [model, focus, scrollTick])
+    const body = bodyRef.current
+    if (body === null) return
+    const target = block.start * ROW_HEIGHT_PX + ROW_HEIGHT_PX / 2 - body.clientHeight / 2
+    const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
+    if (body.scrollTop !== clamped) body.scrollTop = clamped
+    setScrollTop(clamped)
+  }, [model, focus, scrollTick, rowCount])
 
   const jump = (direction: -1 | 1) => {
-    if (model.blocks.length === 0) return
+    if (rowCount === 0) return
     setFocus(current => {
       if (direction === -1) {
         return (current - 1 + model.blocks.length) % model.blocks.length
       }
-      const bodyRect = bodyRef.current?.getBoundingClientRect()
+      const top = bodyRef.current?.scrollTop ?? 0
       // Forward scan without wrapping: land on the first block at or below
       // the viewport top (blocks scrolled out above are skipped).
       for (let index = current + 1; index < model.blocks.length; index++) {
         const block = model.blocks[index]
         if (block === undefined) continue
-        const row = rowRefs.current.get(block.start)
-        if (row === undefined || bodyRect === undefined || row.getBoundingClientRect().top >= bodyRect.top) {
-          return index
-        }
+        if (block.start * ROW_HEIGHT_PX >= top) return index
       }
       // Past the last block — wrap to the first.
       return 0
@@ -337,9 +414,11 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
     setScrollTick(tick => tick + 1)
   }
 
-  const registerRow = (index: number) => (element: HTMLDivElement | null) => {
-    if (element === null) rowRefs.current.delete(index)
-    else rowRefs.current.set(index, element)
+  const onScroll = () => {
+    const body = bodyRef.current
+    if (body === null) return
+    setScrollTop(body.scrollTop)
+    setViewportHeight(body.clientHeight)
   }
 
   // Track the native text selection inside the diff: the copy-reference
@@ -388,15 +467,6 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
     document.addEventListener('keydown', onKeyDown)
     return () => { document.removeEventListener('keydown', onKeyDown) }
   }, [copySelection])
-
-  /** One line's text: token spans when highlighted, plain text otherwise. */
-  const renderLine = (row: WholeFileDiffRow): ReactNode => {
-    const lineNumber = row.kind === 'del' ? row.oldLine : row.newLine
-    const sideRuns = row.kind === 'del' ? runs?.oldRuns : runs?.newRuns
-    const lineRuns = lineNumber === undefined ? undefined : sideRuns?.[lineNumber - 1]
-    if (lineRuns === undefined || lineRuns.length === 0) return row.text === '' ? '\u00a0' : row.text
-    return lineRuns.map((span, index) => <span key={index} style={span.style}>{span.text}</span>)
-  }
 
   const focusedBlock = model.blocks.length > 0 ? model.blocks[focus] : undefined
   const inFocusedBlock = (index: number): boolean =>
@@ -478,22 +548,26 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
       </div>
       {file.missing && <p className={css.missingHint}>{t('panel.missingHint')}</p>}
       <div className={css.diffBodyWrap}>
-        <div className={css.diffBody} ref={bodyRef}>
-          <div className={css.lines}>
-            {model.diff.rows.map((row, index) => (
-              <div
-                key={index}
-                ref={registerRow(index)}
-                className={`${css.line} ${ROW_CLASS[row.kind]}`}
-                data-diff-line={row.kind}
-                data-diff-row={index}
-                data-diff-focused={inFocusedBlock(index) ? '' : undefined}
-              >
-                <span className={css.gutter}>{row.oldLine ?? ''}</span>
-                <span className={css.gutter}>{row.newLine ?? ''}</span>
-                <span className={css.code} data-diff-code>{renderLine(row)}</span>
-              </div>
-            ))}
+        <div className={css.diffBody} ref={bodyRef} onScroll={onScroll} data-diff-body>
+          <div className={css.lines} style={{ minWidth: `max(100%, ${widestLine}ch)` }}>
+            {start > 0 && (
+              <div className={css.vSpacer} style={{ height: start * ROW_HEIGHT_PX }} aria-hidden="true" />
+            )}
+            {visibleRows.map((row, offset) => {
+              const index = start + offset
+              return (
+                <DiffRow
+                  key={index}
+                  index={index}
+                  row={row}
+                  runs={runs}
+                  focused={inFocusedBlock(index)}
+                />
+              )
+            })}
+            {end < rowCount && (
+              <div className={css.vSpacer} style={{ height: (rowCount - end) * ROW_HEIGHT_PX }} aria-hidden="true" />
+            )}
           </div>
         </div>
         {rulerMarkers.length > 0 && (

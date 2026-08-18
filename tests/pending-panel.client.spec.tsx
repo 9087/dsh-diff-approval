@@ -446,20 +446,36 @@ describe('PendingPanel', () => {
   })
 
   it('re-centers the sole block on every jump when it is the only one', () => {
-    const single = entry({ id: 'entry-single', oldText: 'a\nb\n', newText: 'A\nb\n' })
+    const single = entry({ id: 'entry-single', oldText: 'a\nb\nc\nd\ne\n', newText: 'A\nb\nc\nd\nE\n' })
     const props = panelProps({ read: true, files: [single], busy: new Set() })
     const view = render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
 
-    const scroller = vi.spyOn(Element.prototype, 'scrollIntoView')
-    scroller.mockClear()
+    // Give the scroller a fake viewport and intercept scrollTop so the
+    // re-center on each jump is observable.
+    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
+    let scrollTop = 0
+    let sets = 0
+    Object.defineProperty(body, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { scrollTop = value; sets++ },
+    })
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 220 })
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 10 * 22 })
 
-    // With one block the focus never changes, yet each click must re-center.
+    // Push the sole block out of view; with one block the focus never changes,
+    // yet each click must scroll it back to its centered position (row 0).
+    scrollTop = 88
     fireEvent.click(screen.getByLabelText('action.nextDiff'))
-    expect(scroller).toHaveBeenCalledTimes(1)
+    expect(sets).toBeGreaterThanOrEqual(1)
+    expect(scrollTop).toBe(0)
+
+    scrollTop = 88
     fireEvent.click(screen.getByLabelText('action.prevDiff'))
-    expect(scroller).toHaveBeenCalledTimes(2)
+    expect(sets).toBeGreaterThanOrEqual(2)
+    expect(scrollTop).toBe(0)
   })
 
   it('skips blocks scrolled above the viewport when jumping to the next one', () => {
@@ -473,19 +489,34 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
 
-    // Blocks 0 and 1 sit above the viewport top; block 2 is at it.
-    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
-      const text = this.textContent ?? ''
-      if (this.hasAttribute('data-diff-line') && (text.includes('a') || text.includes('c'))) {
-        return { top: -200, bottom: -100, left: 0, right: 0, width: 0, height: 22, x: 0, y: 0, toJSON: () => ({}) } as DOMRect
-      }
-      return { top: 0, bottom: 100, left: 0, right: 100, width: 100, height: 100, x: 0, y: 0, toJSON: () => ({}) } as DOMRect
-    })
+    // Blocks 0 and 1 start at rows 0 and 3 (top 0/66px); block 2 starts at
+    // row 6 (132px). Scroll past the first two so the next jump must land on
+    // the third instead of the ones scrolled out above.
+    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
+    body.scrollTop = 6 * 22
 
     fireEvent.click(screen.getByLabelText('action.nextDiff'))
     const focused = view.container.querySelector('[data-diff-focused]')
     expect(focused).not.toBeNull()
     expect(focused!.textContent).toContain('e')
+  })
+
+  it('renders only a viewport window of rows for a large file', () => {
+    const big = entry({ id: 'entry-big', oldText: 'a\n'.repeat(2000), newText: 'A\n'.repeat(2000) })
+    const props = panelProps({ read: true, files: [big], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
+    // Fake a 440px viewport (20 rows) and let the scroller report it.
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 440 })
+    fireEvent.scroll(body)
+
+    const rendered = view.container.querySelectorAll('[data-diff-row]').length
+    // 20 visible + overscan, far fewer than the whole 4000-row file.
+    expect(rendered).toBeGreaterThan(0)
+    expect(rendered).toBeLessThan(100)
   })
 
   it('warns on the row when a tracked file is gone and explains when expanded', () => {

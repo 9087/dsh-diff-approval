@@ -544,6 +544,15 @@
 
 .line {
   display: table-row;
+  /* Fixed height: the virtual window and jump math are keyed to this value. */
+  height: 22px;
+  line-height: 22px;
+}
+
+/* Virtual-list spacer rows: empty table rows holding the unrendered rows'
+   space so the scrollbar and the added/deleted tint positions stay exact. */
+.vSpacer {
+  display: table-row;
 }
 
 .gutter {
