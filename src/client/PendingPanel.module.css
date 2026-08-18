@@ -156,6 +156,13 @@
   background: var(--dsw-alias-bg-base);
 }
 
+/* Right-side header chrome (expand + close) grouped as one unit. */
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 .states {
   flex: 1;
   min-height: 0;
@@ -446,6 +453,31 @@
 .close:hover {
   background: var(--dsw-alias-interactive-bg-hover);
   color: var(--dsw-alias-label-primary);
+}
+
+/* Panel expand button: mirrors .close as quiet header chrome (28x28). When
+   expanded, the glyph rotates 180° to read as "exit fullscreen". */
+.expand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 28px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.expand:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.expandExpanded svg {
+  transform: rotate(180deg);
 }
 
 .diffBody {

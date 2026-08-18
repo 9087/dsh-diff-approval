@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react'
-import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconListPenOutline16, Menu, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, Menu, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -29,6 +29,8 @@ const POLL_INTERVAL_MS = 1000
 const FALLBACK_BOTTOM_PX = 128
 /** Gap kept between the composer's top edge and the panel bottom, in px. */
 const COMPOSER_GAP_PX = 12
+/** Fixed window-edge inset used when expanded, mirroring `.panel`'s top/left/right. */
+const PANEL_INSET_PX = 8
 /** The harness composer seat (conversation scroll body + seat div). */
 const SCROLL_SELECTOR = '[data-conversation-scroll]'
 const SEAT_SELECTOR = '[data-composer-seat]'
@@ -517,6 +519,8 @@ export function PendingPanel({
   const [openedCount, setOpenedCount] = useState(0)
   /** Bottom offset tracking the chat composer's top edge so the input stays visible. */
   const [bottomPx, setBottomPx] = useState(FALLBACK_BOTTOM_PX)
+  /** Fullscreen expanded: the panel bottom pins to the window edge, ignoring the composer offset. */
+  const [expanded, setExpanded] = useState(false)
   /** File-list pane width, adjustable by dragging the divider. */
   const [listWidth, setListWidth] = useState(240)
   const resizeDrag = useRef<{ startX: number; startWidth: number } | null>(null)
@@ -668,22 +672,34 @@ export function PendingPanel({
       {open && (
         <section
           className={css.panel}
-          style={{ bottom: bottomPx }}
+          style={{ bottom: expanded ? PANEL_INSET_PX : bottomPx }}
           data-diff-approval-panel
           aria-label={t('panel.title')}
         >
           <header className={css.header}>
             <span className={css.title}>{t('panel.title')}</span>
-            <button
-              type="button"
-              className={css.close}
-              data-diff-approval-close
-              aria-label={t('action.close')}
-              title={t('action.close')}
-              onClick={() => { setOpen(false) }}
-            >
-              <IconCloseOutline16 size={14} />
-            </button>
+            <div className={css.headerActions}>
+              <button
+                type="button"
+                className={expanded ? `${css.expand} ${css.expandExpanded}` : css.expand}
+                data-diff-approval-expand
+                aria-label={t(expanded ? 'action.exitFullscreen' : 'action.expand')}
+                title={t(expanded ? 'action.exitFullscreen' : 'action.expand')}
+                onClick={() => { setExpanded(value => !value) }}
+              >
+                <IconFullscreenOutline16 size={14} />
+              </button>
+              <button
+                type="button"
+                className={css.close}
+                data-diff-approval-close
+                aria-label={t('action.close')}
+                title={t('action.close')}
+                onClick={() => { setOpen(false) }}
+              >
+                <IconCloseOutline16 size={14} />
+              </button>
+            </div>
           </header>
           {snapshot.error !== undefined || !snapshot.read || files.length === 0 ? (
             <div className={css.states}>

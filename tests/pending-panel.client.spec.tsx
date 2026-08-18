@@ -478,6 +478,37 @@ describe('PendingPanel', () => {
     expect(screen.getByText('panel.missingHint')).toBeDefined()
   })
 
+  it('pins the panel to the window edge when expanded and restores on a second click', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const panel = view.container.querySelector('[data-diff-approval-panel]') as HTMLElement
+    const expand = view.container.querySelector('[data-diff-approval-expand]') as HTMLElement
+    expect(expand).not.toBeNull()
+    // The close button sits to the right of the expand button.
+    const close = view.container.querySelector('[data-diff-approval-close]') as HTMLElement
+    expect(close.compareDocumentPosition(expand) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
+    // Default bottom is the fallback composer offset.
+    expect(panel.style.bottom).toBe('128px')
+
+    fireEvent.click(expand)
+    // Expanded pins to the window edge, keeping the 8px inset of the other edges.
+    expect(panel.style.bottom).toBe('8px')
+    expect(expand.getAttribute('aria-label')).toBe('action.exitFullscreen')
+
+    fireEvent.click(expand)
+    expect(panel.style.bottom).toBe('128px')
+    expect(expand.getAttribute('aria-label')).toBe('action.expand')
+
+    // Expanded is a persistent state: closing and reopening keeps it.
+    fireEvent.click(expand)
+    fireEvent.click(screen.getByLabelText('action.close'))
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const reopened = view.container.querySelector('[data-diff-approval-panel]') as HTMLElement
+    expect(reopened.style.bottom).toBe('8px')
+  })
+
   it('shows the selection reference in the status bar when text is selected', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     const view = render(<PendingPanel {...props} />)
