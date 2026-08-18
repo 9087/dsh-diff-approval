@@ -399,6 +399,27 @@ describe('PendingPanel', () => {
     expect(screen.getAllByText('row.removed {"removed":0}')).toHaveLength(1)
   })
 
+  it('marks changed lines on the scrollbar overview ruler in diff colors', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const ruler = view.container.querySelector('[data-diff-approval-ruler]') as HTMLElement
+    expect(ruler).not.toBeNull()
+    const markers = [...ruler.querySelectorAll('[data-diff-ruler-marker]')] as HTMLElement[]
+    // 'a\n' -> 'b\n' is one deleted line then one added line: two markers,
+    // each half of the file, tinted by its kind.
+    expect(markers).toHaveLength(2)
+    const [del, add] = markers
+    expect(del.dataset.diffRulerMarker).toBe('del')
+    expect(del.style.top).toBe('0%')
+    expect(del.style.height).toBe('50%')
+    expect(add.dataset.diffRulerMarker).toBe('add')
+    expect(add.style.top).toBe('50%')
+    expect(add.style.height).toBe('50%')
+  })
+
   it('moves the focus between contiguous change blocks', () => {
     const twoBlocks = entry({ id: 'entry-blocks', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [twoBlocks], busy: new Set() })

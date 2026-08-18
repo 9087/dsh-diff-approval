@@ -241,6 +241,39 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
     return { diff, blocks: changeBlocksOf(diff) }
   }, [file.oldText, file.newText])
 
+  // Overview-ruler markers: one per maximal run of same-kind changed rows,
+  // positioned as a fraction of the whole file so the scrollbar strip mirrors
+  // where each added/deleted run sits. Percentage positioning keeps the strip
+  // correct for any diff-body height.
+  const rulerMarkers = useMemo(() => {
+    const rows = model.diff.rows
+    const total = rows.length
+    if (total === 0) return []
+    const markers: { top: number; height: number; kind: 'del' | 'add' }[] = []
+    let runStart = -1
+    let runKind: 'del' | 'add' = 'del'
+    const flush = (end: number) => {
+      const span = end - runStart + 1
+      markers.push({ top: (runStart / total) * 100, height: (span / total) * 100, kind: runKind })
+    }
+    rows.forEach((row, index) => {
+      if (row.kind === 'context') {
+        if (runStart !== -1) { flush(index - 1); runStart = -1 }
+        return
+      }
+      if (runStart === -1) {
+        runStart = index
+        runKind = row.kind
+      } else if (row.kind !== runKind) {
+        flush(index - 1)
+        runStart = index
+        runKind = row.kind
+      }
+    })
+    if (runStart !== -1) flush(rows.length - 1)
+    return markers
+  }, [model])
+
   // Syntax highlight arrives a tick after selection so clicking a file never
   // blocks the diff paint on tokenization; the plain-text diff shows first.
   const [runs, setRuns] = useState<HighlightRuns | undefined>(undefined)
@@ -444,23 +477,37 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
         </button>
       </div>
       {file.missing && <p className={css.missingHint}>{t('panel.missingHint')}</p>}
-      <div className={css.diffBody} ref={bodyRef}>
-        <div className={css.lines}>
-          {model.diff.rows.map((row, index) => (
-            <div
-              key={index}
-              ref={registerRow(index)}
-              className={`${css.line} ${ROW_CLASS[row.kind]}`}
-              data-diff-line={row.kind}
-              data-diff-row={index}
-              data-diff-focused={inFocusedBlock(index) ? '' : undefined}
-            >
-              <span className={css.gutter}>{row.oldLine ?? ''}</span>
-              <span className={css.gutter}>{row.newLine ?? ''}</span>
-              <span className={css.code} data-diff-code>{renderLine(row)}</span>
-            </div>
-          ))}
+      <div className={css.diffBodyWrap}>
+        <div className={css.diffBody} ref={bodyRef}>
+          <div className={css.lines}>
+            {model.diff.rows.map((row, index) => (
+              <div
+                key={index}
+                ref={registerRow(index)}
+                className={`${css.line} ${ROW_CLASS[row.kind]}`}
+                data-diff-line={row.kind}
+                data-diff-row={index}
+                data-diff-focused={inFocusedBlock(index) ? '' : undefined}
+              >
+                <span className={css.gutter}>{row.oldLine ?? ''}</span>
+                <span className={css.gutter}>{row.newLine ?? ''}</span>
+                <span className={css.code} data-diff-code>{renderLine(row)}</span>
+              </div>
+            ))}
+          </div>
         </div>
+        {rulerMarkers.length > 0 && (
+          <div className={css.overviewRuler} data-diff-approval-ruler aria-hidden="true">
+            {rulerMarkers.map((marker, index) => (
+              <div
+                key={index}
+                className={`${css.overviewMarker} ${marker.kind === 'del' ? css.markerDel : css.markerAdd}`}
+                data-diff-ruler-marker={marker.kind}
+                style={{ top: `${marker.top}%`, height: `${marker.height}%` }}
+              />
+            ))}
+          </div>
+        )}
       </div>
       <div className={css.statusBar} data-diff-status-bar>
         {selectionReference === undefined ? null : (

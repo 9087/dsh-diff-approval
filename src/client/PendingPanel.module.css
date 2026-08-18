@@ -480,12 +480,53 @@
   transform: rotate(180deg);
 }
 
-.diffBody {
+/* Scroll wrapper keeps the overview ruler fixed in place while the diff body
+   scrolls beneath it: the ruler lives in the wrapper (not the scroller), so
+   it stays pinned to the visible area instead of scrolling away. */
+.diffBodyWrap {
+  position: relative;
   flex: 1;
   min-height: 0;
+  display: flex;
+}
+
+.diffBody {
+  flex: 1;
+  min-width: 0;
   overflow: auto;
   padding: 8px 10px;
   font: var(--dsw-font-markdown-code-block);
+}
+
+/* Overview ruler over the vertical scrollbar: changed-line markers at their
+   whole-file positions, tinted by the same semantic tokens as the lines.
+   Non-interactive so dragging/clicking the scrollbar keeps working. */
+.overviewRuler {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 8px;
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+/* One changed-line marker; a 2px floor keeps a single changed line visible
+   on a long file even though its fraction is tiny. */
+.overviewMarker {
+  position: absolute;
+  right: 0;
+  width: 100%;
+  min-height: 2px;
+  border-radius: 2px;
+}
+
+.markerDel {
+  background-color: var(--dsw-alias-state-error-primary);
+}
+
+.markerAdd {
+  background-color: var(--dsw-alias-state-success-primary);
 }
 
 /* No wrapping, no word-break: a diff is read by its indentation. A table
