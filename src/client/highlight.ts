@@ -44,6 +44,39 @@ export interface HighlightSpan {
   style: CSSProperties
 }
 
+/**
+ * Tokenize guards: the viewer must never let the synchronous JS-regex engine
+ * block the main thread on a hostile file. Lines above the length cap are
+ * returned plain by shiki, the per-line budget caps a single pathological
+ * line, and whole files above the size/line caps skip highlighting entirely
+ * (the diff still shows its added/deleted coloring). Company-workload files
+ * (generated bundles, minified output, huge data dumps) otherwise stall the
+ * tab for tens of seconds and can OOM it.
+ */
+const MAX_LINE_LENGTH = 2000
+const TOKENIZE_TIME_LIMIT_MS = 100
+const MAX_HIGHLIGHT_CHARS = 300_000
+const MAX_HIGHLIGHT_LINES = 10_000
+
+/**
+ * Bounded tokenize cache keyed by the code string: reselecting a recently
+ * viewed file (or a file whose content reference reappears) reuses the runs
+ * instead of re-running the engine. Insertion-ordered, so the oldest entry is
+ * evicted first; 16 codes bounds both memory and the eviction cost.
+ */
+const TOKENIZE_CACHE_MAX = 16
+const tokenizeCache = new Map<string, Map<string, HighlightSpan[][]>>()
+
+/** Whether `code` is too large to highlight safely (short-circuits fast). */
+function tooLargeToHighlight(code: string): boolean {
+  if (code.length > MAX_HIGHLIGHT_CHARS) return true
+  let newlines = 0
+  for (let index = 0; index < code.length; index++) {
+    if (code.charCodeAt(index) === 10 && ++newlines > MAX_HIGHLIGHT_LINES) return true
+  }
+  return false
+}
+
 /** All grammars this bundle registers; each entry's own `name` is the tokenize id. */
 const LANGS = [
   langC,
@@ -206,7 +239,19 @@ export function highlightLines(code: string, lang: string | undefined): Highligh
   // Unknown ids (an extension mapping bug, never user text) must miss instead
   // of throwing inside shiki.
   if (!highlighter().getLoadedLanguages().includes(lang)) return undefined
-  const { tokens } = highlighter().codeToTokens(code, { lang, theme: 'css-variables' })
+  // Oversized files degrade to plain text: highlighting them synchronously
+  // would stall (and can crash) the tab before the first paint.
+  if (tooLargeToHighlight(code)) return undefined
+  const cached = tokenizeCache.get(code)?.get(lang)
+  if (cached !== undefined) return cached
+  const { tokens } = highlighter().codeToTokens(code, {
+    lang,
+    theme: 'css-variables',
+    // Cap a single line's engine time and skip pathological long lines
+    // entirely; both degrade that line to plain instead of throwing.
+    tokenizeTimeLimit: TOKENIZE_TIME_LIMIT_MS,
+    tokenizeMaxLineLength: MAX_LINE_LENGTH,
+  })
   // shiki tokenizes `a\nb` into two lines; a trailing newline (`a\n`) adds a
   // third, empty line the caller's own line array does not carry. Drop that
   // one terminator line so the two structures stay in step.
@@ -214,5 +259,16 @@ export function highlightLines(code: string, lang: string | undefined): Highligh
   const lines = tokens.length > 1 && last !== undefined && last.length === 0
     ? tokens.slice(0, -1)
     : tokens
-  return lines.map(line => line.map(token => ({ text: token.content, style: { color: token.color } })))
+  const runs = lines.map(line => line.map(token => ({ text: token.content, style: { color: token.color } })))
+  let byLang = tokenizeCache.get(code)
+  if (byLang === undefined) {
+    if (tokenizeCache.size >= TOKENIZE_CACHE_MAX) {
+      const oldest = tokenizeCache.keys().next().value
+      if (oldest !== undefined) tokenizeCache.delete(oldest)
+    }
+    byLang = new Map()
+    tokenizeCache.set(code, byLang)
+  }
+  byLang.set(lang, runs)
+  return runs
 }
