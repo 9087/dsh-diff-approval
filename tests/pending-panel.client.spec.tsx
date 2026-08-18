@@ -534,8 +534,30 @@ describe('PendingPanel', () => {
     const trigger = view.container.querySelector('[data-diff-lang]') as HTMLElement
     expect(trigger).not.toBeNull()
     fireEvent.click(trigger)
-    const typescript = screen.getByText('typescript')
+    const typescript = screen.getByText('TypeScript')
     fireEvent.click(typescript)
-    expect(trigger.textContent).toContain('typescript')
+    expect(trigger.textContent).toContain('TypeScript')
+  })
+
+  it('lists only curated highlight languages, conventionally cased and sorted', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const trigger = view.container.querySelector('[data-diff-lang]') as HTMLElement
+    fireEvent.click(trigger)
+
+    const items = [...document.querySelectorAll('[role="menuitem"]')]
+      .map(item => item.textContent?.trim())
+      .filter(Boolean)
+    // First entry is the auto-detect action; the rest are the explicit grammar list.
+    expect(items[0]).toBe('action.langAuto')
+    const languages = items.slice(1)
+    expect(languages).toEqual([
+      'C', 'C++', 'C#', 'CSS', 'Go', 'HTML', 'INI', 'Java', 'JSON', 'Lua',
+      'Markdown', 'Python', 'Ruby', 'Rust', 'SCSS', 'Shell', 'SQL', 'TOML',
+      'TypeScript', 'XML', 'YAML',
+    ])
   })
 })

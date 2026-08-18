@@ -69,8 +69,69 @@ const LANGS = [
   langYaml,
 ]
 
-/** Supported grammar ids, in picker order, for the viewer's language selector. */
-export const HIGHLIGHT_LANGS = [...new Set(LANGS.flat().map(lang => lang.name))]
+/**
+ * Primary grammar ids offered in the viewer's language selector, in picker
+ * order (alphabetical). Kept explicit instead of deriving from `LANGS`: some
+ * `@shikijs/langs` modules are composite grammars whose `.name` arrays expose
+ * embedded sub-grammars (e.g. C++ → `[regexp, glsl, cpp-macro, cpp]`,
+ * TypeScript → `[typescript, jsx, tsx, graphql]`), which would otherwise leak
+ * ids like `regexp`, `glsl`, `haml` into the menu. `LANGS` still registers the
+ * full grammars (including their embedded languages) for highlighting.
+ */
+export const HIGHLIGHT_LANGS = [
+  'c',
+  'cpp',
+  'csharp',
+  'css',
+  'go',
+  'html',
+  'ini',
+  'java',
+  'json',
+  'lua',
+  'markdown',
+  'python',
+  'ruby',
+  'rust',
+  'scss',
+  'shellscript',
+  'sql',
+  'toml',
+  'typescript',
+  'xml',
+  'yaml',
+]
+
+/** Display names for the grammar ids: shiki ids are lowercase, so the picker
+    and trigger show conventional casing ("TypeScript", "C#", "Shell", …). */
+const LANGUAGE_DISPLAY_NAMES: Record<string, string> = {
+  c: 'C',
+  cpp: 'C++',
+  csharp: 'C#',
+  css: 'CSS',
+  go: 'Go',
+  html: 'HTML',
+  ini: 'INI',
+  java: 'Java',
+  json: 'JSON',
+  lua: 'Lua',
+  markdown: 'Markdown',
+  python: 'Python',
+  ruby: 'Ruby',
+  rust: 'Rust',
+  scss: 'SCSS',
+  shellscript: 'Shell',
+  sql: 'SQL',
+  toml: 'TOML',
+  typescript: 'TypeScript',
+  xml: 'XML',
+  yaml: 'YAML',
+}
+
+/** Conventional display name for a grammar id, falling back to the id itself. */
+export function languageDisplayName(id: string): string {
+  return LANGUAGE_DISPLAY_NAMES[id] ?? id
+}
 
 /** All token colors resolve through `--shiki-*` custom properties (theme package sheets). */
 const cssVariablesTheme = createCssVariablesTheme({

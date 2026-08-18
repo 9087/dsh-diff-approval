@@ -12,7 +12,7 @@ import type { PendingPanelFace } from './slots.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import { computeWholeFileDiff } from './whole-file-diff.ts'
 import type { WholeFileDiffRow } from './whole-file-diff.ts'
-import { HIGHLIGHT_LANGS, highlightLines } from './highlight.ts'
+import { HIGHLIGHT_LANGS, highlightLines, languageDisplayName } from './highlight.ts'
 import { langFromPath } from './lang.ts'
 import { referenceOf } from './reference.ts'
 import css from './PendingPanel.module.css'
@@ -225,15 +225,15 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
   const [langMenuOpen, setLangMenuOpen] = useState(false)
   const langMenuItems = useMemo<MenuEntry[]>(() => [
     { id: '', label: t('action.langAuto') },
-    ...HIGHLIGHT_LANGS.map(language => ({ id: language, label: language })),
+    ...HIGHLIGHT_LANGS.map(language => ({ id: language, label: languageDisplayName(language) })),
   ], [t])
   const detectedLang = useMemo(() => langFromPath(file.path), [file.path])
   const lang = useMemo(() => langOverride ?? detectedLang, [detectedLang, langOverride])
   // The trigger label: the override, or auto with the detected language named
   // so the user sees what auto resolved to (plain text when none is detected).
-  const langLabel = langOverride ?? (detectedLang === undefined
-    ? t('action.langAuto')
-    : t('action.langAutoDetected', { lang: detectedLang }))
+  const langLabel = langOverride === undefined
+    ? (detectedLang === undefined ? t('action.langAuto') : t('action.langAutoDetected', { lang: languageDisplayName(detectedLang) }))
+    : languageDisplayName(langOverride)
   const model = useMemo<RowModel>(() => {
     const diff = computeWholeFileDiff(file.oldText, file.newText)
     return { diff, blocks: changeBlocksOf(diff) }
