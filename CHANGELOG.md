@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0](https://github.com/9087/dsh-diff-approval/compare/v0.5.0...v0.6.0) (2026-08-19)
+
+### Features
+
+* add per-block keep/revert via hover actions on each diff block. ([8ff56d4](https://github.com/9087/dsh-diff-approval/commit/8ff56d42de505aaf1501176f517c60587c7d3676))
+* polish panel chrome and switch copied references to workspace-relative paths. ([9d87f06](https://github.com/9087/dsh-diff-approval/commit/9d87f06435e706aa444d3175b2367c926f395c55))
+
+### Bug Fixes
+
+* count only current-file line numbers in the copied line reference. ([b36e277](https://github.com/9087/dsh-diff-approval/commit/b36e277feab87c925818b4f96612696633c99c68))
+* halve the overview ruler width so the scrollbar thumb stays visible. ([b80ef20](https://github.com/9087/dsh-diff-approval/commit/b80ef20609293b79fce7a0bbd9e1f7197afb5d1e))
+* keep the default arrow cursor on the diff scrollbar. ([7982fa3](https://github.com/9087/dsh-diff-approval/commit/7982fa38b3311b48b77b27d38d2e1092e2df06f1))
+
 ## [0.5.0](https://github.com/9087/dsh-diff-approval/compare/v0.4.0...v0.5.0) (2026-08-18)
 
 ### Features
