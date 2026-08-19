@@ -521,8 +521,16 @@
   padding: 0;
   font: var(--dsw-font-markdown-code-block);
   /* The whole area reads as selectable code, so the text I-beam cursor
-     covers blank space too; the gutter opts back out below. */
+     covers blank space too; the gutter and the scrollbar opt back out below. */
   cursor: text;
+}
+
+/* The scrollbar must keep the arrow cursor: the text beam applies to the
+   code surface, not the drag handle. */
+.diffBody::-webkit-scrollbar,
+.diffBody::-webkit-scrollbar-track,
+.diffBody::-webkit-scrollbar-thumb {
+  cursor: default;
 }
 
 /* Per-block Keep/Revert, shown at the hovered block's top-right, framed on
