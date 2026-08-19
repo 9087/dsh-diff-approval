@@ -111,6 +111,27 @@ describe('open', () => {
     const seam = fakeRpc({ open: { ok: true, value: { outcome: 'missing' } } })
     await expect(createDiffApprovalPort(seam.rpc).open(S1, 'none', 'open')).resolves.toEqual({ outcome: 'missing' })
   })
+})
+
+describe('block keep/revert', () => {
+  const block = { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 }
+
+  it('routes block-keep and passes the block range through', async () => {
+    const seam = fakeRpc({ 'block-keep': { ok: true, value: { outcome: 'kept' } } })
+    await expect(createDiffApprovalPort(seam.rpc).blockKeep(S1, 'e1', block)).resolves.toEqual({ outcome: 'kept' })
+    expect(seam.call).toHaveBeenCalledWith('/diff-approval', 'block-keep', { sessionId: 'session-1', id: 'e1', block })
+  })
+
+  it('routes block-revert and passes the block range through', async () => {
+    const seam = fakeRpc({ 'block-revert': { ok: true, value: { outcome: 'reverted' } } })
+    await expect(createDiffApprovalPort(seam.rpc).blockRevert(S1, 'e1', block)).resolves.toEqual({ outcome: 'reverted' })
+    expect(seam.call).toHaveBeenCalledWith('/diff-approval', 'block-revert', { sessionId: 'session-1', id: 'e1', block })
+  })
+
+  it('folds a transport error into a rejection', async () => {
+    const seam = fakeRpc({ 'block-keep': { ok: false, error: { code: 'internal', message: 'down', details: {} } } })
+    await expect(createDiffApprovalPort(seam.rpc).blockKeep(S1, 'e1', block)).rejects.toThrow('internal: down')
+  })
 
   it('rejects a malformed open outcome', async () => {
     const seam = fakeRpc({ open: { ok: true, value: { outcome: 'maybe' } } })

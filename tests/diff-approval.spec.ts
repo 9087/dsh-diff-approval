@@ -249,6 +249,65 @@ describe('revert', () => {
   })
 })
 
+describe('block keep/revert', () => {
+  // 'a\nb\nc\nd\n' -> 'A\nb\nC\nd\n': block 0 is old/new line 1, block 1 is old/new line 3.
+  async function twoBlocks(harness: TestHarness) {
+    emitResult(harness.ctx, editExec(), editSuccess('/repo/a.txt', 'a\nb\nc\nd\n', 'A\nb\nC\nd\n'))
+    const [entry] = await listEntries(harness.handle, 'session-1')
+    return entry!
+  }
+
+  it('keeps one block by advancing the baseline so only the other stays pending', async () => {
+    const { ctx, fs, handle } = await harness()
+    const entry = await twoBlocks({ ctx, fs, handle })
+    await expect(handle('block-keep', { sessionId: 'session-1', id: entry.id, block: { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 } }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'kept' } })
+    expect(fs.writeText).not.toHaveBeenCalled()
+    const [kept] = await listEntries(handle, 'session-1')
+    // The accepted block folds into the baseline; the second block remains.
+    expect(kept!.oldText).toBe('A\nb\nc\nd\n')
+    expect(kept!.newText).toBe('A\nb\nC\nd\n')
+  })
+
+  it('reverts one block by writing its old lines back and updating the entry', async () => {
+    const { ctx, fs, handle } = await harness()
+    const entry = await twoBlocks({ ctx, fs, handle })
+    await expect(handle('block-revert', { sessionId: 'session-1', id: entry.id, block: { oldStart: 3, oldEnd: 3, newStart: 3, newEnd: 3 } }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'reverted' } })
+    expect(fs.writeText).toHaveBeenCalledWith(
+      { displayPath: '/repo/a.txt', targetKey: 'key:/repo/a.txt' }, 'A\nb\nc\nd\n', undefined, expect.anything() as AbortSignal,
+    )
+    const [kept] = await listEntries(handle, 'session-1')
+    // Only line 3 reverted; line 1 stays accepted in the new text.
+    expect(kept!.newText).toBe('A\nb\nc\nd\n')
+    expect(kept!.oldText).toBe('a\nb\nc\nd\n')
+  })
+
+  it('restores a purely deleted line by inserting at its new-side position', async () => {
+    const { ctx, fs, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a\nb\nc\n', 'b\n'))
+    const [entry] = await listEntries(handle, 'session-1')
+    await expect(handle('block-revert', { sessionId: 'session-1', id: entry!.id, block: { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 0 } }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'reverted' } })
+    expect(fs.writeText).toHaveBeenCalledWith(
+      { displayPath: '/repo/a.txt', targetKey: 'key:/repo/a.txt' }, 'a\nb\n', undefined, expect.anything() as AbortSignal,
+    )
+  })
+
+  it('reports missing without touching fs when no entry exists', async () => {
+    const { fs, handle } = await harness()
+    await expect(handle('block-keep', { sessionId: 'session-1', id: 'none', block: { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 } }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+    expect(fs.resolve).not.toHaveBeenCalled()
+  })
+
+  it('rejects a malformed block payload', async () => {
+    const { handle } = await harness()
+    const answer = await handle('block-keep', { sessionId: 'session-1', id: 'e1', block: { oldStart: 'x' } }, signal())
+    expect(answer).toEqual({ ok: false, error: { code: 'internal', message: expect.any(String) as string, details: {} } })
+  })
+})
+
 describe('str_replace_editor capture', () => {
   it('captures a str_replace mutation through the edit-intent and result seams', async () => {
     const { ctx, fs, handle } = await harness()

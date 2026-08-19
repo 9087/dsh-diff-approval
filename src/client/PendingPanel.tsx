@@ -7,7 +7,7 @@ import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import type { DiffApprovalOpenAction, PendingFileDiff } from '../types.ts'
+import type { DiffApprovalBlockRange, DiffApprovalOpenAction, PendingFileDiff } from '../types.ts'
 import type { PendingPanelFace } from './slots.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import { computeWholeFileDiff } from './whole-file-diff.ts'
@@ -80,6 +80,8 @@ interface PendingDiffProps {
   t: Translator
   onKeep: (sessionId: SessionId, id: string) => Promise<void>
   onRevert: (sessionId: SessionId, id: string) => Promise<void>
+  onBlockKeep: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
+  onBlockRevert: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
   onOpen: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
 }
 
@@ -99,8 +101,9 @@ const DiffRow = memo(function DiffRow(props: {
   row: WholeFileDiffRow
   runs: HighlightRuns | undefined
   focused: boolean
+  onRowHover: (index: number) => void
 }) {
-  const { index, row, runs, focused } = props
+  const { index, row, runs, focused, onRowHover } = props
   const lineNumber = row.kind === 'del' ? row.oldLine : row.newLine
   const sideRuns = row.kind === 'del' ? runs?.oldRuns : runs?.newRuns
   const lineRuns = lineNumber === undefined ? undefined : sideRuns?.[lineNumber - 1]
@@ -113,6 +116,7 @@ const DiffRow = memo(function DiffRow(props: {
       data-diff-line={row.kind}
       data-diff-row={index}
       data-diff-focused={focused ? '' : undefined}
+      onMouseEnter={() => { onRowHover(index) }}
     >
       <span className={css.gutter}>{row.oldLine ?? ''}</span>
       <span className={css.gutter}>{row.newLine ?? ''}</span>
@@ -144,6 +148,44 @@ interface ChangeBlock {
 interface RowRange {
   start: number
   end: number
+}
+
+/**
+ * One diff block's old/new line ranges, 1-based inclusive, for block-level
+ * keep/revert. A side with no lines (a pure addition or deletion) is empty;
+ * its start is that side's insertion point — the line after the surrounding
+ * context — so the host can insert there.
+ * @param rows - the whole-file diff rows.
+ * @param block - the block's row range.
+ * @returns the old and new line ranges.
+ */
+function blockRangesOf(rows: readonly WholeFileDiffRow[], block: ChangeBlock): DiffApprovalBlockRange {
+  let oldStart = Infinity
+  let oldEnd = -Infinity
+  let newStart = Infinity
+  let newEnd = -Infinity
+  for (let index = block.start; index <= block.end; index++) {
+    const row = rows[index]
+    if (row === undefined) continue
+    if (row.oldLine !== undefined) {
+      oldStart = Math.min(oldStart, row.oldLine)
+      oldEnd = Math.max(oldEnd, row.oldLine)
+    }
+    if (row.newLine !== undefined) {
+      newStart = Math.min(newStart, row.newLine)
+      newEnd = Math.max(newEnd, row.newLine)
+    }
+  }
+  const before = rows[block.start - 1]
+  if (oldStart === Infinity) {
+    oldStart = (before?.oldLine ?? 0) + 1
+    oldEnd = oldStart - 1
+  }
+  if (newStart === Infinity) {
+    newStart = (before?.newLine ?? 0) + 1
+    newEnd = newStart - 1
+  }
+  return { oldStart, oldEnd, newStart, newEnd }
 }
 
 /** Split a row list into maximal runs of non-context rows. */
@@ -255,7 +297,7 @@ function PendingFileRow({ file, selected, t, onSelect }: PendingFileRowProps) {
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, t, onKeep, onRevert, onOpen }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -329,6 +371,7 @@ function PendingDiff({ file, busy, workspacePath, t, onKeep, onRevert, onOpen }:
   const [scrollTick, setScrollTick] = useState(0)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(0)
+  const [hoveredBlock, setHoveredBlock] = useState<number | undefined>(undefined)
   const [selection, setSelection] = useState<RowRange | undefined>(undefined)
   const [copied, setCopied] = useState(false)
 
@@ -337,11 +380,30 @@ function PendingDiff({ file, busy, workspacePath, t, onKeep, onRevert, onOpen }:
     setFocus(0)
     setScrollTop(0)
     if (bodyRef.current !== null) bodyRef.current.scrollTop = 0
+    setHoveredBlock(undefined)
     setSelection(undefined)
     setLangOverride(undefined)
     setLangMenuOpen(false)
     setCopied(false)
   }, [file.id])
+
+  // Old/new line ranges per diff block, for block-level keep/revert.
+  const blockRanges = useMemo(() => {
+    return model.blocks.map(block => blockRangesOf(model.diff.rows, block))
+  }, [model])
+
+  // Row index -> block index, so hovering any row of a block shows its actions.
+  const blockIndexByRow = useMemo(() => {
+    const map = new Map<number, number>()
+    model.blocks.forEach((block, blockIndex) => {
+      for (let index = block.start; index <= block.end; index++) map.set(index, blockIndex)
+    })
+    return map
+  }, [model])
+
+  const onRowHover = useCallback((index: number) => {
+    setHoveredBlock(blockIndexByRow.get(index))
+  }, [blockIndexByRow])
 
   // Virtual window over the fixed-height diff rows: only rows near the viewport
   // render, so a huge file never mounts tens of thousands of nodes. An unmounted
@@ -517,9 +579,6 @@ function PendingDiff({ file, busy, workspacePath, t, onKeep, onRevert, onOpen }:
                 <IconChevronUpOutline14 size={14} />
               </button>
             </Tooltip>
-            <span className={css.diffPosition} data-diff-position>
-              {t('panel.diffPosition', { current: focus + 1, total: model.blocks.length })}
-            </span>
             <Tooltip label={t('action.nextDiff')} side="bottom" delayMs={500}>
               <button
                 type="button"
@@ -537,7 +596,7 @@ function PendingDiff({ file, busy, workspacePath, t, onKeep, onRevert, onOpen }:
         <span className={css.flexSpacer} />
         <button
           type="button"
-          className={css.action}
+          className={`${css.action} ${css.actionPrimary}`}
           data-diff-keep
           disabled={busy}
           onClick={() => { void onKeep(file.sessionId, file.id) }}
@@ -556,7 +615,13 @@ function PendingDiff({ file, busy, workspacePath, t, onKeep, onRevert, onOpen }:
       </div>
       {file.missing && <p className={css.missingHint}>{t('panel.missingHint')}</p>}
       <div className={css.diffBodyWrap}>
-        <div className={css.diffBody} ref={bodyRef} onScroll={onScroll} data-diff-body>
+        <div
+          className={css.diffBody}
+          ref={bodyRef}
+          onScroll={onScroll}
+          onMouseLeave={() => { setHoveredBlock(undefined) }}
+          data-diff-body
+        >
           <div className={css.lines} style={{ minWidth: `max(100%, ${widestLine}ch)` }}>
             {start > 0 && (
               <div className={css.vSpacer} style={{ height: start * ROW_HEIGHT_PX }} aria-hidden="true" />
@@ -570,6 +635,7 @@ function PendingDiff({ file, busy, workspacePath, t, onKeep, onRevert, onOpen }:
                   row={row}
                   runs={runs}
                   focused={inFocusedBlock(index)}
+                  onRowHover={onRowHover}
                 />
               )
             })}
@@ -577,6 +643,32 @@ function PendingDiff({ file, busy, workspacePath, t, onKeep, onRevert, onOpen }:
               <div className={css.vSpacer} style={{ height: (rowCount - end) * ROW_HEIGHT_PX }} aria-hidden="true" />
             )}
           </div>
+          {hoveredBlock !== undefined && model.blocks[hoveredBlock] !== undefined && (
+            <div
+              className={css.blockActions}
+              data-diff-block-actions
+              style={{ top: model.blocks[hoveredBlock]!.start * ROW_HEIGHT_PX }}
+            >
+              <button
+                type="button"
+                className={`${css.action} ${css.actionPrimary}`}
+                data-diff-block-keep
+                disabled={busy}
+                onClick={() => { void onBlockKeep(file.sessionId, file.id, blockRanges[hoveredBlock]!) }}
+              >
+                {t('action.keep')}
+              </button>
+              <button
+                type="button"
+                className={css.action}
+                data-diff-block-revert
+                disabled={busy}
+                onClick={() => { void onBlockRevert(file.sessionId, file.id, blockRanges[hoveredBlock]!) }}
+              >
+                {t('action.revert')}
+              </button>
+            </div>
+          )}
         </div>
         {rulerMarkers.length > 0 && (
           <div className={css.overviewRuler} data-diff-approval-ruler aria-hidden="true">
@@ -639,7 +731,7 @@ function PendingDiff({ file, busy, workspacePath, t, onKeep, onRevert, onOpen }:
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onOpen, t,
+  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, t,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
   const snapshot = usePending(snapshot => snapshot)
@@ -870,6 +962,8 @@ export function PendingPanel({
                     t={t}
                     onKeep={onKeep}
                     onRevert={onRevert}
+                    onBlockKeep={onBlockKeep}
+                    onBlockRevert={onBlockRevert}
                     onOpen={onOpen}
                   />
                 )}

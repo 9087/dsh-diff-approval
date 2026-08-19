@@ -52,13 +52,13 @@ import { PendingPersistence, defaultStorageDir } from './persist.ts'
 import { defaultOpenPath } from './open.ts'
 import type { OpenAction } from './open.ts'
 import type {
-  DiffApprovalActionValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue,
+  DiffApprovalActionValue, DiffApprovalBlockTarget, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue,
   PendingEntry, PendingEntryKind, PendingFileDiff,
 } from './types.ts'
 
 export type {
-  DiffApprovalActionOutcome, DiffApprovalActionValue, DiffApprovalListValue, DiffApprovalOpenAction,
-  DiffApprovalOpenValue, PendingEntry, PendingEntryKind, PendingFileDiff,
+  DiffApprovalActionOutcome, DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalBlockTarget,
+  DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, PendingEntry, PendingEntryKind, PendingFileDiff,
 } from './types.ts'
 export { PendingDiffStore } from './pending.ts'
 export { PendingPersistence, defaultStorageDir } from './persist.ts'
@@ -487,6 +487,56 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const value: DiffApprovalActionValue = { outcome: 'reverted' }
         return { ok: true, value }
       }
+      case 'block-keep': {
+        const blockTarget = blockTargetOf(payload)
+        if (blockTarget === undefined) return rpcError('sessionId, id, and block must be valid')
+        await ensureLoaded(blockTarget.sessionId)
+        const entry = store.get(blockTarget.sessionId, blockTarget.id)
+        if (entry === undefined) {
+          const value: DiffApprovalActionValue = { outcome: 'missing' }
+          return { ok: true, value }
+        }
+        // Accept this block: fold its new side into the tracked baseline so
+        // the entry's diff no longer shows it. The file already holds the
+        // accepted content, so nothing is written.
+        const accepted = contentRangeOf(entry.newText, blockTarget.block.newStart, blockTarget.block.newEnd)
+        const updatedOld = replaceContentLines(entry.oldText, blockTarget.block.oldStart, blockTarget.block.oldEnd, accepted)
+        if (updatedOld === entry.newText) store.remove(blockTarget.sessionId, blockTarget.id)
+        else store.update(blockTarget.sessionId, blockTarget.id, { oldText: updatedOld })
+        await persistSession(blockTarget.sessionId)
+        const kept: DiffApprovalActionValue = { outcome: 'kept' }
+        return { ok: true, value: kept }
+      }
+      case 'block-revert': {
+        const blockTarget = blockTargetOf(payload)
+        if (blockTarget === undefined) return rpcError('sessionId, id, and block must be valid')
+        await ensureLoaded(blockTarget.sessionId)
+        const entry = store.get(blockTarget.sessionId, blockTarget.id)
+        if (entry === undefined) {
+          const value: DiffApprovalActionValue = { outcome: 'missing' }
+          return { ok: true, value }
+        }
+        // Undo this block: restore its old side into the new text and write
+        // the file back. A created file that reverts to empty is removed like
+        // the whole-file revert.
+        const restored = contentRangeOf(entry.oldText, blockTarget.block.oldStart, blockTarget.block.oldEnd)
+        const updatedNew = replaceContentLines(entry.newText, blockTarget.block.newStart, blockTarget.block.newEnd, restored)
+        try {
+          const resolved = await ctx.fs.resolve(entry.path, { signal })
+          if (entry.kind === 'create' && updatedNew === '') {
+            await rm(ctx.fs.processPath(resolved), { force: true })
+          } else {
+            await ctx.fs.writeText(resolved, updatedNew, undefined, signal)
+          }
+        } catch (error: unknown) {
+          return rpcError(`block revert failed: ${errorMessage(error)}`)
+        }
+        if (updatedNew === entry.oldText) store.remove(blockTarget.sessionId, blockTarget.id)
+        else store.update(blockTarget.sessionId, blockTarget.id, { newText: updatedNew })
+        await persistSession(blockTarget.sessionId)
+        const reverted: DiffApprovalActionValue = { outcome: 'reverted' }
+        return { ok: true, value: reverted }
+      }
       case 'open': {
         const target = openTargetOf(payload)
         if (target === undefined) return rpcError('sessionId, id, and action must be valid')
@@ -543,6 +593,58 @@ function sessionOf(payload: unknown): SessionId | undefined {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
   const value = (payload as Record<string, unknown>).sessionId
   return typeof value === 'string' && value.length > 0 ? SessionId(value) : undefined
+}
+
+/** The content lines of `text`, matching the diff's line numbering (a single
+    trailing newline is a terminator, not an extra empty line). */
+function contentLinesOf(text: string): string[] {
+  if (text === '') return []
+  const lines = text.split('\n')
+  if (lines[lines.length - 1] === '') lines.pop()
+  return lines
+}
+
+/** Rebuild text from content lines, keeping `original`'s trailing-newline convention. */
+function fromContentLines(original: string, lines: string[]): string {
+  if (lines.length === 0) return ''
+  return lines.join('\n') + (original.endsWith('\n') ? '\n' : '')
+}
+
+/** The content lines [start..end] (1-based inclusive) of `text`; empty when start > end. */
+function contentRangeOf(text: string, start: number, end: number): string[] {
+  if (start > end) return []
+  return contentLinesOf(text).slice(start - 1, end)
+}
+
+/**
+ * Replace the content lines [start..end] (1-based) of `text` with `replacement`
+ * lines. An empty range (`start > end`) inserts before line `start`. Out-of-range
+ * bounds clamp; the trailing-newline convention of `text` is preserved.
+ */
+function replaceContentLines(text: string, start: number, end: number, replacement: string[]): string {
+  const lines = contentLinesOf(text)
+  const count = lines.length
+  if (start > end) {
+    const at = Math.min(Math.max(start, 1), count + 1)
+    return fromContentLines(text, [...lines.slice(0, at - 1), ...replacement, ...lines.slice(at - 1)])
+  }
+  const s = Math.min(Math.max(start, 1), count + 1)
+  const e = Math.min(Math.max(end, 1), count)
+  if (s > e) return text
+  return fromContentLines(text, [...lines.slice(0, s - 1), ...replacement, ...lines.slice(e)])
+}
+
+/** Narrow a wire payload to one block keep/revert target. */
+function blockTargetOf(payload: unknown): DiffApprovalBlockTarget | undefined {
+  const target = targetOf(payload)
+  if (target === undefined) return undefined
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
+  const block = (payload as Record<string, unknown>).block
+  if (typeof block !== 'object' || block === null || Array.isArray(block)) return undefined
+  const { oldStart, oldEnd, newStart, newEnd } = block as Record<string, unknown>
+  const numbers = [oldStart, oldEnd, newStart, newEnd]
+  if (!numbers.every((value) => typeof value === 'number' && Number.isFinite(value))) return undefined
+  return { ...target, block: { oldStart, oldEnd, newStart, newEnd } as DiffApprovalBlockTarget['block'] }
 }
 
 /** Narrow a wire payload to one keep/revert target. */

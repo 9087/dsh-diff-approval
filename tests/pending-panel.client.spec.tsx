@@ -38,6 +38,8 @@ function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
     onRefresh: vi.fn(),
     onKeep: vi.fn(async () => {}),
     onRevert: vi.fn(async () => {}),
+    onBlockKeep: vi.fn(async () => {}),
+    onBlockRevert: vi.fn(async () => {}),
     onOpen: vi.fn(async () => {}),
     t: (key: string, params?: Record<string, unknown>) => params === undefined ? key : `${key} ${JSON.stringify(params)}`,
   } as unknown as PanelProps
@@ -420,6 +422,40 @@ describe('PendingPanel', () => {
     expect(add.style.height).toBe('50%')
   })
 
+  it('shows per-block keep/revert on hover and calls the block action with its line range', () => {
+    const twoBlocks = entry({ id: 'entry-blocks', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [twoBlocks], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    // No block actions until a block is hovered.
+    expect(view.container.querySelector('[data-diff-block-actions]')).toBeNull()
+    const rows = [...view.container.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    fireEvent.mouseEnter(rows[0]!) // del 'a' -> block 0 (old 1-1, new 1-1)
+
+    const actions = view.container.querySelector('[data-diff-block-actions]') as HTMLElement
+    expect(actions).not.toBeNull()
+    const keep = actions.querySelector('[data-diff-block-keep]') as HTMLElement
+    const revert = actions.querySelector('[data-diff-block-revert]') as HTMLElement
+    expect(keep).not.toBeNull()
+    expect(revert).not.toBeNull()
+
+    fireEvent.click(keep)
+    const keepMock = props.onBlockKeep as unknown as { mock: { calls: unknown[][] } }
+    expect(keepMock.mock.calls[0]).toEqual([S1, 'entry-blocks', { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 }])
+
+    fireEvent.click(revert)
+    const revertMock = props.onBlockRevert as unknown as { mock: { calls: unknown[][] } }
+    expect(revertMock.mock.calls[0]).toEqual([S1, 'entry-blocks', { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 }])
+
+    // Hovering context clears the floating actions.
+    const contextRow = [...view.container.querySelectorAll('[data-diff-row]')]
+      .find(row => row.getAttribute('data-diff-line') === 'context') as HTMLElement
+    fireEvent.mouseEnter(contextRow)
+    expect(view.container.querySelector('[data-diff-block-actions]')).toBeNull()
+  })
+
   it('moves the focus between contiguous change blocks', () => {
     const twoBlocks = entry({ id: 'entry-blocks', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [twoBlocks], busy: new Set() })
@@ -428,20 +464,16 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByText('a.txt'))
 
     const focusedLines = () => [...view.container.querySelectorAll('[data-diff-focused]')]
-    const position = () => (view.container.querySelector('[data-diff-position]') as HTMLElement).textContent
     // Block 0: the first change (del a / add A), both lines highlighted.
     expect(focusedLines()).toHaveLength(2)
     expect(focusedLines()[0]!.textContent).toContain('a')
-    expect(position()).toContain('1')
 
     fireEvent.click(screen.getByLabelText('action.nextDiff'))
     expect(focusedLines()).toHaveLength(2)
     expect(focusedLines()[0]!.textContent).toContain('c')
-    expect(position()).toContain('2')
 
     fireEvent.click(screen.getByLabelText('action.prevDiff'))
     expect(focusedLines()[0]!.textContent).toContain('a')
-    expect(position()).toContain('1')
 
     // From the last block, next wraps back to the first.
     fireEvent.click(screen.getByLabelText('action.nextDiff'))

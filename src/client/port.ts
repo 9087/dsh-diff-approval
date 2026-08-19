@@ -7,7 +7,7 @@
 
 import type { ClientConnectionRpc, SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type {
-  DiffApprovalActionValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, PendingFileDiff,
+  DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, PendingFileDiff,
 } from '../types.ts'
 
 /** The channel the host half registers and this port calls. */
@@ -21,6 +21,10 @@ export interface DiffApprovalPort {
   keep(sessionId: SessionId, id: string): Promise<DiffApprovalActionValue>
   /** Revert one operation. */
   revert(sessionId: SessionId, id: string): Promise<DiffApprovalActionValue>
+  /** Keep one diff block (accept its change into the tracked baseline). */
+  blockKeep(sessionId: SessionId, id: string, block: DiffApprovalBlockRange): Promise<DiffApprovalActionValue>
+  /** Revert one diff block (restore its old lines in the file). */
+  blockRevert(sessionId: SessionId, id: string, block: DiffApprovalBlockRange): Promise<DiffApprovalActionValue>
   /** Open one file with its default application or reveal it in the folder. */
   open(sessionId: SessionId, id: string, action: DiffApprovalOpenAction): Promise<DiffApprovalOpenValue>
 }
@@ -39,6 +43,12 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
     },
     async revert(sessionId, id) {
       return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'revert', { sessionId, id }))
+    },
+    async blockKeep(sessionId, id, block) {
+      return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'block-keep', { sessionId, id, block }))
+    },
+    async blockRevert(sessionId, id, block) {
+      return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'block-revert', { sessionId, id, block }))
     },
     async open(sessionId, id, action) {
       return openOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'open', { sessionId, id, action }))

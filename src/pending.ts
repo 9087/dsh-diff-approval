@@ -122,6 +122,25 @@ export class PendingDiffStore {
     return true
   }
 
+  /**
+   * Advance one entry's tracked content after a block-level keep/revert. The
+   * entry keeps its id and path; only the given side's text and capture time
+   * move. When the caller decides the sides now match, it removes the entry
+   * instead of updating it.
+   * @param sessionId - the owning session.
+   * @param id - the entry id.
+   * @param patch - the side to advance (`oldText` for keep, `newText` for revert).
+   * @returns whether the entry changed.
+   */
+  update(sessionId: SessionId, id: string, patch: { oldText?: string; newText?: string }): boolean {
+    const key = entryKey(sessionId, id)
+    const entry = this.entries.get(key)
+    if (entry === undefined) return false
+    const next: PendingEntry = { ...entry, ...patch, updatedAt: Date.now() }
+    this.entries.set(key, next)
+    return true
+  }
+
   /** Total entry count across all sessions. */
   get size(): number {
     return this.entries.size

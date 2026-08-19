@@ -69,6 +69,29 @@ export interface DiffApprovalOpenValue {
   outcome: 'opened' | 'missing'
 }
 
+/**
+ * One diff block's line ranges on the old and new sides, 1-based inclusive.
+ * A side is empty when its start exceeds its end; an empty side's start is
+ * the insertion point (the line before which content inserts) on that side.
+ */
+export interface DiffApprovalBlockRange {
+  /** First old-file line this block spans; the insertion point for pure additions. */
+  oldStart: number
+  /** Last old-file line; `oldStart - 1` when the block has no old side. */
+  oldEnd: number
+  /** First new-file line this block spans; the insertion point for pure deletions. */
+  newStart: number
+  /** Last new-file line; `newStart - 1` when the block has no new side. */
+  newEnd: number
+}
+
+/** Target of one block-level keep/revert: the entry plus the block range. */
+export interface DiffApprovalBlockTarget {
+  sessionId: SessionId
+  id: string
+  block: DiffApprovalBlockRange
+}
+
 /** Outcome of one keep/revert request. */
 export type DiffApprovalActionOutcome = 'kept' | 'reverted' | 'missing'
 

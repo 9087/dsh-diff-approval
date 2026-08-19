@@ -399,15 +399,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Current/next-diff counter beside the prev/next buttons. */
-.diffPosition {
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 12px;
-  line-height: 16px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
 .flexSpacer {
   flex: 1;
 }
@@ -431,6 +422,24 @@
 .action:disabled {
   color: var(--dsw-alias-label-tertiary);
   cursor: default;
+}
+
+/* Accent (Keep) action: filled with the brand blue and white text, like the
+   composer's send button. Keeps the `.action` geometry and disabled cursor. */
+.actionPrimary {
+  background: var(--dsw-alias-state-business-primary);
+  border-color: var(--dsw-alias-state-business-primary);
+  color: var(--dsw-static-neutral-bluish-50);
+}
+
+.actionPrimary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 85%, var(--dsw-static-neutral-bluish-1000));
+}
+
+.actionPrimary:disabled {
+  background: var(--dsw-alias-state-business-primary);
+  color: var(--dsw-static-neutral-bluish-50);
+  opacity: 0.55;
 }
 
 .iconAction {
@@ -503,6 +512,7 @@
 }
 
 .diffBody {
+  position: relative;
   flex: 1;
   min-width: 0;
   overflow: auto;
@@ -513,6 +523,26 @@
   /* The whole area reads as selectable code, so the text I-beam cursor
      covers blank space too; the gutter opts back out below. */
   cursor: text;
+}
+
+/* Per-block Keep/Revert, shown at the hovered block's top-right, framed on
+   the file-list surface. Positioned in the diff scroller (the rows'
+   containing block) so it tracks the block as the file scrolls. The buttons
+   themselves are plain `.action`s, so they share the whole-file buttons'
+   height. */
+.blockActions {
+  position: absolute;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  /* Match the status bar's surface: both sit on the diff's code-block tint. */
+  background: var(--dsw-alias-markdown-code-block);
+  box-shadow: var(--dsw-shadow-lv1);
+  z-index: 2;
 }
 
 /* Overview ruler over the vertical scrollbar: changed-line markers at their

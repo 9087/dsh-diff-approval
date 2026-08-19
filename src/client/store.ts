@@ -8,7 +8,7 @@
 
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
-import type { DiffApprovalOpenAction } from '../types.ts'
+import type { DiffApprovalBlockRange, DiffApprovalOpenAction } from '../types.ts'
 import type { PendingDiffSnapshot } from './slots.ts'
 import type { DiffApprovalPort } from './port.ts'
 
@@ -20,6 +20,10 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   keep: (sessionId: SessionId, id: string) => Promise<void>
   /** Revert one operation. */
   revert: (sessionId: SessionId, id: string) => Promise<void>
+  /** Keep one diff block, then refresh so the entry's diff reflects the accept. */
+  blockKeep: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
+  /** Revert one diff block, then refresh so the entry's diff reflects the undo. */
+  blockRevert: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
   /** Open one file with its default application or reveal it in the folder. */
   open: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
   /** Drop every local fact (used on connection reset). */
@@ -92,6 +96,38 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
     },
     revert(sessionId, id) {
       return withBusy(id, async () => { await port.revert(sessionId, id) })
+    },
+    // A block op keeps the entry: mark the file busy, run the port call, then
+    // refresh so the entry's diff updates (the poll alone would lag a second).
+    async blockKeep(sessionId, id, block) {
+      const { error: _cleared, ...base } = snapshot
+      publish({ ...base, busy: new Set([...snapshot.busy, id]) })
+      try {
+        await port.blockKeep(sessionId, id, block)
+      } catch (error: unknown) {
+        publish({
+          ...snapshot,
+          error: error instanceof Error ? error.message : String(error),
+          busy: new Set([...snapshot.busy].filter(busy => busy !== id)),
+        })
+        return
+      }
+      await this.refresh(sessionId)
+    },
+    async blockRevert(sessionId, id, block) {
+      const { error: _cleared, ...base } = snapshot
+      publish({ ...base, busy: new Set([...snapshot.busy, id]) })
+      try {
+        await port.blockRevert(sessionId, id, block)
+      } catch (error: unknown) {
+        publish({
+          ...snapshot,
+          error: error instanceof Error ? error.message : String(error),
+          busy: new Set([...snapshot.busy].filter(busy => busy !== id)),
+        })
+        return
+      }
+      await this.refresh(sessionId)
     },
     async open(sessionId, id, action) {
       try {
