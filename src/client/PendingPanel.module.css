@@ -506,7 +506,10 @@
   top: 0;
   right: 0;
   bottom: 0;
-  width: 8px;
+  /* Half the 8px scrollbar width: the ruler tints the outer half while the
+     scrollbar thumb stays visible on the inner half (a fully covered
+     scrollbar reads as a faint smear). */
+  width: 4px;
   pointer-events: none;
   opacity: 0.5;
 }
