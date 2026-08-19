@@ -56,6 +56,8 @@ export interface PendingFileDiff extends PendingEntry {
 export interface DiffApprovalListValue {
   /** Pending entries for the requested session, oldest capture first. */
   files: PendingFileDiff[]
+  /** The viewing session's workspace root (when it has one), for workspace-relative references. */
+  workspacePath?: string | undefined
 }
 
 /** What the open endpoint asks the OS to do with a file. */

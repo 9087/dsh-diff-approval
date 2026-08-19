@@ -14,6 +14,8 @@ export interface PendingDiffSnapshot {
   error?: string
   /** Entry ids whose keep/revert is in flight; their controls are disabled. */
   busy: ReadonlySet<string>
+  /** The viewing session's workspace root (when it has one); enables workspace-relative references. */
+  workspacePath?: string | undefined
 }
 
 /** The injected face the panel component receives from the plugin body. */

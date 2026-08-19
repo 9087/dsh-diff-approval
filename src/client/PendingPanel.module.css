@@ -399,6 +399,15 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Current/next-diff counter beside the prev/next buttons. */
+.diffPosition {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .flexSpacer {
   flex: 1;
 }
@@ -428,6 +437,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  /* Floor at the action (Keep/Revert) buttons' height so icon-only buttons
+     in the same bar align with them; the icon stays centered when taller. */
+  min-height: 25px;
   padding: 4px 6px;
 }
 
@@ -494,8 +506,13 @@
   flex: 1;
   min-width: 0;
   overflow: auto;
-  padding: 8px 10px;
+  /* No inner padding: the whole-file diff runs edge to edge inside the
+     scroll area, leaving no band above/below the rows or beside the text. */
+  padding: 0;
   font: var(--dsw-font-markdown-code-block);
+  /* The whole area reads as selectable code, so the text I-beam cursor
+     covers blank space too; the gutter opts back out below. */
+  cursor: text;
 }
 
 /* Overview ruler over the vertical scrollbar: changed-line markers at their
@@ -567,6 +584,8 @@
   color: var(--dsw-alias-label-tertiary);
   font-variant-numeric: tabular-nums;
   user-select: none;
+  /* Line numbers are not selectable text; keep the default arrow here. */
+  cursor: default;
 }
 
 .code {

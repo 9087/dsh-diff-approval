@@ -448,7 +448,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const sessionId = sessionOf(payload)
         if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
         const files = await listWithState(await workspaceEntries(sessionId))
-        const value: DiffApprovalListValue = { files }
+        const value: DiffApprovalListValue = { files, workspacePath: workspaceOf(sessionId)?.path }
         return { ok: true, value }
       }
       case 'keep': {

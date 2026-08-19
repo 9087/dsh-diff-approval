@@ -74,8 +74,9 @@ interface PendingFileRowProps {
 /** The right detail pane for one selected file: actions plus the merged diff. */
 interface PendingDiffProps {
   file: PendingFileDiff
-  files: readonly PendingFileDiff[]
   busy: boolean
+  /** The current workspace root, for workspace-relative copied references. */
+  workspacePath?: string | undefined
   t: Translator
   onKeep: (sessionId: SessionId, id: string) => Promise<void>
   onRevert: (sessionId: SessionId, id: string) => Promise<void>
@@ -233,28 +234,28 @@ function PendingFileRow({ file, selected, t, onSelect }: PendingFileRowProps) {
   )
   return (
     <li className={css.row}>
-      <button
-        type="button"
-        className={css.rowHead}
-        data-selected={selected || undefined}
-        onClick={() => { onSelect(file.id) }}
-      >
-        <Tooltip label={file.path} delayMs={500} maxWidth={560}>
+      <Tooltip label={file.path} delayMs={500} maxWidth={560}>
+        <button
+          type="button"
+          className={css.rowHead}
+          data-selected={selected || undefined}
+          onClick={() => { onSelect(file.id) }}
+        >
           <span className={css.rowPath}>{basenameOf(file.path)}</span>
-        </Tooltip>
-        {file.kind === 'create' && <span className={css.kindTag}>{t('row.create')}</span>}
-        {file.missing && <span className={css.missing} title={t('panel.missingHint')}>{t('panel.missing')}</span>}
-        <span className={css.rowMeta}>
-          <span className={css.addCount}>{t('row.added', { added: stats.added })}</span>
-          <span className={css.delCount}>{t('row.removed', { removed: stats.removed })}</span>
-        </span>
-      </button>
+          {file.kind === 'create' && <span className={css.kindTag}>{t('row.create')}</span>}
+          {file.missing && <span className={css.missing} title={t('panel.missingHint')}>{t('panel.missing')}</span>}
+          <span className={css.rowMeta}>
+            <span className={css.addCount}>{t('row.added', { added: stats.added })}</span>
+            <span className={css.delCount}>{t('row.removed', { removed: stats.removed })}</span>
+          </span>
+        </button>
+      </Tooltip>
     </li>
   )
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, t, onKeep, onRevert, onOpen }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -443,7 +444,7 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
       .map(row => row.newLine ?? row.oldLine)
       .filter((number): number is number => number !== undefined)
     if (lineNumbers.length === 0) return undefined
-    return referenceOf(file.path, files, Math.min(...lineNumbers), Math.max(...lineNumbers))
+    return referenceOf(file.path, workspacePath, Math.min(...lineNumbers), Math.max(...lineNumbers))
   })()
 
   const copySelection = useCallback(async () => {
@@ -476,54 +477,61 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
     <div className={css.diff} data-diff-approval-diff>
       <div className={css.diffHeader}>
         <span className={css.diffPath}>{file.path}</span>
-        <button
-          type="button"
-          className={`${css.action} ${css.iconAction}`}
-          data-diff-open
-          aria-label={t('action.openFile')}
-          title={t('action.openFile')}
-          onClick={() => { void onOpen(file.sessionId, file.id, 'open') }}
-        >
-          <IconBrowseOutline16 size={14} />
-        </button>
-        <button
-          type="button"
-          className={`${css.action} ${css.iconAction}`}
-          data-diff-reveal
-          aria-label={t('action.revealFile')}
-          title={t('action.revealFile')}
-          onClick={() => { void onOpen(file.sessionId, file.id, 'reveal') }}
-        >
-          <IconFolderOpenOutline16 size={14} />
-        </button>
+        <Tooltip label={t('action.openFile')} side="bottom" delayMs={500}>
+          <button
+            type="button"
+            className={`${css.action} ${css.iconAction}`}
+            data-diff-open
+            aria-label={t('action.openFile')}
+            onClick={() => { void onOpen(file.sessionId, file.id, 'open') }}
+          >
+            <IconBrowseOutline16 size={14} />
+          </button>
+        </Tooltip>
+        <Tooltip label={t('action.revealFile')} side="bottom" delayMs={500}>
+          <button
+            type="button"
+            className={`${css.action} ${css.iconAction}`}
+            data-diff-reveal
+            aria-label={t('action.revealFile')}
+            onClick={() => { void onOpen(file.sessionId, file.id, 'reveal') }}
+          >
+            <IconFolderOpenOutline16 size={14} />
+          </button>
+        </Tooltip>
       </div>
       <div className={css.diffActions}>
         <span className={css.diffStats}>{t('panel.stats', { added: model.diff.added, removed: model.diff.removed })}</span>
         {file.kind === 'create' && <span className={css.kindHint}>{t('panel.createHint')}</span>}
         {model.blocks.length > 0 && (
           <>
-            <button
-              type="button"
-              className={`${css.action} ${css.iconAction}`}
-              data-diff-prev
-              aria-label={t('action.prevDiff')}
-              title={t('action.prevDiff')}
-              disabled={busy}
-              onClick={() => { jump(-1) }}
-            >
-              <IconChevronUpOutline14 size={14} />
-            </button>
-            <button
-              type="button"
-              className={`${css.action} ${css.iconAction}`}
-              data-diff-next
-              aria-label={t('action.nextDiff')}
-              title={t('action.nextDiff')}
-              disabled={busy}
-              onClick={() => { jump(1) }}
-            >
-              <IconChevronDownOutline14 size={14} />
-            </button>
+            <Tooltip label={t('action.prevDiff')} side="bottom" delayMs={500}>
+              <button
+                type="button"
+                className={`${css.action} ${css.iconAction}`}
+                data-diff-prev
+                aria-label={t('action.prevDiff')}
+                disabled={busy}
+                onClick={() => { jump(-1) }}
+              >
+                <IconChevronUpOutline14 size={14} />
+              </button>
+            </Tooltip>
+            <span className={css.diffPosition} data-diff-position>
+              {t('panel.diffPosition', { current: focus + 1, total: model.blocks.length })}
+            </span>
+            <Tooltip label={t('action.nextDiff')} side="bottom" delayMs={500}>
+              <button
+                type="button"
+                className={`${css.action} ${css.iconAction}`}
+                data-diff-next
+                aria-label={t('action.nextDiff')}
+                disabled={busy}
+                onClick={() => { jump(1) }}
+              >
+                <IconChevronDownOutline14 size={14} />
+              </button>
+            </Tooltip>
           </>
         )}
         <span className={css.flexSpacer} />
@@ -610,17 +618,18 @@ function PendingDiff({ file, files, busy, t, onKeep, onRevert, onOpen }: Pending
           onSelect={(id) => { setLangOverride(id === '' ? undefined : id); setLangMenuOpen(false) }}
           onClose={() => { setLangMenuOpen(false) }}
           anchor={(
-            <button
-              type="button"
-              className={css.langSelect}
-              data-diff-lang
-              aria-label={t('action.langSelect')}
-              title={t('action.langSelect')}
-              onClick={() => { setLangMenuOpen(value => !value) }}
-            >
-              <span className={css.langLabel}>{langLabel}</span>
-              <IconChevronDownOutline14 size={12} />
-            </button>
+            <Tooltip label={t('action.langSelect')} side="top" delayMs={500}>
+              <button
+                type="button"
+                className={css.langSelect}
+                data-diff-lang
+                aria-label={t('action.langSelect')}
+                onClick={() => { setLangMenuOpen(value => !value) }}
+              >
+                <span className={css.langLabel}>{langLabel}</span>
+                <IconChevronDownOutline14 size={12} />
+              </button>
+            </Tooltip>
           )}
         />
       </div>
@@ -800,26 +809,28 @@ export function PendingPanel({
           <header className={css.header}>
             <span className={css.title}>{t('panel.title')}</span>
             <div className={css.headerActions}>
-              <button
-                type="button"
-                className={expanded ? `${css.expand} ${css.expandExpanded}` : css.expand}
-                data-diff-approval-expand
-                aria-label={t(expanded ? 'action.exitFullscreen' : 'action.expand')}
-                title={t(expanded ? 'action.exitFullscreen' : 'action.expand')}
-                onClick={() => { setExpanded(value => !value) }}
-              >
-                <IconFullscreenOutline16 size={14} />
-              </button>
-              <button
-                type="button"
-                className={css.close}
-                data-diff-approval-close
-                aria-label={t('action.close')}
-                title={t('action.close')}
-                onClick={() => { setOpen(false) }}
-              >
-                <IconCloseOutline16 size={14} />
-              </button>
+              <Tooltip label={t(expanded ? 'action.exitFullscreen' : 'action.expand')} side="bottom" delayMs={500}>
+                <button
+                  type="button"
+                  className={expanded ? `${css.expand} ${css.expandExpanded}` : css.expand}
+                  data-diff-approval-expand
+                  aria-label={t(expanded ? 'action.exitFullscreen' : 'action.expand')}
+                  onClick={() => { setExpanded(value => !value) }}
+                >
+                  <IconFullscreenOutline16 size={14} />
+                </button>
+              </Tooltip>
+              <Tooltip label={t('action.close')} side="bottom" delayMs={500}>
+                <button
+                  type="button"
+                  className={css.close}
+                  data-diff-approval-close
+                  aria-label={t('action.close')}
+                  onClick={() => { setOpen(false) }}
+                >
+                  <IconCloseOutline16 size={14} />
+                </button>
+              </Tooltip>
             </div>
           </header>
           {snapshot.error !== undefined || !snapshot.read || files.length === 0 ? (
@@ -854,8 +865,8 @@ export function PendingPanel({
                 ) : (
                   <PendingDiff
                     file={selectedFile}
-                    files={files}
                     busy={snapshot.busy.has(selectedFile.id)}
+                    workspacePath={snapshot.workspacePath}
                     t={t}
                     onKeep={onKeep}
                     onRevert={onRevert}

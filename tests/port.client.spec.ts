@@ -22,6 +22,7 @@ describe('list', () => {
       list: {
         ok: true,
         value: {
+          workspacePath: '/repo',
           files: [
             {
               id: 'e1', sessionId: 'session-1', path: '/repo/a.txt', kind: 'edit',
@@ -37,17 +38,25 @@ describe('list', () => {
       },
     })
     const port = createDiffApprovalPort(seam.rpc)
-    await expect(port.list(S1)).resolves.toEqual([
-      {
-        id: 'e1', sessionId: 'session-1', path: '/repo/a.txt', kind: 'edit',
-        oldText: 'a', newText: 'b', updatedAt: 10, missing: true, diverged: false,
-      },
-      {
-        id: 'e2', sessionId: 'session-1', path: '/repo/c.txt', kind: 'create',
-        oldText: '', newText: 'c', updatedAt: 20, missing: false, diverged: false,
-      },
-    ])
+    await expect(port.list(S1)).resolves.toEqual({
+      workspacePath: '/repo',
+      files: [
+        {
+          id: 'e1', sessionId: 'session-1', path: '/repo/a.txt', kind: 'edit',
+          oldText: 'a', newText: 'b', updatedAt: 10, missing: true, diverged: false,
+        },
+        {
+          id: 'e2', sessionId: 'session-1', path: '/repo/c.txt', kind: 'create',
+          oldText: '', newText: 'c', updatedAt: 20, missing: false, diverged: false,
+        },
+      ],
+    })
     expect(seam.call).toHaveBeenCalledWith('/diff-approval', 'list', { sessionId: 'session-1' })
+  })
+
+  it('omits workspacePath when the host sends none', async () => {
+    const seam = fakeRpc({ list: { ok: true, value: { files: [] } } })
+    await expect(createDiffApprovalPort(seam.rpc).list(S1)).resolves.toEqual({ workspacePath: undefined, files: [] })
   })
 
   it('folds a transport error into a rejection', async () => {

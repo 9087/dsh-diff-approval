@@ -75,12 +75,13 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
         return
       }
       try {
-        const files = await port.list(sessionId)
-        publish({ read: true, files, busy: EMPTY_BUSY })
+        const { files, workspacePath } = await port.list(sessionId)
+        publish({ read: true, files, workspacePath, busy: EMPTY_BUSY })
       } catch (error: unknown) {
         publish({
           read: true,
           files: snapshot.files,
+          workspacePath: snapshot.workspacePath,
           error: error instanceof Error ? error.message : String(error),
           busy: snapshot.busy,
         })

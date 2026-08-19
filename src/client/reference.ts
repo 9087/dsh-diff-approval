@@ -1,11 +1,10 @@
 /**
- * Reference labels for the selection toolbar: a file name plus a 1-based line
- * range, using the short name when unambiguous and the full path otherwise.
- * Pure derivation so the display rule is unit-testable without the panel.
+ * Reference labels for the selection toolbar: a workspace-relative path (or
+ * the absolute path when the file is outside the workspace) plus a 1-based
+ * line range. Pure derivation so the display rule is unit-testable without
+ * the panel.
  * @module dsh-diff-approval/client/reference
  */
-
-import type { PendingFileDiff } from '../types.ts'
 
 /**
  * Last path segment of a file path, any separator style.
@@ -18,16 +17,24 @@ export function basenameOf(path: string): string {
 }
 
 /**
- * The path shown in a copied reference: the short name when no other listed
- * file shares it, the full path otherwise.
+ * The path embedded in a copied reference: workspace-relative (forward
+ * slashes) when the file lives inside the current workspace, the absolute
+ * path otherwise. A bare file name is never enough — a reference must resolve
+ * to exactly one file.
  * @param path - the selected file's path.
- * @param files - every currently listed pending file.
- * @returns the display path for a copied reference.
+ * @param workspacePath - the current workspace root, or `undefined`.
+ * @returns the reference path.
  */
-export function copyDisplayPath(path: string, files: readonly PendingFileDiff[]): string {
-  const base = basenameOf(path)
-  const duplicated = files.some((file) => file.path !== path && basenameOf(file.path) === base)
-  return duplicated ? path : base
+export function referencePathOf(path: string, workspacePath: string | undefined): string {
+  if (workspacePath === undefined || workspacePath.length === 0) return path
+  const normalized = path.replaceAll('\\', '/')
+  const root = workspacePath.replaceAll('\\', '/')
+  const prefix = root.endsWith('/') ? root : `${root}/`
+  if (normalized.length > prefix.length
+    && normalized.slice(0, prefix.length).toLowerCase() === prefix.toLowerCase()) {
+    return normalized.slice(prefix.length)
+  }
+  return path
 }
 
 /**
@@ -44,11 +51,11 @@ export function lineRangeLabel(start: number, end: number): string {
 /**
  * Build the clipboard text for a selected line range.
  * @param path - the selected file's path.
- * @param files - every currently listed pending file.
+ * @param workspacePath - the current workspace root, or `undefined`.
  * @param start - first selected line number.
  * @param end - last selected line number.
  * @returns the `path:range` reference text.
  */
-export function referenceOf(path: string, files: readonly PendingFileDiff[], start: number, end: number): string {
-  return `${copyDisplayPath(path, files)}:${lineRangeLabel(start, end)}`
+export function referenceOf(path: string, workspacePath: string | undefined, start: number, end: number): string {
+  return `${referencePathOf(path, workspacePath)}:${lineRangeLabel(start, end)}`
 }

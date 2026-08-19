@@ -2,7 +2,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
-import type { DiffApprovalActionValue, PendingFileDiff } from '../src/types.ts'
+import type { DiffApprovalActionValue, DiffApprovalListValue, PendingFileDiff } from '../src/types.ts'
 import type { DiffApprovalPort } from '../src/client/port.ts'
 import { createPendingDiffStore } from '../src/client/store.ts'
 
@@ -12,7 +12,7 @@ const FILE: PendingFileDiff = {
   oldText: 'a', newText: 'b', updatedAt: 10, missing: false, diverged: false,
 }
 
-type ListMock = ReturnType<typeof vi.fn<(sessionId: SessionId) => Promise<PendingFileDiff[]>>>
+type ListMock = ReturnType<typeof vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>>
 type ActionMock = ReturnType<typeof vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalActionValue>>>
 
 /** A port plus its three mocks, so tests control the answers through local bindings. */
@@ -25,7 +25,7 @@ interface PortSeam {
 
 /** Build one seam whose answers the test controls through typed mocks. */
 function port(overrides: Partial<Pick<PortSeam, 'list' | 'keep' | 'revert'>> = {}): PortSeam {
-  const list = vi.fn<(sessionId: SessionId) => Promise<PendingFileDiff[]>>(async () => [FILE])
+  const list = vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>(async () => ({ files: [FILE] }))
   const keep = vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'kept' }))
   const revert = vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'reverted' }))
   return {

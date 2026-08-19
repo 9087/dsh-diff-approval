@@ -1,20 +1,10 @@
-// Reference labels: short names when unambiguous, full paths on clashes.
+// Reference labels: workspace-relative paths inside the workspace, absolute
+// paths outside, each plus a line range.
 
 import { describe, expect, it } from 'vitest'
-import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
-import type { PendingFileDiff } from '../src/types.ts'
 import {
-  basenameOf, copyDisplayPath, lineRangeLabel, referenceOf,
+  basenameOf, lineRangeLabel, referenceOf, referencePathOf,
 } from '../src/client/reference.ts'
-
-const S1 = 'session-1' as SessionId
-
-function file(path: string): PendingFileDiff {
-  return {
-    id: `id:${path}`, sessionId: S1, path, kind: 'edit',
-    oldText: '', newText: '', updatedAt: 0, missing: false, diverged: false,
-  }
-}
 
 describe('basenameOf', () => {
   it('keeps the last segment for both separator styles', () => {
@@ -24,13 +14,22 @@ describe('basenameOf', () => {
   })
 })
 
-describe('copyDisplayPath', () => {
-  it('uses the short name when no other listed file shares it', () => {
-    expect(copyDisplayPath('/repo/src/a.txt', [file('/repo/src/a.txt'), file('/repo/other.txt')])).toBe('a.txt')
+describe('referencePathOf', () => {
+  it('returns the path relative to the workspace when the file is inside it', () => {
+    expect(referencePathOf('/repo/src/a.txt', '/repo')).toBe('src/a.txt')
+    expect(referencePathOf('C:\\repo\\src\\a.txt', 'C:\\repo')).toBe('src/a.txt')
   })
 
-  it('falls back to the full path when another listed file shares the name', () => {
-    expect(copyDisplayPath('/repo/src/a.txt', [file('/repo/src/a.txt'), file('/repo/test/a.txt')])).toBe('/repo/src/a.txt')
+  it('handles a workspace root without a trailing separator', () => {
+    expect(referencePathOf('/repo/src/a.txt', '/repo/')).toBe('src/a.txt')
+  })
+
+  it('keeps the absolute path when the file is outside the workspace', () => {
+    expect(referencePathOf('/elsewhere/a.txt', '/repo')).toBe('/elsewhere/a.txt')
+  })
+
+  it('keeps the path unchanged without a workspace', () => {
+    expect(referencePathOf('/repo/a.txt', undefined)).toBe('/repo/a.txt')
   })
 })
 
@@ -42,13 +41,12 @@ describe('lineRangeLabel', () => {
 })
 
 describe('referenceOf', () => {
-  it('combines the display path and the range', () => {
-    expect(referenceOf('/repo/a.txt', [file('/repo/a.txt')], 12, 34)).toBe('a.txt:12-34')
-    expect(referenceOf('/repo/a.txt', [file('/repo/a.txt')], 12, 12)).toBe('a.txt:12')
+  it('combines the workspace-relative path and the range', () => {
+    expect(referenceOf('/repo/src/a.txt', '/repo', 12, 34)).toBe('src/a.txt:12-34')
+    expect(referenceOf('/repo/src/a.txt', '/repo', 12, 12)).toBe('src/a.txt:12')
   })
 
-  it('uses the full path when the short name clashes', () => {
-    const files = [file('/repo/src/a.ts'), file('/repo/tests/a.ts')]
-    expect(referenceOf('/repo/src/a.ts', files, 3, 7)).toBe('/repo/src/a.ts:3-7')
+  it('uses the absolute path and the range for files outside the workspace', () => {
+    expect(referenceOf('/elsewhere/a.ts', '/repo', 3, 7)).toBe('/elsewhere/a.ts:3-7')
   })
 })

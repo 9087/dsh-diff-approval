@@ -7,7 +7,7 @@
 
 import type { ClientConnectionRpc, SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type {
-  DiffApprovalActionValue, DiffApprovalOpenAction, DiffApprovalOpenValue, PendingFileDiff,
+  DiffApprovalActionValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, PendingFileDiff,
 } from '../types.ts'
 
 /** The channel the host half registers and this port calls. */
@@ -15,8 +15,8 @@ export const DIFF_APPROVAL_CHANNEL = '/diff-approval'
 
 /** This package's business verbs over the review channel. */
 export interface DiffApprovalPort {
-  /** Read one session's pending entries, oldest capture first. */
-  list(sessionId: SessionId): Promise<PendingFileDiff[]>
+  /** Read one session's pending entries (plus its workspace root), oldest capture first. */
+  list(sessionId: SessionId): Promise<DiffApprovalListValue>
   /** Keep one operation. */
   keep(sessionId: SessionId, id: string): Promise<DiffApprovalActionValue>
   /** Revert one operation. */
@@ -32,7 +32,7 @@ export interface DiffApprovalPort {
 export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPort {
   return {
     async list(sessionId) {
-      return filesOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'list', { sessionId }))
+      return listValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'list', { sessionId }))
     },
     async keep(sessionId, id) {
       return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'keep', { sessionId, id }))
@@ -71,7 +71,7 @@ function pendingFileOf(value: unknown): PendingFileDiff | undefined {
 }
 
 /** Narrow the list endpoint's value; a malformed wire value is a read failure. */
-function filesOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): PendingFileDiff[] {
+function listValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffApprovalListValue {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
   const value: unknown = result.value
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -79,12 +79,14 @@ function filesOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): Pend
   }
   const rows = (value as Record<string, unknown>).files
   if (!Array.isArray(rows)) throw new Error('list returned a malformed value')
+  const workspace = (value as Record<string, unknown>).workspacePath
+  const workspacePath = typeof workspace === 'string' && workspace.length > 0 ? workspace : undefined
   const files: PendingFileDiff[] = []
   for (const row of rows) {
     const file = pendingFileOf(row)
     if (file !== undefined) files.push(file)
   }
-  return files
+  return { files, workspacePath }
 }
 
 /** Narrow one action endpoint's value; a malformed wire value is an action failure. */
