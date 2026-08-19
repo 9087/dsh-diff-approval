@@ -625,6 +625,35 @@ describe('PendingPanel', () => {
     expect(screen.getByText('a.txt:1')).toBeDefined()
   })
 
+  it('does not offer a reference for a selection of only removed lines', () => {
+    // 'a\nb\n' -> 'b\n' removes line 1; the removed row has no current-file
+    // number, so selecting it alone must not produce a copyable reference.
+    const removed = entry({ id: 'entry-removed', oldText: 'a\nb\n', newText: 'b\n' })
+    const props = panelProps({ read: true, files: [removed], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const rows = [...view.container.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const code0 = rows[0]!.querySelector('[data-diff-code]') ?? rows[0]!
+    const selection = {
+      isCollapsed: false,
+      anchorNode: code0.firstChild ?? code0,
+      focusNode: code0.firstChild ?? code0,
+      rangeCount: 1,
+      getRangeAt: () => ({
+        startContainer: code0.firstChild ?? code0,
+        startOffset: 0,
+        endContainer: code0.firstChild ?? code0,
+        endOffset: 1,
+      }),
+    } as unknown as Selection
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    expect(view.container.querySelector('[data-diff-copy]')).toBeNull()
+  })
+
   it('copies the reference with Ctrl+L', async () => {
     const writeText = vi.fn(async () => {})
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })

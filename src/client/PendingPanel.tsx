@@ -438,10 +438,10 @@ function PendingDiff({ file, busy, workspacePath, t, onKeep, onRevert, onOpen }:
   const selectionReference = (() => {
     if (selection === undefined) return undefined
     const rows = model.diff.rows.slice(selection.start, selection.end + 1)
-    // New-side numbers where they exist; a pure deletion falls back to the
-    // old side, which is the only side those lines have.
+    // Only the new (current) file's lines are referenceable: removed lines
+    // have no current-side number, so they contribute nothing to the range.
     const lineNumbers = rows
-      .map(row => row.newLine ?? row.oldLine)
+      .map(row => row.newLine)
       .filter((number): number is number => number !== undefined)
     if (lineNumbers.length === 0) return undefined
     return referenceOf(file.path, workspacePath, Math.min(...lineNumbers), Math.max(...lineNumbers))
