@@ -827,9 +827,9 @@ export function PendingPanel({
     return () => { document.removeEventListener('pointerdown', onPointerDown, true) }
   }, [open])
 
-  const files = snapshot.files
-  const mine = files.filter(file => file.sessionId === current)
-  const theirs = files.filter(file => file.sessionId !== current)
+  // The panel reviews only the current session's files; other sessions of the
+  // same workspace stay out of the list, badge, and auto-advance.
+  const files = snapshot.files.filter(file => file.sessionId === current)
 
   // Auto-open the first pending file when the panel opens, and advance to the
   // next one once the selected file is handled. Selection is single and cannot
@@ -837,7 +837,7 @@ export function PendingPanel({
   useEffect(() => {
     if (!open) return
     if (selected !== '' && files.some(file => file.id === selected)) return
-    const next = [...mine, ...theirs][0]
+    const next = files[0]
     if (next !== undefined && next.id !== selected) setSelected(next.id)
   }, [open, current, files, selected])
 
@@ -940,16 +940,10 @@ export function PendingPanel({
           ) : (
             <div className={css.split}>
               <nav className={css.fileList} style={{ width: listWidth }} data-diff-approval-file-list>
-                {mine.length > 0 && (
+                {files.length > 0 && (
                   <section>
                     <h3 className={css.group}>{t('panel.group.current')}</h3>
-                    <ul className={css.rows}>{mine.map(renderEntry)}</ul>
-                  </section>
-                )}
-                {theirs.length > 0 && (
-                  <section>
-                    <h3 className={css.group}>{t('panel.group.others')}</h3>
-                    <ul className={css.rows}>{theirs.map(renderEntry)}</ul>
+                    <ul className={css.rows}>{files.map(renderEntry)}</ul>
                   </section>
                 )}
               </nav>

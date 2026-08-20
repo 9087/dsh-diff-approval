@@ -204,15 +204,15 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
   })
 
-  it('groups the current session first and other sessions below', () => {
+  it('shows only the current session files, not other sessions in the workspace', () => {
     const other = entry({ id: 'entry-other', sessionId: 'session-2' as SessionId, path: '/repo/other.txt' })
     const props = panelProps({ read: true, files: [other, FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     expect(screen.getByText('panel.group.current')).toBeDefined()
-    expect(screen.getByText('panel.group.others')).toBeDefined()
     expect(screen.getByText('a.txt')).toBeDefined()
-    expect(screen.getByText('other.txt')).toBeDefined()
+    expect(screen.queryByText('other.txt')).toBeNull()
+    expect(screen.queryByText('panel.group.others')).toBeNull()
   })
 
   it('shows one row per file with its short name', () => {
