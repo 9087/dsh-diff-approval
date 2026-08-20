@@ -649,6 +649,9 @@ function PendingDiff({ file, busy, workspacePath, t, onKeep, onRevert, onBlockKe
               data-diff-block-actions
               style={{ top: model.blocks[hoveredBlock]!.start * ROW_HEIGHT_PX }}
             >
+              <span className={css.blockPosition} data-diff-block-position>
+                {t('panel.blockPosition', { current: hoveredBlock + 1, total: model.blocks.length })}
+              </span>
               <button
                 type="button"
                 className={`${css.action} ${css.actionPrimary}`}

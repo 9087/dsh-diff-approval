@@ -440,6 +440,10 @@ describe('PendingPanel', () => {
     const revert = actions.querySelector('[data-diff-block-revert]') as HTMLElement
     expect(keep).not.toBeNull()
     expect(revert).not.toBeNull()
+    // The frame names this block's position: block 1 of 2.
+    const position = actions.querySelector('[data-diff-block-position]') as HTMLElement
+    expect(position.textContent).toContain('1')
+    expect(position.textContent).toContain('2')
 
     fireEvent.click(keep)
     const keepMock = props.onBlockKeep as unknown as { mock: { calls: unknown[][] } }
