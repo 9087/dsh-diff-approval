@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.0](https://github.com/9087/dsh-diff-approval/compare/v0.6.0...v0.7.0) (2026-08-20)
+
+### Features
+
+* add an in-file search bar to the code view, opened via a toolbar button or Ctrl+F. ([b53cf1e](https://github.com/9087/dsh-diff-approval/commit/b53cf1e2d87bc90da842318bf54140fee04d2189))
+* anchor the per-block actions frame to the block's bottom edge and pad the diff bottom so it is never clipped. ([cf0ced7](https://github.com/9087/dsh-diff-approval/commit/cf0ced7966c24a3f81daf3ea6bc040ed788447a0))
+* re-clicking the already-open file in the list jumps to the next diff block. ([699578e](https://github.com/9087/dsh-diff-approval/commit/699578e691499d368f06af6474db9686f84ada8e))
+* show only the current session's diff files in the review panel. ([d4fd2dd](https://github.com/9087/dsh-diff-approval/commit/d4fd2dd80d42257361cdd37005d4becbe3fc14b7))
+* show the hovered block's position among the file's diff blocks. ([0a02a19](https://github.com/9087/dsh-diff-approval/commit/0a02a190e024c86654d9ef36bbce9e1a15a7df60))
+
 ## [0.6.0](https://github.com/9087/dsh-diff-approval/compare/v0.5.0...v0.6.0) (2026-08-19)
 
 ### Features
