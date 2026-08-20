@@ -460,6 +460,32 @@ describe('PendingPanel', () => {
     expect(view.container.querySelector('[data-diff-block-actions]')).toBeNull()
   })
 
+  it('anchors the block frame to the block bottom and pads the diff bottom when the block is the last row', () => {
+    // Last row of the file is the changed row, so the floating frame would be
+    // clipped unless the diff bottom is padded to fit it.
+    const lastRowDiff = entry({ id: 'entry-last-row', oldText: 'a\nb\nc\n', newText: 'a\nb\nC\n' })
+    const props = panelProps({ read: true, files: [lastRowDiff], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const rows = [...view.container.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const last = rows[rows.length - 1]!
+    fireEvent.mouseEnter(last)
+
+    const actions = view.container.querySelector('[data-diff-block-actions]') as HTMLElement
+    expect(actions).not.toBeNull()
+    // Frame's top edge sits at the block's bottom edge: one row below the
+    // block's last row. The del 'c' + add 'C' rows are the last two of the 4
+    // rendered rows, so the block's last row is 3 -> (3 + 1) * 22.
+    expect(actions.style.top).toBe('88px')
+
+    // The bottom pad spacer fills the frame height so it is not clipped.
+    const pad = [...view.container.querySelectorAll('[aria-hidden="true"]')]
+      .find(el => (el as HTMLElement).style.height === '40px')
+    expect(pad).toBeDefined()
+  })
+
   it('moves the focus between contiguous change blocks', () => {
     const twoBlocks = entry({ id: 'entry-blocks', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [twoBlocks], busy: new Set() })

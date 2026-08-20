@@ -533,18 +533,18 @@
   cursor: default;
 }
 
-/* Per-block Keep/Revert, shown at the hovered block's top-right, framed on
-   the file-list surface. Positioned in the diff scroller (the rows'
+/* Per-block Keep/Revert, shown at the hovered block's bottom-right edge,
+   framed on the file-list surface. Positioned in the diff scroller (the rows'
    containing block) so it tracks the block as the file scrolls. The buttons
    themselves are plain `.action`s, so they share the whole-file buttons'
    height. */
 .blockActions {
   position: absolute;
-  right: 6px;
+  right: 8px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px;
+  gap: 9px;
+  padding: 5px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 10px;
   /* Match the status bar's surface: both sit on the diff's code-block tint. */

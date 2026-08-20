@@ -49,6 +49,10 @@ const MAX_LIST_WIDTH_PX = 560
 const ROW_HEIGHT_PX = 22
 /** Rows rendered beyond the visible window in each direction. */
 const OVERSCAN_ROWS = 8
+/** Height of the floating per-block Keep/Revert frame in px: 26px actions +
+ * 5px frame padding on each side + 1px border on each side, plus a little
+ * breathing room so the bottom padding never sits flush against it. */
+const BLOCK_ACTIONS_FRAME_PX = 40
 
 /** Full panel props composed by the sidebar footer-action slot. */
 export type PendingPanelProps =
@@ -415,6 +419,15 @@ function PendingDiff({ file, busy, workspacePath, t, onKeep, onRevert, onBlockKe
   const end = Math.min(rowCount, Math.ceil((scrollTop + viewport) / ROW_HEIGHT_PX) + OVERSCAN_ROWS)
   const visibleRows = rows.slice(start, end)
 
+  // When the hovered block's last row reaches the bottom of the file, the
+  // floating Keep/Revert frame (anchored to the block's bottom edge) would
+  // extend past the scrollable content and be clipped by the scroller. Pad
+  // the diff bottom with just enough height to fit it.
+  const hoveredBlockEnd = hoveredBlock !== undefined ? model.blocks[hoveredBlock]?.end : undefined
+  const blockActionsPadPx = hoveredBlockEnd === undefined
+    ? 0
+    : Math.max(0, (hoveredBlockEnd + 1) * ROW_HEIGHT_PX + BLOCK_ACTIONS_FRAME_PX - rowCount * ROW_HEIGHT_PX)
+
   // Widest line in the file, in characters: pins the table's width so the
   // added/deleted tint spans the same width at every scroll position (the
   // rendered window's own widest line alone would make it jump).
@@ -642,12 +655,15 @@ function PendingDiff({ file, busy, workspacePath, t, onKeep, onRevert, onBlockKe
             {end < rowCount && (
               <div className={css.vSpacer} style={{ height: (rowCount - end) * ROW_HEIGHT_PX }} aria-hidden="true" />
             )}
+            {blockActionsPadPx > 0 && (
+              <div className={css.vSpacer} style={{ height: blockActionsPadPx }} aria-hidden="true" />
+            )}
           </div>
           {hoveredBlock !== undefined && model.blocks[hoveredBlock] !== undefined && (
             <div
               className={css.blockActions}
               data-diff-block-actions
-              style={{ top: model.blocks[hoveredBlock]!.start * ROW_HEIGHT_PX }}
+              style={{ top: (model.blocks[hoveredBlock]!.end + 1) * ROW_HEIGHT_PX }}
             >
               <span className={css.blockPosition} data-diff-block-position>
                 {t('panel.blockPosition', { current: hoveredBlock + 1, total: model.blocks.length })}
