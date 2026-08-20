@@ -81,6 +81,9 @@ interface PendingDiffProps {
   busy: boolean
   /** The current workspace root, for workspace-relative copied references. */
   workspacePath?: string | undefined
+  /** Bumped by the panel when the already-open file is clicked again: jumps
+   * to the next change block. */
+  jumpSignal: number
   t: Translator
   onKeep: (sessionId: SessionId, id: string) => Promise<void>
   onRevert: (sessionId: SessionId, id: string) => Promise<void>
@@ -301,7 +304,7 @@ function PendingFileRow({ file, selected, t, onSelect }: PendingFileRowProps) {
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, jumpSignal, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -489,6 +492,14 @@ function PendingDiff({ file, busy, workspacePath, t, onKeep, onRevert, onBlockKe
     // block), so an out-of-view block is always scrolled back into view.
     setScrollTick(tick => tick + 1)
   }
+
+  // Re-clicking the already-open file in the list jumps to the next change
+  // block; the panel bumps `jumpSignal` to trigger it. A fresh signal while
+  // on the same file re-runs this, wrapping to the first block when needed.
+  useEffect(() => {
+    if (jumpSignal === 0) return
+    jump(1)
+  }, [jumpSignal])
 
   const onScroll = () => {
     const body = bodyRef.current
@@ -756,6 +767,9 @@ export function PendingPanel({
   const snapshot = usePending(snapshot => snapshot)
   const [open, setOpen] = useState(false)
   const [selected, setSelected] = useState('')
+  /** Bumped when the already-open file is clicked again, to jump to the next
+   * diff block in the open file's detail pane. */
+  const [jumpSignal, setJumpSignal] = useState(0)
   /** Pending count captured at open time; auto-close needs a list that emptied. */
   const [openedCount, setOpenedCount] = useState(0)
   /** Bottom offset tracking the chat composer's top edge so the input stays visible. */
@@ -878,7 +892,12 @@ export function PendingPanel({
       file={entry}
       selected={selected === entry.id}
       t={t}
-      onSelect={setSelected}
+      onSelect={(id) => {
+        // Re-clicking the already-open file jumps to the next diff block in
+        // the open file; any other row switches the selection.
+        if (id === selected) setJumpSignal(signal => signal + 1)
+        else setSelected(id)
+      }}
     />
   )
 
@@ -972,6 +991,7 @@ export function PendingPanel({
                     file={selectedFile}
                     busy={snapshot.busy.has(selectedFile.id)}
                     workspacePath={snapshot.workspacePath}
+                    jumpSignal={jumpSignal}
                     t={t}
                     onKeep={onKeep}
                     onRevert={onRevert}

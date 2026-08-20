@@ -490,8 +490,8 @@ describe('PendingPanel', () => {
     const twoBlocks = entry({ id: 'entry-blocks', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [twoBlocks], busy: new Set() })
     const view = render(<PendingPanel {...props} />)
+    // Opening the panel auto-selects the first file (block 0 focused).
     fireEvent.click(screen.getByLabelText('panel.aria'))
-    fireEvent.click(screen.getByText('a.txt'))
 
     const focusedLines = () => [...view.container.querySelectorAll('[data-diff-focused]')]
     // Block 0: the first change (del a / add A), both lines highlighted.
@@ -508,6 +508,29 @@ describe('PendingPanel', () => {
     // From the last block, next wraps back to the first.
     fireEvent.click(screen.getByLabelText('action.nextDiff'))
     fireEvent.click(screen.getByLabelText('action.nextDiff'))
+    expect(focusedLines()[0]!.textContent).toContain('a')
+  })
+
+  it('re-clicking the already-open file jumps to the next diff block', () => {
+    const twoBlocks = entry({ id: 'entry-blocks', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [twoBlocks], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    // Opening the panel auto-selects the first file with block 0 focused.
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const focusedLines = () => [...view.container.querySelectorAll('[data-diff-focused]')]
+    // Block 0 (del a / add A) is focused after the file is opened.
+    expect(focusedLines()).toHaveLength(2)
+    expect(focusedLines()[0]!.textContent).toContain('a')
+
+    // Clicking the file's row again must not reselect (it is already open);
+    // it jumps to the next diff block instead (c / C).
+    fireEvent.click(screen.getByText('a.txt'))
+    expect(focusedLines()).toHaveLength(2)
+    expect(focusedLines()[0]!.textContent).toContain('c')
+
+    // And again wraps around to the first block.
+    fireEvent.click(screen.getByText('a.txt'))
     expect(focusedLines()[0]!.textContent).toContain('a')
   })
 
