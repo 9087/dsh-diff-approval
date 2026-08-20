@@ -534,6 +534,54 @@ describe('PendingPanel', () => {
     expect(focusedLines()[0]!.textContent).toContain('a')
   })
 
+  it('searches the diff: counts hits, highlights them, and jumps between matches', () => {
+    const file = entry({ id: 'entry-search', oldText: 'foo\nbar\nbaz\n', newText: 'foo\nbar\nqux\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // No search UI or highlights until the bar is opened.
+    expect(view.container.querySelector('[data-diff-searchbar]')).toBeNull()
+    expect(view.container.querySelectorAll('[data-diff-search]')).toHaveLength(0)
+
+    fireEvent.click(screen.getByLabelText('action.search'))
+    expect(view.container.querySelector('[data-diff-searchbar]')).not.toBeNull()
+
+    // Query 'a' matches 'bar' (context row 1) and 'baz' (del row 2); the
+    // other rows 'foo'/'qux' have no 'a'.
+    const input = view.container.querySelector('[data-diff-search-input]') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'a' } })
+
+    expect(view.container.querySelector('[data-diff-search-count]')!.textContent).toBe('1/2')
+    expect(view.container.querySelectorAll('[data-diff-search="hit"]')).toHaveLength(1)
+    const firstCurrent = view.container.querySelector('[data-diff-search="current"]') as HTMLElement
+    expect(firstCurrent.textContent).toContain('bar')
+
+    // Next match moves to 'baz' and the count advances.
+    fireEvent.click(view.container.querySelector('[data-diff-search-next]') as HTMLElement)
+    expect(view.container.querySelector('[data-diff-search-count]')!.textContent).toBe('2/2')
+    const secondCurrent = view.container.querySelector('[data-diff-search="current"]') as HTMLElement
+    expect(secondCurrent.textContent).toContain('baz')
+
+    // Closing the bar clears the query and the highlights.
+    fireEvent.click(view.container.querySelector('[data-diff-search-close]') as HTMLElement)
+    expect(view.container.querySelector('[data-diff-searchbar]')).toBeNull()
+    expect(view.container.querySelectorAll('[data-diff-search]')).toHaveLength(0)
+  })
+
+  it('opens the search bar with Ctrl+F even when focus is outside the panel', () => {
+    const file = entry({ id: 'entry-search', oldText: 'foo\nbar\n', newText: 'foo\nqux\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(view.container.querySelector('[data-diff-searchbar]')).toBeNull()
+
+    // Ctrl+F with the focus on the page body (not inside the panel) still
+    // opens the search bar instead of the browser's native find.
+    fireEvent.keyDown(document.body, { key: 'f', ctrlKey: true })
+    expect(view.container.querySelector('[data-diff-searchbar]')).not.toBeNull()
+  })
+
   it('re-centers the sole block on every jump when it is the only one', () => {
     const single = entry({ id: 'entry-single', oldText: 'a\nb\nc\nd\ne\n', newText: 'A\nb\nc\nd\nE\n' })
     const props = panelProps({ read: true, files: [single], busy: new Set() })

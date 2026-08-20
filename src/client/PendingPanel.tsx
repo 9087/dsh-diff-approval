@@ -2,7 +2,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
-import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, Menu, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, IconSearchOutline16, Menu, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -108,9 +108,12 @@ const DiffRow = memo(function DiffRow(props: {
   row: WholeFileDiffRow
   runs: HighlightRuns | undefined
   focused: boolean
+  /** Whether this row contains a search hit, and if so whether it is current. */
+  searchHit: boolean
+  searchCurrent: boolean
   onRowHover: (index: number) => void
 }) {
-  const { index, row, runs, focused, onRowHover } = props
+  const { index, row, runs, focused, searchHit, searchCurrent, onRowHover } = props
   const lineNumber = row.kind === 'del' ? row.oldLine : row.newLine
   const sideRuns = row.kind === 'del' ? runs?.oldRuns : runs?.newRuns
   const lineRuns = lineNumber === undefined ? undefined : sideRuns?.[lineNumber - 1]
@@ -123,6 +126,7 @@ const DiffRow = memo(function DiffRow(props: {
       data-diff-line={row.kind}
       data-diff-row={index}
       data-diff-focused={focused ? '' : undefined}
+      data-diff-search={searchHit ? (searchCurrent ? 'current' : 'hit') : undefined}
       onMouseEnter={() => { onRowHover(index) }}
     >
       <span className={css.gutter}>{row.oldLine ?? ''}</span>
@@ -381,6 +385,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, t, onKeep, onRever
   const [hoveredBlock, setHoveredBlock] = useState<number | undefined>(undefined)
   const [selection, setSelection] = useState<RowRange | undefined>(undefined)
   const [copied, setCopied] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchIndex, setSearchIndex] = useState(0)
+  const searchInputRef = useRef<HTMLInputElement>(null)
 
   // Reset transient viewer state whenever the selected file changes.
   useEffect(() => {
@@ -392,12 +400,73 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, t, onKeep, onRever
     setLangOverride(undefined)
     setLangMenuOpen(false)
     setCopied(false)
+    setSearchOpen(false)
+    setSearchQuery('')
+    setSearchIndex(0)
   }, [file.id])
 
   // Old/new line ranges per diff block, for block-level keep/revert.
   const blockRanges = useMemo(() => {
     return model.blocks.map(block => blockRangesOf(model.diff.rows, block))
   }, [model])
+
+  // In-file search: matching lines over the whole diff (not just the rendered
+  // window), so the count and jumps stay correct while the virtual list
+  // scrolls. A line counts once however many times the query appears in it.
+  const searchMatches = useMemo(() => {
+    if (searchQuery === '') return []
+    const lower = searchQuery.toLowerCase()
+    const matches: number[] = []
+    for (let index = 0; index < model.diff.rows.length; index++) {
+      if (model.diff.rows[index]!.text.toLowerCase().includes(lower)) matches.push(index)
+    }
+    return matches
+  }, [model, searchQuery])
+  const searchHitSet = useMemo(() => new Set(searchMatches), [searchMatches])
+  const currentSearchRow = searchMatches.length === 0 ? undefined : searchMatches[searchIndex % searchMatches.length]
+
+  const goSearch = (direction: -1 | 1) => {
+    if (searchMatches.length === 0) return
+    setSearchIndex(current => (current + direction + searchMatches.length) % searchMatches.length)
+  }
+  const toggleSearch = () => {
+    if (searchOpen) {
+      setSearchOpen(false)
+      setSearchQuery('')
+      setSearchIndex(0)
+    } else {
+      setSearchOpen(true)
+    }
+  }
+  const closeSearch = () => {
+    setSearchOpen(false)
+    setSearchQuery('')
+    setSearchIndex(0)
+  }
+
+  // Focus the query box each time the search bar opens.
+  useEffect(() => {
+    if (searchOpen) searchInputRef.current?.focus()
+  }, [searchOpen])
+
+  // A new query or a new file lands on the first match.
+  useEffect(() => {
+    setSearchIndex(0)
+  }, [searchQuery, file.id])
+
+  // Center the current search match in the scroller (same arithmetic as the
+  // block centering; the DOM write is mirrored into state so the virtual
+  // window follows).
+  useEffect(() => {
+    const row = currentSearchRow
+    if (row === undefined) return
+    const body = bodyRef.current
+    if (body === null) return
+    const target = row * ROW_HEIGHT_PX + ROW_HEIGHT_PX / 2 - body.clientHeight / 2
+    const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
+    if (body.scrollTop !== clamped) body.scrollTop = clamped
+    setScrollTop(clamped)
+  }, [currentSearchRow, searchMatches])
 
   // Row index -> block index, so hovering any row of a block shows its actions.
   const blockIndexByRow = useMemo(() => {
@@ -555,6 +624,31 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, t, onKeep, onRever
     return () => { document.removeEventListener('keydown', onKeyDown) }
   }, [copySelection])
 
+  // Ctrl/Cmd+F opens the search bar and focuses its query box. The detail
+  // pane is mounted only while a file is open, so this intercepts globally
+  // while the diff is shown — browser find stays available whenever no file
+  // is open. Window capture is the earliest interception point, so nothing
+  // inside the harness (the code view is read-only and never holds focus) can
+  // swallow the chord; re-hitting it while open re-focuses and selects the
+  // query for retyping.
+  //
+  // TODO(editable code view): once the diff becomes an editable surface that
+  // can hold focus, scope this interception back to the panel (or to the
+  // open search bar) instead of hijacking Ctrl+F globally, so the browser's
+  // native find is available again elsewhere in the harness.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return
+      if (event.key.toLowerCase() !== 'f') return
+      event.preventDefault()
+      setSearchOpen(true)
+      searchInputRef.current?.focus()
+      searchInputRef.current?.select()
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true) }
+  }, [])
+
   const focusedBlock = model.blocks.length > 0 ? model.blocks[focus] : undefined
   const inFocusedBlock = (index: number): boolean =>
     focusedBlock !== undefined && index >= focusedBlock.start && index <= focusedBlock.end
@@ -617,6 +711,17 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, t, onKeep, onRever
             </Tooltip>
           </>
         )}
+        <Tooltip label={t('action.search')} side="bottom" delayMs={500}>
+          <button
+            type="button"
+            className={`${css.action} ${css.iconAction}`}
+            data-diff-search-toggle
+            aria-label={t('action.search')}
+            onClick={toggleSearch}
+          >
+            <IconSearchOutline16 size={14} />
+          </button>
+        </Tooltip>
         <span className={css.flexSpacer} />
         <button
           type="button"
@@ -659,6 +764,8 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, t, onKeep, onRever
                   row={row}
                   runs={runs}
                   focused={inFocusedBlock(index)}
+                  searchHit={searchHitSet.has(index)}
+                  searchCurrent={index === currentSearchRow}
                   onRowHover={onRowHover}
                 />
               )
@@ -700,6 +807,60 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, t, onKeep, onRever
             </div>
           )}
         </div>
+        {searchOpen && (
+          <div className={css.searchBar} data-diff-searchbar>
+            <input
+              ref={searchInputRef}
+              className={css.searchInput}
+              data-diff-search-input
+              value={searchQuery}
+              placeholder={t('panel.searchPlaceholder')}
+              onChange={(event) => { setSearchQuery(event.target.value) }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  goSearch(event.shiftKey ? -1 : 1)
+                } else if (event.key === 'Escape') {
+                  closeSearch()
+                }
+              }}
+            />
+            <span className={css.searchCount} data-diff-search-count>
+              {searchMatches.length === 0
+                ? '0/0'
+                : `${(searchIndex % searchMatches.length) + 1}/${searchMatches.length}`}
+            </span>
+            <button
+              type="button"
+              className={`${css.action} ${css.iconAction}`}
+              data-diff-search-prev
+              aria-label={t('action.prevDiff')}
+              disabled={searchMatches.length === 0}
+              onClick={() => { goSearch(-1) }}
+            >
+              <IconChevronUpOutline14 size={14} />
+            </button>
+            <button
+              type="button"
+              className={`${css.action} ${css.iconAction}`}
+              data-diff-search-next
+              aria-label={t('action.nextDiff')}
+              disabled={searchMatches.length === 0}
+              onClick={() => { goSearch(1) }}
+            >
+              <IconChevronDownOutline14 size={14} />
+            </button>
+            <button
+              type="button"
+              className={`${css.action} ${css.iconAction}`}
+              data-diff-search-close
+              aria-label={t('action.close')}
+              onClick={closeSearch}
+            >
+              <IconCloseOutline16 size={14} />
+            </button>
+          </div>
+        )}
         {rulerMarkers.length > 0 && (
           <div className={css.overviewRuler} data-diff-approval-ruler aria-hidden="true">
             {rulerMarkers.map((marker, index) => (

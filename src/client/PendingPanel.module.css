@@ -569,6 +569,63 @@
   white-space: nowrap;
 }
 
+/* In-file search bar: floats over the diff body, pinned to the visible area
+   because it lives in the wrapper (not the scroller). Same code-block surface
+   and chrome as the per-block actions frame. */
+.searchBar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-markdown-code-block);
+  box-shadow: var(--dsw-shadow-lv1);
+}
+
+.searchInput {
+  width: 150px;
+  padding: 3px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  outline: none;
+}
+
+.searchInput:focus {
+  border-color: var(--dsw-alias-state-business-primary);
+}
+
+.searchCount {
+  min-width: 34px;
+  text-align: center;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Search hits over the whole-file diff: a translucent amber tint layered on
+   top of the row's own context/del/add background (background-image paints
+   above background-color), so the +/- tint stays visible under the hit. The
+   current match is emphasized at a stronger opacity. */
+.diffBody [data-diff-search='hit'] {
+  background-image: linear-gradient(rgba(250, 204, 21, 0.16), rgba(250, 204, 21, 0.16));
+}
+
+.diffBody [data-diff-search='current'] {
+  background-image: linear-gradient(rgba(250, 204, 21, 0.32), rgba(250, 204, 21, 0.32));
+}
+
 /* Overview ruler over the vertical scrollbar: changed-line markers at their
    whole-file positions, tinted by the same semantic tokens as the lines.
    Non-interactive so dragging/clicking the scrollbar keeps working. */
