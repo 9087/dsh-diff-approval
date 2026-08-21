@@ -511,6 +511,65 @@ describe('PendingPanel', () => {
     expect(focusedLines()[0]!.textContent).toContain('a')
   })
 
+  it('jumps between change blocks with Ctrl+Up / Ctrl+Down while the panel is focused', () => {
+    const twoBlocks = entry({ id: 'entry-blocks', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [twoBlocks], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // Opening the panel auto-selects the file and focuses the diff body.
+    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
+    expect(document.activeElement).toBe(body)
+
+    const focusedLines = () => [...view.container.querySelectorAll('[data-diff-focused]')]
+    expect(focusedLines()[0]!.textContent).toContain('a')
+
+    fireEvent.keyDown(body, { key: 'ArrowDown', ctrlKey: true })
+    expect(focusedLines()[0]!.textContent).toContain('c')
+
+    fireEvent.keyDown(body, { key: 'ArrowUp', ctrlKey: true })
+    expect(focusedLines()[0]!.textContent).toContain('a')
+  })
+
+  it('flashes the focused block on open and on every block switch', () => {
+    const twoBlocks = entry({ id: 'entry-blocks', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [twoBlocks], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // Opening the file flashes the initially focused block 0 (rows 0-1).
+    const first = view.container.querySelector('[data-diff-block-flash]') as HTMLElement
+    expect(first).not.toBeNull()
+    expect(first.style.top).toBe('0px')
+    expect(first.style.height).toBe('44px')
+
+    // Jumping to block 1 remounts the flash over it: the del 'c' / add 'C'
+    // pair at rows 3-4 -> top 66px, height 44px.
+    fireEvent.click(screen.getByLabelText('action.nextDiff'))
+    const second = view.container.querySelector('[data-diff-block-flash]') as HTMLElement
+    expect(second).not.toBeNull()
+    expect(second).not.toBe(first)
+    expect(second.style.top).toBe('66px')
+    expect(second.style.height).toBe('44px')
+  })
+
+  it('re-flashes the same block when a single-block file re-jumps onto it', () => {
+    const single = entry({ id: 'entry-single', oldText: 'a\nb\nc\n', newText: 'A\nb\nc\n' })
+    const props = panelProps({ read: true, files: [single], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const flash = () => view.container.querySelector('[data-diff-block-flash]') as HTMLElement
+    expect(flash()).not.toBeNull()
+
+    // NextDiff wraps to the only block: the overlay must remount (new node)
+    // so the fade-out replays even though the block did not move.
+    const before = flash()
+    fireEvent.click(screen.getByLabelText('action.nextDiff'))
+    expect(flash()).not.toBeNull()
+    expect(flash()).not.toBe(before)
+  })
+
   it('re-clicking the already-open file jumps to the next diff block', () => {
     const twoBlocks = entry({ id: 'entry-blocks', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [twoBlocks], busy: new Set() })

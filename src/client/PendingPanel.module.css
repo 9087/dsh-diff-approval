@@ -523,6 +523,9 @@
   /* The whole area reads as selectable code, so the text I-beam cursor
      covers blank space too; the gutter and the scrollbar opt back out below. */
   cursor: text;
+  /* Focusable (tabIndex) so the Ctrl+Up/Down block jump can be scoped to the
+     panel; the scroll container gets no focus ring. */
+  outline: none;
 }
 
 /* The scrollbar must keep the arrow cursor: the text beam applies to the
@@ -626,6 +629,29 @@
   background-image: linear-gradient(rgba(250, 204, 21, 0.32), rgba(250, 204, 21, 0.32));
 }
 
+/* Transient flash framing the just-focused change block: a 1s brand-blue
+   outline that eases out to nothing. Keyed remount on each focus change
+   replays the animation; inert so hover and text selection pass through.
+   border-box keeps the 2px border inside the computed row height, so the
+   box's outer edge lands exactly on the block's boundary instead of spilling
+   2px past it. */
+.blockFlash {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  box-sizing: border-box;
+  border: 2px solid var(--dsw-alias-state-business-primary);
+  border-radius: 4px;
+  pointer-events: none;
+  animation: diffFlash 1s ease-out forwards;
+}
+
+@keyframes diffFlash {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
 /* Overview ruler over the vertical scrollbar: changed-line markers at their
    whole-file positions, tinted by the same semantic tokens as the lines.
    Non-interactive so dragging/clicking the scrollbar keeps working. */
@@ -671,6 +697,9 @@
   width: max-content;
   min-width: 100%;
   border-spacing: 0;
+  /* The block-flash overlay is positioned against the content width (not the
+     scroller's visible box), so its outline tracks the rows on any scroll. */
+  position: relative;
 }
 
 .line {

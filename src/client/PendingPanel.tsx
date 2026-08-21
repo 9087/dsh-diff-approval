@@ -389,12 +389,21 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, t, onKeep, onRever
   const [searchQuery, setSearchQuery] = useState('')
   const [searchIndex, setSearchIndex] = useState(0)
   const searchInputRef = useRef<HTMLInputElement>(null)
+  // Keys the block-flash overlay; every increment remounts it so the fade-out
+  // animation restarts. Bumped on file open/switch and on every jump (even a
+  // same-block wrap), so the focused block flashes whenever it is (re)shown.
+  const [flashKey, setFlashKey] = useState(0)
 
-  // Reset transient viewer state whenever the selected file changes.
+  // Reset transient viewer state whenever the selected file changes, take
+  // keyboard focus into the diff body so the Ctrl+Up/Down block-jump (scoped
+  // to the panel) works as soon as a file is shown, and flash the initial
+  // block so the user sees where the first change sits.
   useEffect(() => {
     setFocus(0)
     setScrollTop(0)
     if (bodyRef.current !== null) bodyRef.current.scrollTop = 0
+    bodyRef.current?.focus()
+    setFlashKey(key => key + 1)
     setHoveredBlock(undefined)
     setSelection(undefined)
     setLangOverride(undefined)
@@ -558,8 +567,11 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, t, onKeep, onRever
       return 0
     })
     // Bump the centering effect even when the focus is unchanged (a single
-    // block), so an out-of-view block is always scrolled back into view.
+    // block), so an out-of-view block is always scrolled back into view, and
+    // re-flash the block (its key changes -> the overlay remounts) so the
+    // fade-out replays when the same block is selected again.
     setScrollTick(tick => tick + 1)
+    setFlashKey(key => key + 1)
   }
 
   // Re-clicking the already-open file in the list jumps to the next change
@@ -647,6 +659,28 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, t, onKeep, onRever
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
+  }, [])
+
+  // Ctrl+Up/Down jumps between change blocks while the review panel owns the
+  // focus. The diff body is focusable (tabIndex) and auto-focused on file
+  // select, so keyboard navigation engages as soon as a file is shown; the
+  // panel scope leaves the composer's own Ctrl+Up/Down (cursor to the message
+  // start/end) intact, and text inputs (the search box) keep their moves.
+  const jumpRef = useRef(jump)
+  jumpRef.current = jump
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return
+      const key = event.key.toLowerCase()
+      if (key !== 'arrowup' && key !== 'arrowdown') return
+      const target = event.target as Node | null
+      if (!(target instanceof Element) || target.closest('[data-diff-approval-panel]') === null) return
+      if (target.closest('input, textarea, [contenteditable="true"]') !== null) return
+      event.preventDefault()
+      jumpRef.current(key === 'arrowup' ? -1 : 1)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => { document.removeEventListener('keydown', onKeyDown) }
   }, [])
 
   const focusedBlock = model.blocks.length > 0 ? model.blocks[focus] : undefined
@@ -747,6 +781,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, t, onKeep, onRever
         <div
           className={css.diffBody}
           ref={bodyRef}
+          tabIndex={0}
           onScroll={onScroll}
           onMouseLeave={() => { setHoveredBlock(undefined) }}
           data-diff-body
@@ -775,6 +810,17 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, t, onKeep, onRever
             )}
             {blockActionsPadPx > 0 && (
               <div className={css.vSpacer} style={{ height: blockActionsPadPx }} aria-hidden="true" />
+            )}
+            {focusedBlock !== undefined && flashKey > 0 && (
+              <div
+                key={flashKey}
+                className={css.blockFlash}
+                data-diff-block-flash
+                style={{
+                  top: focusedBlock.start * ROW_HEIGHT_PX,
+                  height: (focusedBlock.end - focusedBlock.start + 1) * ROW_HEIGHT_PX,
+                }}
+              />
             )}
           </div>
           {hoveredBlock !== undefined && model.blocks[hoveredBlock] !== undefined && (
