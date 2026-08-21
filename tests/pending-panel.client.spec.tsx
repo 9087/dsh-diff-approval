@@ -3,7 +3,7 @@
 // navigation, live-state warnings, and the line-selection copy toolbar.
 
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ComponentProps } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingFileDiff } from '../src/types.ts'
@@ -223,6 +223,23 @@ describe('PendingPanel', () => {
 
     expect(screen.getAllByText('a.txt')).toHaveLength(1)
     expect(screen.getAllByText('b.txt')).toHaveLength(1)
+  })
+
+  it('keeps or reverts every current-session file from the list footer', async () => {
+    const second = entry({ id: 'entry-2', path: '/repo/b.txt' })
+    const props = panelProps({ read: true, files: [FILE, second], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    fireEvent.click(screen.getByText('action.keepAll'))
+    const keepMock = props.onKeep as unknown as { mock: { calls: unknown[][] } }
+    await waitFor(() => { expect(keepMock.mock.calls).toHaveLength(2) })
+    expect(keepMock.mock.calls.map(call => call[1])).toEqual([FILE.id, 'entry-2'])
+
+    fireEvent.click(screen.getByText('action.revertAll'))
+    const revertMock = props.onRevert as unknown as { mock: { calls: unknown[][] } }
+    await waitFor(() => { expect(revertMock.mock.calls).toHaveLength(2) })
+    expect(revertMock.mock.calls.map(call => call[1])).toEqual([FILE.id, 'entry-2'])
   })
 
   it('always shows the short file name with the full path on hover, even when basenames collide', () => {

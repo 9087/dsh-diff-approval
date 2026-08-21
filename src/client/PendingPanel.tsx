@@ -977,6 +977,8 @@ export function PendingPanel({
   /** Bumped when the already-open file is clicked again, to jump to the next
    * diff block in the open file's detail pane. */
   const [jumpSignal, setJumpSignal] = useState(0)
+  /** Which bulk decision (keep-all / revert-all) is running; null when idle. */
+  const [bulkBusy, setBulkBusy] = useState<'keep' | 'revert' | null>(null)
   /** Pending count captured at open time; auto-close needs a list that emptied. */
   const [openedCount, setOpenedCount] = useState(0)
   /** Bottom offset tracking the chat composer's top edge so the input stays visible. */
@@ -1093,6 +1095,19 @@ export function PendingPanel({
     setOpen(value => !value)
   }
 
+  /** Run the same decision over every current-session file, sequentially. */
+  const runBulk = async (kind: 'keep' | 'revert') => {
+    setBulkBusy(kind)
+    try {
+      for (const file of files) {
+        if (kind === 'keep') await onKeep(file.sessionId, file.id)
+        else await onRevert(file.sessionId, file.id)
+      }
+    } finally {
+      setBulkBusy(null)
+    }
+  }
+
   const renderEntry = (entry: PendingFileDiff) => (
     <PendingFileRow
       key={entry.id}
@@ -1182,11 +1197,35 @@ export function PendingPanel({
           ) : (
             <div className={css.split}>
               <nav className={css.fileList} style={{ width: listWidth }} data-diff-approval-file-list>
+                <div className={css.listScroll}>
+                  {files.length > 0 && (
+                    <section>
+                      <h3 className={css.group}>{t('panel.group.current')}</h3>
+                      <ul className={css.rows}>{files.map(renderEntry)}</ul>
+                    </section>
+                  )}
+                </div>
                 {files.length > 0 && (
-                  <section>
-                    <h3 className={css.group}>{t('panel.group.current')}</h3>
-                    <ul className={css.rows}>{files.map(renderEntry)}</ul>
-                  </section>
+                  <div className={css.bulkActions}>
+                    <button
+                      type="button"
+                      className={`${css.action} ${css.actionPrimary}`}
+                      data-diff-keep-all
+                      disabled={bulkBusy !== null}
+                      onClick={() => { void runBulk('keep') }}
+                    >
+                      {bulkBusy === 'keep' ? t('action.busy') : t('action.keepAll')}
+                    </button>
+                    <button
+                      type="button"
+                      className={css.action}
+                      data-diff-revert-all
+                      disabled={bulkBusy !== null}
+                      onClick={() => { void runBulk('revert') }}
+                    >
+                      {bulkBusy === 'revert' ? t('action.busy') : t('action.revertAll')}
+                    </button>
+                  </div>
                 )}
               </nav>
               <div className={css.resizeHandle} data-diff-resize onMouseDown={startResize} />

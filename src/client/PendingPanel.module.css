@@ -181,10 +181,31 @@
   flex: none;
   width: 240px;
   min-height: 0;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
   padding: 4px 8px 12px;
   box-sizing: border-box;
   border-right: 1px solid var(--dsw-alias-border-l2);
+}
+
+/* The file rows scroll; the Keep-all / Revert-all footer stays pinned. */
+.listScroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Bulk decisions under the file list: two equal-width actions. */
+.bulkActions {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  padding-top: 8px;
+}
+
+.bulkActions .action {
+  flex: 1;
+  text-align: center;
 }
 
 .resizeHandle {
