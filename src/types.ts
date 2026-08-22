@@ -99,4 +99,6 @@ export type DiffApprovalActionOutcome = 'kept' | 'reverted' | 'missing' | 'undon
 export interface DiffApprovalActionValue {
   /** What the request did; `missing` means no pending entry existed. */
   outcome: DiffApprovalActionOutcome
+  /** Entry id the undo/redo affected; absent for a no-op or a non-undo action. */
+  id?: string | undefined
 }

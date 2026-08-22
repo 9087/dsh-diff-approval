@@ -54,6 +54,10 @@ const OVERSCAN_ROWS = 8
  * 5px frame padding on each side + 1px border on each side, plus a little
  * breathing room so the bottom padding never sits flush against it. */
 const BLOCK_ACTIONS_FRAME_PX = 40
+/** How long a fully-processed list stays open before the panel folds, so the
+ * last action (a Keep-all/Revert-all especially) can still be undone with
+ * Ctrl+Z. An undo that restores an entry cancels the pending close. */
+const EMPTY_CLOSE_GRACE_MS = 3000
 
 /** Full panel props composed by the sidebar footer-action slot. */
 export type PendingPanelProps =
@@ -108,14 +112,13 @@ interface PendingDiffProps {
   /** Bumped by the panel when the already-open file is clicked again: jumps
    * to the next change block. */
   jumpSignal: number
+  /** Bumped when an undo/redo touched the currently open file: re-select the
+   * undone diff (flash its first change block). */
+  undoFlash: number
   /** The last keep/revert failure for this file, shown as an inline banner. */
   failedMessage?: string | undefined
   /** Paste a copied reference into the session's chat input and focus it. */
   onPasteReference: (sessionId: SessionId, reference: string) => void
-  /** Undo the session's last keep/revert (Ctrl+Z). */
-  onUndo: (sessionId: SessionId) => void
-  /** Redo the session's last undone keep/revert (Ctrl+Y). */
-  onRedo: (sessionId: SessionId) => void
   t: Translator
   onKeep: (sessionId: SessionId, id: string) => Promise<void>
   onRevert: (sessionId: SessionId, id: string) => Promise<void>
@@ -344,7 +347,7 @@ function PendingFileRow({ file, selected, failedMessage, t, onSelect }: PendingF
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, onPasteReference, onUndo, onRedo, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedMessage, onPasteReference, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -449,6 +452,17 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, onP
     setSearchQuery('')
     setSearchIndex(0)
   }, [file.id])
+
+  // An undo/redo that touched the currently open file re-selects the undone
+  // diff the same way switching to a file does: reset to the first change
+  // block, recenter it, and flash it (the highlight box). The panel bumps
+  // `undoFlash` when the action's affected id is the open file's.
+  useEffect(() => {
+    if (undoFlash === 0) return
+    setFocus(0)
+    setScrollTick(tick => tick + 1)
+    setFlashKey(key => key + 1)
+  }, [undoFlash])
 
   // Old/new line ranges per diff block, for block-level keep/revert.
   const blockRanges = useMemo(() => {
@@ -706,37 +720,6 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, onP
     window.addEventListener('keydown', onKeyDown, true)
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
   }, [])
-
-  // Ctrl+Z / Ctrl+Y undo/redo the last keep/revert. The detail pane is
-  // mounted only while a file is open, so this intercepts globally while the
-  // diff is shown — the code view is read-only and never reliably holds focus
-  // (after clicking Keep/Revert the focus sits on the body), so a panel scope
-  // would make the chord dead right after an action. Window capture beats any
-  // inner handler; text inputs (the composer, the search box) keep their own
-  // Ctrl+Z/Ctrl+Y editing. Ctrl+Shift+Z also redoes.
-  //
-  // TODO(editable code view): once the diff becomes an editable surface that
-  // can hold focus, scope this back to the panel so the composer's own
-  // undo/redo is restored everywhere else.
-  const sessionId = file.sessionId
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey) return
-      const key = event.key.toLowerCase()
-      if (key !== 'z' && key !== 'y') return
-      const target = event.target as Node | null
-      if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null) return
-      event.preventDefault()
-      if (key === 'z') {
-        if (event.shiftKey) void onRedo(sessionId)
-        else void onUndo(sessionId)
-      } else {
-        void onRedo(sessionId)
-      }
-    }
-    window.addEventListener('keydown', onKeyDown, true)
-    return () => { window.removeEventListener('keydown', onKeyDown, true) }
-  }, [onRedo, onUndo, sessionId])
 
   // Ctrl+Up/Down jumps between change blocks. The detail pane is mounted only
   // while a file is open, so this intercepts globally while the diff is shown
@@ -1066,6 +1049,9 @@ export function PendingPanel({
   /** Bumped when the already-open file is clicked again, to jump to the next
    * diff block in the open file's detail pane. */
   const [jumpSignal, setJumpSignal] = useState(0)
+  /** Bumped when an undo/redo affected the already-open file, so its detail
+   * pane re-selects the undone diff (flash). */
+  const [undoFlash, setUndoFlash] = useState(0)
   /** Which bulk decision (keep-all / revert-all) is running; null when idle. */
   const [bulkBusy, setBulkBusy] = useState<'keep' | 'revert' | null>(null)
   /** Pending count captured at open time; auto-close needs a list that emptied. */
@@ -1173,14 +1159,19 @@ export function PendingPanel({
     if (next !== undefined && next.id !== selected) setSelected(next.id)
   }, [open, current, files, selected])
 
-  // A list that empties through Keep/Revert closes the panel; opening an
-  // already-empty list stays open so the empty note stays readable. An error
-  // also keeps it open.
+  // A list that empties through Keep/Revert closes the panel — after a short
+  // grace period so the action that emptied it (a Keep-all/Revert-all above
+  // all) can still be undone with Ctrl+Z. Undoing restores an entry, which
+  // re-runs this effect and cancels the pending close. Opening an already-
+  // empty list stays open (openedCount 0); an error also keeps it open.
   useEffect(() => {
-    if (open && openedCount > 0 && snapshot.read && snapshot.error === undefined && files.length === 0) {
+    if (!open || openedCount === 0) return
+    if (!(snapshot.read && snapshot.error === undefined && files.length === 0)) return
+    const timer = window.setTimeout(() => {
       setOpenedCount(0)
       setOpen(false)
-    }
+    }, EMPTY_CLOSE_GRACE_MS)
+    return () => { window.clearTimeout(timer) }
   }, [open, openedCount, snapshot.read, snapshot.error, files.length])
 
   const toggleOpen = () => {
@@ -1218,6 +1209,52 @@ export function PendingPanel({
   )
 
   const selectedFile = files.find(file => file.id === selected)
+
+  // Undo/redo resolves to the affected entry id while it is still pending.
+  // The panel then selects that file, or — when it is already the open one —
+  // bumps `undoFlash` so its detail pane re-flashes the undone diff.
+  const handleUndo = async (sessionId: SessionId): Promise<void> => {
+    const id = await onUndo(sessionId)
+    if (id === undefined) return
+    if (id === selected) setUndoFlash(signal => signal + 1)
+    else setSelected(id)
+  }
+  const handleRedo = async (sessionId: SessionId): Promise<void> => {
+    const id = await onRedo(sessionId)
+    if (id === undefined) return
+    if (id === selected) setUndoFlash(signal => signal + 1)
+    else setSelected(id)
+  }
+
+  // Ctrl+Z / Ctrl+Y undo/redo the last keep/revert (per-file or bulk). The
+  // handler lives on the panel — not the detail pane — so it works even with
+  // no file selected (a bulk action leaves an empty list), and stays alive
+  // through the empty-list close grace period above. Window capture beats any
+  // inner handler; text inputs (the composer, the search box) keep their own
+  // Ctrl+Z/Ctrl+Y editing, and Ctrl+Shift+Z also redoes.
+  //
+  // TODO(editable code view): once the diff becomes an editable surface that
+  // can hold focus, scope this back to the panel so the composer's own
+  // undo/redo is restored everywhere else.
+  useEffect(() => {
+    if (!open || current === undefined) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return
+      const key = event.key.toLowerCase()
+      if (key !== 'z' && key !== 'y') return
+      const target = event.target as Node | null
+      if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null) return
+      event.preventDefault()
+      if (key === 'z') {
+        if (event.shiftKey) void handleRedo(current)
+        else void handleUndo(current)
+      } else {
+        void handleRedo(current)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true) }
+  }, [open, current, handleUndo, handleRedo])
 
   /** Drag the list/detail divider; width follows the pointer within its bounds. */
   const startResize = (event: ReactMouseEvent<HTMLDivElement>) => {
@@ -1349,10 +1386,9 @@ export function PendingPanel({
                     busy={snapshot.busy.has(selectedFile.id)}
                     workspacePath={snapshot.workspacePath}
                     jumpSignal={jumpSignal}
+                    undoFlash={undoFlash}
                     failedMessage={failed.get(selectedFile.id)}
                     onPasteReference={onPasteReference}
-                    onUndo={onUndo}
-                    onRedo={onRedo}
                     t={t}
                     onKeep={onKeep}
                     onRevert={onRevert}

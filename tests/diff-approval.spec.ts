@@ -631,12 +631,12 @@ describe('undo/redo', () => {
     expect(await listEntries(handle, 'session-1')).toEqual([])
 
     await expect(handle('undo', { sessionId: 'session-1' }, signal()))
-      .resolves.toEqual({ ok: true, value: { outcome: 'undone' } })
+      .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: entry!.id } })
     const [restored] = await listEntries(handle, 'session-1')
     expect(restored).toMatchObject({ id: entry!.id, path: '/repo/a.txt', kind: 'edit', oldText: 'a', newText: 'b' })
 
     await expect(handle('redo', { sessionId: 'session-1' }, signal()))
-      .resolves.toEqual({ ok: true, value: { outcome: 'redone' } })
+      .resolves.toEqual({ ok: true, value: { outcome: 'redone', id: entry!.id } })
     expect(await listEntries(handle, 'session-1')).toEqual([])
   })
 
@@ -653,13 +653,13 @@ describe('undo/redo', () => {
     expect(await listEntries(handle, 'session-1')).toEqual([])
 
     await expect(handle('undo', { sessionId: 'session-1' }, signal()))
-      .resolves.toEqual({ ok: true, value: { outcome: 'undone' } })
+      .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: entry!.id } })
     expect(diskContent).toBe('b')
     const [restored] = await listEntries(handle, 'session-1')
     expect(restored).toMatchObject({ oldText: 'a', newText: 'b' })
 
     await expect(handle('redo', { sessionId: 'session-1' }, signal()))
-      .resolves.toEqual({ ok: true, value: { outcome: 'redone' } })
+      .resolves.toEqual({ ok: true, value: { outcome: 'redone', id: entry!.id } })
     expect(diskContent).toBe('a')
     expect(await listEntries(handle, 'session-1')).toEqual([])
   })
@@ -677,7 +677,7 @@ describe('undo/redo', () => {
     expect(diskContent).toBe('a\nb\n')
 
     await expect(handle('undo', { sessionId: 'session-1' }, signal()))
-      .resolves.toEqual({ ok: true, value: { outcome: 'undone' } })
+      .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: entry!.id } })
     expect(diskContent).toBe('A\nb\n')
     const [restored] = await listEntries(handle, 'session-1')
     expect(restored).toMatchObject({ oldText: 'a\nb\n', newText: 'A\nb\n' })

@@ -119,7 +119,9 @@ function actionOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): Dif
     && outcome !== 'undone' && outcome !== 'redone' && outcome !== 'nothing') {
     throw new Error('the action returned a malformed outcome')
   }
-  return { outcome }
+  const id = (value as Record<string, unknown>).id
+  const entryId = typeof id === 'string' && id.length > 0 ? id : undefined
+  return { outcome, id: entryId }
 }
 
 /** Narrow the open endpoint's value; a malformed wire value is an open failure. */

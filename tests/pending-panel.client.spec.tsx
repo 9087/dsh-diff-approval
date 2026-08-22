@@ -375,17 +375,40 @@ describe('PendingPanel', () => {
     failed.unmount()
   })
 
-  it('closes the panel once a non-empty list empties through handling', () => {
+  it('closes the panel once a non-empty list empties through handling, after the undo grace', () => {
+    vi.useFakeTimers()
     const view = render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     expect(screen.getByText('panel.title')).toBeDefined()
 
     view.rerender(<PendingPanel {...panelProps({ read: true, files: [], busy: new Set() })} />)
+    // The emptied list stays open through the undo grace window...
+    expect(screen.getByText('panel.empty')).toBeDefined()
+    expect(screen.queryByText('panel.title')).not.toBeNull()
+    // ...then folds once the grace elapses.
+    act(() => { vi.advanceTimersByTime(3000) })
     expect(screen.queryByText('panel.title')).toBeNull()
+    vi.useRealTimers()
 
     // Reopening an empty list stays open.
     fireEvent.click(screen.getByLabelText('panel.aria'))
     expect(screen.getByText('panel.empty')).toBeDefined()
+  })
+
+  it('undoes a bulk keep-all after the list empties, through the open grace window', () => {
+    vi.useFakeTimers()
+    const first = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const second = panelProps({ read: true, files: [], busy: new Set() })
+    const view = render(<PendingPanel {...first} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    view.rerender(<PendingPanel {...second} />)
+    // The emptied list stays open during the grace, so the bulk decision is
+    // still undoable via the panel-level Ctrl+Z handler (no file selected).
+    expect(screen.getByText('panel.empty')).toBeDefined()
+    fireEvent.keyDown(document.body, { key: 'z', ctrlKey: true })
+    const undoMock = second.onUndo as unknown as { mock: { calls: unknown[][] } }
+    expect(undoMock.mock.calls).toEqual([[S1]])
+    vi.useRealTimers()
   })
 
   it('shows the icon and the pending count as a bubble in the collapsed rail mode', () => {
@@ -724,6 +747,44 @@ describe('PendingPanel', () => {
     fireEvent.keyDown(input, { key: 'z', ctrlKey: true })
     expect(undoMock.mock.calls).toHaveLength(1)
     input.remove()
+  })
+
+  it('selects the file an undo affected and flashes its diff', async () => {
+    const other = entry({ id: 'entry-2', path: '/repo/b.txt', oldText: 'x\n', newText: 'y\n' })
+    const props = panelProps({ read: true, files: [FILE, other], busy: new Set() })
+    ;(props.onUndo as unknown as { mockResolvedValueOnce: (value: string) => void })
+      .mockResolvedValueOnce('entry-2')
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    // The detail pane shows a.txt; the other file's path is not open yet.
+    expect(screen.queryByText('/repo/b.txt')).toBeNull()
+
+    // Undo resolves to another file's id: the panel switches to it and its
+    // diff mounts, flashing the first change block.
+    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
+    fireEvent.keyDown(body, { key: 'z', ctrlKey: true })
+    await waitFor(() => { expect(screen.getByText('/repo/b.txt')).toBeDefined() })
+    expect(document.querySelector('[data-diff-block-flash]')).not.toBeNull()
+  })
+
+  it('re-flashes the open file when an undo affects it', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    ;(props.onUndo as unknown as { mockResolvedValueOnce: (value: string) => void })
+      .mockResolvedValueOnce(FILE.id)
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    const flashBefore = document.querySelector('[data-diff-block-flash]')
+    expect(flashBefore).not.toBeNull()
+
+    // Undo resolves to the open file's id: the panel re-keys the flash so the
+    // highlight box replays on the undone diff (a new overlay node).
+    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
+    fireEvent.keyDown(body, { key: 'z', ctrlKey: true })
+    await waitFor(() => {
+      expect(document.querySelector('[data-diff-block-flash]')).not.toBe(flashBefore)
+    })
   })
 
   it('opens the search bar with Ctrl+F even when focus is outside the panel', () => {

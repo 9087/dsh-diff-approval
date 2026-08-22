@@ -46,8 +46,8 @@ export function apply(ctx: ClientContext): void {
       onBlockKeep: (sessionId, id, block) => store.blockKeep(sessionId, id, block),
       onBlockRevert: (sessionId, id, block) => store.blockRevert(sessionId, id, block),
       onOpen: (sessionId, id, action) => store.open(sessionId, id, action),
-      onUndo: (sessionId) => { void store.undo(sessionId) },
-      onRedo: (sessionId) => { void store.redo(sessionId) },
+      onUndo: (sessionId) => store.undo(sessionId),
+      onRedo: (sessionId) => store.redo(sessionId),
       onPasteReference: (sessionId, reference) => {
         // The composer is reached through the session-scoped context: the
         // sessions service maps an id to its actx, whose conversation service

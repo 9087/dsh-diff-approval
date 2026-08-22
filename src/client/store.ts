@@ -24,10 +24,10 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   blockKeep: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
   /** Revert one diff block, then refresh so the entry's diff reflects the undo. */
   blockRevert: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
-  /** Undo the session's last keep/revert, then refresh. */
-  undo: (sessionId: SessionId) => Promise<void>
-  /** Redo the session's last undone keep/revert, then refresh. */
-  redo: (sessionId: SessionId) => Promise<void>
+  /** Undo the session's last keep/revert, then refresh; resolves to the affected entry id when it is still pending. */
+  undo: (sessionId: SessionId) => Promise<string | undefined>
+  /** Redo the session's last undone keep/revert, then refresh; resolves to the affected entry id when it is still pending. */
+  redo: (sessionId: SessionId) => Promise<string | undefined>
   /** Open one file with its default application or reveal it in the folder. */
   open: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
   /** Drop every local fact (used on connection reset). */
@@ -161,13 +161,29 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
       clearFailed(id)
       await this.refresh(sessionId)
     },
+    // Undo/redo restores a pending entry (undo) or removes one (redo); only an
+    // id that is still pending after the refresh is worth selecting, so the
+    // caller can switch to it. A failure (divergence guard, lost file) stays
+    // silent on the list and resolves to undefined.
     async undo(sessionId) {
-      await port.undo(sessionId)
-      await this.refresh(sessionId)
+      try {
+        const value = await port.undo(sessionId)
+        await this.refresh(sessionId)
+        const id = value.id
+        return id !== undefined && snapshot.files.some(file => file.id === id) ? id : undefined
+      } catch {
+        return undefined
+      }
     },
     async redo(sessionId) {
-      await port.redo(sessionId)
-      await this.refresh(sessionId)
+      try {
+        const value = await port.redo(sessionId)
+        await this.refresh(sessionId)
+        const id = value.id
+        return id !== undefined && snapshot.files.some(file => file.id === id) ? id : undefined
+      } catch {
+        return undefined
+      }
     },
     async open(sessionId, id, action) {
       try {

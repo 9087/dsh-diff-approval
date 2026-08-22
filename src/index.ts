@@ -734,7 +734,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         redoStack.push(pair)
         redoStacks.set(key, redoStack)
         await persistSession(sessionId)
-        const value: DiffApprovalActionValue = { outcome: 'undone' }
+        const value: DiffApprovalActionValue = { outcome: 'undone', id: pair.after.id }
         return { ok: true, value }
       }
       case 'redo': {
@@ -757,7 +757,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         undoStack.push(pair)
         undoStacks.set(key, undoStack)
         await persistSession(sessionId)
-        const value: DiffApprovalActionValue = { outcome: 'redone' }
+        const value: DiffApprovalActionValue = { outcome: 'redone', id: pair.after.id }
         return { ok: true, value }
       }
       case 'open': {
