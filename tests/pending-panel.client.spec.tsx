@@ -64,6 +64,37 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-approval-panel]')!.style.bottom).toBe('128px')
   })
 
+  it('opens the DSH settings dialog and switches to the plugin section', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // The settings shell keeps its open state component-local, so the button
+    // drives the real trigger and nav cell nodes. The test translator returns
+    // the key, so the section label is 'settings.tabLabel'.
+    const trigger = document.createElement('button')
+    trigger.setAttribute('aria-haspopup', 'dialog')
+    const triggerClick = vi.fn()
+    trigger.addEventListener('click', triggerClick)
+    document.body.appendChild(trigger)
+
+    const navCell = document.createElement('button')
+    navCell.textContent = 'settings.tabLabel'
+    const navClick = vi.fn()
+    navCell.addEventListener('click', navClick)
+    document.body.appendChild(navCell)
+
+    fireEvent.click(screen.getByLabelText('action.settings'))
+    expect(triggerClick).toHaveBeenCalledTimes(1)
+    // Handing off to settings also closes this panel.
+    expect(screen.queryByText('panel.title')).toBeNull()
+    // The nav-cell click happens on the next animation frame.
+    await waitFor(() => { expect(navClick).toHaveBeenCalledTimes(1) })
+
+    trigger.remove()
+    navCell.remove()
+  })
+
   it('sits above a docked composer seat (approval takeover included)', () => {
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
     const scroll = document.createElement('div')
@@ -1001,16 +1032,19 @@ describe('PendingPanel', () => {
   it('the DSH Settings tab toggles the auto-paste preference in localStorage', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     const view = render(<DiffApprovalSettingsTab {...props} />)
-    const toggle = view.container.querySelector('[data-diff-paste-on-copy]') as HTMLInputElement
-    expect(toggle).not.toBeNull()
-    expect(toggle.checked).toBe(true)
+    const selector = view.container.querySelector('[data-diff-paste-on-copy-select]') as HTMLButtonElement
+    expect(selector).not.toBeNull()
+    // On by default: the pill names the on state.
+    expect(selector.textContent).toContain('action.toggleOn')
 
-    fireEvent.click(toggle)
-    expect(toggle.checked).toBe(false)
+    // Pick 关闭 from the dropdown.
+    fireEvent.click(selector)
+    fireEvent.click(screen.getByText('action.toggleOff'))
     expect(localStorage.getItem('diff-approval:paste-on-copy')).toBe('0')
 
-    fireEvent.click(toggle)
-    expect(toggle.checked).toBe(true)
+    // The pill now names the off state; pick 打开 to turn it back on.
+    fireEvent.click(selector)
+    fireEvent.click(screen.getByText('action.toggleOn'))
     expect(localStorage.getItem('diff-approval:paste-on-copy')).toBe('1')
   })
 

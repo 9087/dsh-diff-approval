@@ -2,7 +2,7 @@
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
-import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, IconSearchOutline16, Menu, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -66,6 +66,27 @@ type Translator = (key: DiffApprovalKey, params?: Record<string, unknown>) => st
 function basenameOf(path: string): string {
   const index = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
   return index < 0 ? path : path.slice(index + 1)
+}
+
+/**
+ * Open the DSH settings dialog and switch to this plugin's section. The
+ * settings shell keeps its open state and the active section id as
+ * component-local viewing state with no cross-plugin service, so the dialog
+ * is opened by clicking the sidebar's settings trigger and then the nav cell
+ * for this section. `element.click()` still fires React's delegated click
+ * handlers, reaching the same state transitions a user gesture would.
+ * @param sectionLabel - the nav label of this plugin's settings section.
+ */
+export function openSettingsSection(sectionLabel: string): void {
+  const trigger = document.querySelector<HTMLButtonElement>('button[aria-haspopup="dialog"]')
+  if (trigger === null) return
+  trigger.click()
+  // Let the shell mount the modal before driving its nav rail.
+  requestAnimationFrame(() => {
+    const cell = Array.from(document.querySelectorAll('button'))
+      .find(button => button.textContent?.trim() === sectionLabel)
+    cell?.click()
+  })
 }
 
 /** One file row in the left list pane. */
@@ -1234,6 +1255,23 @@ export function PendingPanel({
           <header className={css.header}>
             <span className={css.title}>{t('panel.title')}</span>
             <div className={css.headerActions}>
+              <Tooltip label={t('action.settings')} side="bottom" delayMs={500}>
+                <button
+                  type="button"
+                  className={css.expand}
+                  data-diff-approval-settings
+                  aria-label={t('action.settings')}
+                  onClick={() => {
+                    // Hand off to the settings dialog: close this panel too,
+                    // since the review list is left behind for the settings
+                    // section the button just opened.
+                    setOpen(false)
+                    openSettingsSection(t('settings.tabLabel'))
+                  }}
+                >
+                  <IconSettingsOutline16 size={14} />
+                </button>
+              </Tooltip>
               <Tooltip label={t(expanded ? 'action.exitFullscreen' : 'action.expand')} side="bottom" delayMs={500}>
                 <button
                   type="button"
