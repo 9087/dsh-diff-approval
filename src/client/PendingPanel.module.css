@@ -559,6 +559,24 @@
   opacity: 0.55;
 }
 
+/* Whole-file Keep/Revert: the write is near-instant, so the disabled restyle
+   (dim + text swap) read as a flash. These buttons keep their normal look
+   while busy — the `disabled` attribute still drops clicks, so a double
+   submit is impossible without any visual flicker. */
+.actionQuietDisabled:disabled {
+  cursor: pointer;
+  color: var(--dsw-alias-label-primary);
+  background: transparent;
+  border-color: var(--dsw-alias-border-l1);
+}
+
+.actionPrimary.actionQuietDisabled:disabled {
+  background: var(--dsw-alias-state-business-primary);
+  border-color: var(--dsw-alias-state-business-primary);
+  color: var(--dsw-static-neutral-bluish-50);
+  opacity: 1;
+}
+
 .iconAction {
   display: inline-flex;
   align-items: center;

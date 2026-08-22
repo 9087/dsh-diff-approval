@@ -348,9 +348,12 @@ describe('PendingPanel', () => {
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
-    expect(screen.getAllByText('action.busy')).toHaveLength(2)
-    fireEvent.click(screen.getAllByText('action.busy')[0]!)
+    // Busy keeps the buttons' labels (no flash), but still drops the clicks.
+    expect(screen.getByText('action.keep')).toBeDefined()
+    expect(screen.getByText('action.revert')).toBeDefined()
+    fireEvent.click(screen.getByText('action.keep'))
     expect(props.onKeep).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByText('action.revert'))
     expect(props.onRevert).not.toHaveBeenCalled()
   })
 

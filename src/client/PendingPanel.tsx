@@ -841,21 +841,21 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, onP
         <span className={css.flexSpacer} />
         <button
           type="button"
-          className={`${css.action} ${css.actionPrimary}`}
+          className={`${css.action} ${css.actionPrimary} ${css.actionQuietDisabled}`}
           data-diff-keep
           disabled={busy}
           onClick={() => { void onKeep(file.sessionId, file.id) }}
         >
-          {busy ? t('action.busy') : t('action.keep')}
+          {t('action.keep')}
         </button>
         <button
           type="button"
-          className={css.action}
+          className={`${css.action} ${css.actionQuietDisabled}`}
           data-diff-revert
           disabled={busy}
           onClick={() => { void onRevert(file.sessionId, file.id) }}
         >
-          {busy ? t('action.busy') : t('action.revert')}
+          {t('action.revert')}
         </button>
       </div>
       {failedMessage !== undefined && <p className={css.actionError} data-diff-action-error>{failedMessage}</p>}
