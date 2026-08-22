@@ -702,9 +702,11 @@
 /* Transient flash framing the just-focused change block: a 1s brand-blue
    outline that eases out to nothing. Keyed remount on each focus change
    replays the animation; inert so hover and text selection pass through.
-   border-box keeps the 2px border inside the computed row height, so the
-   box's outer edge lands exactly on the block's boundary instead of spilling
-   2px past it. */
+   Sits in the non-scrolling wrapper (not the content rows), so left/right
+   span the visible viewport and stay pinned on horizontal scroll; the JSX
+   subtracts the current scrollTop so the box still tracks the block as the
+   file scrolls. border-box keeps the 2px border inside the computed row
+   height, so the box's outer edge lands exactly on the block's boundary. */
 .blockFlash {
   position: absolute;
   left: 0;
@@ -767,9 +769,6 @@
   width: max-content;
   min-width: 100%;
   border-spacing: 0;
-  /* The block-flash overlay is positioned against the content width (not the
-     scroller's visible box), so its outline tracks the rows on any scroll. */
-  position: relative;
 }
 
 .line {

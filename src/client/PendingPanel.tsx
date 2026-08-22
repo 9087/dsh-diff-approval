@@ -1,6 +1,6 @@
 /** Sidebar-foot pending-edit review action and the split review panel it opens. */
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, IconSearchOutline16, Menu, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -479,9 +479,8 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, onP
   }, [searchQuery, file.id])
 
   // Center the current search match in the scroller (same arithmetic as the
-  // block centering; the DOM write is mirrored into state so the virtual
-  // window follows).
-  useEffect(() => {
+  // block centering; layout timing keeps the search state consistent too).
+  useLayoutEffect(() => {
     const row = currentSearchRow
     if (row === undefined) return
     const body = bodyRef.current
@@ -551,8 +550,11 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, onP
   // Arithmetic on the fixed row height works even when the block's rows are
   // outside the rendered window. A programmatic scrollTop does not fire a
   // scroll event, so the DOM write is mirrored into state to re-render the
-  // window; onScroll covers real user scrolling.
-  useEffect(() => {
+  // window; onScroll covers real user scrolling. Layout timing matters: the
+  // block-flash overlay reads scrollTop while rendering, so the scroll must
+  // settle BEFORE the browser paints — otherwise the flash shows a frame at
+  // the stale offset and then jumps to the centered spot.
+  useLayoutEffect(() => {
     if (rowCount === 0) return
     const block = model.blocks[focus]
     if (block === undefined) return
@@ -871,17 +873,6 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, onP
             {blockActionsPadPx > 0 && (
               <div className={css.vSpacer} style={{ height: blockActionsPadPx }} aria-hidden="true" />
             )}
-            {focusedBlock !== undefined && flashKey > 0 && (
-              <div
-                key={flashKey}
-                className={css.blockFlash}
-                data-diff-block-flash
-                style={{
-                  top: focusedBlock.start * ROW_HEIGHT_PX,
-                  height: (focusedBlock.end - focusedBlock.start + 1) * ROW_HEIGHT_PX,
-                }}
-              />
-            )}
           </div>
           {hoveredBlock !== undefined && model.blocks[hoveredBlock] !== undefined && (
             <div
@@ -913,6 +904,23 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, onP
             </div>
           )}
         </div>
+        {focusedBlock !== undefined && flashKey > 0 && (
+          <div
+            key={flashKey}
+            className={css.blockFlash}
+            data-diff-block-flash
+            style={{
+              // The wrapper does not scroll, so the vertical position must
+              // subtract the current scrollTop to keep the box on the block;
+              // the width is the scroller's client width (the code area,
+              // excluding the scrollbar and the overview ruler), so the right
+              // edge lands exactly on the code's right edge.
+              top: focusedBlock.start * ROW_HEIGHT_PX - scrollTop,
+              height: (focusedBlock.end - focusedBlock.start + 1) * ROW_HEIGHT_PX,
+              width: bodyRef.current?.clientWidth ?? 0,
+            }}
+          />
+        )}
         {searchOpen && (
           <div className={css.searchBar} data-diff-searchbar>
             <input
