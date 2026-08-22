@@ -1265,7 +1265,7 @@ export function PendingPanel({
               )}
               {!snapshot.read && snapshot.error === undefined && <p className={css.note}>{t('panel.loading')}</p>}
               {snapshot.read && snapshot.error === undefined && files.length === 0
-                && <p className={css.note}>{t('panel.empty')}</p>}
+                && <p className={`${css.note} ${css.noteCentered}`}>{t('panel.empty')}</p>}
             </div>
           ) : (
             <div className={css.split}>

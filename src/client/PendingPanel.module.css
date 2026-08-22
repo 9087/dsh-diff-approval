@@ -192,6 +192,8 @@
   min-height: 0;
   overflow-y: auto;
   padding: 4px 12px 12px;
+  display: flex;
+  flex-direction: column;
 }
 
 .split {
@@ -279,6 +281,12 @@
   font-size: 12px;
   line-height: 18px;
   color: var(--dsw-alias-label-tertiary);
+}
+
+/* The empty-state note fills the body and centers on both axes. */
+.noteCentered {
+  margin: auto;
+  text-align: center;
 }
 
 .readError {
