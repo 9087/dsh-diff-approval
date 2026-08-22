@@ -163,6 +163,30 @@
   gap: 2px;
 }
 
+/* The plugin's DSH Settings → Plugins tab page: preference rows on the
+   settings surface. */
+.settingsPage {
+  padding: 8px 12px;
+}
+
+.settingsRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-primary);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.settingsCheckbox {
+  margin: 0;
+  accent-color: var(--dsw-alias-state-business-primary);
+  cursor: pointer;
+}
+
 .states {
   flex: 1;
   min-height: 0;

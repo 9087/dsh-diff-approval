@@ -38,4 +38,6 @@ export interface PendingPanelFace {
   onBlockRevert: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
   /** Open one file with its default application or reveal it in the folder. */
   onOpen: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
+  /** Paste a copied reference into the session's chat input and focus it. */
+  onPasteReference: (sessionId: SessionId, reference: string) => void
 }

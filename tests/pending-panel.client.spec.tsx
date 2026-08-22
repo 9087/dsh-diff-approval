@@ -8,10 +8,12 @@ import type { ComponentProps } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingFileDiff } from '../src/types.ts'
 import { PendingPanel } from '../src/client/PendingPanel.tsx'
+import { DiffApprovalSettingsTab } from '../src/client/SettingsTab.tsx'
 import type { PendingDiffSnapshot } from '../src/client/slots.ts'
 
 afterEach(cleanup)
 afterEach(() => { vi.restoreAllMocks() })
+afterEach(() => { localStorage.clear() })
 
 beforeAll(() => {
   // jsdom has no scrolling; the jump effect centers rows through it.
@@ -41,6 +43,7 @@ function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
     onBlockKeep: vi.fn(async () => {}),
     onBlockRevert: vi.fn(async () => {}),
     onOpen: vi.fn(async () => {}),
+    onPasteReference: vi.fn(),
     t: (key: string, params?: Record<string, unknown>) => params === undefined ? key : `${key} ${JSON.stringify(params)}`,
   } as unknown as PanelProps
 }
@@ -913,6 +916,77 @@ describe('PendingPanel', () => {
     fireEvent.keyDown(document, { key: 'l', ctrlKey: true })
     await vi.waitFor(() => { expect(writeText).toHaveBeenCalledWith('/repo/a.txt:1') })
     await vi.waitFor(() => { expect(screen.getByText('action.copied')).toBeDefined() })
+  })
+
+  /** Select the first two diff rows so a reference becomes copyable. */
+  function selectFirstRows(view: ReturnType<typeof render>): void {
+    const rows = [...view.container.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const code0 = rows[0]!.querySelector('[data-diff-code]') ?? rows[0]!
+    const code1 = rows[1]!.querySelector('[data-diff-code]') ?? rows[1]!
+    const selection = {
+      isCollapsed: false,
+      anchorNode: code0.firstChild ?? code0,
+      focusNode: code1.firstChild ?? code1,
+      rangeCount: 1,
+      getRangeAt: () => ({
+        startContainer: code0.firstChild ?? code0,
+        startOffset: 1,
+        endContainer: code1.firstChild ?? code1,
+        endOffset: 1,
+      }),
+    } as unknown as Selection
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+  }
+
+  it('pastes the copied reference into the composer when auto-paste is on', async () => {
+    const writeText = vi.fn(async () => {})
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    selectFirstRows(view)
+
+    fireEvent.keyDown(document, { key: 'l', ctrlKey: true })
+    await vi.waitFor(() => { expect(writeText).toHaveBeenCalledWith('/repo/a.txt:1') })
+    // The paste runs in the same async continuation after the clipboard write
+    // settles, so wait for it rather than reading the mock immediately.
+    const pasteMock = props.onPasteReference as unknown as { mock: { calls: unknown[][] } }
+    await vi.waitFor(() => { expect(pasteMock.mock.calls).toEqual([[S1, '/repo/a.txt:1']]) })
+  })
+
+  it('skips auto-paste when the DSH Settings toggle is turned off', async () => {
+    // Simulate the preference being off in DSH Settings → the plugin's tab.
+    localStorage.setItem('diff-approval:paste-on-copy', '0')
+    const writeText = vi.fn(async () => {})
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    selectFirstRows(view)
+    fireEvent.keyDown(document, { key: 'l', ctrlKey: true })
+    await vi.waitFor(() => { expect(writeText).toHaveBeenCalledWith('/repo/a.txt:1') })
+    const pasteMock = props.onPasteReference as unknown as { mock: { calls: unknown[][] } }
+    expect(pasteMock.mock.calls).toHaveLength(0)
+  })
+
+  it('the DSH Settings tab toggles the auto-paste preference in localStorage', () => {
+    const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
+    const view = render(<DiffApprovalSettingsTab {...props} />)
+    const toggle = view.container.querySelector('[data-diff-paste-on-copy]') as HTMLInputElement
+    expect(toggle).not.toBeNull()
+    expect(toggle.checked).toBe(true)
+
+    fireEvent.click(toggle)
+    expect(toggle.checked).toBe(false)
+    expect(localStorage.getItem('diff-approval:paste-on-copy')).toBe('0')
+
+    fireEvent.click(toggle)
+    expect(toggle.checked).toBe(true)
+    expect(localStorage.getItem('diff-approval:paste-on-copy')).toBe('1')
   })
 
   it('lets the status bar pick the highlight language', () => {

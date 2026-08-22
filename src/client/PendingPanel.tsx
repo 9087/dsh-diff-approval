@@ -15,6 +15,7 @@ import type { WholeFileDiffRow } from './whole-file-diff.ts'
 import { HIGHLIGHT_LANGS, highlightLines, languageDisplayName } from './highlight.ts'
 import { langFromPath } from './lang.ts'
 import { referenceOf } from './reference.ts'
+import { pasteOnCopyEnabled } from './settings.ts'
 import css from './PendingPanel.module.css'
 
 /**
@@ -88,6 +89,8 @@ interface PendingDiffProps {
   jumpSignal: number
   /** The last keep/revert failure for this file, shown as an inline banner. */
   failedMessage?: string | undefined
+  /** Paste a copied reference into the session's chat input and focus it. */
+  onPasteReference: (sessionId: SessionId, reference: string) => void
   t: Translator
   onKeep: (sessionId: SessionId, id: string) => Promise<void>
   onRevert: (sessionId: SessionId, id: string) => Promise<void>
@@ -316,7 +319,7 @@ function PendingFileRow({ file, selected, failedMessage, t, onSelect }: PendingF
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, onPasteReference, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -627,8 +630,11 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, t, 
     const accepted = await writeClipboard(selectionReference)
     if (!accepted) return
     setCopied(true)
+    // The preference lives in DSH Settings → this plugin's tab; read it at
+    // copy time so a change there takes effect without reopening the panel.
+    if (pasteOnCopyEnabled()) onPasteReference(file.sessionId, selectionReference)
     window.setTimeout(() => { setCopied(false) }, 1500)
-  }, [selectionReference])
+  }, [file.sessionId, onPasteReference, selectionReference])
 
   // Ctrl/Cmd+L copies the selected line range; the chord is left to the
   // browser's own default when there is no selection to reference.
@@ -977,7 +983,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, t, 
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, t,
+  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPasteReference, t,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
   const snapshot = usePending(snapshot => snapshot)
@@ -1251,6 +1257,7 @@ export function PendingPanel({
                     workspacePath={snapshot.workspacePath}
                     jumpSignal={jumpSignal}
                     failedMessage={failed.get(selectedFile.id)}
+                    onPasteReference={onPasteReference}
                     t={t}
                     onKeep={onKeep}
                     onRevert={onRevert}
