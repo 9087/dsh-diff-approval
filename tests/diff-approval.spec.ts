@@ -178,6 +178,34 @@ describe('capturing operations', () => {
   })
 })
 
+describe('live state', () => {
+  it('adopts an externally modified file as the new baseline so the diff tracks it', async () => {
+    const { ctx, handle, fs } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'v1\n', 'v2\n'))
+
+    // The file is changed outside the tracked operations (e.g. by an editor):
+    // the listed diff must now reflect the current content.
+    fs.readText.mockResolvedValue('v2\nexternal\n')
+    const [entry] = await listEntries(handle, 'session-1')
+    expect(entry).toMatchObject({
+      kind: 'edit', oldText: 'v1\n', newText: 'v2\nexternal\n', missing: false, diverged: false,
+    })
+
+    // A second listing sees the adopted content already tracked (no drift).
+    const [again] = await listEntries(handle, 'session-1')
+    expect(again!.newText).toBe('v2\nexternal\n')
+  })
+
+  it('keeps the tracked newText when the file content is unavailable', async () => {
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'v1\n', 'v2\n'))
+    // readText resolves undefined (resolved but unreadable): never clobber the
+    // tracked newText with a non-content value.
+    const [entry] = await listEntries(handle, 'session-1')
+    expect(entry!.newText).toBe('v2\n')
+  })
+})
+
 describe('keep', () => {
   it('removes the entry and reports missing on a repeat', async () => {
     const { ctx, handle } = await harness()
@@ -373,7 +401,8 @@ describe('str_replace_editor capture', () => {
 
   it('tracks nothing for view commands, failed mutations, or other tools on the same seams', async () => {
     const { ctx, fs, handle } = await harness()
-    fs.readText.mockImplementation(async () => 'same\n')
+    // The file matches its last edit, so listing does not adopt any drift.
+    fs.readText.mockImplementation(async () => 'y')
 
     // view: no intent basis exists; the settle must not invent an entry.
     emitResult(ctx, strReplaceExec('view', 'call-3'), { isError: false, value: 'content' })
@@ -445,14 +474,14 @@ describe('open', () => {
 })
 
 describe('live file state', () => {
-  it('marks entries diverged when the current content differs from the newest tracked content', async () => {
+  it('adopts externally modified content as the new baseline so the diff tracks it', async () => {
     const { ctx, handle, fs } = await harness()
     fs.readText.mockResolvedValue('external edit\n')
     emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'v1\n', 'v2\n'))
 
     const entries = await listEntries(handle, 'session-1')
     expect(entries).toEqual([
-      expect.objectContaining({ missing: false, diverged: true }) as object,
+      expect.objectContaining({ missing: false, diverged: false, oldText: 'v1\n', newText: 'external edit\n' }) as object,
     ])
   })
 

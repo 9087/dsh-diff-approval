@@ -308,10 +308,27 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       const newest = group[group.length - 1]
       if (newest === undefined) continue
       const live = await liveStateOf(newest.path)
+      // A file changed outside the tracked operations (another tool, an
+      // editor, a second process) is folded in as the new baseline, so the
+      // panel's diff tracks the file as it is now instead of showing the
+      // stale captured content. The entry keeps its pre-change `oldText`, so
+      // Revert still restores the earliest basis (overwriting the external
+      // edit, as the diverged entry documents).
+      let adopted = newest.newText
+      // Only a real string content is adoptable: a resolved-but-unreadable
+      // file (content unavailable) must not clobber the tracked newText.
+      if (live.present && typeof live.content === 'string' && live.content !== newest.newText) {
+        adopted = live.content
+        if (store.update(newest.sessionId, newest.id, { newText: live.content })) {
+          await persistSession(newest.sessionId)
+        }
+      }
       const state = live.present
-        ? { missing: false, diverged: live.content !== newest.newText }
+        ? { missing: false, diverged: live.content !== adopted }
         : { missing: live.kind === 'missing', diverged: live.kind === 'unreadable' }
-      for (const entry of group) listed.push({ ...entry, ...state })
+      for (const entry of group) {
+        listed.push(entry.id === newest.id ? { ...entry, newText: adopted, ...state } : { ...entry, ...state })
+      }
     }
     return listed
   }
