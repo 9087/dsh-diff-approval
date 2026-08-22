@@ -48,7 +48,7 @@ describe('refresh', () => {
     const seen = vi.fn()
     const off = store.subscribe(seen)
     await store.refresh(S1)
-    expect(store.getSnapshot()).toEqual({ read: true, files: [FILE], busy: new Set() })
+    expect(store.getSnapshot()).toEqual({ read: true, files: [FILE], busy: new Set(), failed: new Map() })
     expect(seen).toHaveBeenCalled()
     off()
   })
@@ -57,7 +57,7 @@ describe('refresh', () => {
     const seam = port()
     const store = createPendingDiffStore(seam.port)
     await store.refresh(undefined)
-    expect(store.getSnapshot()).toEqual({ read: true, files: [], busy: new Set() })
+    expect(store.getSnapshot()).toEqual({ read: true, files: [], busy: new Set(), failed: new Map() })
     expect(seam.list).not.toHaveBeenCalled()
   })
 
@@ -68,7 +68,7 @@ describe('refresh', () => {
 
     seam.list.mockRejectedValue(new Error('socket closed'))
     await store.refresh(S1)
-    expect(store.getSnapshot()).toEqual({ read: true, files: [FILE], error: 'socket closed', busy: new Set() })
+    expect(store.getSnapshot()).toEqual({ read: true, files: [FILE], error: 'socket closed', busy: new Set(), failed: new Map() })
   })
 })
 
@@ -87,7 +87,7 @@ describe('actions', () => {
     expect(store.getSnapshot().busy).toEqual(new Set([FILE.id]))
     release?.({ outcome: 'kept' })
     await settled
-    expect(store.getSnapshot()).toEqual({ read: true, files: [], busy: new Set() })
+    expect(store.getSnapshot()).toEqual({ read: true, files: [], busy: new Set(), failed: new Map() })
   })
 
   it('reverts through the port and removes the entry', async () => {
@@ -99,14 +99,15 @@ describe('actions', () => {
     expect(store.getSnapshot().files).toEqual([])
   })
 
-  it('keeps the file and reports the message when an action fails', async () => {
+  it('keeps the file and marks it failed when an action fails, without a read error', async () => {
     const seam = port({ keep: vi.fn(async () => { throw new Error('busy elsewhere') }) })
     const store = createPendingDiffStore(seam.port)
     await store.refresh(S1)
-    await store.keep(S1, FILE.path)
-    expect(store.getSnapshot()).toEqual({
-      read: true, files: [FILE], error: 'busy elsewhere', busy: new Set(),
-    })
+    await store.keep(S1, FILE.id)
+    expect(store.getSnapshot().files).toEqual([FILE])
+    expect(store.getSnapshot().failed?.get(FILE.id)).toBe('busy elsewhere')
+    expect(store.getSnapshot().error).toBeUndefined()
+    expect(store.getSnapshot().busy).toEqual(new Set())
   })
 
   it('reports a non-Error rejection without inventing a message', async () => {
@@ -114,8 +115,8 @@ describe('actions', () => {
     const seam = port({ revert: vi.fn(() => Promise.reject('nope')) })
     const store = createPendingDiffStore(seam.port)
     await store.refresh(S1)
-    await store.revert(S1, FILE.path)
-    expect(store.getSnapshot().error).toBe('nope')
+    await store.revert(S1, FILE.id)
+    expect(store.getSnapshot().failed?.get(FILE.id)).toBe('nope')
   })
 })
 
@@ -153,12 +154,13 @@ describe('block actions', () => {
     expect(store.getSnapshot().busy).toEqual(new Set())
   })
 
-  it('reports the message when a block action fails', async () => {
+  it('marks the file failed when a block action fails, without a read error', async () => {
     const seam = port({ blockKeep: vi.fn(async () => { throw new Error('block busy') }) })
     const store = createPendingDiffStore(seam.port)
     await store.refresh(S1)
     await store.blockKeep(S1, FILE.id, BLOCK)
-    expect(store.getSnapshot().error).toBe('block busy')
+    expect(store.getSnapshot().failed?.get(FILE.id)).toBe('block busy')
+    expect(store.getSnapshot().error).toBeUndefined()
     expect(store.getSnapshot().busy).toEqual(new Set())
   })
 })

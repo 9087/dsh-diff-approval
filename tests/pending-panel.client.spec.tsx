@@ -242,6 +242,25 @@ describe('PendingPanel', () => {
     expect(revertMock.mock.calls.map(call => call[1])).toEqual([FILE.id, 'entry-2'])
   })
 
+  it('shows a keep/revert failure inline on the row and detail instead of hiding the list', () => {
+    const props = panelProps({
+      read: true,
+      files: [FILE],
+      busy: new Set(),
+      failed: new Map([[FILE.id, 'revert failed: disk full']]),
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // The list stays visible (no full error screen) and the row carries a tag.
+    expect(screen.getByText('panel.group.current')).toBeDefined()
+    expect(screen.getByText('row.failed')).toBeDefined()
+
+    // The detail banner under the action buttons shows the failure message.
+    expect(screen.getByText('revert failed: disk full')).toBeDefined()
+    expect(document.querySelector('[data-diff-action-error]')).not.toBeNull()
+  })
+
   it('always shows the short file name with the full path on hover, even when basenames collide', () => {
     const sibling = entry({ id: 'entry-dup', path: '/repo/sub/a.txt' })
     const props = panelProps({ read: true, files: [FILE, sibling], busy: new Set() })

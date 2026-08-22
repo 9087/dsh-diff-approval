@@ -350,6 +350,31 @@
   white-space: nowrap;
 }
 
+/* A file whose keep/revert just failed: error-red tag on the list row, with
+   the message as its hover title. Auto-clears after a few seconds. */
+.rowFailed {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--dsw-alias-state-error-primary);
+  border-radius: 6px;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 11px;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+/* The detail pane's keep/revert failure, shown right under the action buttons
+   so the failed click reads where it happened. */
+.actionError {
+  margin: 0;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
 .missingHint {
   color: var(--dsw-alias-state-warn-label, var(--dsw-alias-state-warn-primary));
 }

@@ -14,6 +14,8 @@ export interface PendingDiffSnapshot {
   error?: string
   /** Entry ids whose keep/revert is in flight; their controls are disabled. */
   busy: ReadonlySet<string>
+  /** Entry ids whose last keep/revert failed, mapped to the error message; the panel surfaces these inline (row tag + detail banner) instead of hiding the list. */
+  failed?: ReadonlyMap<string, string> | undefined
   /** The viewing session's workspace root (when it has one); enables workspace-relative references. */
   workspacePath?: string | undefined
 }

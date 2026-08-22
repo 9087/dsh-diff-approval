@@ -71,6 +71,8 @@ function basenameOf(path: string): string {
 interface PendingFileRowProps {
   file: PendingFileDiff
   selected: boolean
+  /** The last keep/revert failure for this file, shown as an inline tag. */
+  failedMessage?: string | undefined
   t: Translator
   onSelect: (id: string) => void
 }
@@ -84,6 +86,8 @@ interface PendingDiffProps {
   /** Bumped by the panel when the already-open file is clicked again: jumps
    * to the next change block. */
   jumpSignal: number
+  /** The last keep/revert failure for this file, shown as an inline banner. */
+  failedMessage?: string | undefined
   t: Translator
   onKeep: (sessionId: SessionId, id: string) => Promise<void>
   onRevert: (sessionId: SessionId, id: string) => Promise<void>
@@ -98,6 +102,9 @@ const ROW_CLASS = {
   del: css.del,
   add: css.add,
 } as const
+
+/** Empty failure map reused as the snapshot's canonical absent value. */
+const EMPTY_FAILED_MAP: ReadonlyMap<string, string> = new Map()
 
 /**
  * One rendered diff row, memoized so a poll or an unrelated state change
@@ -280,7 +287,7 @@ function rowRangeOf(selection: Selection | null): RowRange | undefined {
 }
 
 /** One row of the file list: the clickable head in the left pane. */
-function PendingFileRow({ file, selected, t, onSelect }: PendingFileRowProps) {
+function PendingFileRow({ file, selected, failedMessage, t, onSelect }: PendingFileRowProps) {
   const stats = useMemo(
     () => computeWholeFileDiff(file.oldText, file.newText),
     [file.oldText, file.newText],
@@ -297,6 +304,7 @@ function PendingFileRow({ file, selected, t, onSelect }: PendingFileRowProps) {
           <span className={css.rowPath}>{basenameOf(file.path)}</span>
           {file.kind === 'create' && <span className={css.kindTag}>{t('row.create')}</span>}
           {file.missing && <span className={css.missing} title={t('panel.missingHint')}>{t('panel.missing')}</span>}
+          {failedMessage !== undefined && <span className={css.rowFailed} title={failedMessage}>{t('row.failed')}</span>}
           <span className={css.rowMeta}>
             <span className={css.addCount}>{t('row.added', { added: stats.added })}</span>
             <span className={css.delCount}>{t('row.removed', { removed: stats.removed })}</span>
@@ -308,7 +316,7 @@ function PendingFileRow({ file, selected, t, onSelect }: PendingFileRowProps) {
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, jumpSignal, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -776,6 +784,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, t, onKeep, onRever
           {busy ? t('action.busy') : t('action.revert')}
         </button>
       </div>
+      {failedMessage !== undefined && <p className={css.actionError} data-diff-action-error>{failedMessage}</p>}
       {file.missing && <p className={css.missingHint}>{t('panel.missingHint')}</p>}
       <div className={css.diffBodyWrap}>
         <div
@@ -1069,6 +1078,8 @@ export function PendingPanel({
   // The panel reviews only the current session's files; other sessions of the
   // same workspace stay out of the list, badge, and auto-advance.
   const files = snapshot.files.filter(file => file.sessionId === current)
+  /** Per-file keep/revert failures, surfaced inline on the row and detail. */
+  const failed = snapshot.failed ?? EMPTY_FAILED_MAP
 
   // Auto-open the first pending file when the panel opens, and advance to the
   // next one once the selected file is handled. Selection is single and cannot
@@ -1113,6 +1124,7 @@ export function PendingPanel({
       key={entry.id}
       file={entry}
       selected={selected === entry.id}
+      failedMessage={failed.get(entry.id)}
       t={t}
       onSelect={(id) => {
         // Re-clicking the already-open file jumps to the next diff block in
@@ -1238,6 +1250,7 @@ export function PendingPanel({
                     busy={snapshot.busy.has(selectedFile.id)}
                     workspacePath={snapshot.workspacePath}
                     jumpSignal={jumpSignal}
+                    failedMessage={failed.get(selectedFile.id)}
                     t={t}
                     onKeep={onKeep}
                     onRevert={onRevert}

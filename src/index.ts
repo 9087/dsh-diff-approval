@@ -40,7 +40,7 @@ import { resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { expandHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 // Type-only: brings the `ctx.fs` Context merge into this program.
@@ -68,7 +68,7 @@ export { defaultOpenPath } from './open.ts'
 export const name = 'diff-approval'
 
 /** Services required before the review surface activates. */
-export const inject = ['fs', 'connection', 'workspaceRegistry']
+export const inject = ['fs', 'connection', 'workspaceRegistry', 'sessions']
 
 /** The connection RPC channel this plugin serves. */
 export const DIFF_APPROVAL_CHANNEL = '/diff-approval'
@@ -96,6 +96,20 @@ interface OperationOutcome {
   kind: PendingEntryKind
   oldText: string
   newText: string
+}
+
+/**
+ * Structural stand-in for the harness's `SandboxExecutionPolicy` (type-only;
+ * avoids a hard dependency on `@deepseek-ai/dsh-sandbox`). `sessionId` is
+ * intentionally omitted: the plugin's published `dsh-session` and the
+ * harness's local one are distinct branded types, and the containment fence
+ * only needs `mode` + `workspaceRoot`. A Revert write must carry the session's
+ * workspace root, or the sandbox fences it against `process.cwd()` and denies
+ * it.
+ */
+interface SandboxExecutionPolicyLike {
+  mode: 'read-only' | 'workspace-write' | 'danger-full-access'
+  workspaceRoot: string
 }
 
 /**
@@ -317,6 +331,45 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   }
 
   /**
+   * Resolve the file-sandbox policy for one session's Revert write, or
+   * undefined when no confining backend is mounted. A live session carries
+   * its workspace root through `ctx.sessions`; a persisted entry from a
+   * session not live in this process falls back to the session's workspace
+   * path (else the deployment default). Without this the sandbox fences the
+   * write against the process cwd and denies it with "file access denied
+   * under workspace-write mode".
+   */
+  function sandboxPolicyOf(sessionId: SessionId): SandboxExecutionPolicyLike | undefined {
+    const policy = ctx.get('sandboxPolicy') as
+      | { resolve(request?: { session?: Session }): SandboxExecutionPolicyLike; defaultMode: SandboxExecutionPolicyLike['mode'] }
+      | undefined
+    if (policy === undefined) return undefined
+    const session = ctx.sessions.get(sessionId)
+    if (session !== undefined) return policy.resolve({ session })
+    const workspace = workspaceOf(sessionId)
+    return workspace === undefined
+      ? policy.resolve({})
+      : { mode: policy.defaultMode, workspaceRoot: workspace.path }
+  }
+
+  /**
+   * Write a Revert through `ctx.fs`, carrying the session's sandbox policy
+   * only when a confining backend is mounted (so the plain 4-arg call shape is
+   * preserved for the unsandboxed composition).
+   * @param target - the resolved target to write.
+   * @param content - the restored file content.
+   * @param sessionId - the entry's session, for the per-session policy.
+   * @param signal - aborts before atomic publication takes effect.
+   * @returns the write outcome.
+   */
+  async function writeRevert(target: FsTarget, content: string, sessionId: SessionId, signal: AbortSignal): Promise<unknown> {
+    const policy = sandboxPolicyOf(sessionId)
+    return policy === undefined
+      ? ctx.fs.writeText(target, content, undefined, signal)
+      : ctx.fs.writeText(target, content, undefined, signal, policy)
+  }
+
+  /**
    * Record one session in its workspace's account. Every path that touches a
    * session registers it, so the list merges all of a workspace's sessions'
    * entries — a fresh session after restart still sees the workspace's
@@ -477,7 +530,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             // through the backend's own execution-world path.
             await rm(ctx.fs.processPath(resolved), { force: true })
           } else {
-            await ctx.fs.writeText(resolved, entry.oldText, undefined, signal)
+            await writeRevert(resolved, entry.oldText, target.sessionId, signal)
           }
         } catch (error: unknown) {
           return rpcError(`revert failed: ${errorMessage(error)}`)
@@ -526,7 +579,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           if (entry.kind === 'create' && updatedNew === '') {
             await rm(ctx.fs.processPath(resolved), { force: true })
           } else {
-            await ctx.fs.writeText(resolved, updatedNew, undefined, signal)
+            await writeRevert(resolved, updatedNew, blockTarget.sessionId, signal)
           }
         } catch (error: unknown) {
           return rpcError(`block revert failed: ${errorMessage(error)}`)

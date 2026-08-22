@@ -32,6 +32,10 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
 
 /** An empty busy set reused as the snapshot's canonical absent value. */
 const EMPTY_BUSY: ReadonlySet<string> = new Set()
+/** An empty failure map reused as the snapshot's canonical absent value. */
+const EMPTY_FAILED: ReadonlyMap<string, string> = new Map()
+/** How long a failed keep/revert hint stays visible before it auto-clears. */
+const FAILED_HINT_MS = 5000
 
 /**
  * Create the store over the review-channel port.
@@ -47,19 +51,44 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
     for (const listener of [...listeners]) listener()
   }
 
+  const failedOf = (value: PendingDiffSnapshot): ReadonlyMap<string, string> => value.failed ?? EMPTY_FAILED
+
+  /** Record one entry's failed keep/revert with its message; auto-clears after a few seconds. */
+  const markFailed = (id: string, message: string): void => {
+    publish({ ...snapshot, failed: new Map([...failedOf(snapshot), [id, message]]) })
+    window.setTimeout(() => {
+      // Re-check at fire time: the marker may have been cleared or replaced.
+      if (failedOf(snapshot).get(id) !== message) return
+      const next = new Map(failedOf(snapshot))
+      next.delete(id)
+      publish({ ...snapshot, failed: next })
+    }, FAILED_HINT_MS)
+  }
+
+  /** Drop one entry's failure marker after a successful retry. */
+  const clearFailed = (id: string): void => {
+    if (!failedOf(snapshot).has(id)) return
+    const next = new Map(failedOf(snapshot))
+    next.delete(id)
+    publish({ ...snapshot, failed: next })
+  }
+
   const withBusy = async (id: string, action: () => Promise<void>): Promise<void> => {
     const { error: _cleared, ...base } = snapshot
-    publish({ ...base, busy: new Set([...snapshot.busy, id]) })
+    publish({ ...base, failed: failedOf(snapshot), busy: new Set([...snapshot.busy, id]) })
     try {
       await action()
     } catch (error: unknown) {
+      // A failed decision keeps the entry and surfaces inline; it must not
+      // swap the whole panel to the error screen.
+      markFailed(id, error instanceof Error ? error.message : String(error))
       publish({
         ...snapshot,
-        error: error instanceof Error ? error.message : String(error),
         busy: new Set([...snapshot.busy].filter(busy => busy !== id)),
       })
       return
     }
+    clearFailed(id)
     publish({
       ...snapshot,
       files: snapshot.files.filter(file => file.id !== id),
@@ -75,12 +104,14 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
     },
     async refresh(sessionId) {
       if (sessionId === undefined) {
-        publish({ read: true, files: [], busy: EMPTY_BUSY })
+        publish({ read: true, files: [], busy: EMPTY_BUSY, failed: failedOf(snapshot) })
         return
       }
       try {
         const { files, workspacePath } = await port.list(sessionId)
-        publish({ read: true, files, workspacePath, busy: EMPTY_BUSY })
+        // Carry the failure markers through: a hint must survive the poll
+        // (auto-clears on its own timer) rather than vanish a second later.
+        publish({ read: true, files, workspacePath, busy: EMPTY_BUSY, failed: failedOf(snapshot) })
       } catch (error: unknown) {
         publish({
           read: true,
@@ -88,6 +119,7 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
           workspacePath: snapshot.workspacePath,
           error: error instanceof Error ? error.message : String(error),
           busy: snapshot.busy,
+          failed: failedOf(snapshot),
         })
       }
     },
@@ -105,13 +137,11 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
       try {
         await port.blockKeep(sessionId, id, block)
       } catch (error: unknown) {
-        publish({
-          ...snapshot,
-          error: error instanceof Error ? error.message : String(error),
-          busy: new Set([...snapshot.busy].filter(busy => busy !== id)),
-        })
+        markFailed(id, error instanceof Error ? error.message : String(error))
+        publish({ ...snapshot, busy: new Set([...snapshot.busy].filter(busy => busy !== id)) })
         return
       }
+      clearFailed(id)
       await this.refresh(sessionId)
     },
     async blockRevert(sessionId, id, block) {
@@ -120,13 +150,11 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
       try {
         await port.blockRevert(sessionId, id, block)
       } catch (error: unknown) {
-        publish({
-          ...snapshot,
-          error: error instanceof Error ? error.message : String(error),
-          busy: new Set([...snapshot.busy].filter(busy => busy !== id)),
-        })
+        markFailed(id, error instanceof Error ? error.message : String(error))
+        publish({ ...snapshot, busy: new Set([...snapshot.busy].filter(busy => busy !== id)) })
         return
       }
+      clearFailed(id)
       await this.refresh(sessionId)
     },
     async open(sessionId, id, action) {
