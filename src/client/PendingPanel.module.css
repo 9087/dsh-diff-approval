@@ -6,19 +6,20 @@
    SettingsRoot.module.css .trigger). Its class name is a build-hashed
    CSS-module token, so it cannot be shared across packages — geometry is
    mirrored here, while colors inherit the harness's --dsw-alias-* theme
-   tokens. The live trigger is 42px tall with 0 / 10 / 0 / 8 padding; if it
-   changes upstream, update this block to match. */
+   tokens. The live trigger is the sidebar's wide 42px row (0 / 10 / 0 / 8
+   padding) that pokes 2px past its seat on each side; if it changes
+   upstream, update this block to match. */
 .layer {
   position: relative;
   flex: none;
   display: flex;
   align-items: center;
   box-sizing: border-box;
-  /* Match the settings trigger's compact footer rhythm exactly so the hover
+  /* Match the settings trigger's footer rhythm exactly so the hover
      highlight (padding and size) lines up with the button below it. */
-  width: calc(100% + 8px);
+  width: calc(100% + 4px);
   height: 42px;
-  margin: 4px -4px 4px;
+  margin: 4px -2px 4px;
 }
 
 .footerButtons {
