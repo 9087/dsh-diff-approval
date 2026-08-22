@@ -1282,6 +1282,10 @@ export function PendingPanel({
 
   return (
     <div className={wide ? css.layer : `${css.layer} ${css.rail}`}>
+      {/* Expanded keeps an 8px inset, so a full-screen backdrop painted with
+          the sidebar's fill hides the app behind the seam instead of letting
+          it show through. It sits just below the panel's z-index. */}
+      {open && expanded && <div className={css.fullscreenBackdrop} data-diff-fullscreen-backdrop />}
       {open && (
         <section
           className={css.panel}

@@ -114,6 +114,20 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Expanded mode fills the viewport seam: the panel keeps its 8px insets, so a
+   full-screen layer painted with the sidebar's fill covers the app that would
+   otherwise show through around the edges. z-index 29 sits just below the
+   panel's 30. */
+.fullscreenBackdrop {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 29;
+  background: var(--dsw-specific-sidebar-fill);
+}
+
 /* The panel stretches between the viewport top and the chat composer: both
    edges are anchored, so the height adapts to the window and can never
    overflow. Its bottom offset is measured from the composer's top edge at

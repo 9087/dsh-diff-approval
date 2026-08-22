@@ -916,6 +916,23 @@ describe('PendingPanel', () => {
     expect(reopened.style.bottom).toBe('8px')
   })
 
+  it('lays a sidebar-colored backdrop over the seam while expanded', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // No backdrop in the docked state.
+    expect(view.container.querySelector('[data-diff-fullscreen-backdrop]')).toBeNull()
+
+    fireEvent.click(view.container.querySelector('[data-diff-approval-expand]') as HTMLElement)
+    const backdrop = view.container.querySelector('[data-diff-fullscreen-backdrop]') as HTMLElement
+    expect(backdrop).not.toBeNull()
+
+    // Leaving fullscreen removes it.
+    fireEvent.click(view.container.querySelector('[data-diff-approval-expand]') as HTMLElement)
+    expect(view.container.querySelector('[data-diff-fullscreen-backdrop]')).toBeNull()
+  })
+
   it('shows the selection reference in the status bar when text is selected', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     const view = render(<PendingPanel {...props} />)
