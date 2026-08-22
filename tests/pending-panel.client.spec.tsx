@@ -44,6 +44,8 @@ function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
     onBlockRevert: vi.fn(async () => {}),
     onOpen: vi.fn(async () => {}),
     onPasteReference: vi.fn(),
+    onUndo: vi.fn(),
+    onRedo: vi.fn(),
     t: (key: string, params?: Record<string, unknown>) => params === undefined ? key : `${key} ${JSON.stringify(params)}`,
   } as unknown as PanelProps
 }
@@ -665,6 +667,29 @@ describe('PendingPanel', () => {
     fireEvent.click(view.container.querySelector('[data-diff-search-close]') as HTMLElement)
     expect(view.container.querySelector('[data-diff-searchbar]')).toBeNull()
     expect(view.container.querySelectorAll('[data-diff-search]')).toHaveLength(0)
+  })
+
+  it('undoes with Ctrl+Z and redoes with Ctrl+Y globally, but not in text inputs', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const undoMock = props.onUndo as unknown as { mock: { calls: unknown[][] } }
+    const redoMock = props.onRedo as unknown as { mock: { calls: unknown[][] } }
+
+    // Global: works from the diff body regardless of where focus sits.
+    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
+    fireEvent.keyDown(body, { key: 'z', ctrlKey: true })
+    expect(undoMock.mock.calls).toEqual([[S1]])
+    fireEvent.keyDown(body, { key: 'y', ctrlKey: true })
+    expect(redoMock.mock.calls).toEqual([[S1]])
+
+    // Text inputs (the composer) keep their own Ctrl+Z / Ctrl+Y editing.
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
+    fireEvent.keyDown(input, { key: 'z', ctrlKey: true })
+    expect(undoMock.mock.calls).toHaveLength(1)
+    input.remove()
   })
 
   it('opens the search bar with Ctrl+F even when focus is outside the panel', () => {

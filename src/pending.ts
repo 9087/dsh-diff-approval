@@ -141,6 +141,23 @@ export class PendingDiffStore {
     return true
   }
 
+  /**
+   * Restore one entry exactly as given (an undo/redo replays a snapshot). The
+   * entry is inserted or replaced by id, and the path index points at it so a
+   * later capture folds into the restored entry.
+   * @param sessionId - the owning session.
+   * @param entry - the entry state to restore.
+   * @returns whether the store changed.
+   */
+  restore(sessionId: SessionId, entry: PendingEntry): boolean {
+    const key = entryKey(sessionId, entry.id)
+    const existing = this.entries.get(key)
+    if (existing !== undefined && sameEntry(existing, entry)) return false
+    this.entries.set(key, { ...entry, sessionId })
+    this.pathIndex.set(pathKey(sessionId, entry.path), entry.id)
+    return true
+  }
+
   /** Total entry count across all sessions. */
   get size(): number {
     return this.entries.size

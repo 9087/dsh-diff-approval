@@ -25,6 +25,10 @@ export interface DiffApprovalPort {
   blockKeep(sessionId: SessionId, id: string, block: DiffApprovalBlockRange): Promise<DiffApprovalActionValue>
   /** Revert one diff block (restore its old lines in the file). */
   blockRevert(sessionId: SessionId, id: string, block: DiffApprovalBlockRange): Promise<DiffApprovalActionValue>
+  /** Undo the session's last keep/revert (restore the before state). */
+  undo(sessionId: SessionId): Promise<DiffApprovalActionValue>
+  /** Redo the session's last undone keep/revert (re-apply the after state). */
+  redo(sessionId: SessionId): Promise<DiffApprovalActionValue>
   /** Open one file with its default application or reveal it in the folder. */
   open(sessionId: SessionId, id: string, action: DiffApprovalOpenAction): Promise<DiffApprovalOpenValue>
 }
@@ -49,6 +53,12 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
     },
     async blockRevert(sessionId, id, block) {
       return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'block-revert', { sessionId, id, block }))
+    },
+    async undo(sessionId) {
+      return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'undo', { sessionId }))
+    },
+    async redo(sessionId) {
+      return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'redo', { sessionId }))
     },
     async open(sessionId, id, action) {
       return openOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'open', { sessionId, id, action }))
@@ -105,7 +115,8 @@ function actionOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): Dif
   const value: unknown = result.value
   if (typeof value !== 'object' || value === null) throw new Error('the action returned a malformed value')
   const outcome = (value as Record<string, unknown>).outcome
-  if (outcome !== 'kept' && outcome !== 'reverted' && outcome !== 'missing') {
+  if (outcome !== 'kept' && outcome !== 'reverted' && outcome !== 'missing'
+    && outcome !== 'undone' && outcome !== 'redone' && outcome !== 'nothing') {
     throw new Error('the action returned a malformed outcome')
   }
   return { outcome }

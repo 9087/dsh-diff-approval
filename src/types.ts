@@ -92,8 +92,8 @@ export interface DiffApprovalBlockTarget {
   block: DiffApprovalBlockRange
 }
 
-/** Outcome of one keep/revert request. */
-export type DiffApprovalActionOutcome = 'kept' | 'reverted' | 'missing'
+/** Outcome of one keep/revert/undo/redo request. */
+export type DiffApprovalActionOutcome = 'kept' | 'reverted' | 'missing' | 'undone' | 'redone' | 'nothing'
 
 /** Value returned by the channel's keep and revert endpoints. */
 export interface DiffApprovalActionValue {

@@ -40,4 +40,8 @@ export interface PendingPanelFace {
   onOpen: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
   /** Paste a copied reference into the session's chat input and focus it. */
   onPasteReference: (sessionId: SessionId, reference: string) => void
+  /** Undo the session's last keep/revert, then refresh the list. */
+  onUndo: (sessionId: SessionId) => void
+  /** Redo the session's last undone keep/revert, then refresh the list. */
+  onRedo: (sessionId: SessionId) => void
 }

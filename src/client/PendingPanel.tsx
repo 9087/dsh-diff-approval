@@ -91,6 +91,10 @@ interface PendingDiffProps {
   failedMessage?: string | undefined
   /** Paste a copied reference into the session's chat input and focus it. */
   onPasteReference: (sessionId: SessionId, reference: string) => void
+  /** Undo the session's last keep/revert (Ctrl+Z). */
+  onUndo: (sessionId: SessionId) => void
+  /** Redo the session's last undone keep/revert (Ctrl+Y). */
+  onRedo: (sessionId: SessionId) => void
   t: Translator
   onKeep: (sessionId: SessionId, id: string) => Promise<void>
   onRevert: (sessionId: SessionId, id: string) => Promise<void>
@@ -319,7 +323,7 @@ function PendingFileRow({ file, selected, failedMessage, t, onSelect }: PendingF
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, onPasteReference, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, onPasteReference, onUndo, onRedo, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -636,8 +640,13 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, onP
     window.setTimeout(() => { setCopied(false) }, 1500)
   }, [file.sessionId, onPasteReference, selectionReference])
 
-  // Ctrl/Cmd+L copies the selected line range; the chord is left to the
-  // browser's own default when there is no selection to reference.
+  // Ctrl/Cmd+L copies the selected line range. The detail pane is mounted
+  // only while a file is open, so the chord is global while the diff is shown
+  // (the reference copy works from anywhere, no focus scope); it is left to
+  // the browser's own default when there is no selection to reference.
+  //
+  // TODO(editable code view): if the editable surface ever needs its own
+  // Ctrl+L, revisit this global interception.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return
@@ -646,8 +655,8 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, onP
       event.preventDefault()
       void copySelection()
     }
-    document.addEventListener('keydown', onKeyDown)
-    return () => { document.removeEventListener('keydown', onKeyDown) }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true) }
   }, [copySelection])
 
   // Ctrl/Cmd+F opens the search bar and focuses its query box. The detail
@@ -675,11 +684,48 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, onP
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
   }, [])
 
-  // Ctrl+Up/Down jumps between change blocks while the review panel owns the
-  // focus. The diff body is focusable (tabIndex) and auto-focused on file
-  // select, so keyboard navigation engages as soon as a file is shown; the
-  // panel scope leaves the composer's own Ctrl+Up/Down (cursor to the message
-  // start/end) intact, and text inputs (the search box) keep their moves.
+  // Ctrl+Z / Ctrl+Y undo/redo the last keep/revert. The detail pane is
+  // mounted only while a file is open, so this intercepts globally while the
+  // diff is shown — the code view is read-only and never reliably holds focus
+  // (after clicking Keep/Revert the focus sits on the body), so a panel scope
+  // would make the chord dead right after an action. Window capture beats any
+  // inner handler; text inputs (the composer, the search box) keep their own
+  // Ctrl+Z/Ctrl+Y editing. Ctrl+Shift+Z also redoes.
+  //
+  // TODO(editable code view): once the diff becomes an editable surface that
+  // can hold focus, scope this back to the panel so the composer's own
+  // undo/redo is restored everywhere else.
+  const sessionId = file.sessionId
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return
+      const key = event.key.toLowerCase()
+      if (key !== 'z' && key !== 'y') return
+      const target = event.target as Node | null
+      if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null) return
+      event.preventDefault()
+      if (key === 'z') {
+        if (event.shiftKey) void onRedo(sessionId)
+        else void onUndo(sessionId)
+      } else {
+        void onRedo(sessionId)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true) }
+  }, [onRedo, onUndo, sessionId])
+
+  // Ctrl+Up/Down jumps between change blocks. The detail pane is mounted only
+  // while a file is open, so this intercepts globally while the diff is shown
+  // — the code view is read-only and never reliably holds focus (after any
+  // panel interaction the focus sits on the body), so a panel scope would make
+  // the chord dead right after an action. Window capture beats any inner
+  // handler; text inputs (the composer, the search box) keep their own
+  // Ctrl+Up/Down cursor moves.
+  //
+  // TODO(editable code view): once the diff becomes an editable surface that
+  // can hold focus, scope this back to the panel so the composer's own chords
+  // are restored everywhere else.
   const jumpRef = useRef(jump)
   jumpRef.current = jump
   useEffect(() => {
@@ -688,13 +734,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, onP
       const key = event.key.toLowerCase()
       if (key !== 'arrowup' && key !== 'arrowdown') return
       const target = event.target as Node | null
-      if (!(target instanceof Element) || target.closest('[data-diff-approval-panel]') === null) return
-      if (target.closest('input, textarea, [contenteditable="true"]') !== null) return
+      if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null) return
       event.preventDefault()
       jumpRef.current(key === 'arrowup' ? -1 : 1)
     }
-    document.addEventListener('keydown', onKeyDown)
-    return () => { document.removeEventListener('keydown', onKeyDown) }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true) }
   }, [])
 
   const focusedBlock = model.blocks.length > 0 ? model.blocks[focus] : undefined
@@ -983,7 +1028,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, failedMessage, onP
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPasteReference, t,
+  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPasteReference, onUndo, onRedo, t,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
   const snapshot = usePending(snapshot => snapshot)
@@ -1080,6 +1125,8 @@ export function PendingPanel({
     document.addEventListener('pointerdown', onPointerDown, true)
     return () => { document.removeEventListener('pointerdown', onPointerDown, true) }
   }, [open])
+
+
 
   // The panel reviews only the current session's files; other sessions of the
   // same workspace stay out of the list, badge, and auto-advance.
@@ -1258,6 +1305,8 @@ export function PendingPanel({
                     jumpSignal={jumpSignal}
                     failedMessage={failed.get(selectedFile.id)}
                     onPasteReference={onPasteReference}
+                    onUndo={onUndo}
+                    onRedo={onRedo}
                     t={t}
                     onKeep={onKeep}
                     onRevert={onRevert}

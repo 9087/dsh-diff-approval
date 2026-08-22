@@ -619,3 +619,94 @@ describe('channel safety', () => {
     expect(answer).toEqual({ ok: false, error: { code: 'internal', message: expect.any(String) as string, details: {} } })
   })
 })
+
+describe('undo/redo', () => {
+  it('undoes a keep by restoring the entry, and redoes it', async () => {
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    await expect(handle('keep', { sessionId: 'session-1', id: entry!.id }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'kept' } })
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+
+    await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'undone' } })
+    const [restored] = await listEntries(handle, 'session-1')
+    expect(restored).toMatchObject({ id: entry!.id, path: '/repo/a.txt', kind: 'edit', oldText: 'a', newText: 'b' })
+
+    await expect(handle('redo', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'redone' } })
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+  })
+
+  it('undoes a revert by restoring the entry and the file content, then redoes it', async () => {
+    const { ctx, handle, fs } = await harness()
+    let diskContent = 'b'
+    fs.readText.mockImplementation(async () => diskContent)
+    fs.writeText.mockImplementation(async (_target: unknown, content: string) => { diskContent = content; return { version: 1 } })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    await handle('revert', { sessionId: 'session-1', id: entry!.id }, signal())
+    expect(diskContent).toBe('a')
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+
+    await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'undone' } })
+    expect(diskContent).toBe('b')
+    const [restored] = await listEntries(handle, 'session-1')
+    expect(restored).toMatchObject({ oldText: 'a', newText: 'b' })
+
+    await expect(handle('redo', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'redone' } })
+    expect(diskContent).toBe('a')
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+  })
+
+  it('undoes a block revert by restoring the entry and the file', async () => {
+    const { ctx, handle, fs } = await harness()
+    let diskContent = 'A\nb\n'
+    fs.readText.mockImplementation(async () => diskContent)
+    fs.writeText.mockImplementation(async (_target: unknown, content: string) => { diskContent = content; return { version: 1 } })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a\nb\n', 'A\nb\n'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    // Block-revert the first block (rows 0-1: del a / add A) -> writes 'a\nb\n'.
+    await handle('block-revert', { sessionId: 'session-1', id: entry!.id, block: { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 } }, signal())
+    expect(diskContent).toBe('a\nb\n')
+
+    await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'undone' } })
+    expect(diskContent).toBe('A\nb\n')
+    const [restored] = await listEntries(handle, 'session-1')
+    expect(restored).toMatchObject({ oldText: 'a\nb\n', newText: 'A\nb\n' })
+  })
+
+  it('does not undo a revert that deleted a created file', async () => {
+    const { ctx, handle } = await harness()
+    emitResult(ctx, writeExec(), writeSuccess('/repo/new.txt', 'create', null, 'content'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    await handle('revert', { sessionId: 'session-1', id: entry!.id }, signal())
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+
+    await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'nothing' } })
+  })
+
+  it('refuses to undo a revert when the file changed outside the review since', async () => {
+    const { ctx, handle, fs } = await harness()
+    let diskContent = 'b'
+    fs.readText.mockImplementation(async () => diskContent)
+    fs.writeText.mockImplementation(async (_target: unknown, content: string) => { diskContent = content; return { version: 1 } })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    await handle('revert', { sessionId: 'session-1', id: entry!.id }, signal())
+    diskContent = 'c' // an outside writer changed the file after the revert
+    const answer = await handle('undo', { sessionId: 'session-1' }, signal())
+    expect(answer).toEqual({ ok: false, error: { code: 'internal', message: expect.stringContaining('undo failed') as string, details: {} } })
+    expect(diskContent).toBe('c')
+  })
+})

@@ -112,6 +112,25 @@ interface SandboxExecutionPolicyLike {
   workspaceRoot: string
 }
 
+/** One restorable snapshot of an entry plus its file, for undo/redo. */
+interface DiffApprovalUndoState {
+  /** Entry id (survives even when the entry is absent, so redo can remove it). */
+  id: string
+  /** The entry's path (for file writes even when the entry is absent). */
+  path: string
+  /** The store entry to restore (undefined = the entry is absent). */
+  entry: PendingEntry | undefined
+  /** The file content to write on restore (undefined = leave the file untouched). */
+  fileText: string | undefined
+}
+
+/** Before/after pair pushed on each undoable keep/revert action. */
+interface DiffApprovalUndoPair {
+  sessionId: SessionId
+  before: DiffApprovalUndoState
+  after: DiffApprovalUndoState
+}
+
 /**
  * Narrow a successful `edit` result value to an operation outcome. The edit
  * tool's output schema declares exactly `{ path, before, after }`; anything
@@ -386,6 +405,52 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       : ctx.fs.writeText(target, content, undefined, signal, policy)
   }
 
+  // Per-session undo/redo stacks, in memory only (lost on restart). Every
+  // undoable keep/revert/block action pushes its before/after pair; undo
+  // restores `before`, redo re-applies `after`. Actions that delete a file
+  // (revert of a created file, block-revert to empty) are not pushed.
+  const undoStacks = new Map<string, DiffApprovalUndoPair[]>()
+  const redoStacks = new Map<string, DiffApprovalUndoPair[]>()
+
+  function pushUndo(sessionId: SessionId, before: DiffApprovalUndoState, after: DiffApprovalUndoState): void {
+    const key = String(sessionId)
+    const stack = undoStacks.get(key) ?? []
+    stack.push({ sessionId, before, after })
+    undoStacks.set(key, stack)
+    // A fresh action invalidates any redo history for the session.
+    redoStacks.delete(key)
+  }
+
+  /**
+   * Restore one snapshot (the before/after side of an undo pair). File writes
+   * carry the session sandbox policy; a divergence guard refuses to overwrite
+   * a file an outside writer has since changed. The store change is applied
+   * only after the write succeeds, keeping the restore all-or-nothing.
+   * @param sessionId - the owning session.
+   * @param state - the snapshot to restore.
+   * @param expectedFile - the other side's file content, checked before a write.
+   * @param signal - aborts before atomic publication takes effect.
+   */
+  async function restoreState(
+    sessionId: SessionId,
+    state: DiffApprovalUndoState,
+    expectedFile: DiffApprovalUndoState | undefined,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (state.fileText !== undefined) {
+      const resolved = await ctx.fs.resolve(state.path, { signal })
+      if (expectedFile?.fileText !== undefined) {
+        const current = await ctx.fs.readText(resolved, undefined)
+        if (current !== expectedFile.fileText) {
+          throw new Error('the file changed outside the review after the action; undo is unavailable')
+        }
+      }
+      await writeRevert(resolved, state.fileText, sessionId, signal)
+    }
+    if (state.entry !== undefined) store.restore(sessionId, state.entry)
+    else store.remove(sessionId, state.id)
+  }
+
   /**
    * Record one session in its workspace's account. Every path that touches a
    * session registers it, so the list merges all of a workspace's sessions'
@@ -525,9 +590,17 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const target = targetOf(payload)
         if (target === undefined) return rpcError('sessionId and id must be non-empty strings')
         await ensureLoaded(target.sessionId)
-        const removed = store.remove(target.sessionId, target.id)
-        if (removed) await persistSession(target.sessionId)
-        const value: DiffApprovalActionValue = { outcome: removed ? 'kept' : 'missing' }
+        const entry = store.get(target.sessionId, target.id)
+        if (entry === undefined) {
+          const value: DiffApprovalActionValue = { outcome: 'missing' }
+          return { ok: true, value }
+        }
+        store.remove(target.sessionId, target.id)
+        pushUndo(target.sessionId,
+          { id: entry.id, path: entry.path, entry, fileText: undefined },
+          { id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
+        await persistSession(target.sessionId)
+        const value: DiffApprovalActionValue = { outcome: 'kept' }
         return { ok: true, value }
       }
       case 'revert': {
@@ -539,6 +612,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           const value: DiffApprovalActionValue = { outcome: 'missing' }
           return { ok: true, value }
         }
+        // A revert that deletes a created file is not undoable (the file is
+        // gone); a revert that writes keeps a snapshot for Ctrl+Z.
+        let undo: { before: DiffApprovalUndoState; after: DiffApprovalUndoState } | undefined
         try {
           const resolved = await ctx.fs.resolve(entry.path, { signal })
           if (entry.kind === 'create') {
@@ -547,12 +623,18 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             // through the backend's own execution-world path.
             await rm(ctx.fs.processPath(resolved), { force: true })
           } else {
+            const preWrite = await ctx.fs.readText(resolved, undefined) ?? entry.newText
             await writeRevert(resolved, entry.oldText, target.sessionId, signal)
+            undo = {
+              before: { id: entry.id, path: entry.path, entry, fileText: preWrite },
+              after: { id: entry.id, path: entry.path, entry: undefined, fileText: entry.oldText },
+            }
           }
         } catch (error: unknown) {
           return rpcError(`revert failed: ${errorMessage(error)}`)
         }
         store.remove(target.sessionId, target.id)
+        if (undo !== undefined) pushUndo(target.sessionId, undo.before, undo.after)
         await persistSession(target.sessionId)
         const value: DiffApprovalActionValue = { outcome: 'reverted' }
         return { ok: true, value }
@@ -571,8 +653,17 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // accepted content, so nothing is written.
         const accepted = contentRangeOf(entry.newText, blockTarget.block.newStart, blockTarget.block.newEnd)
         const updatedOld = replaceContentLines(entry.oldText, blockTarget.block.oldStart, blockTarget.block.oldEnd, accepted)
-        if (updatedOld === entry.newText) store.remove(blockTarget.sessionId, blockTarget.id)
-        else store.update(blockTarget.sessionId, blockTarget.id, { oldText: updatedOld })
+        let afterEntry: PendingEntry | undefined
+        if (updatedOld === entry.newText) {
+          store.remove(blockTarget.sessionId, blockTarget.id)
+          afterEntry = undefined
+        } else {
+          store.update(blockTarget.sessionId, blockTarget.id, { oldText: updatedOld })
+          afterEntry = { ...entry, oldText: updatedOld, updatedAt: Date.now() }
+        }
+        pushUndo(blockTarget.sessionId,
+          { id: entry.id, path: entry.path, entry, fileText: undefined },
+          { id: entry.id, path: entry.path, entry: afterEntry, fileText: undefined })
         await persistSession(blockTarget.sessionId)
         const kept: DiffApprovalActionValue = { outcome: 'kept' }
         return { ok: true, value: kept }
@@ -591,21 +682,83 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // the whole-file revert.
         const restored = contentRangeOf(entry.oldText, blockTarget.block.oldStart, blockTarget.block.oldEnd)
         const updatedNew = replaceContentLines(entry.newText, blockTarget.block.newStart, blockTarget.block.newEnd, restored)
+        let afterEntry: PendingEntry | undefined
+        if (updatedNew === entry.oldText) {
+          store.remove(blockTarget.sessionId, blockTarget.id)
+          afterEntry = undefined
+        } else {
+          store.update(blockTarget.sessionId, blockTarget.id, { newText: updatedNew })
+          afterEntry = { ...entry, newText: updatedNew, updatedAt: Date.now() }
+        }
+        // A block-revert that empties a created file deletes it and is not
+        // undoable; one that writes keeps a snapshot for Ctrl+Z.
+        let undo: { before: DiffApprovalUndoState; after: DiffApprovalUndoState } | undefined
         try {
           const resolved = await ctx.fs.resolve(entry.path, { signal })
           if (entry.kind === 'create' && updatedNew === '') {
             await rm(ctx.fs.processPath(resolved), { force: true })
           } else {
+            const preWrite = await ctx.fs.readText(resolved, undefined) ?? entry.newText
             await writeRevert(resolved, updatedNew, blockTarget.sessionId, signal)
+            undo = {
+              before: { id: entry.id, path: entry.path, entry, fileText: preWrite },
+              after: { id: entry.id, path: entry.path, entry: afterEntry, fileText: updatedNew },
+            }
           }
         } catch (error: unknown) {
           return rpcError(`block revert failed: ${errorMessage(error)}`)
         }
-        if (updatedNew === entry.oldText) store.remove(blockTarget.sessionId, blockTarget.id)
-        else store.update(blockTarget.sessionId, blockTarget.id, { newText: updatedNew })
+        if (undo !== undefined) pushUndo(blockTarget.sessionId, undo.before, undo.after)
         await persistSession(blockTarget.sessionId)
         const reverted: DiffApprovalActionValue = { outcome: 'reverted' }
         return { ok: true, value: reverted }
+      }
+      case 'undo': {
+        const sessionId = sessionOf(payload)
+        if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
+        const key = String(sessionId)
+        const stack = undoStacks.get(key) ?? []
+        const pair = stack.pop()
+        if (pair === undefined) {
+          const value: DiffApprovalActionValue = { outcome: 'nothing' }
+          return { ok: true, value }
+        }
+        try {
+          await restoreState(sessionId, pair.before, pair.after, signal)
+        } catch (error: unknown) {
+          // Keep the pair on the stack so a later, still-valid undo works.
+          stack.push(pair)
+          return rpcError(`undo failed: ${errorMessage(error)}`)
+        }
+        const redoStack = redoStacks.get(key) ?? []
+        redoStack.push(pair)
+        redoStacks.set(key, redoStack)
+        await persistSession(sessionId)
+        const value: DiffApprovalActionValue = { outcome: 'undone' }
+        return { ok: true, value }
+      }
+      case 'redo': {
+        const sessionId = sessionOf(payload)
+        if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
+        const key = String(sessionId)
+        const stack = redoStacks.get(key) ?? []
+        const pair = stack.pop()
+        if (pair === undefined) {
+          const value: DiffApprovalActionValue = { outcome: 'nothing' }
+          return { ok: true, value }
+        }
+        try {
+          await restoreState(sessionId, pair.after, pair.before, signal)
+        } catch (error: unknown) {
+          stack.push(pair)
+          return rpcError(`redo failed: ${errorMessage(error)}`)
+        }
+        const undoStack = undoStacks.get(key) ?? []
+        undoStack.push(pair)
+        undoStacks.set(key, undoStack)
+        await persistSession(sessionId)
+        const value: DiffApprovalActionValue = { outcome: 'redone' }
+        return { ok: true, value }
       }
       case 'open': {
         const target = openTargetOf(payload)

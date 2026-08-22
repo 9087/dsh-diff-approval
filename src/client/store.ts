@@ -24,6 +24,10 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   blockKeep: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
   /** Revert one diff block, then refresh so the entry's diff reflects the undo. */
   blockRevert: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
+  /** Undo the session's last keep/revert, then refresh. */
+  undo: (sessionId: SessionId) => Promise<void>
+  /** Redo the session's last undone keep/revert, then refresh. */
+  redo: (sessionId: SessionId) => Promise<void>
   /** Open one file with its default application or reveal it in the folder. */
   open: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
   /** Drop every local fact (used on connection reset). */
@@ -155,6 +159,14 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
         return
       }
       clearFailed(id)
+      await this.refresh(sessionId)
+    },
+    async undo(sessionId) {
+      await port.undo(sessionId)
+      await this.refresh(sessionId)
+    },
+    async redo(sessionId) {
+      await port.redo(sessionId)
       await this.refresh(sessionId)
     },
     async open(sessionId, id, action) {
