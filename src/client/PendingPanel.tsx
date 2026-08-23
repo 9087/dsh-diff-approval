@@ -1060,6 +1060,13 @@ export function PendingPanel({
   wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPasteReference, onUndo, onRedo, onImportVcs, t,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
+  // A newly created session is selected but still blank (no messages yet); it
+  // has nothing to review, so the entry is grayed out exactly like no session.
+  const currentBlank = useSessions(state => {
+    const id = state.current
+    return id === undefined ? false : (state.byId[id]?.blank ?? false)
+  })
+  const noSession = current === undefined || currentBlank
   const snapshot = usePending(snapshot => snapshot)
   const [open, setOpen] = useState(false)
   const [selected, setSelected] = useState('')
@@ -1253,6 +1260,12 @@ export function PendingPanel({
     if (!open) setOpenedCount(files.length)
     setOpen(value => !value)
   }
+
+  // No reviewable session (none selected, or a freshly created blank one): the
+  // button is disabled and an open panel closes — there is nothing to review.
+  useEffect(() => {
+    if (noSession) setOpen(false)
+  }, [noSession])
 
   /** Run the same decision over every current-session file, sequentially. */
   const runBulk = async (kind: 'keep' | 'revert') => {
@@ -1505,11 +1518,12 @@ export function PendingPanel({
       <div className={css.footerButtons}>
         <button
           type="button"
-          className={css.badge}
+          className={noSession ? `${css.badge} ${css.badgeDisabled}` : css.badge}
           data-diff-approval-badge={files.length}
           data-active={open ? '' : undefined}
           aria-label={t('panel.aria')}
           aria-expanded={open}
+          disabled={noSession}
           onClick={toggleOpen}
         >
           <IconListPenOutline16 size={wide ? 16 : 18} />

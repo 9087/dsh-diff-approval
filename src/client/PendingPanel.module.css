@@ -57,6 +57,13 @@
   background: var(--dsw-alias-interactive-bg-hover-solid);
 }
 
+/* No session selected: the entry sits grayed and inert until a session exists. */
+.badge:disabled {
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: default;
+}
+
 .badgeLabel {
   min-width: 0;
   overflow: hidden;

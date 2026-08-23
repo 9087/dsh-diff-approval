@@ -35,7 +35,8 @@ type PanelProps = ComponentProps<typeof PendingPanel>
 function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
   return {
     wide: true,
-    useSessions: (select: (state: { current: SessionId }) => SessionId) => select({ current: S1 }),
+    useSessions: (select: (state: { current: SessionId; byId: Record<string, { blank?: boolean }> }) => SessionId) =>
+      select({ current: S1, byId: {} }),
     usePending: (select: (state: PendingDiffSnapshot) => PendingDiffSnapshot) => select(snapshot),
     onRefresh: vi.fn(),
     onKeep: vi.fn(async () => {}),
@@ -52,6 +53,24 @@ function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
 }
 
 describe('PendingPanel', () => {
+  it('disables the pending button when no session is selected', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    props.useSessions = ((select: (state: { current: SessionId | undefined; byId: Record<string, { blank?: boolean }> }) => SessionId | undefined) =>
+      select({ current: undefined, byId: {} })) as unknown as typeof props.useSessions
+    const view = render(<PendingPanel {...props} />)
+    const badge = view.container.querySelector('[data-diff-approval-badge]') as HTMLButtonElement
+    expect(badge.disabled).toBe(true)
+  })
+
+  it('disables the pending button while the current session is blank (a new session being created)', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    props.useSessions = ((select: (state: { current: SessionId; byId: Record<string, { blank?: boolean }> }) => SessionId) =>
+      select({ current: S1, byId: { [S1]: { blank: true } } })) as unknown as typeof props.useSessions
+    const view = render(<PendingPanel {...props} />)
+    const badge = view.container.querySelector('[data-diff-approval-badge]') as HTMLButtonElement
+    expect(badge.disabled).toBe(true)
+  })
+
   it('shows the pending count on the badge and refreshes when opened', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
