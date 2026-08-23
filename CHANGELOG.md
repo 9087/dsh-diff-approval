@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.8.0](https://github.com/9087/dsh-diff-approval/compare/v0.7.0...v0.8.0) (2026-08-23)
+
+### Features
+
+* add a panel settings button that opens the Diff Approval settings section, and turn the paste-on-copy preference into an Agent-preset-style On/Off picker. ([6a07724](https://github.com/9087/dsh-diff-approval/commit/6a07724ec0c658d7c2cf9e494a06859429ffd4fd))
+* add Keep-all and Revert-all actions to the file list footer. ([0cafe8a](https://github.com/9087/dsh-diff-approval/commit/0cafe8aa3dc4e419a3b8d28c113900429b672ba4))
+* adopt externally modified file content into the tracked baseline so the panel diff stays current. ([5ae07c1](https://github.com/9087/dsh-diff-approval/commit/5ae07c1acd1d02677e5d1672fc0b18c8eea3d41a))
+* auto-paste a copied reference into the composer, toggled from a DSH Settings section. ([9b4c5f0](https://github.com/9087/dsh-diff-approval/commit/9b4c5f0eb861042933544810513ff0ed926c9419))
+* import the workspace's local git/svn/p4 changes from the empty state, undoable as one action, with an opt-in untracked-files preference. ([c07ff5c](https://github.com/9087/dsh-diff-approval/commit/c07ff5c1c96e48628469a60e6ab4cefff9860a08))
+* jump between diff blocks with Ctrl+Up/Down, make the diff body focusable, and flash the focused block on open and each switch. ([0bf4f6d](https://github.com/9087/dsh-diff-approval/commit/0bf4f6d77504ee7e3a195455d752aa699c4990ef))
+* make keep/revert undoable with Ctrl+Z / Ctrl+Y, and unify the panel shortcuts as global window-capture chords. ([b10672f](https://github.com/9087/dsh-diff-approval/commit/b10672fd40326d6cfde4ed5dc960e289987c448c))
+* make undo/redo focus the affected file and stay reachable after bulk actions with a close grace. ([2df3f29](https://github.com/9087/dsh-diff-approval/commit/2df3f29a879454e02f19744782a0442bd0beca4a))
+* toast keep/revert failures, and keep the block flash inside the scroll viewport with a height clamp and ruler clearance. ([e56ccb6](https://github.com/9087/dsh-diff-approval/commit/e56ccb642376708033fb666ef156a86d4f42eedc))
+
+### Bug Fixes
+
+* fill the fullscreen diff panel seam with a sidebar-colored backdrop. ([09cac5d](https://github.com/9087/dsh-diff-approval/commit/09cac5df0b69ca21502f746103b8474d56f73af1))
+* gray out the pending button while no reviewable session exists, including a freshly created blank one. ([18f8ec2](https://github.com/9087/dsh-diff-approval/commit/18f8ec29cd18a06733566fbb6e60d162e22c1599))
+* keep the focused-block flash pinned to the diff viewport and settled before paint. ([cc4761b](https://github.com/9087/dsh-diff-approval/commit/cc4761be824599a39c086896a482bce416207cd3))
+* keep the whole-file Keep/Revert buttons visually steady while busy, dropping the flashy processing state. ([1970106](https://github.com/9087/dsh-diff-approval/commit/197010627ac6accb00ac5c4b397d26eb0615ef94))
+* match the footer pending button to the live settings trigger geometry (42px row, 2px outward margin). ([9727249](https://github.com/9087/dsh-diff-approval/commit/972724926fc3efb0ebb64e5bc64bb4d9de32ec0f))
+* pass the per-session sandbox policy to revert writes and surface keep/revert failures inline instead of the full error screen. ([6ce69c6](https://github.com/9087/dsh-diff-approval/commit/6ce69c6d34e7262013b1c378c22ed6cf919fd8b0))
+
 ## [0.7.0](https://github.com/9087/dsh-diff-approval/compare/v0.6.0...v0.7.0) (2026-08-20)
 
 ### Features
