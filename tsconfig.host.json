@@ -29,6 +29,7 @@
     "src/open.ts",
     "src/pending.ts",
     "src/persist.ts",
-    "src/types.ts"
+    "src/types.ts",
+    "src/vcs.ts"
   ]
 }

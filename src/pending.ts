@@ -144,7 +144,10 @@ export class PendingDiffStore {
   /**
    * Restore one entry exactly as given (an undo/redo replays a snapshot). The
    * entry is inserted or replaced by id, and the path index points at it so a
-   * later capture folds into the restored entry.
+   * later capture folds into the restored entry. The store keeps one entry per
+   * path: restoring an entry for a path that a DIFFERENT entry currently owns
+   * drops that occupant first, so an undo can never leave two list items for
+   * the same file (e.g. an imported entry and a replayed keep of the same path).
    * @param sessionId - the owning session.
    * @param entry - the entry state to restore.
    * @returns whether the store changed.
@@ -153,8 +156,13 @@ export class PendingDiffStore {
     const key = entryKey(sessionId, entry.id)
     const existing = this.entries.get(key)
     if (existing !== undefined && sameEntry(existing, entry)) return false
+    const pathKey_ = pathKey(sessionId, entry.path)
+    const occupantId = this.pathIndex.get(pathKey_)
+    if (occupantId !== undefined && occupantId !== entry.id) {
+      this.entries.delete(entryKey(sessionId, occupantId))
+    }
     this.entries.set(key, { ...entry, sessionId })
-    this.pathIndex.set(pathKey(sessionId, entry.path), entry.id)
+    this.pathIndex.set(pathKey_, entry.id)
     return true
   }
 

@@ -48,6 +48,7 @@ export function apply(ctx: ClientContext): void {
       onOpen: (sessionId, id, action) => store.open(sessionId, id, action),
       onUndo: (sessionId) => store.undo(sessionId),
       onRedo: (sessionId) => store.redo(sessionId),
+      onImportVcs: (sessionId, includeUntracked) => store.importVcs(sessionId, includeUntracked),
       onPasteReference: (sessionId, reference) => {
         // The composer is reached through the session-scoped context: the
         // sessions service maps an id to its actx, whose conversation service

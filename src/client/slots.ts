@@ -2,7 +2,7 @@
 
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
-import type { DiffApprovalBlockRange, DiffApprovalOpenAction, PendingFileDiff } from '../types.ts'
+import type { DiffApprovalBlockRange, DiffApprovalOpenAction, PendingFileDiff, VcsImportValue } from '../types.ts'
 
 /** What the panel reads and drives: the pending list plus in-flight entries. */
 export interface PendingDiffSnapshot {
@@ -44,4 +44,6 @@ export interface PendingPanelFace {
   onUndo: (sessionId: SessionId) => Promise<string | undefined>
   /** Redo the session's last undone keep/revert, then refresh the list; resolves to the affected entry id when it is still pending. */
   onRedo: (sessionId: SessionId) => Promise<string | undefined>
+  /** Import the workspace's local VCS changes as pending entries (detection included). */
+  onImportVcs: (sessionId: SessionId, includeUntracked: boolean) => Promise<VcsImportValue>
 }

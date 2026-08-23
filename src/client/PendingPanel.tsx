@@ -2,7 +2,7 @@
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
-import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -15,7 +15,7 @@ import type { WholeFileDiffRow } from './whole-file-diff.ts'
 import { HIGHLIGHT_LANGS, highlightLines, languageDisplayName } from './highlight.ts'
 import { langFromPath } from './lang.ts'
 import { referenceOf } from './reference.ts'
-import { pasteOnCopyEnabled } from './settings.ts'
+import { includeUntrackedEnabled, pasteOnCopyEnabled } from './settings.ts'
 import css from './PendingPanel.module.css'
 
 /**
@@ -1040,7 +1040,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPasteReference, onUndo, onRedo, t,
+  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPasteReference, onUndo, onRedo, onImportVcs, t,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
   const snapshot = usePending(snapshot => snapshot)
@@ -1054,6 +1054,14 @@ export function PendingPanel({
   const [undoFlash, setUndoFlash] = useState(0)
   /** Which bulk decision (keep-all / revert-all) is running; null when idle. */
   const [bulkBusy, setBulkBusy] = useState<'keep' | 'revert' | null>(null)
+  /** True while a workspace-changes import is running. */
+  const [importBusy, setImportBusy] = useState(false)
+  /** Feedback under the empty note after an import (no VCS, or a failure). */
+  const [importNote, setImportNote] = useState<string | undefined>(undefined)
+  /** Whether the last import note is a failure (drives the alert role). */
+  const [importFailed, setImportFailed] = useState(false)
+  /** A transient banner for an import that found nothing to bring in. */
+  const [importToast, setImportToast] = useState<string | null>(null)
   /** Pending count captured at open time; auto-close needs a list that emptied. */
   const [openedCount, setOpenedCount] = useState(0)
   /** Bottom offset tracking the chat composer's top edge so the input stays visible. */
@@ -1174,6 +1182,34 @@ export function PendingPanel({
     return () => { window.clearTimeout(timer) }
   }, [open, openedCount, snapshot.read, snapshot.error, files.length])
 
+  // Import is explicitly button-triggered: the empty state's button runs the
+  // whole detect-and-import in one call (no host probe until the user asks).
+  // The host's answer distinguishes a workspace outside any git/svn/p4 checkout
+  // (`detected: false`) from one with no changes to bring in (`imported: 0`).
+  const runImportVcs = async (): Promise<void> => {
+    if (current === undefined || importBusy) return
+    setImportBusy(true)
+    setImportNote(undefined)
+    setImportFailed(false)
+    setImportToast(null)
+    try {
+      const value = await onImportVcs(current, includeUntrackedEnabled())
+      await onRefresh(current)
+      if (!value.detected) {
+        setImportNote(t('panel.importNoVcs'))
+      } else if (value.imported === 0) {
+        // Nothing came in and the list stays empty: a transient banner is all
+        // the feedback needed.
+        setImportToast(t('panel.importNone'))
+      }
+    } catch (error: unknown) {
+      setImportFailed(true)
+      setImportNote(t('panel.importFailed', { message: error instanceof Error ? error.message : String(error) }))
+    } finally {
+      setImportBusy(false)
+    }
+  }
+
   const toggleOpen = () => {
     if (!open) setOpenedCount(files.length)
     setOpen(value => !value)
@@ -1282,6 +1318,11 @@ export function PendingPanel({
 
   return (
     <div className={wide ? css.layer : `${css.layer} ${css.rail}`}>
+      {/* A transient banner for an import that found no changes; the Toast
+          reports completion so it can be unmounted. */}
+      {importToast !== null && (
+        <Toast text={importToast} onDone={() => { setImportToast(null) }} />
+      )}
       {/* Expanded keeps an 8px inset, so a full-screen backdrop painted with
           the sidebar's fill hides the app behind the seam instead of letting
           it show through. It sits just below the panel's z-index. */}
@@ -1343,8 +1384,21 @@ export function PendingPanel({
                 <p className={css.readError} role="alert">{t('panel.readFailed', { message: snapshot.error })}</p>
               )}
               {!snapshot.read && snapshot.error === undefined && <p className={css.note}>{t('panel.loading')}</p>}
-              {snapshot.read && snapshot.error === undefined && files.length === 0
-                && <p className={`${css.note} ${css.noteCentered}`}>{t('panel.empty')}</p>}
+              {snapshot.read && snapshot.error === undefined && files.length === 0 && (
+                <div className={css.emptyState}>
+                  <p className={`${css.note} ${css.noteCentered}`}>{t('panel.empty')}</p>
+                  <button
+                    type="button"
+                    className={css.importButton}
+                    data-diff-import-vcs
+                    disabled={importBusy}
+                    onClick={() => { void runImportVcs() }}
+                  >
+                    {importBusy ? t('action.importVcsBusy') : t('action.importVcs')}
+                  </button>
+                  {importNote !== undefined && <p className={css.importNote} role={importFailed ? 'alert' : undefined}>{importNote}</p>}
+                </div>
+              )}
             </div>
           ) : (
             <div className={css.split}>

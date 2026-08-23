@@ -343,6 +343,47 @@
   text-align: center;
 }
 
+/* Empty state group: the "no pending changes" note plus (when a VCS is
+   detected) an import button, centered together. */
+.emptyState {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Import-workspace-changes button: quiet secondary chrome under the note. */
+.importButton {
+  padding: 5px 14px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.importButton:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.importButton:disabled {
+  color: var(--dsw-alias-label-tertiary);
+  cursor: default;
+}
+
+/* Import feedback (imported count, none, or a failure) under the note. */
+.importNote {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+  text-align: center;
+}
+
 .readError {
   color: var(--dsw-alias-state-error-primary);
 }

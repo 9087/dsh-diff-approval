@@ -7,7 +7,7 @@
 
 import type { ClientConnectionRpc, SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type {
-  DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, PendingFileDiff,
+  DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, PendingFileDiff, VcsImportValue,
 } from '../types.ts'
 
 /** The channel the host half registers and this port calls. */
@@ -29,6 +29,8 @@ export interface DiffApprovalPort {
   undo(sessionId: SessionId): Promise<DiffApprovalActionValue>
   /** Redo the session's last undone keep/revert (re-apply the after state). */
   redo(sessionId: SessionId): Promise<DiffApprovalActionValue>
+  /** Import the workspace's local VCS changes as pending entries. */
+  importVcs(sessionId: SessionId, includeUntracked: boolean): Promise<VcsImportValue>
   /** Open one file with its default application or reveal it in the folder. */
   open(sessionId: SessionId, id: string, action: DiffApprovalOpenAction): Promise<DiffApprovalOpenValue>
 }
@@ -59,6 +61,9 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
     },
     async redo(sessionId) {
       return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'redo', { sessionId }))
+    },
+    async importVcs(sessionId, includeUntracked) {
+      return importValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'vcs-import', { sessionId, includeUntracked }))
     },
     async open(sessionId, id, action) {
       return openOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'open', { sessionId, id, action }))
@@ -122,6 +127,19 @@ function actionOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): Dif
   const id = (value as Record<string, unknown>).id
   const entryId = typeof id === 'string' && id.length > 0 ? id : undefined
   return { outcome, id: entryId }
+}
+
+/** Narrow the vcs-import endpoint's value; a malformed wire value is a failure. */
+function importValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): VcsImportValue {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+  const value: unknown = result.value
+  if (typeof value !== 'object' || value === null) throw new Error('the import returned a malformed value')
+  const imported = (value as Record<string, unknown>).imported
+  const detected = (value as Record<string, unknown>).detected
+  if (typeof imported !== 'number' || typeof detected !== 'boolean') {
+    throw new Error('the import returned a malformed value')
+  }
+  return { imported, detected }
 }
 
 /** Narrow the open endpoint's value; a malformed wire value is an open failure. */

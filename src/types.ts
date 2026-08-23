@@ -95,6 +95,17 @@ export interface DiffApprovalBlockTarget {
 /** Outcome of one keep/revert/undo/redo request. */
 export type DiffApprovalActionOutcome = 'kept' | 'reverted' | 'missing' | 'undone' | 'redone' | 'nothing'
 
+/** The version-control systems the import integration knows. */
+export type VcsKind = 'git' | 'svn' | 'p4'
+
+/** Value returned by the channel's vcs-import endpoint. */
+export interface VcsImportValue {
+  /** How many pending entries were created (0 when nothing was imported). */
+  imported: number
+  /** Whether a VCS root was found at all (false when the workspace is not in a git/svn/p4 checkout). */
+  detected: boolean
+}
+
 /** Value returned by the channel's keep and revert endpoints. */
 export interface DiffApprovalActionValue {
   /** What the request did; `missing` means no pending entry existed. */

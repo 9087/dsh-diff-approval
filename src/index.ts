@@ -35,7 +35,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { rm } from 'node:fs/promises'
+import { readFile, rm } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { expandHomePath } from '@deepseek-ai/dsh-home-paths'
@@ -51,9 +51,11 @@ import { PendingDiffStore } from './pending.ts'
 import { PendingPersistence, defaultStorageDir } from './persist.ts'
 import { defaultOpenPath } from './open.ts'
 import type { OpenAction } from './open.ts'
+import { detectVcsRoot, listVcsChanges } from './vcs.ts'
+import type { VcsChange, VcsImportInput, ShellExecutorLike } from './vcs.ts'
 import type {
   DiffApprovalActionValue, DiffApprovalBlockTarget, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue,
-  PendingEntry, PendingEntryKind, PendingFileDiff,
+  PendingEntry, PendingEntryKind, PendingFileDiff, VcsImportValue,
 } from './types.ts'
 
 export type {
@@ -122,6 +124,9 @@ interface DiffApprovalUndoState {
   entry: PendingEntry | undefined
   /** The file content to write on restore (undefined = leave the file untouched). */
   fileText: string | undefined
+  /** A batch of entries restored/removed together (one VCS import). Each item's
+   * `entry` decides restore vs remove; present only on the import's pair. */
+  batch?: readonly DiffApprovalUndoState[] | undefined
 }
 
 /** Before/after pair pushed on each undoable keep/revert action. */
@@ -447,6 +452,15 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       }
       await writeRevert(resolved, state.fileText, sessionId, signal)
     }
+    if (state.batch !== undefined) {
+      // A batch (one VCS import) touches no files: each item restores its entry
+      // or removes it by id, exactly reversing the import.
+      for (const item of state.batch) {
+        if (item.entry !== undefined) store.restore(sessionId, item.entry)
+        else store.remove(sessionId, item.id)
+      }
+      return
+    }
     if (state.entry !== undefined) store.restore(sessionId, state.entry)
     else store.remove(sessionId, state.id)
   }
@@ -758,6 +772,78 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         undoStacks.set(key, undoStack)
         await persistSession(sessionId)
         const value: DiffApprovalActionValue = { outcome: 'redone', id: pair.after.id }
+        return { ok: true, value }
+      }
+      case 'vcs-import': {
+        const sessionId = sessionOf(payload)
+        if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
+        const workspace = workspaceOf(sessionId)
+        if (workspace === undefined) return rpcError('import unavailable: the session has no workspace')
+        // Detection lives inside the import: the button is the only trigger, so
+        // a workspace outside any git/svn/p4 checkout answers with no VCS found
+        // rather than needing a separate probe.
+        const root = detectVcsRoot(workspace.path)
+        if (root === undefined) return { ok: true, value: { imported: 0, detected: false } }
+        const shell = ctx.get('shell') as ShellExecutorLike | undefined
+        if (shell === undefined) return rpcError('import unavailable: the deployment has no shell executor')
+        const includeUntracked = (payload as Record<string, unknown>).includeUntracked === true
+        const input: VcsImportInput = {
+          kind: root.kind,
+          root: root.root,
+          workspaceRoot: workspace.path,
+          includeUntracked,
+          shell,
+          readText: (path) => readFile(path, 'utf8').catch(() => undefined),
+          signal,
+        }
+        let changes: VcsChange[]
+        try {
+          changes = await listVcsChanges(input)
+        } catch (error: unknown) {
+          return rpcError(`import failed: ${errorMessage(error)}`)
+        }
+        await ensureLoaded(sessionId)
+        const before = new Map(store.list(sessionId).map(entry => [entry.path, entry]))
+        let imported = 0
+        const changedPaths: string[] = []
+        for (const change of changes) {
+          const entry: PendingEntry = {
+            id: randomUUID(),
+            sessionId,
+            path: change.path,
+            kind: change.kind,
+            oldText: change.oldText,
+            newText: change.newText,
+            updatedAt: Date.now(),
+          }
+          if (store.fold(entry)) {
+            imported += 1
+            changedPaths.push(change.path)
+          }
+        }
+        if (imported > 0) {
+          await persistSession(sessionId)
+          // The import is undoable as one action: snapshot each affected path's
+          // entry before and after, so Ctrl+Z undoes the whole import back to
+          // the pre-import list (no file writes — the import never touched files).
+          const after = new Map(store.list(sessionId).map(entry => [entry.path, entry]))
+          const batchBefore: DiffApprovalUndoState[] = []
+          const batchAfter: DiffApprovalUndoState[] = []
+          for (const path of changedPaths) {
+            const final = after.get(path)
+            if (final === undefined) continue
+            const pre = before.get(path)
+            batchAfter.push({ id: final.id, path, entry: final, fileText: undefined })
+            batchBefore.push({ id: final.id, path, entry: pre, fileText: undefined })
+          }
+          if (batchBefore.length > 0) {
+            pushUndo(sessionId,
+              { id: batchBefore[0]!.id, path: batchBefore[0]!.path, entry: undefined, fileText: undefined, batch: batchBefore },
+              { id: batchAfter[0]!.id, path: batchAfter[0]!.path, entry: undefined, fileText: undefined, batch: batchAfter },
+            )
+          }
+        }
+        const value: VcsImportValue = { imported, detected: true }
         return { ok: true, value }
       }
       case 'open': {

@@ -46,6 +46,7 @@ function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
     onPasteReference: vi.fn(),
     onUndo: vi.fn(),
     onRedo: vi.fn(),
+    onImportVcs: vi.fn(async () => ({ imported: 0, detected: false })),
     t: (key: string, params?: Record<string, unknown>) => params === undefined ? key : `${key} ${JSON.stringify(params)}`,
   } as unknown as PanelProps
 }
@@ -373,6 +374,51 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     expect(screen.getByText('panel.readFailed {"message":"down"}')).toBeDefined()
     failed.unmount()
+  })
+
+  it('offers the import button in the empty state and reports when no VCS is found', async () => {
+    const props = panelProps({ read: true, files: [], busy: new Set() })
+    const importMock = props.onImportVcs as unknown as { mock: { calls: unknown[][] } }
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // The empty note always offers the import button (no host probe until click).
+    const button = view.container.querySelector('[data-diff-import-vcs]') as HTMLElement
+    expect(button).not.toBeNull()
+
+    // No VCS root: the note says so, and no refresh happened (nothing changed).
+    fireEvent.click(button)
+    await waitFor(() => { expect(importMock.mock.calls).toEqual([[S1, false]]) })
+    expect(screen.getByText('panel.importNoVcs')).toBeDefined()
+  })
+
+  it('imports the workspace changes on click and refreshes the list', async () => {
+    const props = panelProps({ read: true, files: [], busy: new Set() })
+    ;(props.onImportVcs as unknown as { mockResolvedValueOnce: (v: unknown) => void })
+      .mockResolvedValueOnce({ imported: 2, detected: true })
+    const importMock = props.onImportVcs as unknown as { mock: { calls: unknown[][] } }
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    fireEvent.click(view.container.querySelector('[data-diff-import-vcs]') as HTMLElement)
+    await waitFor(() => {
+      expect(importMock.mock.calls).toEqual([[S1, false]])
+      expect(props.onRefresh).toHaveBeenCalled()
+    })
+    // Imported entries repopulate the list; no banner is needed.
+    expect(screen.queryByText('panel.importNone')).toBeNull()
+  })
+
+  it('shows a toast when an import finds no changes to bring in', async () => {
+    const props = panelProps({ read: true, files: [], busy: new Set() })
+    ;(props.onImportVcs as unknown as { mockResolvedValueOnce: (v: unknown) => void })
+      .mockResolvedValueOnce({ imported: 0, detected: true })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    fireEvent.click(view.container.querySelector('[data-diff-import-vcs]') as HTMLElement)
+    // The DSH Toast renders portaled into the body.
+    await waitFor(() => { expect(screen.getByText('panel.importNone')).toBeDefined() })
   })
 
   it('closes the panel once a non-empty list empties through handling, after the undo grace', () => {
@@ -1113,20 +1159,41 @@ describe('PendingPanel', () => {
   it('the DSH Settings tab toggles the auto-paste preference in localStorage', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     const view = render(<DiffApprovalSettingsTab {...props} />)
-    const selector = view.container.querySelector('[data-diff-paste-on-copy-select]') as HTMLButtonElement
-    expect(selector).not.toBeNull()
+    // Re-query the pill each time: re-rendering can replace the node.
+    const pill = () => view.container.querySelector('[data-diff-paste-on-copy-select]') as HTMLButtonElement
+    expect(pill()).not.toBeNull()
     // On by default: the pill names the on state.
-    expect(selector.textContent).toContain('action.toggleOn')
+    expect(pill().textContent).toContain('action.toggleOn')
 
-    // Pick 关闭 from the dropdown.
-    fireEvent.click(selector)
-    fireEvent.click(screen.getByText('action.toggleOff'))
+    // Pick 关闭 from the dropdown (the other row's pill can also read 关闭 now,
+    // so the menu item is the last match).
+    fireEvent.click(pill())
+    fireEvent.click(screen.getAllByText('action.toggleOff').at(-1)!)
     expect(localStorage.getItem('diff-approval:paste-on-copy')).toBe('0')
 
     // The pill now names the off state; pick 打开 to turn it back on.
-    fireEvent.click(selector)
-    fireEvent.click(screen.getByText('action.toggleOn'))
+    expect(pill().textContent).toContain('action.toggleOff')
+    fireEvent.click(pill())
+    fireEvent.click(screen.getAllByText('action.toggleOn').at(-1)!)
     expect(localStorage.getItem('diff-approval:paste-on-copy')).toBe('1')
+  })
+
+  it('the DSH Settings tab toggles the import-untracked preference in localStorage', () => {
+    const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
+    const view = render(<DiffApprovalSettingsTab {...props} />)
+    const pill = () => view.container.querySelector('[data-diff-import-untracked-select]') as HTMLButtonElement
+    expect(pill()).not.toBeNull()
+    // Off by default: the full untracked scan is opt-in.
+    expect(pill().textContent).toContain('action.toggleOff')
+
+    fireEvent.click(pill())
+    fireEvent.click(screen.getAllByText('action.toggleOn').at(-1)!)
+    expect(localStorage.getItem('diff-approval:import-untracked')).toBe('1')
+
+    expect(pill().textContent).toContain('action.toggleOn')
+    fireEvent.click(pill())
+    fireEvent.click(screen.getAllByText('action.toggleOff').at(-1)!)
+    expect(localStorage.getItem('diff-approval:import-untracked')).toBe('0')
   })
 
   it('lets the status bar pick the highlight language', () => {

@@ -8,7 +8,7 @@
 
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
-import type { DiffApprovalBlockRange, DiffApprovalOpenAction } from '../types.ts'
+import type { DiffApprovalBlockRange, DiffApprovalOpenAction, VcsImportValue } from '../types.ts'
 import type { PendingDiffSnapshot } from './slots.ts'
 import type { DiffApprovalPort } from './port.ts'
 
@@ -28,6 +28,8 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   undo: (sessionId: SessionId) => Promise<string | undefined>
   /** Redo the session's last undone keep/revert, then refresh; resolves to the affected entry id when it is still pending. */
   redo: (sessionId: SessionId) => Promise<string | undefined>
+  /** Import the workspace's local VCS changes as pending entries, then refresh. */
+  importVcs: (sessionId: SessionId, includeUntracked: boolean) => Promise<VcsImportValue>
   /** Open one file with its default application or reveal it in the folder. */
   open: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
   /** Drop every local fact (used on connection reset). */
@@ -184,6 +186,11 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
       } catch {
         return undefined
       }
+    },
+    async importVcs(sessionId, includeUntracked) {
+      const value = await port.importVcs(sessionId, includeUntracked)
+      await this.refresh(sessionId)
+      return value
     },
     async open(sessionId, id, action) {
       try {

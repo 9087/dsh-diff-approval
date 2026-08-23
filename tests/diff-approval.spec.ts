@@ -1,7 +1,7 @@
 // The host half: capture, per-operation entries, channel serving, keep,
 // kind-aware revert, live file state, and persistence.
 
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -44,6 +44,7 @@ afterEach(async () => {
 
 async function harness(options: {
   sessionIds?: readonly SessionId[]
+  workspacePath?: string
   storageDir?: string
   openPath?: (path: string, action: 'open' | 'reveal') => Promise<void>
   prepare?: (ctx: Context) => void
@@ -62,6 +63,7 @@ async function harness(options: {
   const workspaces: Workspace[] = (options.sessionIds ?? []).length === 0 ? [] : [{
     id: WorkspaceId('workspace-1'),
     sessionIds: [...options.sessionIds!],
+    path: options.workspacePath ?? '',
   } as unknown as Workspace]
   ctx.provide('workspaceRegistry', { list: () => workspaces } as unknown as WorkspaceRegistry)
   const storageDir = options.storageDir ?? await mkdtemp(join(tmpdir(), 'dsh-diff-approval-'))
@@ -96,6 +98,23 @@ async function listEntries(handle: ConnectionRpcHandler, sessionId: string): Pro
   const answer = await handle('list', { sessionId }, signal())
   if (!answer.ok) throw new Error('list failed')
   return (answer.value as { files: PendingFileDiff[] }).files
+}
+
+/** A scriptable fake `ctx.shell` executor answering routed commands. Paths the
+ * implementation quotes are matched after stripping the quotes. */
+function fakeShell(routes: Record<string, string>): unknown {
+  return {
+    resolve: (request: { command: string; workdir?: string; timeoutMs?: number }) => ({ ...request }),
+    run: async (spec: { command: string }) => {
+      const command = spec.command.replace(/'/g, '')
+      for (const [needle, output] of Object.entries(routes)) {
+        if (command.includes(needle)) {
+          return { exitCode: 0, stdout: { text: output }, stderr: { text: '' } }
+        }
+      }
+      return { exitCode: 1, stdout: { text: '' }, stderr: { text: `no route for ${spec.command}` } }
+    },
+  }
 }
 
 function editExec(): unknown {
@@ -708,5 +727,179 @@ describe('undo/redo', () => {
     const answer = await handle('undo', { sessionId: 'session-1' }, signal())
     expect(answer).toEqual({ ok: false, error: { code: 'internal', message: expect.stringContaining('undo failed') as string, details: {} } })
     expect(diskContent).toBe('c')
+  })
+})
+
+describe('vcs detection and import', () => {
+  /** A git repo at `dir/repo` whose working tree is the workspace `dir/repo/sub`. */
+  async function gitRepo(): Promise<{ dir: string; repo: string; workspace: string }> {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-vcs-'))
+    tempDirs.push(dir)
+    const repo = join(dir, 'repo')
+    const workspace = join(repo, 'sub')
+    await mkdir(join(repo, '.git'), { recursive: true })
+    await mkdir(workspace, { recursive: true })
+    return { dir, repo, workspace }
+  }
+
+  it('imports git workspace changes (modified, deleted, and untracked) as pending entries', async () => {
+    const { workspace } = await gitRepo()
+    await writeFile(join(workspace, 'a.txt'), 'new content\n')
+    await writeFile(join(workspace, 'new.txt'), 'fresh\n')
+    const shell = fakeShell({
+      'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all':
+        ' M sub/a.txt\u0000 D sub/gone.txt\u0000?? sub/new.txt\u0000',
+      'git show :0:sub/a.txt': 'old content\n',
+      'git show :0:sub/gone.txt': 'gone old\n',
+    })
+    const { handle } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (ctx) => { ctx.provide('shell', shell) },
+    })
+
+    const answer = await handle('vcs-import', { sessionId: 'session-1', includeUntracked: true }, signal())
+    expect(answer).toEqual({ ok: true, value: { imported: 3, detected: true } })
+
+    const files = await listEntries(handle, 'session-1')
+    expect(files).toHaveLength(3)
+    expect(files.map(file => file.path)).toEqual([
+      join(workspace, 'a.txt'),
+      join(workspace, 'gone.txt'),
+      join(workspace, 'new.txt'),
+    ])
+    expect(files[0]).toMatchObject({ kind: 'edit', oldText: 'old content\n', newText: 'new content\n' })
+    expect(files[1]).toMatchObject({ kind: 'edit', oldText: 'gone old\n', newText: '' })
+    expect(files[2]).toMatchObject({ kind: 'create', oldText: '', newText: 'fresh\n' })
+  })
+
+  it('skips untracked files when the import-untracked preference is off', async () => {
+    const { workspace } = await gitRepo()
+    await writeFile(join(workspace, 'a.txt'), 'new content\n')
+    await writeFile(join(workspace, 'new.txt'), 'fresh\n')
+    const shell = fakeShell({
+      'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all':
+        ' M sub/a.txt\u0000?? sub/new.txt\u0000',
+      'git show :0:sub/a.txt': 'old content\n',
+    })
+    const { handle } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (ctx) => { ctx.provide('shell', shell) },
+    })
+
+    const answer = await handle('vcs-import', { sessionId: 'session-1', includeUntracked: false }, signal())
+    expect(answer).toEqual({ ok: true, value: { imported: 1, detected: true } })
+    const files = await listEntries(handle, 'session-1')
+    expect(files.map(file => file.path)).toEqual([join(workspace, 'a.txt')])
+  })
+
+  it('reports no VCS (detected false) when none encloses the workspace, without running commands', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-vcs-empty-'))
+    tempDirs.push(dir)
+    const { handle } = await harness({ sessionIds: [SessionId('session-1')], workspacePath: dir })
+    const answer = await handle('vcs-import', { sessionId: 'session-1', includeUntracked: true }, signal())
+    expect(answer).toEqual({ ok: true, value: { imported: 0, detected: false } })
+  })
+
+  /** A p4 client at `dir/ws` (its `.p4config` marks the client root). */
+  async function p4Client(): Promise<{ dir: string; workspace: string }> {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-vcs-p4-'))
+    tempDirs.push(dir)
+    const workspace = join(dir, 'ws')
+    await mkdir(workspace, { recursive: true })
+    await writeFile(join(workspace, '.p4config'), 'P4CLIENT=test-client\n')
+    return { dir, workspace }
+  }
+
+  it('imports p4 untracked (add) files when the untracked preference is on', async () => {
+    const { workspace } = await p4Client()
+    const newFile = join(workspace, 'new.txt')
+    await writeFile(newFile, 'fresh\n')
+    const shell = fakeShell({
+      'p4 status': `//depot/ws/new.txt#1 - add default change (text) (test-client)\n`,
+      'p4 where //depot/ws/new.txt': `//depot/ws/new.txt //client/ws/new.txt ${newFile}\n`,
+    })
+    const { handle } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (ctx) => { ctx.provide('shell', shell) },
+    })
+
+    const answer = await handle('vcs-import', { sessionId: 'session-1', includeUntracked: true }, signal())
+    expect(answer).toEqual({ ok: true, value: { imported: 1, detected: true } })
+    const [file] = await listEntries(handle, 'session-1')
+    expect(file).toMatchObject({ kind: 'create', oldText: '', newText: 'fresh\n' })
+  })
+
+  it('imports only p4 opened files when the untracked preference is off (no full scan)', async () => {
+    const { workspace } = await p4Client()
+    const edited = join(workspace, 'a.txt')
+    await writeFile(edited, 'new content\n')
+    // No `p4 status` route: if the off-path ran the full scan, the command
+    // would be unmatched and the import would fail.
+    const shell = fakeShell({
+      'p4 opened': `//depot/ws/a.txt#2 - edit default change (text) (test-client)\n`,
+      'p4 where //depot/ws/a.txt': `//depot/ws/a.txt //client/ws/a.txt ${edited}\n`,
+      'p4 print -q //depot/ws/a.txt#have': 'old content\n',
+    })
+    const { handle } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (ctx) => { ctx.provide('shell', shell) },
+    })
+
+    const answer = await handle('vcs-import', { sessionId: 'session-1', includeUntracked: false }, signal())
+    expect(answer).toEqual({ ok: true, value: { imported: 1, detected: true } })
+    const [file] = await listEntries(handle, 'session-1')
+    expect(file).toMatchObject({ kind: 'edit', oldText: 'old content\n', newText: 'new content\n' })
+  })
+
+  it('undoes a VCS import back to the pre-import list, then the earlier keep', async () => {
+    const { workspace } = await gitRepo()
+    const aPath = join(workspace, 'a.txt')
+    await writeFile(aPath, 'new\n')
+    const shell = fakeShell({
+      'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all': ' M sub/a.txt\u0000',
+      'git show :0:sub/a.txt': 'old\n',
+    })
+    const { ctx, handle } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (c) => { c.provide('shell', shell) },
+    })
+
+    // The agent edited a.txt, then the user kept it: the list is empty and the
+    // keep is on the undo stack.
+    emitResult(ctx, editExec(), editSuccess(aPath, 'old\n', 'new\n'))
+    const [kept] = await listEntries(handle, 'session-1')
+    await handle('keep', { sessionId: 'session-1', id: kept!.id }, signal())
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+
+    // Import the same file's VCS change: one pending entry, import on the stack.
+    const importAnswer = await handle('vcs-import', { sessionId: 'session-1', includeUntracked: false }, signal())
+    expect(importAnswer).toEqual({ ok: true, value: { imported: 1, detected: true } })
+    expect(await listEntries(handle, 'session-1')).toHaveLength(1)
+
+    // One undo undoes the IMPORT (back to the empty pre-import list), not the
+    // earlier keep — and no duplicate entry for the path appears.
+    await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: expect.any(String) } })
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+
+    // The next undo restores the pre-keep entry (the "diff from before keep").
+    await handle('undo', { sessionId: 'session-1' }, signal())
+    const files = await listEntries(handle, 'session-1')
+    expect(files).toHaveLength(1)
+    expect(files[0]).toMatchObject({ path: aPath, oldText: 'old\n', newText: 'new\n' })
+
+    // Redo replays in reverse: the keep re-applies first (list empties again),
+    // then the import's redo brings the imported entry back.
+    await handle('redo', { sessionId: 'session-1' }, signal())
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+    await handle('redo', { sessionId: 'session-1' }, signal())
+    const files2 = await listEntries(handle, 'session-1')
+    expect(files2).toHaveLength(1)
+    expect(files2[0]).toMatchObject({ kind: 'edit', oldText: 'old\n', newText: 'new\n' })
   })
 })
