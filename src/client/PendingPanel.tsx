@@ -48,6 +48,9 @@ const MIN_LIST_WIDTH_PX = 160
 const MAX_LIST_WIDTH_PX = 560
 /** Fixed diff-row height in px; the virtual window and jump math are built on it. */
 const ROW_HEIGHT_PX = 22
+/** The overview ruler's width in px (mirrors `.overviewRuler`). The flash is
+ * kept off it even when the scroller has no vertical scrollbar. */
+const OVERVIEW_RULER_WIDTH_PX = 4
 /** Rows rendered beyond the visible window in each direction. */
 const OVERSCAN_ROWS = 8
 /** Height of the floating per-block Keep/Revert frame in px: 26px actions +
@@ -751,6 +754,15 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const focusedBlock = model.blocks.length > 0 ? model.blocks[focus] : undefined
   const inFocusedBlock = (index: number): boolean =>
     focusedBlock !== undefined && index >= focusedBlock.start && index <= focusedBlock.end
+  // The flash's width: `clientWidth` already ends at a real vertical scrollbar,
+  // so when one is present no adjustment is needed; without one, the ruler's
+  // own width is reserved so the box never overlaps it.
+  const flashWidth = (() => {
+    const scroller = bodyRef.current
+    if (scroller === null) return 0
+    const scrollbarWidth = scroller.offsetWidth - scroller.clientWidth
+    return Math.max(0, scroller.clientWidth - (scrollbarWidth > 0 ? 0 : OVERVIEW_RULER_WIDTH_PX))
+  })()
 
   return (
     <div className={css.diff} data-diff-approval-diff>
@@ -918,10 +930,15 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
               // subtract the current scrollTop to keep the box on the block;
               // the width is the scroller's client width (the code area,
               // excluding the scrollbar and the overview ruler), so the right
-              // edge lands exactly on the code's right edge.
+              // edge lands exactly on the code's right edge. A block taller
+              // than the viewport would draw a box past the scroll box, so the
+              // height is clamped to the scroller's visible height.
               top: focusedBlock.start * ROW_HEIGHT_PX - scrollTop,
-              height: (focusedBlock.end - focusedBlock.start + 1) * ROW_HEIGHT_PX,
-              width: bodyRef.current?.clientWidth ?? 0,
+              height: Math.min(
+                (focusedBlock.end - focusedBlock.start + 1) * ROW_HEIGHT_PX,
+                viewportHeight > 0 ? viewportHeight : Number.POSITIVE_INFINITY,
+              ),
+              width: flashWidth,
             }}
           />
         )}
@@ -1062,6 +1079,8 @@ export function PendingPanel({
   const [importFailed, setImportFailed] = useState(false)
   /** A transient banner for an import that found nothing to bring in. */
   const [importToast, setImportToast] = useState<string | null>(null)
+  /** A transient banner for a keep/revert failure. */
+  const [actionToast, setActionToast] = useState<string | null>(null)
   /** Pending count captured at open time; auto-close needs a list that emptied. */
   const [openedCount, setOpenedCount] = useState(0)
   /** Bottom offset tracking the chat composer's top edge so the input stays visible. */
@@ -1156,6 +1175,26 @@ export function PendingPanel({
   const files = snapshot.files.filter(file => file.sessionId === current)
   /** Per-file keep/revert failures, surfaced inline on the row and detail. */
   const failed = snapshot.failed ?? EMPTY_FAILED_MAP
+
+  // A keep/revert failure also pops a transient banner: watch the failure map
+  // for entries that were not there before (the panel's own actions mark them;
+  // the first observation is the baseline and does not toast). The inline tag
+  // and detail banner stay for context.
+  const failedInitialized = useRef(false)
+  const failedRef = useRef<ReadonlyMap<string, string> | undefined>(undefined)
+  useEffect(() => {
+    const current = snapshot.failed
+    if (!failedInitialized.current) {
+      failedInitialized.current = true
+      failedRef.current = current
+      return
+    }
+    const previous = failedRef.current
+    const fresh = [...(current ?? EMPTY_FAILED_MAP).entries()]
+      .filter(([id]) => previous === undefined || !previous.has(id))
+    if (fresh.length > 0) setActionToast(fresh[0]![1])
+    failedRef.current = current
+  }, [snapshot.failed])
 
   // Auto-open the first pending file when the panel opens, and advance to the
   // next one once the selected file is handled. Selection is single and cannot
@@ -1322,6 +1361,9 @@ export function PendingPanel({
           reports completion so it can be unmounted. */}
       {importToast !== null && (
         <Toast text={importToast} onDone={() => { setImportToast(null) }} />
+      )}
+      {actionToast !== null && (
+        <Toast text={actionToast} onDone={() => { setActionToast(null) }} />
       )}
       {/* Expanded keeps an 8px inset, so a full-screen backdrop painted with
           the sidebar's fill hides the app behind the seam instead of letting

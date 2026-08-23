@@ -298,6 +298,27 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-action-error]')).not.toBeNull()
   })
 
+  it('pops a toast when a keep/revert failure appears', async () => {
+    const view = render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    expect(document.querySelector('[role="alert"]')).toBeNull()
+
+    // A keep/revert fails: the snapshot gains the failure marker, which toasts
+    // (the DSH Toast renders portaled into the body with role="alert").
+    view.rerender(<PendingPanel {...panelProps({
+      read: true,
+      files: [FILE],
+      busy: new Set(),
+      failed: new Map([[FILE.id, 'revert failed: disk full']]),
+    })} />)
+    await waitFor(() => {
+      const alert = document.querySelector('[role="alert"]')
+      expect(alert).not.toBeNull()
+      expect(alert!.textContent).toContain('revert failed: disk full')
+    })
+  })
+
   it('always shows the short file name with the full path on hover, even when basenames collide', () => {
     const sibling = entry({ id: 'entry-dup', path: '/repo/sub/a.txt' })
     const props = panelProps({ read: true, files: [FILE, sibling], busy: new Set() })
@@ -712,6 +733,46 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('action.nextDiff'))
     expect(flash()).not.toBeNull()
     expect(flash()).not.toBe(before)
+  })
+
+  it('clamps a tall block flash to the scroller viewport height', () => {
+    // One contiguous 12-row block (264px tall) in a 60px viewport.
+    const tall = entry({ id: 'entry-tall', oldText: 'a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n', newText: 'A\nB\nC\nD\nE\nF\nG\nH\nI\nJ\nK\nL\n' })
+    const props = panelProps({ read: true, files: [tall], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // In jsdom the viewport measures 0 (no clamp); fake a visible height and
+    // re-measure through a scroll event, which reports the scroller height.
+    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
+    Object.defineProperty(body, 'clientHeight', { value: 60, configurable: true })
+    fireEvent.scroll(body)
+
+    const flash = view.container.querySelector('[data-diff-block-flash]') as HTMLElement
+    expect(flash).not.toBeNull()
+    expect(flash.style.height).toBe('60px')
+  })
+
+  it('keeps the flash off the overview ruler, reserving its width when no scrollbar is present', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
+
+    // No vertical scrollbar (offset == client): the ruler's 4px is reserved,
+    // so the flash stops short of it. The clientHeight change forces the
+    // re-render that recomputes the width.
+    Object.defineProperty(body, 'clientWidth', { value: 200, configurable: true })
+    Object.defineProperty(body, 'offsetWidth', { value: 200, configurable: true })
+    Object.defineProperty(body, 'clientHeight', { value: 100, configurable: true })
+    fireEvent.scroll(body)
+    expect(view.container.querySelector('[data-diff-block-flash]')!.style.width).toBe('196px')
+
+    // With a scrollbar (offset > client), clientWidth already ends at it.
+    Object.defineProperty(body, 'offsetWidth', { value: 208, configurable: true })
+    Object.defineProperty(body, 'clientHeight', { value: 120, configurable: true })
+    fireEvent.scroll(body)
+    expect(view.container.querySelector('[data-diff-block-flash]')!.style.width).toBe('200px')
   })
 
   it('re-clicking the already-open file jumps to the next diff block', () => {
