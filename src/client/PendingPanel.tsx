@@ -435,11 +435,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // Reset transient viewer state whenever the selected file changes, take
   // keyboard focus into the diff body so the Ctrl+Up/Down block-jump (scoped
   // to the panel) works as soon as a file is shown, and flash the initial
-  // block so the user sees where the first change sits.
+  // block so the user sees where the first change sits. The scroll position is
+  // left to the block-centering effect below: it scrolls the first change
+  // block into view, and resetting it to 0 here would override that for long
+  // files whose first change sits far down.
   useEffect(() => {
     setFocus(0)
-    setScrollTop(0)
-    if (bodyRef.current !== null) bodyRef.current.scrollTop = 0
     bodyRef.current?.focus()
     setFlashKey(key => key + 1)
     setHoveredBlock(undefined)
