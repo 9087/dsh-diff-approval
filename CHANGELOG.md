@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.0](https://github.com/9087/dsh-diff-approval/compare/v0.8.0...v0.9.0) (2026-08-24)
+
+### Features
+
+* keep the pending panel open when every change has been handled ([f397d73](https://github.com/9087/dsh-diff-approval/commit/f397d73f17f1bd1a1ddaa38254a1008696165877))
+* sense external file changes and fold them into undo/redo ([c5586f8](https://github.com/9087/dsh-diff-approval/commit/c5586f88b0c02234c8097542f5df5cf0d3d80af5))
+* show the Ctrl+Up/Down block-jump shortcut in the prev/next diff tooltips ([4c2205d](https://github.com/9087/dsh-diff-approval/commit/4c2205d8c13ddf546349a6304a4816c54709acf0))
+
+### Bug Fixes
+
+* scroll long files to the first change block on open ([d5672b0](https://github.com/9087/dsh-diff-approval/commit/d5672b04df3aaad3bc5ffeeac6f45879183c5232))
+
 ## [0.8.0](https://github.com/9087/dsh-diff-approval/compare/v0.7.0...v0.8.0) (2026-08-23)
 
 ### Features
