@@ -288,29 +288,46 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     if (store.fold(entry)) await persistSession(sessionId)
   }
 
+  /** One observation of a tracked path's live file. Existence is decided solely
+   * by `stat` (`undefined` means the target is absent); a present-but-unreadable
+   * file is `unavailable` so the panel can disable its operations. */
+  type LiveFileState =
+    | { kind: 'present'; content: string }
+    | { kind: 'deleted' }
+    | { kind: 'unavailable' }
+
+  /** The stable `FsError.code`, when the thrown value carries one. */
+  function fsErrorCodeOf(error: unknown): string | undefined {
+    if (typeof error !== 'object' || error === null) return undefined
+    const code = (error as { code?: unknown }).code
+    return typeof code === 'string' ? code : undefined
+  }
+
   /**
-   * Read one path's live state: present content, an unresolvable (missing)
-   * path, or a resolved-but-unreadable file.
+   * Read one path's live state. The only existence test is `stat`: it returns
+   * `undefined` for an absent target (gone), so a deleted file never falls into
+   * the unreadable bucket. A file that exists but cannot be read is `unavailable`.
    * @param path - backend display path to probe through `ctx.fs`.
    * @returns the live state.
    */
-  async function liveStateOf(path: string): Promise<
-    { present: true; content: string } | { present: false; kind: 'missing' | 'unreadable' }
-  > {
+  async function liveStateOf(path: string): Promise<LiveFileState> {
     let target
     try {
       target = await ctx.fs.resolve(path, {})
-    } catch {
-      // Resolution is how this seam reports a gone path; absence is a state,
-      // not a fault, so the missing branch answers.
-      return { present: false, kind: 'missing' }
+    } catch (error) {
+      return fsErrorCodeOf(error) === 'FS_NOT_FOUND' ? { kind: 'deleted' } : { kind: 'unavailable' }
     }
+    let info
     try {
-      return { present: true, content: await ctx.fs.readText(target, undefined) }
-    } catch {
-      // Resolved but unreadable: the content cannot be verified, which the
-      // panel reports as divergence — the safe reading.
-      return { present: false, kind: 'unreadable' }
+      info = await ctx.fs.stat(target, undefined)
+    } catch (error) {
+      return fsErrorCodeOf(error) === 'FS_NOT_FOUND' ? { kind: 'deleted' } : { kind: 'unavailable' }
+    }
+    if (info === undefined) return { kind: 'deleted' }
+    try {
+      return { kind: 'present', content: await ctx.fs.readText(target, undefined) }
+    } catch (error) {
+      return fsErrorCodeOf(error) === 'FS_NOT_FOUND' ? { kind: 'deleted' } : { kind: 'unavailable' }
     }
   }
 
@@ -320,7 +337,37 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * @param entries - the store's entries for one session.
    * @returns entries with `missing` and `diverged` set from the live file.
    */
-  async function listWithState(entries: readonly PendingEntry[]): Promise<PendingFileDiff[]> {
+  /** Drop every undo/redo pair that belongs to a removed entry, so the LIFO
+   * queue stays traversable without ever trying to restore an unreadable file. */
+  function purgeForEntry(sessionId: SessionId, entryId: string, path: string): void {
+    const key = String(sessionId)
+    for (const stacks of [undoStacks, redoStacks]) {
+      const stack = stacks.get(key)
+      if (stack === undefined) continue
+      stacks.set(key, stack.filter(pair => {
+        const touches = (state: DiffApprovalUndoState): boolean =>
+          state.id === entryId || state.path === path
+        const batch = pair.before.batch ?? pair.after.batch
+        if (batch !== undefined) return !batch.some(item => item.id === entryId || item.path === path)
+        return !touches(pair.before) && !touches(pair.after)
+      }))
+    }
+  }
+
+  /**
+   * Settle each listed entry against its live file. Existence is decided by the
+   * live state alone: a deleted file leaves the list as an undoable checkpoint
+   * (Ctrl+Z recreates it and restores the entry), an unavailable one leaves the
+   * list and has its undo/redo records dropped, and externally changed content
+   * is adopted as the new baseline with its own checkpoint.
+   * @param sessionId - the session being listed.
+   * @param entries - the store's entries for one session.
+   * @returns the listed entries plus whether an external change cleared redo.
+   */
+  async function listWithState(
+    sessionId: SessionId,
+    entries: readonly PendingEntry[],
+  ): Promise<{ files: PendingFileDiff[]; redoCleared: boolean }> {
     const byPath = new Map<string, PendingEntry[]>()
     for (const entry of entries) {
       const group = byPath.get(entry.path)
@@ -328,33 +375,54 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       else group.push(entry)
     }
     const listed: PendingFileDiff[] = []
+    let redoCleared = false
     for (const group of byPath.values()) {
       const newest = group[group.length - 1]
       if (newest === undefined) continue
       const live = await liveStateOf(newest.path)
-      // A file changed outside the tracked operations (another tool, an
-      // editor, a second process) is folded in as the new baseline, so the
-      // panel's diff tracks the file as it is now instead of showing the
-      // stale captured content. The entry keeps its pre-change `oldText`, so
-      // Revert still restores the earliest basis (overwriting the external
-      // edit, as the diverged entry documents).
-      let adopted = newest.newText
-      // Only a real string content is adoptable: a resolved-but-unreadable
-      // file (content unavailable) must not clobber the tracked newText.
-      if (live.present && typeof live.content === 'string' && live.content !== newest.newText) {
-        adopted = live.content
-        if (store.update(newest.sessionId, newest.id, { newText: live.content })) {
-          await persistSession(newest.sessionId)
-        }
+      if (live.kind === 'deleted') {
+        // The file is gone: remove it from the list, keeping an undoable
+        // checkpoint that recreates the file (its tracked content) and restores
+        // the entry to the list.
+        store.remove(sessionId, newest.id)
+        pushUndo(sessionId,
+          { id: newest.id, path: newest.path, entry: newest, fileText: newest.newText },
+          { id: newest.id, path: newest.path, entry: undefined, fileText: undefined })
+        await persistSession(sessionId)
+        continue
       }
-      const state = live.present
-        ? { missing: false, diverged: live.content !== adopted }
-        : { missing: live.kind === 'missing', diverged: live.kind === 'unreadable' }
+      if (live.kind === 'unavailable') {
+        // Present but unreadable: no operation is safe, so drop the entry and
+        // purge its undo/redo records so the LIFO queue stays traversable.
+        store.remove(sessionId, newest.id)
+        purgeForEntry(sessionId, newest.id, newest.path)
+        await persistSession(sessionId)
+        continue
+      }
+      // Present. A file changed outside the tracked operations (another tool,
+      // an editor, a second process) is adopted as the new baseline so the
+      // panel tracks the file as it is now; the entry keeps its pre-change
+      // `oldText`, and the adoption itself is a fresh undo checkpoint.
+      const content = live.content as string | undefined
+      let adopted = newest.newText
+      const hasContent = typeof content === 'string'
+      if (hasContent && content !== newest.newText) {
+        adopted = content
+        const beforeText = newest.newText
+        const redoWasPresent = redoStacks.has(String(sessionId))
+        store.update(sessionId, newest.id, { newText: content })
+        pushUndo(sessionId,
+          { id: newest.id, path: newest.path, entry: newest, fileText: beforeText },
+          { id: newest.id, path: newest.path, entry: { ...newest, newText: content, updatedAt: Date.now() }, fileText: content })
+        await persistSession(sessionId)
+        if (redoWasPresent) redoCleared = true
+      }
+      const state = { missing: false, diverged: hasContent ? content !== adopted : true }
       for (const entry of group) {
         listed.push(entry.id === newest.id ? { ...entry, newText: adopted, ...state } : { ...entry, ...state })
       }
     }
-    return listed
+    return { files: listed, redoCleared }
   }
 
   /**
@@ -596,8 +664,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       case 'list': {
         const sessionId = sessionOf(payload)
         if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
-        const files = await listWithState(await workspaceEntries(sessionId))
-        const value: DiffApprovalListValue = { files, workspacePath: workspaceOf(sessionId)?.path }
+        const { files, redoCleared } = await listWithState(sessionId, await workspaceEntries(sessionId))
+        const value: DiffApprovalListValue = { files, workspacePath: workspaceOf(sessionId)?.path, redoCleared: redoCleared || undefined }
         return { ok: true, value }
       }
       case 'keep': {

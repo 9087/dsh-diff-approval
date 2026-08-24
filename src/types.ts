@@ -58,6 +58,10 @@ export interface DiffApprovalListValue {
   files: PendingFileDiff[]
   /** The viewing session's workspace root (when it has one), for workspace-relative references. */
   workspacePath?: string | undefined
+  /** Set when a detected external change created a fresh undo checkpoint while
+   * redo history was pending, so the panel can surface that the redo stack was
+   * superseded. */
+  redoCleared?: boolean | undefined
 }
 
 /** What the open endpoint asks the OS to do with a file. */

@@ -18,6 +18,10 @@ export interface PendingDiffSnapshot {
   failed?: ReadonlyMap<string, string> | undefined
   /** The viewing session's workspace root (when it has one); enables workspace-relative references. */
   workspacePath?: string | undefined
+  /** Latched when an external change created a fresh undo checkpoint that
+   * superseded the redo history; the panel surfaces it once (deferred if the
+   * panel is closed) via a bottom-right notice. */
+  redoCleared?: boolean
 }
 
 /** The injected face the panel component receives from the plugin body. */
@@ -46,4 +50,6 @@ export interface PendingPanelFace {
   onRedo: (sessionId: SessionId) => Promise<string | undefined>
   /** Import the workspace's local VCS changes as pending entries (detection included). */
   onImportVcs: (sessionId: SessionId, includeUntracked: boolean) => Promise<VcsImportValue>
+  /** Acknowledge the redo-cleared notice so it is only surfaced once. */
+  onAckRedoCleared: () => void
 }

@@ -111,7 +111,8 @@ function listValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): 
     const file = pendingFileOf(row)
     if (file !== undefined) files.push(file)
   }
-  return { files, workspacePath }
+  const redoCleared = (value as Record<string, unknown>).redoCleared
+  return redoCleared === true ? { files, workspacePath, redoCleared: true } : { files, workspacePath }
 }
 
 /** Narrow one action endpoint's value; a malformed wire value is an action failure. */

@@ -19,6 +19,7 @@ interface FsDouble {
   resolve: ReturnType<typeof vi.fn>
   readText: ReturnType<typeof vi.fn>
   writeText: ReturnType<typeof vi.fn>
+  stat: ReturnType<typeof vi.fn>
   processPath: ReturnType<typeof vi.fn>
 }
 
@@ -55,6 +56,7 @@ async function harness(options: {
     resolve: vi.fn(async (path: string) => ({ displayPath: path, targetKey: `key:${path}` })),
     readText: vi.fn(async () => undefined),
     writeText: vi.fn(async () => ({ version: 1 })),
+    stat: vi.fn(async () => ({ version: 'v1', type: 'file' })),
     processPath: vi.fn((target: { targetKey: string }) => target.targetKey),
   }
   ctx.provide('fs', fs as unknown as FileSystem)
@@ -493,7 +495,7 @@ describe('open', () => {
 })
 
 describe('live file state', () => {
-  it('adopts externally modified content as the new baseline so the diff tracks it', async () => {
+  it('adopts externally modified content as the new baseline and makes it undoable', async () => {
     const { ctx, handle, fs } = await harness()
     fs.readText.mockResolvedValue('external edit\n')
     emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'v1\n', 'v2\n'))
@@ -502,6 +504,9 @@ describe('live file state', () => {
     expect(entries).toEqual([
       expect.objectContaining({ missing: false, diverged: false, oldText: 'v1\n', newText: 'external edit\n' }) as object,
     ])
+    // The adoption is a fresh undo point: undo restores the prior content.
+    const undo = await handle('undo', { sessionId: 'session-1' }, signal())
+    expect(undo).toEqual({ ok: true, value: { outcome: 'undone', id: expect.any(String) } })
   })
 
   it('marks an entry clean when the current content matches the tracked text', async () => {
@@ -515,26 +520,43 @@ describe('live file state', () => {
     ])
   })
 
-  it('marks entries missing when the path no longer resolves', async () => {
+  it('drops a file stat reports as absent, kept as an undoable checkpoint', async () => {
     const { ctx, handle, fs } = await harness()
-    fs.resolve.mockRejectedValue(new Error('not found'))
+    fs.stat.mockResolvedValue(undefined)
     emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'v1\n', 'v2\n'))
 
     const entries = await listEntries(handle, 'session-1')
-    expect(entries).toEqual([
-      expect.objectContaining({ missing: true, diverged: false }) as object,
-    ])
+    expect(entries).toEqual([])
+    // Undo recreates the file (its tracked content) and restores the entry.
+    const undo = await handle('undo', { sessionId: 'session-1' }, signal())
+    expect(undo).toEqual({ ok: true, value: { outcome: 'undone', id: expect.any(String) } })
+    expect(fs.writeText).toHaveBeenCalled()
   })
 
-  it('marks entries diverged when the file resolves but cannot be read', async () => {
+  it('drops a file readText reports as unreadable and clears its history', async () => {
     const { ctx, handle, fs } = await harness()
     fs.readText.mockRejectedValue(new Error('permission denied'))
     emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'v1\n', 'v2\n'))
 
     const entries = await listEntries(handle, 'session-1')
-    expect(entries).toEqual([
-      expect.objectContaining({ missing: false, diverged: true }) as object,
-    ])
+    expect(entries).toEqual([])
+    // The unavailable entry's undo record was purged, so undo has nothing to do.
+    const undo = await handle('undo', { sessionId: 'session-1' }, signal())
+    expect(undo).toEqual({ ok: true, value: { outcome: 'nothing' } })
+  })
+
+  it('reports redoCleared when a detected external change supersedes pending redo', async () => {
+    const { ctx, fs, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'v1\n', 'v2\n'))
+    const [entry] = await listEntries(handle, 'session-1')
+    await handle('keep', { sessionId: 'session-1', id: entry!.id }, signal())
+    await handle('undo', { sessionId: 'session-1' }, signal())
+
+    // An external change after the undo: adopting it is a fresh undo point that
+    // clears the session's pending redo, so the list flags it for the panel.
+    fs.readText.mockResolvedValue('v3\n')
+    const answer = await handle('list', { sessionId: 'session-1' }, signal())
+    expect(answer).toEqual({ ok: true, value: expect.objectContaining({ redoCleared: true }) as object })
   })
 })
 

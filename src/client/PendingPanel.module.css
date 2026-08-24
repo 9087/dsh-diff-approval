@@ -1013,3 +1013,45 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Bottom-right, non-blocking notice: an external change created a fresh undo
+   checkpoint and superseded the redo history. The card only captures clicks on
+   itself, never the page behind it. */
+.notice {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 60;
+  max-width: 360px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-base);
+  box-shadow: var(--dsw-shadow-lv3);
+}
+
+.noticeText {
+  flex: 1;
+  margin: 0;
+  font: var(--dsw-font-caption);
+  color: var(--dsw-alias-label-primary);
+  line-height: 1.45;
+}
+
+.noticeButton {
+  flex: none;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-caption);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.noticeButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+}

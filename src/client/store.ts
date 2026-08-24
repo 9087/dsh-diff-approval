@@ -34,6 +34,8 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   open: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
   /** Drop every local fact (used on connection reset). */
   reset: () => void
+  /** Acknowledge a redo-cleared notice so the panel surfaces it only once. */
+  clearRedoCleared: () => void
 }
 
 /** An empty busy set reused as the snapshot's canonical absent value. */
@@ -51,9 +53,14 @@ const FAILED_HINT_MS = 5000
 export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore {
   let snapshot: PendingDiffSnapshot = { read: false, files: [], busy: EMPTY_BUSY }
   const listeners = new Set<() => void>()
+  // Latched until the panel acknowledges it: a detected external change that
+  // superseded the redo history must surface even when the panel is closed.
+  let redoCleared = false
 
   const publish = (next: PendingDiffSnapshot): void => {
-    snapshot = next
+    // Only carry the flag while it is latched, so an ordinary snapshot is
+    // byte-for-byte the shape older consumers expect.
+    snapshot = redoCleared ? { ...next, redoCleared: true } : next
     for (const listener of [...listeners]) listener()
   }
 
@@ -114,7 +121,8 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
         return
       }
       try {
-        const { files, workspacePath } = await port.list(sessionId)
+        const { files, workspacePath, redoCleared: cleared } = await port.list(sessionId)
+        if (cleared) redoCleared = true
         // Carry the failure markers through: a hint must survive the poll
         // (auto-clears on its own timer) rather than vanish a second later.
         publish({ read: true, files, workspacePath, busy: EMPTY_BUSY, failed: failedOf(snapshot) })
@@ -204,6 +212,11 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
     },
     reset() {
       publish({ read: false, files: [], busy: EMPTY_BUSY })
+    },
+    clearRedoCleared() {
+      redoCleared = false
+      const { redoCleared: _omit, ...rest } = snapshot
+      publish(rest)
     },
   }
 }

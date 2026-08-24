@@ -1054,7 +1054,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPasteReference, onUndo, onRedo, onImportVcs, t,
+  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPasteReference, onUndo, onRedo, onImportVcs, onAckRedoCleared, t,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
   // A newly created session is selected but still blank (no messages yet); it
@@ -1085,6 +1085,8 @@ export function PendingPanel({
   const [importToast, setImportToast] = useState<string | null>(null)
   /** A transient banner for a keep/revert failure. */
   const [actionToast, setActionToast] = useState<string | null>(null)
+  /** Whether the redo-cleared notice is showing (bottom-right, OK to dismiss). */
+  const [redoClearedNotice, setRedoClearedNotice] = useState(false)
   /** Bottom offset tracking the chat composer's top edge so the input stays visible. */
   const [bottomPx, setBottomPx] = useState(FALLBACK_BOTTOM_PX)
   /** Fullscreen expanded: the panel bottom pins to the window edge, ignoring the composer offset. */
@@ -1098,6 +1100,15 @@ export function PendingPanel({
     const timer = setInterval(() => { onRefresh(current) }, POLL_INTERVAL_MS)
     return () => { clearInterval(timer) }
   }, [current, onRefresh])
+
+  // Surface a detected external change that superseded the redo history. The
+  // notice is deferred until the panel is open, and the store latches the flag
+  // so a change observed while closed is still shown once the panel reopens.
+  useEffect(() => {
+    if (!open || !snapshot.redoCleared) return
+    onAckRedoCleared()
+    setRedoClearedNotice(true)
+  }, [open, snapshot.redoCleared, onAckRedoCleared])
 
   // While the panel is open, sit above the docked composer seat. The seat
   // hosts the input card OR an elected approval/question takeover (the input
@@ -1515,6 +1526,19 @@ export function PendingPanel({
           {(wide || files.length > 0) && <span className={css.badgeCount}>{files.length}</span>}
         </button>
       </div>
+      {redoClearedNotice && (
+        <div className={css.notice} role="status" data-diff-approval-notice>
+          <p className={css.noticeText}>{t('panel.externalChanged')}</p>
+          <button
+            type="button"
+            className={css.noticeButton}
+            data-diff-notice-dismiss
+            onClick={() => { setRedoClearedNotice(false) }}
+          >
+            {t('panel.dismiss')}
+          </button>
+        </div>
+      )}
     </div>
   )
 }

@@ -48,6 +48,7 @@ function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
     onUndo: vi.fn(),
     onRedo: vi.fn(),
     onImportVcs: vi.fn(async () => ({ imported: 0, detected: false })),
+    onAckRedoCleared: vi.fn(),
     t: (key: string, params?: Record<string, unknown>) => params === undefined ? key : `${key} ${JSON.stringify(params)}`,
   } as unknown as PanelProps
 }
@@ -1000,6 +1001,23 @@ describe('PendingPanel', () => {
     expect(screen.getByText('panel.missing')).toBeDefined()
     fireEvent.click(screen.getByText('a.txt'))
     expect(screen.getByText('panel.missingHint')).toBeDefined()
+  })
+
+  it('defers a redo-cleared notice until the panel is open, then dismisses it', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set(), redoCleared: true })
+    const view = render(<PendingPanel {...props} />)
+
+    // Deferred while closed: no notice, and the latch is not acked.
+    expect(document.querySelector('[data-diff-approval-notice]')).toBeNull()
+    expect(props.onAckRedoCleared).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    // Opening surfaces the latched notice once and acks it.
+    expect(screen.getByText('panel.externalChanged')).toBeDefined()
+    expect(props.onAckRedoCleared).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(view.container.querySelector('[data-diff-notice-dismiss]') as HTMLElement)
+    expect(document.querySelector('[data-diff-approval-notice]')).toBeNull()
   })
 
   it('pins the panel to the window edge when expanded and restores on a second click', () => {
