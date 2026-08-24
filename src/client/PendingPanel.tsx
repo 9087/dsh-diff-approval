@@ -626,6 +626,20 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     setFlashKey(key => key + 1)
   }
 
+  // Step the hovered block's floating actions frame to the adjacent diff block
+  // (wrapping). Both the hovered block (the frame follows it) and the focused
+  // block (which recenters and re-flashes) advance together.
+  const stepBlock = (direction: -1 | 1): void => {
+    const count = model.blocks.length
+    if (count === 0) return
+    const base = hoveredBlock ?? focus
+    const target = (base + direction + count) % count
+    setHoveredBlock(target)
+    setFocus(target)
+    setScrollTick(tick => tick + 1)
+    setFlashKey(key => key + 1)
+  }
+
   // Re-clicking the already-open file in the list jumps to the next change
   // block; the panel bumps `jumpSignal` to trigger it. A fresh signal while
   // on the same file re-runs this, wrapping to the first block when needed.
@@ -896,6 +910,26 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
               <span className={css.blockPosition} data-diff-block-position>
                 {t('panel.blockPosition', { current: hoveredBlock + 1, total: model.blocks.length })}
               </span>
+              <button
+                type="button"
+                className={`${css.action} ${css.iconAction}`}
+                data-diff-block-prev
+                aria-label={t('action.prevDiff')}
+                disabled={busy}
+                onClick={() => { stepBlock(-1) }}
+              >
+                <IconChevronUpOutline14 size={14} />
+              </button>
+              <button
+                type="button"
+                className={`${css.action} ${css.iconAction}`}
+                data-diff-block-next
+                aria-label={t('action.nextDiff')}
+                disabled={busy}
+                onClick={() => { stepBlock(1) }}
+              >
+                <IconChevronDownOutline14 size={14} />
+              </button>
               <button
                 type="button"
                 className={`${css.action} ${css.actionPrimary}`}

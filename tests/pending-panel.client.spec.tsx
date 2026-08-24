@@ -636,6 +636,32 @@ describe('PendingPanel', () => {
     expect(view.container.querySelector('[data-diff-block-actions]')).toBeNull()
   })
 
+  it('steps the hovered block frame to the next/previous diff block', () => {
+    const twoBlocks = entry({ id: 'entry-blocks', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [twoBlocks], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const rows = [...view.container.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    fireEvent.mouseEnter(rows[0]!) // block 0 (del 'a' -> line 1)
+
+    const actions = view.container.querySelector('[data-diff-block-actions]') as HTMLElement
+    expect(actions).not.toBeNull()
+    const next = actions.querySelector('[data-diff-block-next]') as HTMLElement
+    const prev = actions.querySelector('[data-diff-block-prev]') as HTMLElement
+    expect(next).not.toBeNull()
+    expect(prev).not.toBeNull()
+    const position = actions.querySelector('[data-diff-block-position]') as HTMLElement
+    expect(position.textContent).toContain('1')
+
+    fireEvent.click(next)
+    expect(position.textContent).toContain('2')
+
+    fireEvent.click(prev)
+    expect(position.textContent).toContain('1')
+  })
+
   it('anchors the block frame to the block bottom and pads the diff bottom when the block is the last row', () => {
     // Last row of the file is the changed row, so the floating frame would be
     // clipped unless the diff bottom is padded to fit it.
