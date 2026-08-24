@@ -46,6 +46,8 @@ const DOCKED_TOLERANCE_PX = 48
 /** File-list pane width bounds for the manual split drag, in px. */
 const MIN_LIST_WIDTH_PX = 160
 const MAX_LIST_WIDTH_PX = 560
+/** Inset of the floating file-list card from the code scroll box, in px. */
+const FLOAT_LIST_MARGIN_PX = 12
 /** Fixed diff-row height in px; the virtual window and jump math are built on it. */
 const ROW_HEIGHT_PX = 22
 /** The overview ruler's width in px (mirrors `.overviewRuler`). The flash is
@@ -124,6 +126,13 @@ interface PendingDiffProps {
   onBlockKeep: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
   onBlockRevert: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
   onOpen: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
+  /** The file list is collapsed to a floating button (its width would exceed a
+   * third of the panel); the diff then takes the full width. */
+  floatMode: boolean
+  /** Whether the floating file list is currently expanded. */
+  floatOpen: boolean
+  /** Toggle the floating file list. */
+  onToggleFileList: () => void
 }
 
 /** The diff body's row class per line kind. */
@@ -346,7 +355,7 @@ function PendingFileRow({ file, selected, failedMessage, t, onSelect }: PendingF
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedMessage, onPasteReference, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedMessage, onPasteReference, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, floatMode, floatOpen, onToggleFileList }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -803,6 +812,19 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
         </Tooltip>
       </div>
       <div className={css.diffActions}>
+        {floatMode && (
+          <Tooltip label={t(floatOpen ? 'action.hideFileList' : 'action.showFileList')} side="bottom" delayMs={500}>
+            <button
+              type="button"
+              className={`${css.action} ${css.iconAction}`}
+              data-diff-file-list-toggle
+              aria-label={t(floatOpen ? 'action.hideFileList' : 'action.showFileList')}
+              onClick={onToggleFileList}
+            >
+              <IconListPenOutline16 size={14} />
+            </button>
+          </Tooltip>
+        )}
         <span className={css.diffStats}>{t('panel.stats', { added: model.diff.added, removed: model.diff.removed })}</span>
         {file.kind === 'create' && <span className={css.kindHint}>{t('panel.createHint')}</span>}
         {model.blocks.length > 0 && (
@@ -1128,12 +1150,67 @@ export function PendingPanel({
   /** File-list pane width, adjustable by dragging the divider. */
   const [listWidth, setListWidth] = useState(240)
   const resizeDrag = useRef<{ startX: number; startWidth: number } | null>(null)
+  /** Whether the floating (collapsed) file list is currently expanded. */
+  const [floatOpen, setFloatOpen] = useState(false)
+  /** The review panel's width, measured so the file list can collapse when it
+   * would take more than a third of it (browser zoom / window resize). */
+  const [panelWidth, setPanelWidth] = useState(0)
+  const panelRef = useRef<HTMLElement>(null)
+  const splitRef = useRef<HTMLDivElement>(null)
+  /** The code scroll box's bounds within the split, so the floating card is
+   * constrained to it. */
+  const [floatBox, setFloatBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
 
   useEffect(() => {
     onRefresh(current)
     const timer = setInterval(() => { onRefresh(current) }, POLL_INTERVAL_MS)
     return () => { clearInterval(timer) }
   }, [current, onRefresh])
+
+  // Measure the panel width so the file list can auto-collapse to a floating
+  // button when it would occupy more than a third of the panel (narrow windows
+  // from browser zoom/resize). The panel only mounts while open.
+  useEffect(() => {
+    const el = panelRef.current
+    if (el === null) return
+    const measure = (): void => { setPanelWidth(el.clientWidth) }
+    measure()
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
+    observer?.observe(el)
+    return () => { observer?.disconnect() }
+  }, [open])
+
+  const floatMode = panelWidth > 0 && listWidth > panelWidth / 3
+  const toggleFileList = (): void => { setFloatOpen(value => !value) }
+
+  // Clicking anywhere outside the floating card — or on the toggle button,
+  // which toggles it — folds the floating list back.
+  useEffect(() => {
+    if (!floatMode || !floatOpen) return
+    const el = panelRef.current
+    if (el === null) return
+    const onPointerDown = (event: PointerEvent): void => {
+      const target = event.target as Node | null
+      if (target instanceof Element
+        && (target.closest('[data-diff-floating-file-list]') !== null || target.closest('[data-diff-file-list-toggle]') !== null)) return
+      setFloatOpen(false)
+    }
+    el.addEventListener('pointerdown', onPointerDown, true)
+    return () => { el.removeEventListener('pointerdown', onPointerDown, true) }
+  }, [floatMode, floatOpen])
+
+  // Constrain the floating file-list card to the code scroll box (`.diffBody`):
+  // measure its bounds within the split each time the list opens or the panel
+  // resizes, so the card never extends beyond the code view.
+  useEffect(() => {
+    if (!floatMode || !floatOpen) return
+    const split = splitRef.current
+    const body = panelRef.current?.querySelector<HTMLElement>('[data-diff-body]')
+    if (split === null || body == null) return
+    const s = split.getBoundingClientRect()
+    const b = body.getBoundingClientRect()
+    setFloatBox({ left: b.left - s.left, top: b.top - s.top, width: b.width, height: b.height })
+  }, [floatMode, floatOpen, panelWidth])
 
   // Surface a detected external change that superseded the redo history. The
   // notice is deferred until the panel is open, and the store latches the flag
@@ -1321,11 +1398,50 @@ export function PendingPanel({
         // the open file; any other row switches the selection.
         if (id === selected) setJumpSignal(signal => signal + 1)
         else setSelected(id)
+        // Picking a file from the floating list folds it back.
+        if (floatMode) setFloatOpen(false)
       }}
     />
   )
 
   const selectedFile = files.find(file => file.id === selected)
+
+  // The file list's scrollable rows plus the pinned bulk footer, shared by the
+  // in-flow left pane and the floating (collapsed) overlay.
+  const fileListBody = (
+    <>
+      <div className={css.listScroll}>
+        {files.length > 0 && (
+          <section>
+            <h3 className={css.group}>{t('panel.group.current')}</h3>
+            <ul className={css.rows}>{files.map(renderEntry)}</ul>
+          </section>
+        )}
+      </div>
+      {files.length > 0 && (
+        <div className={css.bulkActions}>
+          <button
+            type="button"
+            className={`${css.action} ${css.actionPrimary}`}
+            data-diff-keep-all
+            disabled={bulkBusy !== null}
+            onClick={() => { void runBulk('keep') }}
+          >
+            {bulkBusy === 'keep' ? t('action.busy') : t('action.keepAll')}
+          </button>
+          <button
+            type="button"
+            className={css.action}
+            data-diff-revert-all
+            disabled={bulkBusy !== null}
+            onClick={() => { void runBulk('revert') }}
+          >
+            {bulkBusy === 'revert' ? t('action.busy') : t('action.revertAll')}
+          </button>
+        </div>
+      )}
+    </>
+  )
 
   // Undo/redo resolves to the affected entry id while it is still pending.
   // The panel then selects that file, or — when it is already the open one —
@@ -1414,6 +1530,7 @@ export function PendingPanel({
       {open && (
         <section
           className={css.panel}
+          ref={panelRef}
           style={{ bottom: expanded ? PANEL_INSET_PX : bottomPx }}
           data-diff-approval-panel
           aria-label={t('panel.title')}
@@ -1485,40 +1602,13 @@ export function PendingPanel({
               )}
             </div>
           ) : (
-            <div className={css.split}>
-              <nav className={css.fileList} style={{ width: listWidth }} data-diff-approval-file-list>
-                <div className={css.listScroll}>
-                  {files.length > 0 && (
-                    <section>
-                      <h3 className={css.group}>{t('panel.group.current')}</h3>
-                      <ul className={css.rows}>{files.map(renderEntry)}</ul>
-                    </section>
-                  )}
-                </div>
-                {files.length > 0 && (
-                  <div className={css.bulkActions}>
-                    <button
-                      type="button"
-                      className={`${css.action} ${css.actionPrimary}`}
-                      data-diff-keep-all
-                      disabled={bulkBusy !== null}
-                      onClick={() => { void runBulk('keep') }}
-                    >
-                      {bulkBusy === 'keep' ? t('action.busy') : t('action.keepAll')}
-                    </button>
-                    <button
-                      type="button"
-                      className={css.action}
-                      data-diff-revert-all
-                      disabled={bulkBusy !== null}
-                      onClick={() => { void runBulk('revert') }}
-                    >
-                      {bulkBusy === 'revert' ? t('action.busy') : t('action.revertAll')}
-                    </button>
-                  </div>
-                )}
-              </nav>
-              <div className={css.resizeHandle} data-diff-resize onMouseDown={startResize} />
+            <div className={css.split} ref={splitRef}>
+              {!floatMode && (
+                <nav className={css.fileList} style={{ width: listWidth }} data-diff-approval-file-list>
+                  {fileListBody}
+                </nav>
+              )}
+              {!floatMode && <div className={css.resizeHandle} data-diff-resize onMouseDown={startResize} />}
               <div className={css.detail}>
                 {selectedFile === undefined ? (
                   <p className={css.detailEmpty}>{t('panel.selectHint')}</p>
@@ -1537,9 +1627,26 @@ export function PendingPanel({
                     onBlockKeep={onBlockKeep}
                     onBlockRevert={onBlockRevert}
                     onOpen={onOpen}
+                    floatMode={floatMode}
+                    floatOpen={floatOpen}
+                    onToggleFileList={toggleFileList}
                   />
                 )}
               </div>
+              {floatMode && floatOpen && files.length > 0 && floatBox !== null && (
+                <div
+                  className={css.fileListFloat}
+                  style={{
+                    left: floatBox.left + FLOAT_LIST_MARGIN_PX,
+                    top: floatBox.top + FLOAT_LIST_MARGIN_PX,
+                    width: Math.min(listWidth, Math.max(0, floatBox.width - 2 * FLOAT_LIST_MARGIN_PX)),
+                    height: Math.max(0, floatBox.height - 2 * FLOAT_LIST_MARGIN_PX),
+                  }}
+                  data-diff-floating-file-list
+                >
+                  {fileListBody}
+                </div>
+              )}
             </div>
           )}
         </section>

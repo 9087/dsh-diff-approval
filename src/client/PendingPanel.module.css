@@ -258,10 +258,30 @@
 }
 
 .split {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
   align-items: stretch;
+}
+
+/* The floating (collapsed) file list: when the pane would take more than a
+   third of the panel, it folds to a button and the diff takes the full width;
+   the list then floats over the code scroll box as a rounded, inset card. Its
+   position/size come from measuring `.diffBody` (so the card is always inside
+   the code view); this block only styles the card surface. */
+.fileListFloat {
+  position: absolute;
+  z-index: 40;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 6px 8px 10px;
+  box-sizing: border-box;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-base);
+  box-shadow: var(--dsw-shadow-lv2);
 }
 
 .fileList {

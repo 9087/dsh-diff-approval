@@ -662,6 +662,39 @@ describe('PendingPanel', () => {
     expect(position.textContent).toContain('1')
   })
 
+  it('collapses the file list to a floating button when it would take a third of the panel', () => {
+    const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 600 })
+    try {
+      const file = entry({ id: 'entry-float', oldText: 'a\n', newText: 'b\n' })
+      const props = panelProps({ read: true, files: [file], busy: new Set() })
+      const view = render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+
+      // 240px (listWidth) > 600/3, so the in-flow list collapses to a button and
+      // the toggle appears in the diff actions row.
+      expect(view.container.querySelector('[data-diff-approval-file-list]')).toBeNull()
+      const toggle = view.container.querySelector('[data-diff-file-list-toggle]') as HTMLElement
+      expect(toggle).not.toBeNull()
+
+      expect(view.container.querySelector('[data-diff-floating-file-list]')).toBeNull()
+      fireEvent.click(toggle)
+      expect(view.container.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
+
+      fireEvent.click(toggle)
+      expect(view.container.querySelector('[data-diff-floating-file-list]')).toBeNull()
+
+      fireEvent.click(toggle)
+      expect(view.container.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
+      // Clicking outside the card (the code box) folds it back.
+      fireEvent.pointerDown(view.container.querySelector('[data-diff-approval-panel]') as HTMLElement)
+      expect(view.container.querySelector('[data-diff-floating-file-list]')).toBeNull()
+    } finally {
+      if (original !== undefined) Object.defineProperty(HTMLElement.prototype, 'clientWidth', original)
+      else delete (HTMLElement.prototype as { clientWidth?: unknown }).clientWidth
+    }
+  })
+
   it('anchors the block frame to the block bottom and pads the diff bottom when the block is the last row', () => {
     // Last row of the file is the changed row, so the floating frame would be
     // clipped unless the diff bottom is padded to fit it.
