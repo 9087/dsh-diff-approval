@@ -57,10 +57,6 @@ const OVERSCAN_ROWS = 8
  * 5px frame padding on each side + 1px border on each side, plus a little
  * breathing room so the bottom padding never sits flush against it. */
 const BLOCK_ACTIONS_FRAME_PX = 40
-/** How long a fully-processed list stays open before the panel folds, so the
- * last action (a Keep-all/Revert-all especially) can still be undone with
- * Ctrl+Z. An undo that restores an entry cancels the pending close. */
-const EMPTY_CLOSE_GRACE_MS = 3000
 
 /** Full panel props composed by the sidebar footer-action slot. */
 export type PendingPanelProps =
@@ -1088,8 +1084,6 @@ export function PendingPanel({
   const [importToast, setImportToast] = useState<string | null>(null)
   /** A transient banner for a keep/revert failure. */
   const [actionToast, setActionToast] = useState<string | null>(null)
-  /** Pending count captured at open time; auto-close needs a list that emptied. */
-  const [openedCount, setOpenedCount] = useState(0)
   /** Bottom offset tracking the chat composer's top edge so the input stays visible. */
   const [bottomPx, setBottomPx] = useState(FALLBACK_BOTTOM_PX)
   /** Fullscreen expanded: the panel bottom pins to the window edge, ignoring the composer offset. */
@@ -1213,20 +1207,10 @@ export function PendingPanel({
     if (next !== undefined && next.id !== selected) setSelected(next.id)
   }, [open, current, files, selected])
 
-  // A list that empties through Keep/Revert closes the panel — after a short
-  // grace period so the action that emptied it (a Keep-all/Revert-all above
-  // all) can still be undone with Ctrl+Z. Undoing restores an entry, which
-  // re-runs this effect and cancels the pending close. Opening an already-
-  // empty list stays open (openedCount 0); an error also keeps it open.
-  useEffect(() => {
-    if (!open || openedCount === 0) return
-    if (!(snapshot.read && snapshot.error === undefined && files.length === 0)) return
-    const timer = window.setTimeout(() => {
-      setOpenedCount(0)
-      setOpen(false)
-    }, EMPTY_CLOSE_GRACE_MS)
-    return () => { window.clearTimeout(timer) }
-  }, [open, openedCount, snapshot.read, snapshot.error, files.length])
+  // A fully-processed (emptied) list stays open with the empty state on
+  // purpose — no auto-close — so the last action (a Keep-all/Revert-all
+  // especially) stays undoable via Ctrl+Z and the import button is still
+  // reachable.
 
   // Import is explicitly button-triggered: the empty state's button runs the
   // whole detect-and-import in one call (no host probe until the user asks).
@@ -1257,7 +1241,6 @@ export function PendingPanel({
   }
 
   const toggleOpen = () => {
-    if (!open) setOpenedCount(files.length)
     setOpen(value => !value)
   }
 
@@ -1316,8 +1299,8 @@ export function PendingPanel({
 
   // Ctrl+Z / Ctrl+Y undo/redo the last keep/revert (per-file or bulk). The
   // handler lives on the panel — not the detail pane — so it works even with
-  // no file selected (a bulk action leaves an empty list), and stays alive
-  // through the empty-list close grace period above. Window capture beats any
+  // no file selected (a bulk action leaves an empty list, which stays open).
+  // Window capture beats any
   // inner handler; text inputs (the composer, the search box) keep their own
   // Ctrl+Z/Ctrl+Y editing, and Ctrl+Shift+Z also redoes.
   //

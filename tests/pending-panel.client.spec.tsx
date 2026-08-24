@@ -461,24 +461,15 @@ describe('PendingPanel', () => {
     await waitFor(() => { expect(screen.getByText('panel.importNone')).toBeDefined() })
   })
 
-  it('closes the panel once a non-empty list empties through handling, after the undo grace', () => {
-    vi.useFakeTimers()
+  it('keeps an emptied list open instead of auto-closing', () => {
     const view = render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     expect(screen.getByText('panel.title')).toBeDefined()
 
     view.rerender(<PendingPanel {...panelProps({ read: true, files: [], busy: new Set() })} />)
-    // The emptied list stays open through the undo grace window...
+    // The emptied list stays open with its note — the panel does not auto-close.
     expect(screen.getByText('panel.empty')).toBeDefined()
-    expect(screen.queryByText('panel.title')).not.toBeNull()
-    // ...then folds once the grace elapses.
-    act(() => { vi.advanceTimersByTime(3000) })
-    expect(screen.queryByText('panel.title')).toBeNull()
-    vi.useRealTimers()
-
-    // Reopening an empty list stays open.
-    fireEvent.click(screen.getByLabelText('panel.aria'))
-    expect(screen.getByText('panel.empty')).toBeDefined()
+    expect(screen.getByText('panel.title')).toBeDefined()
   })
 
   it('undoes a bulk keep-all after the list empties, through the open grace window', () => {
@@ -488,8 +479,8 @@ describe('PendingPanel', () => {
     const view = render(<PendingPanel {...first} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     view.rerender(<PendingPanel {...second} />)
-    // The emptied list stays open during the grace, so the bulk decision is
-    // still undoable via the panel-level Ctrl+Z handler (no file selected).
+    // The emptied list stays open, so the bulk decision is still undoable via
+    // the panel-level Ctrl+Z handler (no file selected).
     expect(screen.getByText('panel.empty')).toBeDefined()
     fireEvent.keyDown(document.body, { key: 'z', ctrlKey: true })
     const undoMock = second.onUndo as unknown as { mock: { calls: unknown[][] } }
