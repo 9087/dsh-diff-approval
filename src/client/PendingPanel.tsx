@@ -796,7 +796,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
         {file.kind === 'create' && <span className={css.kindHint}>{t('panel.createHint')}</span>}
         {model.blocks.length > 0 && (
           <>
-            <Tooltip label={t('action.prevDiff')} side="bottom" delayMs={500}>
+            <Tooltip label={`${t('action.prevDiff')} (Ctrl+↑)`} side="bottom" delayMs={500}>
               <button
                 type="button"
                 className={`${css.action} ${css.iconAction}`}
@@ -808,7 +808,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 <IconChevronUpOutline14 size={14} />
               </button>
             </Tooltip>
-            <Tooltip label={t('action.nextDiff')} side="bottom" delayMs={500}>
+            <Tooltip label={`${t('action.nextDiff')} (Ctrl+↓)`} side="bottom" delayMs={500}>
               <button
                 type="button"
                 className={`${css.action} ${css.iconAction}`}
