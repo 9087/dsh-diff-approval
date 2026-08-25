@@ -15,14 +15,15 @@ The numbered markers (① – ⑧) in the screenshot point to the matching detai
 
 - **Diff view**: syntax-highlighted whole-file diff ⑤ with +/− counts, an overview ruler ④ on the scrollbar showing where changes sit, and an in-file search (`Ctrl+F`). Rows are virtualized, so huge files stay smooth.
 - **Block navigation & decisions**: jump between change blocks with `Ctrl+↑/↓` (or the previous/next buttons) — the focused block flashes. Hover a block to **Keep** or **Revert** just that block from a small actions frame ③ that also shows its position (e.g. "2/5").
-- **Per-file and bulk decisions**: the files in the file list ② can be kept / reverted one at a time, or **Keep all** / **Revert all** from its footer.
+- **Per-file and bulk decisions**: the files in the file list ② can be kept / reverted one at a time, or **Keep all** / **Revert all** from its footer ⑦.
 - **Undo / Redo**: every keep, revert, and import is undoable with `Ctrl+Z` / `Ctrl+Y` (active while the panel is open; text inputs keep their own editing).
-- **Line references**: select text in the diff — the status bar shows its `file:start-end` reference ⑦; click it (or press `Ctrl+L`) to copy, and with the setting on it auto-pastes into the composer ⑥ and focuses it.
+- **Line references**: select text in the diff — the status bar shows its `file:start-end` reference; click it (or press `Ctrl+L`) to copy, and with the setting on it auto-pastes into the composer ⑥ and focuses it.
 - **Highlight language**: auto-detected from the file extension, or overridden from a dropdown ⑧.
+- **Auto-wrap**: a "Wrap lines" toggle beside the language selector ⑧ wraps long lines for that language (CJK breaks between characters, Latin words stay whole), remembered per language.
 - **External changes**: files already in the pending list are monitored — if one is later modified outside the reviewed edits (another tool, an editor), the panel adopts the new content and flags the divergence.
 - **Open / Reveal**: while reviewing a file's diff, open it in its default app or reveal it in the system file manager with one click.
 - **Import workspace changes**: when the list is empty, click the button to import the workspace's local changes from **Git / SVN / Perforce** — modified, deleted, and (opt-in) untracked files. The VCS root is found by walking up from the workspace, so a workspace inside a subdirectory works too.
-- **Settings**: a "Diff Approval" section in DeepSeek Harness settings with the preferences for auto-paste on copy and whether untracked files are included when importing.
+- **Settings**: a "Diff Approval" section in DeepSeek Harness settings with the preferences for auto-paste on copy, whether untracked files are included when importing, and the diff's tab width (2 / 4 / 8 spaces).
 - **Persistence**: pending state is stored per workspace at `<dshHome>/diff-approval/workspaces/<workspaceId>.json` and survives restarts — unhandled changes are still there when you come back, even in a fresh session.
 
 ## 📦 Install
