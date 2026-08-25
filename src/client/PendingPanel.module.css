@@ -977,6 +977,9 @@
   flex: none;
   display: flex;
   align-items: center;
+  /* Same horizontal rhythm as the actions bar above (Keep/Revert): 8px between
+     the copy button, the language dropdown, and the wrap toggle. */
+  gap: 8px;
   /* Same fixed height as the path header above (6px padding + 22px button),
      so showing the reference button never changes the bar. */
   height: 34px;
