@@ -169,6 +169,23 @@ function basenameOf(path: string): string {
 }
 
 /**
+ * Order two paths by their displayed file name (dictionary, case-insensitive),
+ * breaking a same-name tie on the full path so files in different directories
+ * keep a stable order. The file list shows only the file name, so the panel
+ * sorts by it here — the host's list order (oldest capture first) is not a
+ * display guarantee.
+ */
+function compareFileNames(a: string, b: string): number {
+  const na = basenameOf(a).toLowerCase()
+  const nb = basenameOf(b).toLowerCase()
+  if (na !== nb) return na < nb ? -1 : 1
+  const pa = a.toLowerCase()
+  const pb = b.toLowerCase()
+  if (pa !== pb) return pa < pb ? -1 : 1
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
+/**
  * Open the DSH settings dialog and switch to this plugin's section. The
  * settings shell keeps its open state and the active section id as
  * component-local viewing state with no cross-plugin service, so the dialog
@@ -1544,8 +1561,12 @@ export function PendingPanel({
 
 
   // The panel reviews only the current session's files; other sessions of the
-  // same workspace stay out of the list, badge, and auto-advance.
-  const files = snapshot.files.filter(file => file.sessionId === current)
+  // same workspace stay out of the list, badge, and auto-advance. Sort by the
+  // displayed file name so the list reads in dictionary order even before the
+  // host's own ordering is picked up.
+  const files = snapshot.files
+    .filter(file => file.sessionId === current)
+    .sort((left, right) => compareFileNames(left.path, right.path))
   /** Per-file keep/revert failures, surfaced inline on the row and detail. */
   const failed = snapshot.failed ?? EMPTY_FAILED_MAP
 
