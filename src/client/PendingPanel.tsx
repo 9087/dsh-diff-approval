@@ -1751,11 +1751,11 @@ export function PendingPanel({
       t={t}
       onSelect={(id) => {
         // Re-clicking the already-open file jumps to the next diff block in
-        // the open file; any other row switches the selection.
+        // the open file; any other row switches the selection. The floating
+        // list stays open so you can browse more files; clicking outside the
+        // card (or the toggle button) folds it back.
         if (id === selected) setJumpSignal(signal => signal + 1)
         else setSelected(id)
-        // Picking a file from the floating list folds it back.
-        if (floatMode) setFloatOpen(false)
       }}
     />
   )

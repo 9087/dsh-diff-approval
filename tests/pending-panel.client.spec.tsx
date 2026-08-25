@@ -686,6 +686,13 @@ describe('PendingPanel', () => {
 
       fireEvent.click(toggle)
       expect(view.container.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
+      // Clicking a file row keeps the floating list open (so you can browse
+      // more files); only clicking outside the card folds it back.
+      const floatList = view.container.querySelector('[data-diff-floating-file-list]') as HTMLElement
+      const row = [...floatList.querySelectorAll('button')].find(button => button.textContent?.includes('a.txt'))
+      expect(row).toBeDefined()
+      fireEvent.click(row!)
+      expect(view.container.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
       // Clicking outside the card (the code box) folds it back.
       fireEvent.pointerDown(view.container.querySelector('[data-diff-approval-panel]') as HTMLElement)
       expect(view.container.querySelector('[data-diff-floating-file-list]')).toBeNull()
