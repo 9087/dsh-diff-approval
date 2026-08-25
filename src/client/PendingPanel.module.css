@@ -1075,3 +1075,35 @@
 .noticeButton:hover {
   background: var(--dsw-alias-interactive-bg-hover-solid);
 }
+
+/* Per-language auto-wrap: the panel computes each row's visual sub-lines
+   itself (VSCode-style) and renders them as fixed-22px `.subline` blocks, so a
+   wrapped row's height is `subline count × 22px` by construction and the
+   virtual window, jump, and flash stay pixel-exact. The wrap width includes a
+   one-char safety margin (see `wrapInto`), so the widest sub-line always stays
+   inside the code column and the auto-layout table never widens past 100%;
+   `overflow: hidden` clips any sub-pixel font-metric overshoot. */
+.wrap .line {
+  height: auto;
+  min-height: 22px;
+}
+
+/* One visual line of a wrapped row: pre (no re-wrap) at a fixed 22px height. */
+.subline {
+  display: block;
+  height: 22px;
+  line-height: 22px;
+  white-space: pre;
+  overflow: hidden;
+}
+
+/* The active (wrap-on) state of the toggle next to the language select. */
+.wrapActive {
+  background: var(--dsw-alias-state-business-primary);
+  border-color: var(--dsw-alias-state-business-primary);
+  color: var(--dsw-static-neutral-bluish-50);
+}
+
+.wrapActive:hover {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 85%, var(--dsw-static-neutral-bluish-1000));
+}

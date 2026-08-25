@@ -1,7 +1,7 @@
 /** Sidebar-foot pending-edit review action and the split review panel it opens. */
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { MouseEvent as ReactMouseEvent } from 'react'
+import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react'
 import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
@@ -13,9 +13,10 @@ import type { DiffApprovalKey } from './locales.ts'
 import { computeWholeFileDiff } from './whole-file-diff.ts'
 import type { WholeFileDiffRow } from './whole-file-diff.ts'
 import { HIGHLIGHT_LANGS, highlightLines, languageDisplayName } from './highlight.ts'
+import type { HighlightSpan } from './highlight.ts'
 import { langFromPath } from './lang.ts'
 import { referenceOf } from './reference.ts'
-import { includeUntrackedEnabled, pasteOnCopyEnabled } from './settings.ts'
+import { includeUntrackedEnabled, pasteOnCopyEnabled, setWrapEnabled, wrapEnabled } from './settings.ts'
 import css from './PendingPanel.module.css'
 
 /**
@@ -50,6 +51,100 @@ const MAX_LIST_WIDTH_PX = 560
 const FLOAT_LIST_MARGIN_PX = 12
 /** Fixed diff-row height in px; the virtual window and jump math are built on it. */
 const ROW_HEIGHT_PX = 22
+/** Total width of the two line-number gutters, subtracted from the code width
+ * when measuring wrapped line heights. */
+const WRAP_GUTTERS_PX = 88
+
+/** A shared canvas for measuring wrapped line heights (CPU-only, no DOM reflow). */
+let measureCanvas: CanvasRenderingContext2D | undefined
+
+/**
+ * Compute a diff line's visual sub-lines for soft wrap the way VSCode does it:
+ * break at spaces (whole words), split an overlong word at character
+ * boundaries, and advance tabs to the next tab stop. This *is* the wrap
+ * decision — the caller renders the returned sub-lines itself (never
+ * `white-space: pre-wrap`), so the row height equals `subLines.length * 22`
+ * by construction and can never drift from the browser re-wrapping.
+ * The concatenation equals the input (no characters are dropped), so
+ * highlight runs can be clipped back onto sub-lines by character offset.
+ * @param text - the line's content (no trailing newline).
+ * @param widthPx - the available code width, in px.
+ * @param measure - `ctx.measureText` bound to the code font.
+ * @param tabPx - the width of one tab stop, in px.
+ */
+function wrapInto(text: string, widthPx: number, measure: (t: string) => number, tabPx: number): string[] {
+  if (widthPx <= 0 || text.length === 0) return [text]
+  const out: string[] = []
+  let cur = ''
+  let curW = 0
+  const push = (): void => { out.push(cur); cur = ''; curW = 0 }
+  for (const tok of text.split(/(\s+)/)) {
+    if (tok.length === 0) continue
+    if (/^\s+$/.test(tok)) {
+      for (const ch of tok) {
+        if (ch === '\t') {
+          const adv = tabPx - (curW % tabPx)
+          if (cur.length > 0 && curW + adv > widthPx) push()
+          cur += '\t'
+          curW += tabPx - (curW % tabPx)
+        } else {
+          if (cur.length > 0 && curW + measure(ch) > widthPx) {
+            // A space at a wrap point hangs on the current line (trailing) and
+            // the break follows it — it never opens the next line.
+            cur += ch
+            push()
+            continue
+          }
+          cur += ch
+          curW += measure(ch)
+        }
+      }
+    } else {
+      const w = measure(tok)
+      if (cur.length > 0 && curW + w > widthPx) push()
+      if (w > widthPx) {
+        // Overlong word: split at character boundaries on fresh lines.
+        for (const ch of tok) {
+          const cw = measure(ch)
+          if (cur.length > 0 && curW + cw > widthPx) push()
+          cur += ch
+          curW += cw
+        }
+      } else {
+        cur += tok
+        curW += w
+      }
+    }
+  }
+  // A trailing space that just hung-and-broke leaves `cur` empty; don't emit a
+  // phantom blank line for it (unless nothing was emitted at all).
+  if (cur.length > 0 || out.length === 0) out.push(cur)
+  return out
+}
+
+/** Resolve the code cell's computed font for canvas measurement. */
+function codeFontOf(): string | undefined {
+  const code = document.querySelector<HTMLElement>('[data-diff-code]')
+  if (code === null) return undefined
+  const computed = getComputedStyle(code)
+  // Prefer the resolved shorthand; fall back to the individual properties
+  // (canvas `font` accepts no line-height).
+  return computed.font || `${computed.fontStyle} ${computed.fontWeight} ${computed.fontSize} ${computed.fontFamily}`
+}
+
+/** Create a measurer bound to `font`; falls back to a rough char estimate. */
+function makeMeasurer(font: string | undefined): ((text: string) => number) | undefined {
+  if (typeof document === 'undefined') return undefined
+  try {
+    if (measureCanvas === undefined) measureCanvas = document.createElement('canvas').getContext('2d') ?? undefined
+  } catch {
+    return undefined
+  }
+  const ctx = measureCanvas
+  if (ctx === undefined) return undefined
+  if (font !== undefined) ctx.font = font
+  return text => ctx.measureText(text).width
+}
 /** The overview ruler's width in px (mirrors `.overviewRuler`). The flash is
  * kept off it even when the scroller has no vertical scrollbar. */
 const OVERVIEW_RULER_WIDTH_PX = 4
@@ -146,8 +241,30 @@ const ROW_CLASS = {
 const EMPTY_FAILED_MAP: ReadonlyMap<string, string> = new Map()
 
 /**
+ * Clip highlight runs (which partition one whole line) to the character range
+ * `[start, end)` of that line, producing the sub-line's highlighted content.
+ */
+function clipRuns(runs: readonly HighlightSpan[], start: number, end: number): ReactNode {
+  const nodes: ReactNode[] = []
+  let pos = 0
+  for (const run of runs) {
+    const runStart = pos
+    const runEnd = pos + run.text.length
+    pos = runEnd
+    if (runEnd <= start || runStart >= end) continue
+    const text = run.text.slice(Math.max(runStart, start) - runStart, Math.min(runEnd, end) - runStart)
+    if (text.length === 0) continue
+    nodes.push(<span key={nodes.length} style={run.style}>{text}</span>)
+  }
+  return nodes.length === 0 ? '\u00a0' : nodes
+}
+
+/**
  * One rendered diff row, memoized so a poll or an unrelated state change
  * does not re-render rows whose content, highlight, and focus are unchanged.
+ * With auto-wrap on, `wrappedLines` carries the row's visual sub-lines and the
+ * code cell renders each at a fixed 22px (never `pre-wrap`), so the row height
+ * is `wrappedLines.length * 22` by construction.
  */
 const DiffRow = memo(function DiffRow(props: {
   index: number
@@ -158,14 +275,32 @@ const DiffRow = memo(function DiffRow(props: {
   searchHit: boolean
   searchCurrent: boolean
   onRowHover: (index: number) => void
+  /** Visual sub-lines when auto-wrap is on, else undefined (single line). */
+  wrappedLines: string[] | undefined
 }) {
-  const { index, row, runs, focused, searchHit, searchCurrent, onRowHover } = props
+  const { index, row, runs, focused, searchHit, searchCurrent, onRowHover, wrappedLines } = props
   const lineNumber = row.kind === 'del' ? row.oldLine : row.newLine
   const sideRuns = row.kind === 'del' ? runs?.oldRuns : runs?.newRuns
   const lineRuns = lineNumber === undefined ? undefined : sideRuns?.[lineNumber - 1]
-  const content = lineRuns === undefined || lineRuns.length === 0
-    ? row.text === '' ? '\u00a0' : row.text
-    : lineRuns.map((span, spanIndex) => <span key={spanIndex} style={span.style}>{span.text}</span>)
+
+  let code: ReactNode
+  if (wrappedLines === undefined) {
+    code = lineRuns !== undefined && lineRuns.length > 0
+      ? lineRuns.map((span, spanIndex) => <span key={spanIndex} style={span.style}>{span.text}</span>)
+      : (row.text === '' ? '\u00a0' : row.text)
+  } else {
+    const highlighted = lineRuns !== undefined && lineRuns.length > 0
+    let offset = 0
+    code = wrappedLines.map((line, lineIndex) => {
+      const start = offset
+      offset += line.length
+      const content = highlighted
+        ? clipRuns(lineRuns!, start, offset)
+        : (line === '' ? '\u00a0' : line)
+      return <div key={lineIndex} className={css.subline}>{content}</div>
+    })
+  }
+
   return (
     <div
       className={`${css.line} ${ROW_CLASS[row.kind]}`}
@@ -177,7 +312,7 @@ const DiffRow = memo(function DiffRow(props: {
     >
       <span className={css.gutter}>{row.oldLine ?? ''}</span>
       <span className={css.gutter}>{row.newLine ?? ''}</span>
-      <span className={css.code} data-diff-code>{content}</span>
+      <span className={css.code} data-diff-code>{code}</span>
     </div>
   )
 })
@@ -372,6 +507,16 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const langLabel = langOverride === undefined
     ? (detectedLang === undefined ? t('action.langAuto') : t('action.langAutoDetected', { lang: languageDisplayName(detectedLang) }))
     : languageDisplayName(langOverride)
+  // Per-language auto-wrap preference: keyed by the resolved language so each
+  // language's setting is remembered independently; defaults to off.
+  const wrapKey = lang ?? ''
+  const [langWrap, setLangWrap] = useState(() => wrapEnabled(wrapKey))
+  useEffect(() => { setLangWrap(wrapEnabled(wrapKey)) }, [wrapKey])
+  const toggleLangWrap = (): void => {
+    const next = !langWrap
+    setLangWrap(next)
+    setWrapEnabled(wrapKey, next)
+  }
   const model = useMemo<RowModel>(() => {
     const diff = computeWholeFileDiff(file.oldText, file.newText)
     return { diff, blocks: changeBlocksOf(diff) }
@@ -429,6 +574,8 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const [scrollTick, setScrollTick] = useState(0)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(0)
+  const [bodyWidth, setBodyWidth] = useState(0)
+  const [hScrollbarPx, setHScrollbarPx] = useState(0)
   const [hoveredBlock, setHoveredBlock] = useState<number | undefined>(undefined)
   const [selection, setSelection] = useState<RowRange | undefined>(undefined)
   const [copied, setCopied] = useState(false)
@@ -529,7 +676,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     if (row === undefined) return
     const body = bodyRef.current
     if (body === null) return
-    const target = row * ROW_HEIGHT_PX + ROW_HEIGHT_PX / 2 - body.clientHeight / 2
+    const target = offsetOf(row) + extentOf(row, row) / 2 - body.clientHeight / 2
     const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
     if (body.scrollTop !== clamped) body.scrollTop = clamped
     setScrollTop(clamped)
@@ -553,9 +700,59 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // or jsdom scroller (no height) falls back to rendering the whole file.
   const rows = model.diff.rows
   const rowCount = rows.length
-  const viewport = viewportHeight > 0 ? viewportHeight : rowCount * ROW_HEIGHT_PX
-  const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT_PX) - OVERSCAN_ROWS)
-  const end = Math.min(rowCount, Math.ceil((scrollTop + viewport) / ROW_HEIGHT_PX) + OVERSCAN_ROWS)
+  // When auto-wrap is on, each diff row becomes one or more visual sub-lines
+  // computed here the way VSCode wraps text (break at words, split overlong
+  // words, tab stops). The row's height is then `subLines.length * 22` by
+  // construction — the browser never re-wraps, so the prefix sum cannot drift.
+  // `rowWrapped` feeds both the heights and the rendered sub-lines. Off wrap,
+  // both stay null and the fixed-22px model is used.
+  const rowWrapped = useMemo(() => {
+    if (!langWrap || bodyWidth === 0) return null
+    const measure = makeMeasurer(codeFontOf())
+    if (measure === undefined) return null
+    const charWidth = measure('0')
+    // One-char safety margin keeps a sub-line from clipping on a sub-pixel
+    // difference between canvas metrics and the DOM's actual glyph advance.
+    const wrapping = bodyWidth - WRAP_GUTTERS_PX - charWidth
+    const tabPx = charWidth * 8
+    return rows.map(row => wrapInto(row.text, wrapping, measure, tabPx))
+  }, [langWrap, bodyWidth, rows])
+  const rowHeights = useMemo(() => {
+    if (rowWrapped === null) return null
+    return rowWrapped.map(lines => lines.length * ROW_HEIGHT_PX)
+  }, [rowWrapped])
+  const rowOffsets = useMemo(() => {
+    if (rowHeights === null) return null
+    const offs = new Array<number>(rowHeights.length + 1)
+    offs[0] = 0
+    for (let i = 0; i < rowHeights.length; i++) offs[i + 1] = offs[i]! + rowHeights[i]!
+    return offs
+  }, [rowHeights])
+  const totalHeight = rowOffsets === null ? rowCount * ROW_HEIGHT_PX : (rowOffsets[rowCount] ?? 0)
+  const offsetOf = (index: number): number => {
+    if (rowOffsets === null) return index * ROW_HEIGHT_PX
+    const i = Math.max(0, Math.min(index, rowCount))
+    return rowOffsets[i] ?? 0
+  }
+  const extentOf = (from: number, to: number): number => {
+    if (rowOffsets === null) return (to - from + 1) * ROW_HEIGHT_PX
+    return Math.max(0, offsetOf(to + 1) - offsetOf(from))
+  }
+  const rowAtY = (y: number): number => {
+    if (rowOffsets === null) return Math.floor(y / ROW_HEIGHT_PX)
+    if (y <= 0) return 0
+    let lo = 0
+    let hi = rowCount
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1
+      if (rowOffsets[mid]! <= y) lo = mid
+      else hi = mid - 1
+    }
+    return lo
+  }
+  const viewport = viewportHeight > 0 ? viewportHeight : totalHeight
+  const start = Math.max(0, rowAtY(scrollTop) - OVERSCAN_ROWS)
+  const end = Math.min(rowCount, rowAtY(scrollTop + viewport) + OVERSCAN_ROWS)
   const visibleRows = rows.slice(start, end)
 
   // When the hovered block's last row reaches the bottom of the file, the
@@ -565,7 +762,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const hoveredBlockEnd = hoveredBlock !== undefined ? model.blocks[hoveredBlock]?.end : undefined
   const blockActionsPadPx = hoveredBlockEnd === undefined
     ? 0
-    : Math.max(0, (hoveredBlockEnd + 1) * ROW_HEIGHT_PX + BLOCK_ACTIONS_FRAME_PX - rowCount * ROW_HEIGHT_PX)
+    : Math.max(0, offsetOf(hoveredBlockEnd + 1) + BLOCK_ACTIONS_FRAME_PX - totalHeight)
 
   // Widest line in the file, in characters: pins the table's width so the
   // added/deleted tint spans the same width at every scroll position (the
@@ -590,25 +787,51 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     return () => { observer?.disconnect() }
   }, [file.id])
 
-  // Center the focused change block after focus, content changes, or a jump.
-  // Arithmetic on the fixed row height works even when the block's rows are
-  // outside the rendered window. A programmatic scrollTop does not fire a
-  // scroll event, so the DOM write is mirrored into state to re-render the
-  // window; onScroll covers real user scrolling. Layout timing matters: the
-  // block-flash overlay reads scrollTop while rendering, so the scroll must
-  // settle BEFORE the browser paints — otherwise the flash shows a frame at
-  // the stale offset and then jumps to the centered spot.
+  // Measure the code scroll box's width so wrapped line heights can be computed.
+  // Re-measure immediately on resize so a drag re-wraps live. ResizeObserver
+  // already delivers at most one callback per frame, so "immediate" here is
+  // per-frame, not per-pixel — no extra coalescing is needed. Also track the
+  // horizontal scrollbar's height so the overview ruler stops above it.
+  useEffect(() => {
+    const body = bodyRef.current
+    if (body === null) return
+    const measure = () => {
+      setBodyWidth(body.clientWidth)
+      setHScrollbarPx(Math.max(0, body.offsetHeight - body.clientHeight))
+    }
+    measure()
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
+    observer?.observe(body)
+    return () => { observer?.disconnect() }
+  }, [file.id, langWrap])
+
+  // Scroll the focused change block into view after focus, content changes, or
+  // a jump. The block's top edge lands two rows below the viewport top so a
+  // little context stays visible above it; near the top or bottom the scroll
+  // clamps to the scrollable range instead. Arithmetic on the fixed row height
+  // works even when the block's rows are outside the rendered window. A
+  // programmatic scrollTop does not fire a scroll event, so the DOM write is
+  // mirrored into state to re-render the window; onScroll covers real user
+  // scrolling. Layout timing matters: the block-flash overlay reads scrollTop
+  // while rendering, so the scroll must settle BEFORE the browser paints —
+  // otherwise the flash shows a frame at the stale offset and then jumps.
   useLayoutEffect(() => {
     if (rowCount === 0) return
     const block = model.blocks[focus]
     if (block === undefined) return
     const body = bodyRef.current
     if (body === null) return
-    const target = block.start * ROW_HEIGHT_PX + ROW_HEIGHT_PX / 2 - body.clientHeight / 2
+    // Leave two rows of lead above the block's top edge; when the block is too
+    // close to the top or bottom to afford it, clamp to the scrollable range.
+    const target = offsetOf(block.start) - 2 * ROW_HEIGHT_PX
     const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
     if (body.scrollTop !== clamped) body.scrollTop = clamped
     setScrollTop(clamped)
-  }, [model, focus, scrollTick, rowCount])
+    // Re-run once when wrapped offsets go from "not measured yet" to ready, so
+    // an open-with-wrap-on file centers on the block's real (wrapped) offset
+    // instead of the initial fixed-22px guess. `rowOffsets === null` flips only
+    // on the readiness transition, not on every resize re-measure.
+  }, [model, focus, scrollTick, rowCount, rowOffsets === null])
 
   const jump = (direction: -1 | 1) => {
     if (rowCount === 0) return
@@ -622,7 +845,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       for (let index = current + 1; index < model.blocks.length; index++) {
         const block = model.blocks[index]
         if (block === undefined) continue
-        if (block.start * ROW_HEIGHT_PX >= top) return index
+        if (offsetOf(block.start) >= top) return index
       }
       // Past the last block — wrap to the first.
       return 0
@@ -783,6 +1006,18 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     const scrollbarWidth = scroller.offsetWidth - scroller.clientWidth
     return Math.max(0, scroller.clientWidth - (scrollbarWidth > 0 ? 0 : OVERVIEW_RULER_WIDTH_PX))
   })()
+  // The flash is absolutely positioned inside `.diffBody` (the scroll box); it
+  // is fixed relative to that box and does NOT scroll with the in-flow rows.
+  // So `top = contentOffset - scrollTop` (viewport coordinates), clamped to the
+  // block's intersection with the viewport — a tall block scrolled into never
+  // draws a box past the top edge, and still fills the visible area.
+  const flashTop = focusedBlock === undefined
+    ? 0
+    : Math.max(0, offsetOf(focusedBlock.start) - scrollTop)
+  const flashBottom = focusedBlock === undefined
+    ? 0
+    : Math.min(viewportHeight > 0 ? viewportHeight : Number.POSITIVE_INFINITY, offsetOf(focusedBlock.end + 1) - scrollTop)
+  const flashHeight = Math.max(0, flashBottom - flashTop)
 
   return (
     <div className={css.diff} data-diff-approval-diff>
@@ -897,9 +1132,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
           onMouseLeave={() => { setHoveredBlock(undefined) }}
           data-diff-body
         >
-          <div className={css.lines} style={{ minWidth: `max(100%, ${widestLine}ch)` }}>
+          <div
+            className={`${css.lines}${langWrap ? ' ' + css.wrap : ''}`}
+            style={langWrap ? { width: '100%', minWidth: '100%' } : { minWidth: `max(100%, ${widestLine}ch)` }}
+          >
             {start > 0 && (
-              <div className={css.vSpacer} style={{ height: start * ROW_HEIGHT_PX }} aria-hidden="true" />
+              <div className={css.vSpacer} style={{ height: offsetOf(start) }} aria-hidden="true" />
             )}
             {visibleRows.map((row, offset) => {
               const index = start + offset
@@ -913,11 +1151,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                   searchHit={searchHitSet.has(index)}
                   searchCurrent={index === currentSearchRow}
                   onRowHover={onRowHover}
+                  wrappedLines={rowWrapped?.[index]}
                 />
               )
             })}
             {end < rowCount && (
-              <div className={css.vSpacer} style={{ height: (rowCount - end) * ROW_HEIGHT_PX }} aria-hidden="true" />
+              <div className={css.vSpacer} style={{ height: totalHeight - offsetOf(end) }} aria-hidden="true" />
             )}
             {blockActionsPadPx > 0 && (
               <div className={css.vSpacer} style={{ height: blockActionsPadPx }} aria-hidden="true" />
@@ -927,7 +1166,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
             <div
               className={css.blockActions}
               data-diff-block-actions
-              style={{ top: (model.blocks[hoveredBlock]!.end + 1) * ROW_HEIGHT_PX }}
+              style={{ top: offsetOf(model.blocks[hoveredBlock]!.end + 1) }}
             >
               <span className={css.blockPosition} data-diff-block-position>
                 {t('panel.blockPosition', { current: hoveredBlock + 1, total: model.blocks.length })}
@@ -979,18 +1218,13 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
             className={css.blockFlash}
             data-diff-block-flash
             style={{
-              // The wrapper does not scroll, so the vertical position must
-              // subtract the current scrollTop to keep the box on the block;
-              // the width is the scroller's client width (the code area,
-              // excluding the scrollbar and the overview ruler), so the right
-              // edge lands exactly on the code's right edge. A block taller
-              // than the viewport would draw a box past the scroll box, so the
-              // height is clamped to the scroller's visible height.
-              top: focusedBlock.start * ROW_HEIGHT_PX - scrollTop,
-              height: Math.min(
-                (focusedBlock.end - focusedBlock.start + 1) * ROW_HEIGHT_PX,
-                viewportHeight > 0 ? viewportHeight : Number.POSITIVE_INFINITY,
-              ),
+              // The flash is fixed relative to the scroll box, so `top`/`height`
+              // are viewport coordinates (content offset minus scrollTop), clamped
+              // to the block's visible intersection. The width is the scroller's
+              // client width (code area, excluding the scrollbar and the
+              // overview ruler).
+              top: flashTop,
+              height: flashHeight,
               width: flashWidth,
             }}
           />
@@ -1050,7 +1284,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
           </div>
         )}
         {rulerMarkers.length > 0 && (
-          <div className={css.overviewRuler} data-diff-approval-ruler aria-hidden="true">
+          <div
+            className={css.overviewRuler}
+            data-diff-approval-ruler
+            aria-hidden="true"
+            style={{ bottom: hScrollbarPx }}
+          >
             {rulerMarkers.map((marker, index) => (
               <div
                 key={index}
@@ -1103,6 +1342,18 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
             </Tooltip>
           )}
         />
+        <Tooltip label={langWrap ? t('action.toggleOff') : t('action.toggleOn')} side="top" delayMs={500}>
+          <button
+            type="button"
+            className={`${css.langSelect}${langWrap ? ' ' + css.wrapActive : ''}`}
+            data-diff-wrap
+            aria-label={langWrap ? t('action.toggleOff') : t('action.toggleOn')}
+            aria-pressed={langWrap}
+            onClick={toggleLangWrap}
+          >
+            <span className={css.langLabel}>{t('action.wrap')}</span>
+          </button>
+        </Tooltip>
       </div>
     </div>
   )

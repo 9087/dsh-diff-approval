@@ -2,6 +2,7 @@
 
 const PASTE_ON_COPY_KEY = 'diff-approval:paste-on-copy'
 const IMPORT_UNTRACKED_KEY = 'diff-approval:import-untracked'
+const WRAP_PREFIX = 'diff-approval:wrap:'
 
 /**
  * Whether copying a reference should also paste it into the chat input and
@@ -31,4 +32,20 @@ export function includeUntrackedEnabled(): boolean {
 /** Persist the import-untracked preference. */
 export function setIncludeUntrackedEnabled(value: boolean): void {
   localStorage.setItem(IMPORT_UNTRACKED_KEY, value ? '1' : '0')
+}
+
+/**
+ * Whether lines wrap (auto-wrap) in the diff for one highlight language.
+ * Defaults to off; only an explicit `'1'` enables it. Stored per language, so
+ * a language's preference never leaks into another's.
+ * @param lang - the highlight language (or `''` for the auto/default bucket).
+ * @returns whether lines wrap.
+ */
+export function wrapEnabled(lang: string): boolean {
+  return localStorage.getItem(`${WRAP_PREFIX}${lang}`) === '1'
+}
+
+/** Persist the per-language auto-wrap preference. */
+export function setWrapEnabled(lang: string, value: boolean): void {
+  localStorage.setItem(`${WRAP_PREFIX}${lang}`, value ? '1' : '0')
 }

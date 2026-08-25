@@ -805,22 +805,18 @@ describe('PendingPanel', () => {
     expect(flash()).not.toBe(before)
   })
 
-  it('clamps a tall block flash to the scroller viewport height', () => {
-    // One contiguous 12-row block (264px tall) in a 60px viewport.
+  it('sizes a tall block flash to the block height (clipped by the scroller)', () => {
+    // One contiguous block spanning the whole diff (24 rows, 528px). The flash
+    // uses content coordinates and spans the whole block; the scroller's
+    // overflow clips it to the viewport.
     const tall = entry({ id: 'entry-tall', oldText: 'a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n', newText: 'A\nB\nC\nD\nE\nF\nG\nH\nI\nJ\nK\nL\n' })
     const props = panelProps({ read: true, files: [tall], busy: new Set() })
     const view = render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
-    // In jsdom the viewport measures 0 (no clamp); fake a visible height and
-    // re-measure through a scroll event, which reports the scroller height.
-    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
-    Object.defineProperty(body, 'clientHeight', { value: 60, configurable: true })
-    fireEvent.scroll(body)
-
     const flash = view.container.querySelector('[data-diff-block-flash]') as HTMLElement
     expect(flash).not.toBeNull()
-    expect(flash.style.height).toBe('60px')
+    expect(flash.style.height).toBe('528px')
   })
 
   it('keeps the flash off the overview ruler, reserving its width when no scrollbar is present', () => {
@@ -1378,5 +1374,26 @@ describe('PendingPanel', () => {
       'Markdown', 'Python', 'Ruby', 'Rust', 'SCSS', 'Shell', 'SQL', 'TOML',
       'TypeScript', 'XML', 'YAML',
     ])
+  })
+
+  it('toggles the per-language auto-wrap switch and persists it', () => {
+    const htmlFile = entry({ id: 'entry-wrap', path: '/repo/index.html', oldText: '<div>\n', newText: '<span>\n' })
+    const props = panelProps({ read: true, files: [htmlFile], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('index.html'))
+
+    const wrap = view.container.querySelector('[data-diff-wrap]') as HTMLElement
+    expect(wrap).not.toBeNull()
+    // Default off.
+    expect(wrap.getAttribute('aria-pressed')).toBe('false')
+
+    fireEvent.click(wrap)
+    expect(wrap.getAttribute('aria-pressed')).toBe('true')
+    expect(localStorage.getItem('diff-approval:wrap:html')).toBe('1')
+
+    fireEvent.click(wrap)
+    expect(wrap.getAttribute('aria-pressed')).toBe('false')
+    expect(localStorage.getItem('diff-approval:wrap:html')).toBe('0')
   })
 })
