@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.10.0](https://github.com/9087/dsh-diff-approval/compare/v0.9.0...v0.10.0) (2026-08-25)
+
+### Features
+
+* add per-language auto-wrap with precise VSCode-style wrapping ([6fabb82](https://github.com/9087/dsh-diff-approval/commit/6fabb8205bf5d260248b49066345886972063921))
+* add prev/next diff buttons to the floating block actions frame ([a6f6d19](https://github.com/9087/dsh-diff-approval/commit/a6f6d19ae0b3be932176ba138daf928dd0bbd173))
+* collapse the file list to a floating card constrained to the code scroll box ([e96a5b9](https://github.com/9087/dsh-diff-approval/commit/e96a5b979db177535fab3fbe852da5e9475f60f2))
+* keep the floating file list open when picking a file ([4cdbde3](https://github.com/9087/dsh-diff-approval/commit/4cdbde3c8dd53715ece7c9229511ff7841efa128))
+* order the pending file list by file name in the panel ([8b9bb98](https://github.com/9087/dsh-diff-approval/commit/8b9bb98e7cc36f111f1acedfd7e41f8d488f7bd1))
+* wrap on a Unicode line-break model with configurable tab width ([b55e777](https://github.com/9087/dsh-diff-approval/commit/b55e77781c4f4cc305facbd1a03794f9299306e2))
+
+### Bug Fixes
+
+* keep the hovered block keep/revert frame inside the content bottom ([3b9fafd](https://github.com/9087/dsh-diff-approval/commit/3b9fafd6fd238f5c4bb7af5bd3f87a6371a74a85))
+
 ## [0.9.0](https://github.com/9087/dsh-diff-approval/compare/v0.8.0...v0.9.0) (2026-08-24)
 
 ### Features
