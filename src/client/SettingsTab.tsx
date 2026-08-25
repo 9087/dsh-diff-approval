@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
-import { includeUntrackedEnabled, pasteOnCopyEnabled, setIncludeUntrackedEnabled, setPasteOnCopyEnabled } from './settings.ts'
+import { includeUntrackedEnabled, pasteOnCopyEnabled, setIncludeUntrackedEnabled, setPasteOnCopyEnabled, setTabWidth, tabWidth } from './settings.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import css from './PendingPanel.module.css'
 
@@ -88,17 +88,90 @@ function PreferenceRow({
   )
 }
 
+/** A picker offering the tab-width choices 2 / 4 / 8 (spaces). */
+function TabWidthPicker({
+  value, open, onOpenChange, onSelect, dataAttribute,
+}: {
+  value: number
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onSelect: (value: number) => void
+  dataAttribute: string
+}) {
+  const options = [2, 4, 8]
+  return (
+    <Menu
+      open={open}
+      onClose={() => { onOpenChange(false) }}
+      items={options.map(n => ({ id: String(n), label: String(n) }))}
+      selectedId={String(value)}
+      onSelect={(id) => {
+        onOpenChange(false)
+        const n = Number.parseInt(id, 10)
+        if (Number.isFinite(n)) onSelect(n)
+      }}
+      align="end"
+      portal
+      anchor={(
+        <button
+          type="button"
+          className={css.settingsSelector}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          onClick={() => { onOpenChange(!open) }}
+          {...{ [dataAttribute]: true }}
+        >
+          {value}
+          <IconChevronDownOutline14 className={css.settingsSelectorChevron} />
+        </button>
+      )}
+    />
+  )
+}
+
+/** One tab-width preference row: title + description, number picker right. */
+function TabWidthRow({
+  title, description, value, open, onOpenChange, onSelect, dataAttribute,
+}: {
+  title: string
+  description: string
+  value: number
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onSelect: (value: number) => void
+  dataAttribute: string
+}) {
+  return (
+    <div className={css.settingsRow}>
+      <div className={css.settingsRowText}>
+        <div className={css.settingsRowTitle}>{title}</div>
+        <div className={css.settingsRowDesc}>{description}</div>
+      </div>
+      <TabWidthPicker
+        value={value}
+        open={open}
+        onOpenChange={onOpenChange}
+        onSelect={onSelect}
+        dataAttribute={dataAttribute}
+      />
+    </div>
+  )
+}
+
 /**
- * The plugin's preferences: auto-paste a copied reference into the input, and
- * whether importing workspace VCS changes includes untracked files. Each row
- * mirrors the harness's Agent-preset row (title + description on the left, a
- * pill picker on the right) with the two boolean states 打开 / 关闭.
+ * The plugin's preferences: auto-paste a copied reference into the input,
+ * whether importing workspace VCS changes includes untracked files, and the
+ * diff's tab width. Each row mirrors the harness's Agent-preset row (title +
+ * description on the left, a pill picker on the right); the tab-width row
+ * offers 2 / 4 / 8 spaces.
  */
 export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const [pasteOnCopy, setPasteOnCopyState] = useState(pasteOnCopyEnabled)
   const [pasteOnCopyOpen, setPasteOnCopyOpen] = useState(false)
   const [includeUntracked, setIncludeUntrackedState] = useState(includeUntrackedEnabled)
   const [includeUntrackedOpen, setIncludeUntrackedOpen] = useState(false)
+  const [tab, setTabState] = useState(tabWidth)
+  const [tabOpen, setTabOpen] = useState(false)
   const setPasteOnCopy = (value: boolean): void => {
     setPasteOnCopyState(value)
     setPasteOnCopyEnabled(value)
@@ -106,6 +179,10 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const setIncludeUntracked = (value: boolean): void => {
     setIncludeUntrackedState(value)
     setIncludeUntrackedEnabled(value)
+  }
+  const setTab = (value: number): void => {
+    setTabState(value)
+    setTabWidth(value)
   }
   return (
     <div className={css.settingsPage} data-diff-settings>
@@ -128,6 +205,15 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
         onSelect={setIncludeUntracked}
         dataAttribute="data-diff-import-untracked-select"
         t={t}
+      />
+      <TabWidthRow
+        title={t('panel.tabWidth')}
+        description={t('panel.tabWidthDesc')}
+        value={tab}
+        open={tabOpen}
+        onOpenChange={setTabOpen}
+        onSelect={setTab}
+        dataAttribute="data-diff-tab-width-select"
       />
     </div>
   )

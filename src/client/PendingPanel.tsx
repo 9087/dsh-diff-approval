@@ -16,7 +16,7 @@ import { HIGHLIGHT_LANGS, highlightLines, languageDisplayName } from './highligh
 import type { HighlightSpan } from './highlight.ts'
 import { langFromPath } from './lang.ts'
 import { referenceOf } from './reference.ts'
-import { includeUntrackedEnabled, pasteOnCopyEnabled, setWrapEnabled, wrapEnabled } from './settings.ts'
+import { includeUntrackedEnabled, pasteOnCopyEnabled, setWrapEnabled, tabWidth, wrapEnabled } from './settings.ts'
 import css from './PendingPanel.module.css'
 
 /**
@@ -60,9 +60,13 @@ let measureCanvas: CanvasRenderingContext2D | undefined
 
 /**
  * Compute a diff line's visual sub-lines for soft wrap the way VSCode does it:
- * break at spaces (whole words), split an overlong word at character
- * boundaries, and advance tabs to the next tab stop. This *is* the wrap
- * decision — the caller renders the returned sub-lines itself (never
+ * a Unicode line-break model — break at whitespace and between any two CJK
+ * characters (Chinese han, Japanese kana, fullwidth forms), keep Latin and
+ * numeric words atomic (a word longer than a whole line falls back to a
+ * character split), and honor East Asian kinsoku so an opening bracket never
+ * ends a line and a closing/terminal punctuation never starts one. Tabs
+ * advance to the tab stop derived from the computed `tab-size`. This *is* the
+ * wrap decision — the caller renders the returned sub-lines itself (never
  * `white-space: pre-wrap`), so the row height equals `subLines.length * 22`
  * by construction and can never drift from the browser re-wrapping.
  * The concatenation equals the input (no characters are dropped), so
@@ -72,53 +76,130 @@ let measureCanvas: CanvasRenderingContext2D | undefined
  * @param measure - `ctx.measureText` bound to the code font.
  * @param tabPx - the width of one tab stop, in px.
  */
-function wrapInto(text: string, widthPx: number, measure: (t: string) => number, tabPx: number): string[] {
-  if (widthPx <= 0 || text.length === 0) return [text]
+
+const cpOf = (c: string): number => c.codePointAt(0) ?? 0
+
+/** Space, tab, or the ideographic space — whitespace is a break opportunity. */
+function isSpaceCode(cp: number): boolean {
+  return cp === 0x20 || cp === 0x09 || cp === 0x3000
+}
+
+/**
+ * CJK characters — Chinese han, Japanese kana, CJK fullwidth forms. Each is an
+ * independent break opportunity (wrap between any two), unlike Latin words.
+ */
+function isCJKCode(cp: number): boolean {
+  return (cp >= 0x3040 && cp <= 0x30ff)
+    || (cp >= 0x3400 && cp <= 0x4dbf)
+    || (cp >= 0x4e00 && cp <= 0x9fff)
+    || (cp >= 0xf900 && cp <= 0xfaff)
+    || (cp >= 0xfe30 && cp <= 0xfe4f)
+    || (cp >= 0xff00 && cp <= 0xffef)
+    || (cp >= 0x20000 && cp <= 0x2fa1f)
+}
+
+/** Opening bracket/quote — kinsoku forbids ending a line right after it. */
+function isOpenPunctCode(cp: number): boolean {
+  return cp === 0x28 || cp === 0x5b || cp === 0x7b
+    || cp === 0x3008 || cp === 0x300a || cp === 0x300c || cp === 0x300e
+    || cp === 0x3010 || cp === 0x3014 || cp === 0x3016 || cp === 0x3018
+    || cp === 0xff08 || cp === 0xff3b || cp === 0xff5b
+    || cp === 0x2018 || cp === 0x201c
+}
+
+/** Closing bracket/quote or terminal punctuation — kinsoku forbids starting a line with it. */
+function isClosePunctCode(cp: number): boolean {
+  return cp === 0x29 || cp === 0x5d || cp === 0x7d
+    || cp === 0x3001 || cp === 0x3002
+    || cp === 0x3009 || cp === 0x300b || cp === 0x300d || cp === 0x300f
+    || cp === 0x3011 || cp === 0x3015 || cp === 0x3017 || cp === 0x3019
+    || cp === 0xff09 || cp === 0xff3d || cp === 0xff5d
+    || cp === 0xff0c || cp === 0xff0e || cp === 0xff01 || cp === 0xff1f
+    || cp === 0xff1b || cp === 0xff1a
+    || cp === 0x2019 || cp === 0x201d
+    || cp === 0x2026 || cp === 0x2014
+}
+
+/**
+ * Whether a line break is allowed between characters `a` (ending the current
+ * line) and `b` (starting the next). Whitespace and any CJK/serial-boundary
+ * admit a break; a full Latin/numeric word does not. Kinsoku forbids a break
+ * after an opening punct or before a closing/terminal one.
+ */
+function breakValid(a: string, b: string): boolean {
+  const ac = cpOf(a)
+  const bc = cpOf(b)
+  if (isOpenPunctCode(ac)) return false
+  if (isClosePunctCode(bc)) return false
+  if (isSpaceCode(ac)) return true
+  if (isSpaceCode(bc)) return false
+  if (isCJKCode(ac) || isCJKCode(bc)) return true
+  return false
+}
+
+/**
+ * The largest index in `chars` at which a break may occur so the next line can
+ * begin there with the overflowing character `next` (the break may be at the
+ * line's end, `chars.length`). -1 when no position admits a break.
+ */
+function lastBreakIndex(chars: readonly string[], next: string): number {
+  for (let k = chars.length; k >= 1; k--) {
+    const a = chars[k - 1]!
+    const b = k < chars.length ? chars[k]! : next
+    if (breakValid(a, b)) return k
+  }
+  return -1
+}
+
+/** Width of a code-point array, advancing tabs to the next stop. */
+function charsWidth(chars: readonly string[], measure: (t: string) => number, tabPx: number): number {
+  let w = 0
+  for (const c of chars) {
+    if (c === '\t') w += tabPx - (w % tabPx)
+    else w += measure(c)
+  }
+  return w
+}
+
+export function wrapInto(text: string, widthPx: number, measure: (t: string) => number, tabPx: number): string[] {
+  if (widthPx <= 0) return [text]
+  const codepoints = Array.from(text)
+  if (codepoints.length === 0) return ['']
   const out: string[] = []
-  let cur = ''
-  let curW = 0
-  const push = (): void => { out.push(cur); cur = ''; curW = 0 }
-  for (const tok of text.split(/(\s+)/)) {
-    if (tok.length === 0) continue
-    if (/^\s+$/.test(tok)) {
-      for (const ch of tok) {
-        if (ch === '\t') {
-          const adv = tabPx - (curW % tabPx)
-          if (cur.length > 0 && curW + adv > widthPx) push()
-          cur += '\t'
-          curW += tabPx - (curW % tabPx)
-        } else {
-          if (cur.length > 0 && curW + measure(ch) > widthPx) {
-            // A space at a wrap point hangs on the current line (trailing) and
-            // the break follows it — it never opens the next line.
-            cur += ch
-            push()
-            continue
-          }
-          cur += ch
-          curW += measure(ch)
-        }
+  let line: string[] = []
+  let lineW = 0
+  for (const ch of codepoints) {
+    const adv = ch === '\t' ? tabPx - (lineW % tabPx) : measure(ch)
+    if (line.length > 0 && lineW + adv > widthPx) {
+      if (isSpaceCode(cpOf(ch))) {
+        // A space is the break point itself: hang it trailing on the current
+        // line and start a fresh line after it, so the wrap never opens a line
+        // with a space (or with a lone space-only line).
+        line.push(ch)
+        lineW += adv
+        out.push(line.join(''))
+        line = []
+        lineW = 0
+        continue
       }
-    } else {
-      const w = measure(tok)
-      if (cur.length > 0 && curW + w > widthPx) push()
-      if (w > widthPx) {
-        // Overlong word: split at character boundaries on fresh lines.
-        for (const ch of tok) {
-          const cw = measure(ch)
-          if (cur.length > 0 && curW + cw > widthPx) push()
-          cur += ch
-          curW += cw
-        }
+      const k = lastBreakIndex(line, ch)
+      if (k >= 1) {
+        out.push(line.slice(0, k).join(''))
+        line = line.slice(k)
+        lineW = charsWidth(line, measure, tabPx)
       } else {
-        cur += tok
-        curW += w
+        // No break opportunity (an overlong Latin word): split at the char.
+        out.push(line.join(''))
+        line = []
+        lineW = 0
       }
     }
+    line.push(ch)
+    lineW += ch === '\t' ? tabPx - (lineW % tabPx) : measure(ch)
   }
-  // A trailing space that just hung-and-broke leaves `cur` empty; don't emit a
-  // phantom blank line for it (unless nothing was emitted at all).
-  if (cur.length > 0 || out.length === 0) out.push(cur)
+  out.push(line.join(''))
+  // A hanging trailing space emptied the last line; drop the phantom blank.
+  if (out.length > 1 && out[out.length - 1] === '') out.pop()
   return out
 }
 
@@ -534,6 +615,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     setLangWrap(next)
     setWrapEnabled(wrapKey, next)
   }
+  // Global tab width (spaces) from settings: drives the rendered `tab-size`
+  // on the diff and the wrapped-line tab measurement, so both agree. Read once
+  // on mount; a change in DSH Settings applies on the next panel open.
+  const [tabWidthSpaces] = useState(() => tabWidth())
   const model = useMemo<RowModel>(() => {
     const diff = computeWholeFileDiff(file.oldText, file.newText)
     return { diff, blocks: changeBlocksOf(diff) }
@@ -731,9 +816,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     // One-char safety margin keeps a sub-line from clipping on a sub-pixel
     // difference between canvas metrics and the DOM's actual glyph advance.
     const wrapping = bodyWidth - WRAP_GUTTERS_PX - charWidth
-    const tabPx = charWidth * 8
+    const tabPx = tabWidthSpaces * measure(' ')
     return rows.map(row => wrapInto(row.text, wrapping, measure, tabPx))
-  }, [langWrap, bodyWidth, rows])
+  }, [langWrap, bodyWidth, rows, tabWidthSpaces])
   const rowHeights = useMemo(() => {
     if (rowWrapped === null) return null
     return rowWrapped.map(lines => lines.length * ROW_HEIGHT_PX)
@@ -1148,6 +1233,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
           tabIndex={0}
           onScroll={onScroll}
           onMouseLeave={() => { setHoveredBlock(undefined) }}
+          style={{ tabSize: tabWidthSpaces }}
           data-diff-body
         >
           <div

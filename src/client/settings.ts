@@ -2,6 +2,7 @@
 
 const PASTE_ON_COPY_KEY = 'diff-approval:paste-on-copy'
 const IMPORT_UNTRACKED_KEY = 'diff-approval:import-untracked'
+const TAB_WIDTH_KEY = 'diff-approval:tab-size'
 const WRAP_PREFIX = 'diff-approval:wrap:'
 
 /**
@@ -48,4 +49,20 @@ export function wrapEnabled(lang: string): boolean {
 /** Persist the per-language auto-wrap preference. */
 export function setWrapEnabled(lang: string, value: boolean): void {
   localStorage.setItem(`${WRAP_PREFIX}${lang}`, value ? '1' : '0')
+}
+
+/**
+ * The diff's tab width in spaces. Defaults to 4; the settings UI offers 2/4/8,
+ * but any positive integer is accepted. This drives both the rendered
+ * `tab-size` and the wrapped-line tab measurement, so they always agree.
+ * @returns the number of spaces one tab advances.
+ */
+export function tabWidth(): number {
+  const value = Number.parseInt(localStorage.getItem(TAB_WIDTH_KEY) ?? '', 10)
+  return Number.isInteger(value) && value > 0 ? value : 4
+}
+
+/** Persist the diff's tab width (in spaces). */
+export function setTabWidth(value: number): void {
+  localStorage.setItem(TAB_WIDTH_KEY, String(value))
 }
