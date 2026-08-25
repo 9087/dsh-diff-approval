@@ -710,15 +710,12 @@ describe('PendingPanel', () => {
 
     const actions = view.container.querySelector('[data-diff-block-actions]') as HTMLElement
     expect(actions).not.toBeNull()
-    // Frame's top edge sits at the block's bottom edge: one row below the
-    // block's last row. The del 'c' + add 'C' rows are the last two of the 4
-    // rendered rows, so the block's last row is 3 -> (3 + 1) * 22.
-    expect(actions.style.top).toBe('88px')
-
-    // The bottom pad spacer fills the frame height so it is not clipped.
-    const pad = [...view.container.querySelectorAll('[aria-hidden="true"]')]
-      .find(el => (el as HTMLElement).style.height === '40px')
-    expect(pad).toBeDefined()
+    // The block's last row is the file's last row (content bottom), so the
+    // frame cannot sit below it; it moves UP so its own bottom stays at the
+    // content bottom. Total height is 4 rows = 88px; the 40px frame clamps to
+    // top = 88 - 40 = 48px. The content height never grows (no bottom pad), so
+    // the last rows do not jump.
+    expect(actions.style.top).toBe('48px')
   })
 
   it('moves the focus between contiguous change blocks', () => {

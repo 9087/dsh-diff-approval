@@ -755,14 +755,15 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const end = Math.min(rowCount, rowAtY(scrollTop + viewport) + OVERSCAN_ROWS)
   const visibleRows = rows.slice(start, end)
 
-  // When the hovered block's last row reaches the bottom of the file, the
-  // floating Keep/Revert frame (anchored to the block's bottom edge) would
-  // extend past the scrollable content and be clipped by the scroller. Pad
-  // the diff bottom with just enough height to fit it.
-  const hoveredBlockEnd = hoveredBlock !== undefined ? model.blocks[hoveredBlock]?.end : undefined
-  const blockActionsPadPx = hoveredBlockEnd === undefined
+  // The floating Keep/Revert frame anchors to the hovered block's bottom edge.
+  // When that edge runs into the content's bottom, the frame must move up so
+  // its own bottom stays inside the scrollable content — padding the bottom
+  // would grow the content and make the last rows jump. Clamping to
+  // `totalHeight - FRAME_HEIGHT` (never past `0`) keeps the frame reachable.
+  const blockEnd = hoveredBlock === undefined ? undefined : model.blocks[hoveredBlock]?.end
+  const blockActionsTop = blockEnd === undefined
     ? 0
-    : Math.max(0, offsetOf(hoveredBlockEnd + 1) + BLOCK_ACTIONS_FRAME_PX - totalHeight)
+    : Math.min(offsetOf(blockEnd + 1), Math.max(0, totalHeight - BLOCK_ACTIONS_FRAME_PX))
 
   // Widest line in the file, in characters: pins the table's width so the
   // added/deleted tint spans the same width at every scroll position (the
@@ -1158,15 +1159,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
             {end < rowCount && (
               <div className={css.vSpacer} style={{ height: totalHeight - offsetOf(end) }} aria-hidden="true" />
             )}
-            {blockActionsPadPx > 0 && (
-              <div className={css.vSpacer} style={{ height: blockActionsPadPx }} aria-hidden="true" />
-            )}
           </div>
           {hoveredBlock !== undefined && model.blocks[hoveredBlock] !== undefined && (
             <div
               className={css.blockActions}
               data-diff-block-actions
-              style={{ top: offsetOf(model.blocks[hoveredBlock]!.end + 1) }}
+              style={{ top: blockActionsTop }}
             >
               <span className={css.blockPosition} data-diff-block-position>
                 {t('panel.blockPosition', { current: hoveredBlock + 1, total: model.blocks.length })}
