@@ -296,6 +296,21 @@ describe('revert', () => {
     })
     expect(await listEntries(handle, 'session-1')).toHaveLength(1)
   })
+
+  it('re-encodes the old content to the file current EOL (Bug 1)', async () => {
+    // Baseline LF, worktree CRLF, one line changed: without normalization a
+    // revert would flip the whole file to the baseline (LF) EOL.
+    const { ctx, fs, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'l1\nl2\nl3\n', 'l1\r\nl2\r\nL3\r\n'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    await expect(handle('revert', { sessionId: 'session-1', id: entry!.id }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'reverted' } })
+    // The revert always keeps the file's current (CRLF) EOL.
+    expect(fs.writeText).toHaveBeenCalledWith(
+      { displayPath: '/repo/a.txt', targetKey: 'key:/repo/a.txt' }, 'l1\r\nl2\r\nl3\r\n', undefined, expect.anything() as AbortSignal,
+    )
+  })
 })
 
 describe('block keep/revert', () => {

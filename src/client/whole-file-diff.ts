@@ -34,12 +34,17 @@ export interface WholeFileDiff {
  * Compute the whole-file view between two contents. The context budget is the
  * side lengths, so every hunk covers the file and unchanged lines survive as
  * context rows; the `\ No newline at end of file` patch marker is annotation
- * and never becomes a row.
+ * and never becomes a row. Both sides are line-ending normalized (`\r\n?` →
+ * `\n`) first, so a repo baseline stored with one EOL and a worktree with
+ * another never show as a whole-file delete+add — the diff is about approved
+ * content, not line-ending noise.
  * @param oldText - the file content before the pending change.
  * @param newText - the file content after the pending change.
  * @returns the complete row list with totals.
  */
 export function computeWholeFileDiff(oldText: string, newText: string): WholeFileDiff {
+  oldText = oldText.replace(/\r\n?/g, '\n')
+  newText = newText.replace(/\r\n?/g, '\n')
   const oldLines = contentLines(oldText)
   const newLines = contentLines(newText)
   const context = Math.max(1, oldLines.length, newLines.length)

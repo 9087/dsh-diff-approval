@@ -57,4 +57,17 @@ describe('computeWholeFileDiff', () => {
       { kind: 'add', text: 'y', oldLine: undefined, newLine: 2 },
     ])
   })
+
+  it('normalizes line endings, so a CRLF/LF difference is not a whole-file change', () => {
+    // Baseline stored LF, worktree CRLF, a single line changed (the Bug 1 case).
+    const diff = computeWholeFileDiff('l1\nl2\nl3\n', 'l1\r\nl2\r\nL3\r\n')
+    expect(diff.rows).toEqual([
+      { kind: 'context', text: 'l1', oldLine: 1, newLine: 1 },
+      { kind: 'context', text: 'l2', oldLine: 2, newLine: 2 },
+      { kind: 'del', text: 'l3', oldLine: 3, newLine: undefined },
+      { kind: 'add', text: 'L3', oldLine: undefined, newLine: 3 },
+    ])
+    expect(diff.removed).toBe(1)
+    expect(diff.added).toBe(1)
+  })
 })

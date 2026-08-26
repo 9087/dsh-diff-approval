@@ -122,7 +122,10 @@ interface DiffApprovalUndoState {
   path: string
   /** The store entry to restore (undefined = the entry is absent). */
   entry: PendingEntry | undefined
-  /** The file content to write on restore (undefined = leave the file untouched). */
+  /** The file content to write on restore (undefined = leave the file untouched).
+   * This is the exact bytes the action wrote (already line-ending adjusted), so
+   * restore writes it verbatim and reproduces the action independent of the
+   * current line-ending-sensitivity setting. */
   fileText: string | undefined
   /** A batch of entries restored/removed together (one VCS import). Each item's
    * `entry` decides restore vs remove; present only on the import's pair. */
@@ -134,6 +137,37 @@ interface DiffApprovalUndoPair {
   sessionId: SessionId
   before: DiffApprovalUndoState
   after: DiffApprovalUndoState
+}
+
+/** The dominant line ending of `text`: CRLF when `\r\n` meets or beats lone
+ * `\n`, else LF; a text with no line breaks falls back to LF.
+ * @param text - the content to inspect.
+ * @returns the dominant line-ending sequence.
+ */
+function detectEol(text: string): '\r\n' | '\n' {
+  let crlf = 0
+  let lf = 0
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    if (c === 13) {
+      if (i + 1 < text.length && text.charCodeAt(i + 1) === 10) { crlf++; i++ }
+    } else if (c === 10) {
+      lf++
+    }
+  }
+  if (crlf === 0 && lf === 0) return '\n'
+  return crlf >= lf ? '\r\n' : '\n'
+}
+
+/** Normalize any line ending (`\r\n`, `\r`) to `\n`. */
+function normalizeEol(text: string): string {
+  return text.replace(/\r\n?/g, '\n')
+}
+
+/** Re-encode `text`'s line endings to `eol` (its content is unchanged). */
+function reencodeEol(text: string, eol: '\r\n' | '\n'): string {
+  const normalized = normalizeEol(text)
+  return eol === '\n' ? normalized : normalized.replace(/\n/g, '\r\n')
 }
 
 /**
@@ -518,6 +552,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           throw new Error('the file changed outside the review after the action; undo is unavailable')
         }
       }
+      // The snapshot is the exact bytes the action wrote (line-endings already
+      // adjusted), so restore writes it verbatim — reproducing the action
+      // regardless of the current line-ending-sensitivity setting.
       await writeRevert(resolved, state.fileText, sessionId, signal)
     }
     if (state.batch !== undefined) {
@@ -706,10 +743,14 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             await rm(ctx.fs.processPath(resolved), { force: true })
           } else {
             const preWrite = await ctx.fs.readText(resolved, undefined) ?? entry.newText
-            await writeRevert(resolved, entry.oldText, target.sessionId, signal)
+            // Always write the baseline re-encoded to the file's current EOL:
+            // a revert restores content while keeping the file's line-ending
+            // style (the diff is about approved content, not EOL noise).
+            const content = reencodeEol(entry.oldText, detectEol(entry.newText))
+            await writeRevert(resolved, content, target.sessionId, signal)
             undo = {
               before: { id: entry.id, path: entry.path, entry, fileText: preWrite },
-              after: { id: entry.id, path: entry.path, entry: undefined, fileText: entry.oldText },
+              after: { id: entry.id, path: entry.path, entry: undefined, fileText: content },
             }
           }
         } catch (error: unknown) {
@@ -764,27 +805,32 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // the whole-file revert.
         const restored = contentRangeOf(entry.oldText, blockTarget.block.oldStart, blockTarget.block.oldEnd)
         const updatedNew = replaceContentLines(entry.newText, blockTarget.block.newStart, blockTarget.block.newEnd, restored)
+        // Write the file in the entry's current EOL (uniform), and keep the
+        // store's newText in step with the bytes actually written, so a later
+        // read never sees a line-ending-only drift. The "fully reverted" check
+        // compares content on an EOL-neutral basis.
+        const content = reencodeEol(updatedNew, detectEol(entry.newText))
         let afterEntry: PendingEntry | undefined
-        if (updatedNew === entry.oldText) {
+        if (normalizeEol(updatedNew) === normalizeEol(entry.oldText)) {
           store.remove(blockTarget.sessionId, blockTarget.id)
           afterEntry = undefined
         } else {
-          store.update(blockTarget.sessionId, blockTarget.id, { newText: updatedNew })
-          afterEntry = { ...entry, newText: updatedNew, updatedAt: Date.now() }
+          store.update(blockTarget.sessionId, blockTarget.id, { newText: content })
+          afterEntry = { ...entry, newText: content, updatedAt: Date.now() }
         }
         // A block-revert that empties a created file deletes it and is not
         // undoable; one that writes keeps a snapshot for Ctrl+Z.
         let undo: { before: DiffApprovalUndoState; after: DiffApprovalUndoState } | undefined
         try {
           const resolved = await ctx.fs.resolve(entry.path, { signal })
-          if (entry.kind === 'create' && updatedNew === '') {
+          if (entry.kind === 'create' && content === '') {
             await rm(ctx.fs.processPath(resolved), { force: true })
           } else {
             const preWrite = await ctx.fs.readText(resolved, undefined) ?? entry.newText
-            await writeRevert(resolved, updatedNew, blockTarget.sessionId, signal)
+            await writeRevert(resolved, content, blockTarget.sessionId, signal)
             undo = {
               before: { id: entry.id, path: entry.path, entry, fileText: preWrite },
-              after: { id: entry.id, path: entry.path, entry: afterEntry, fileText: updatedNew },
+              after: { id: entry.id, path: entry.path, entry: afterEntry, fileText: content },
             }
           }
         } catch (error: unknown) {
