@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.11.0](https://github.com/9087/dsh-diff-approval/compare/v0.10.0...v0.11.0) (2026-08-27)
+
+### Features
+
+* stack multi-plugin sidebar footer actions, deferring to dsh-footer-order ([94e0542](https://github.com/9087/dsh-diff-approval/commit/94e05426578e72c32afd141067ceff9e9c762320))
+
+### Bug Fixes
+
+* normalize line endings and revert files to their current EOL ([38391bc](https://github.com/9087/dsh-diff-approval/commit/38391bcee2eb782af7b7f70b102ef5cc9bdebe40))
+
 ## [0.10.0](https://github.com/9087/dsh-diff-approval/compare/v0.9.0...v0.10.0) (2026-08-25)
 
 ### Features
