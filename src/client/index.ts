@@ -22,10 +22,68 @@ export { DIFF_APPROVAL_CHANNEL } from './port.ts'
 export const inject = ['slots', 'locale', 'connection', 'sessions']
 
 /**
+ * The dsh web-react renderer gives `div[data-slot="sidebar.footer.action"]` an
+ * inline `display: contents`, so every plugin's footer entry root participates
+ * directly in the `.footerActions` flex row — several plugins (e.g. this one
+ * plus a file-browser) get crammed into one row and a full-width badge
+ * overflows. Stack the slot entries vertically instead (the same fix the
+ * dsh-footer-order plugin injects), so each plugin gets its own row.
+ *
+ * We defer to the dedicated dsh-footer-order plugin when it is present, so the
+ * two never fight.
+ *
+ * Why we detect it by its injected stylesheet's `--dsh-footer-order-gap` custom
+ * property rather than by `ctx.slots.entriesOfSlot('settings.plugin.item')`
+ * (where footer-order registers its settings card, id `footer-order`): that slot
+ * key is not in our SlotMap type (would need a cast) and, more importantly, it
+ * may not be an active slot in this dsh version at all — footer-order targets a
+ * newer dsh settings API, so the detection could miss footer-order and we would
+ * then both inject, fighting over the same `!important` rule. The CSS marker is
+ * footer-order's own, and its presence is exactly "footer-order's rule is really
+ * applied", which is what decides the layout. So only when the marker is absent
+ * do we inject our own rule.
+ */
+function injectFooterStackStyle(): void {
+  if (typeof document === 'undefined') return
+  if (document.querySelector('style[data-diff-approval-footer-stack]') !== null) return
+  const CSS = 'div[data-slot="sidebar.footer.action"]{display:flex!important;flex-direction:column!important;flex:1 1 auto!important;align-items:stretch!important;}'
+  const footerOrderInstalled = (): boolean => {
+    // footer-order's injected rule carries this marker; scan every stylesheet.
+    for (const style of document.querySelectorAll('style')) {
+      if ((style.textContent ?? '').includes('--dsh-footer-order-gap')) return true
+    }
+    return false
+  }
+  const inject = (): void => {
+    if (document.querySelector('style[data-diff-approval-footer-stack]') !== null) return
+    if (footerOrderInstalled()) return  // dsh-footer-order is managing this slot
+    const style = document.createElement('style')
+    style.setAttribute('data-diff-approval-footer-stack', '')
+    style.textContent = CSS
+    document.head.appendChild(style)
+  }
+  if (document.querySelector('div[data-slot="sidebar.footer.action"]') !== null) {
+    inject()
+    return
+  }
+  // The footer renders after the app boots; watch for the anchor and check once
+  // it appears (footer-order's stylesheet is injected at boot, so its marker
+  // would already be present then).
+  const observer = new MutationObserver(() => {
+    if (document.querySelector('div[data-slot="sidebar.footer.action"]') !== null) {
+      observer.disconnect()
+      inject()
+    }
+  })
+  observer.observe(document.documentElement, { childList: true, subtree: true })
+}
+
+/**
  * Mount the pending-edit review panel.
  * @param ctx - Client Cordis context carrying the wire and slot services.
  */
 export function apply(ctx: ClientContext): void {
+  injectFooterStackStyle()
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-diff-approval: dictionaries')
   const t = ctx.locale.bind(NS)
 
