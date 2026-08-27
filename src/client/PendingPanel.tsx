@@ -736,6 +736,23 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     if (body.scrollTop !== clamped) body.scrollTop = clamped
     setScrollTop(clamped)
   }
+  // Keep/revert the hovered block, then advance focus to the next change block
+  // (if there is one), mirroring the single-column behaviour. The remaining
+  // blocks shift into the operated block's slot, so that index is the next one.
+  const handleBlockAction = async (action: 'keep' | 'revert'): Promise<void> => {
+    if (busy || hoveredBlock === undefined) return
+    const operated = hoveredBlock
+    const range = blockRanges[operated]!
+    await (action === 'keep'
+      ? onBlockKeep(file.sessionId, file.id, range)
+      : onBlockRevert(file.sessionId, file.id, range))
+    const count = model.blocks.length
+    if (count === 0) return
+    const next = Math.max(0, Math.min(operated, count - 1))
+    setFocus(next)
+    setHoveredBlock(undefined)
+    setFlashKey(key => key + 1)
+  }
   const pairAtY = (y: number): number => {
     if (pairOffsets === null) return Math.floor(y / ROW_HEIGHT_PX)
     if (y <= 0) return 0
@@ -926,10 +943,10 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
           <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-block-next aria-label={t('action.nextDiff')} disabled={busy} onClick={() => jump(1)}>
             <IconChevronDownOutline14 size={14} />
           </button>
-          <button type="button" className={`${css.action} ${css.actionPrimary}`} data-diff-block-keep disabled={busy} onClick={() => { void onBlockKeep(file.sessionId, file.id, blockRanges[hoveredBlock]!) }}>
+          <button type="button" className={`${css.action} ${css.actionPrimary}`} data-diff-block-keep disabled={busy} onClick={() => { void handleBlockAction('keep') }}>
             {t('action.keep')}
           </button>
-          <button type="button" className={`${css.action}`} data-diff-block-revert disabled={busy} onClick={() => { void onBlockRevert(file.sessionId, file.id, blockRanges[hoveredBlock]!) }}>
+          <button type="button" className={`${css.action}`} data-diff-block-revert disabled={busy} onClick={() => { void handleBlockAction('revert') }}>
             {t('action.revert')}
           </button>
         </div>
@@ -1440,6 +1457,28 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     setFlashKey(key => key + 1)
   }
 
+  // Keep/revert the hovered block, then advance focus to the next change block
+  // (if there is one). The store removes the operated block and refreshes, so
+  // the remaining blocks shift into its slot; using the operated index makes the
+  // next block land on that index, and the clamp keeps it in range when the
+  // operated block was the last one. On a failed action the block is still
+  // present, so focus stays where it was.
+  const handleBlockAction = async (action: 'keep' | 'revert'): Promise<void> => {
+    if (busy || hoveredBlock === undefined) return
+    const operated = hoveredBlock
+    const range = blockRanges[operated]!
+    await (action === 'keep'
+      ? onBlockKeep(file.sessionId, file.id, range)
+      : onBlockRevert(file.sessionId, file.id, range))
+    const count = model.blocks.length
+    if (count === 0) return
+    const next = Math.max(0, Math.min(operated, count - 1))
+    setFocus(next)
+    setHoveredBlock(undefined)
+    setScrollTick(tick => tick + 1)
+    setFlashKey(key => key + 1)
+  }
+
   // Re-clicking the already-open file in the list jumps to the next change
   // block; the panel bumps `jumpSignal` to trigger it. A fresh signal while
   // on the same file re-runs this, wrapping to the first block when needed.
@@ -1779,7 +1818,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 className={`${css.action} ${css.actionPrimary}`}
                 data-diff-block-keep
                 disabled={busy}
-                onClick={() => { void onBlockKeep(file.sessionId, file.id, blockRanges[hoveredBlock]!) }}
+                onClick={() => { void handleBlockAction('keep') }}
               >
                 {t('action.keep')}
               </button>
@@ -1788,7 +1827,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 className={css.action}
                 data-diff-block-revert
                 disabled={busy}
-                onClick={() => { void onBlockRevert(file.sessionId, file.id, blockRanges[hoveredBlock]!) }}
+                onClick={() => { void handleBlockAction('revert') }}
               >
                 {t('action.revert')}
               </button>
