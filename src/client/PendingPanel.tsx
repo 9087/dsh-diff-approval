@@ -1,6 +1,6 @@
 /** Sidebar-foot pending-edit review action and the split review panel it opens. */
 
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react'
 import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -12,11 +12,13 @@ import type { PendingPanelFace } from './slots.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import { computeWholeFileDiff } from './whole-file-diff.ts'
 import type { WholeFileDiffRow } from './whole-file-diff.ts'
+import { computeSideBySideDiff, searchPairs } from './split-diff.ts'
+import type { SplitPair, SplitSide } from './split-diff.ts'
 import { HIGHLIGHT_LANGS, highlightLines, languageDisplayName } from './highlight.ts'
 import type { HighlightSpan } from './highlight.ts'
 import { langFromPath } from './lang.ts'
 import { referenceOf } from './reference.ts'
-import { includeUntrackedEnabled, pasteOnCopyEnabled, setWrapEnabled, tabWidth, wrapEnabled } from './settings.ts'
+import { includeUntrackedEnabled, pasteOnCopyEnabled, setWrapEnabled, splitMode, tabWidth, wrapEnabled } from './settings.ts'
 import css from './PendingPanel.module.css'
 
 /**
@@ -494,6 +496,448 @@ function changeBlocksOf(diff: ReturnType<typeof computeWholeFileDiff>): ChangeBl
   return blocks
 }
 
+/** One side's line-content for the split view: the highlighted runs or plain text. */
+function splitSideContent(
+  side: SplitSide | undefined,
+  wrapped: string[] | undefined,
+  runs: readonly HighlightSpan[] | undefined,
+): ReactNode {
+  if (side === undefined) return ''
+  const highlighted = runs !== undefined && runs.length > 0
+  if (wrapped === undefined) {
+    return highlighted
+      ? runs.map((span, i) => <span key={i} style={span.style}>{span.text}</span>)
+      : (side.text === '' ? '\u00a0' : side.text)
+  }
+  let offset = 0
+  return wrapped.map((line, i) => {
+    const start = offset
+    offset += line.length
+    const content = highlighted ? clipRuns(runs, start, offset) : (line === '' ? '\u00a0' : line)
+    return <div key={i} className={css.subline}>{content}</div>
+  })
+}
+
+/**
+ * One side of a split pair row, rendered inside its own column. The two columns
+ * are drawn by two independent `.splitCol` scrollers (each with its own
+ * horizontal scrollbar) that share one vertical scroller, and each row gets the
+ * same fixed `height` (the pair's max of the two sides' wrapped sub-line
+ * counts) so the left/right halves always align on the same Y — no jump when
+ * one side is longer. The gutter and code are top-aligned so sub-lines line up
+ * across the divider.
+ */
+function SplitSideRow({ side, wrapped, runs, kind, isLeft, height, focused, searchHit, searchCurrent, onHover }: {
+  side: SplitSide | undefined
+  wrapped: string[] | undefined
+  runs: readonly HighlightSpan[] | undefined
+  kind: SplitPair['kind']
+  isLeft: boolean
+  height: number
+  focused: boolean
+  searchHit: boolean
+  searchCurrent: boolean
+  onHover: () => void
+}) {
+  const tint = isLeft
+    ? (kind === 'del' || kind === 'replace' ? css.splitLdel : '')
+    : (kind === 'add' || kind === 'replace' ? css.splitRadd : '')
+  return (
+    <div
+      className={css.line}
+      style={{ height }}
+      data-diff-split-row
+      data-diff-split-side={isLeft ? 'left' : 'right'}
+      data-diff-focused={focused ? '' : undefined}
+      data-diff-search={searchHit ? (searchCurrent ? 'current' : 'hit') : undefined}
+      onMouseEnter={onHover}
+    >
+      <span className={css.gutter}>{side?.line ?? ''}</span>
+      <span className={`${css.code} ${tint}`} data-diff-code>{splitSideContent(side, wrapped, runs)}</span>
+    </div>
+  )
+}
+
+/** Imperative surface the parent uses to drive block navigation from the
+ *  shared toolbar/keyboard in split mode (its own `focus` is private here). */
+export interface SplitDiffHandle { jump: (direction: -1 | 1) => void; openSearch: () => void }
+
+/** The two-column (side-by-side) whole-file diff view. */
+export const SplitDiff = forwardRef<SplitDiffHandle, {
+  file: PendingFileDiff
+  model: RowModel
+  runs: HighlightRuns | undefined
+  langWrap: boolean
+  tabWidthSpaces: number
+  busy: boolean
+  t: Translator
+  onBlockKeep: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
+  onBlockRevert: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
+}>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, onBlockKeep, onBlockRevert }, ref) {
+  const { pairs, pairOfRow } = useMemo(() => computeSideBySideDiff(model.diff.rows), [model])
+  const pairCount = pairs.length
+  const bodyRef = useRef<HTMLDivElement>(null)
+  const [scrollTop, setScrollTop] = useState(0)
+  const [viewportH, setViewportH] = useState(0)
+  const [bodyWidth, setBodyWidth] = useState(0)
+  const [hoveredBlock, setHoveredBlock] = useState<number | undefined>(undefined)
+  const [focus, setFocus] = useState(0)
+  const [flashKey, setFlashKey] = useState(0)
+  // Pinned horizontal scrollbars: each column's content is a hidden-scroll
+  // `.splitCol` whose `scrollLeft` we drive from a pinned native scrollbar
+  // strip in `.splitHScrollRow`. We track the content width of each column to
+  // size the strip's thumb, and pin the `.lines` table to the file's widest
+  // line so the thumb never jumps as the virtual window scrolls.
+  const leftColRef = useRef<HTMLDivElement>(null)
+  const rightColRef = useRef<HTMLDivElement>(null)
+  const leftHScrollRef = useRef<HTMLDivElement>(null)
+  const rightHScrollRef = useRef<HTMLDivElement>(null)
+  const [fillWidth, setFillWidth] = useState<{ left: number; right: number }>({ left: 0, right: 0 })
+  // In-split search: matches are whole pairs (a pair counts once, however many
+  // times the query appears, and both columns highlight together). Own copy so
+  // split keeps its own bar independent of the single-column one.
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchIndex, setSearchIndex] = useState(0)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    setFocus(0)
+    bodyRef.current?.focus()
+    setFlashKey(k => k + 1)
+    setHoveredBlock(undefined)
+    setSearchOpen(false)
+    setSearchQuery('')
+    setSearchIndex(0)
+  }, [file.id])
+
+  useEffect(() => {
+    const body = bodyRef.current
+    if (body === null) return
+    const measure = () => { setViewportH(body.clientHeight); setBodyWidth(body.clientWidth) }
+    measure()
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
+    observer?.observe(body)
+    return () => { observer?.disconnect() }
+  }, [file.id])
+
+  // Pair index range per change block (mapped from the original row range).
+  const blockOfPair = useMemo(() => model.blocks.map(block => ({
+    start: pairOfRow.get(block.start) ?? 0,
+    end: pairOfRow.get(block.end) ?? 0,
+  })), [model, pairOfRow])
+  const blockIndexByPair = useMemo(() => {
+    const map = new Map<number, number>()
+    blockOfPair.forEach((block, bi) => { for (let k = block.start; k <= block.end; k++) map.set(k, bi) })
+    return map
+  }, [blockOfPair])
+  const onPairHover = useCallback((k: number) => setHoveredBlock(blockIndexByPair.get(k)), [blockIndexByPair])
+
+  // One column's content width: both columns are equal `flex: 1 1 0` shares of
+  // `.diffBody`'s client box minus the 1px divider. `bodyWidth` already excludes
+  // the vertical scrollbar, so this is the real column width even when a
+  // scrollbar is present (which the full-width pinned strip row would otherwise
+  // overrun and misalign with).
+  const colWidth = Math.max(0, (bodyWidth - 1) / 2)
+
+  const pairWrapped = useMemo(() => {
+    if (!langWrap || bodyWidth === 0) return null
+    const measure = makeMeasurer(codeFontOf())
+    if (measure === undefined) return null
+    const charWidth = measure('0')
+    const wrapW = colWidth - WRAP_GUTTERS_PX / 2 - charWidth
+    const tabPx = tabWidthSpaces * measure(' ')
+    return pairs.map(p => ({
+      left: p.left === undefined ? undefined : wrapInto(p.left.text, wrapW, measure, tabPx),
+      right: p.right === undefined ? undefined : wrapInto(p.right.text, wrapW, measure, tabPx),
+    }))
+  }, [pairs, langWrap, bodyWidth, colWidth, tabWidthSpaces])
+  const pairHeights = useMemo(() => {
+    if (pairWrapped === null) return null
+    return pairWrapped.map(w => Math.max(w.left?.length ?? 1, w.right?.length ?? 1) * ROW_HEIGHT_PX)
+  }, [pairWrapped])
+  const pairOffsets = useMemo(() => {
+    if (pairHeights === null) return null
+    const offs = new Array<number>(pairHeights.length + 1)
+    offs[0] = 0
+    for (let i = 0; i < pairHeights.length; i++) offs[i + 1] = offs[i]! + pairHeights[i]!
+    return offs
+  }, [pairHeights])
+  const totalHeight = pairOffsets === null ? pairCount * ROW_HEIGHT_PX : (pairOffsets[pairCount] ?? 0)
+  const off = (k: number): number => (pairOffsets === null ? k * ROW_HEIGHT_PX : (pairOffsets[Math.max(0, Math.min(k, pairCount))] ?? 0))
+  // Fixed height for a pair's row: both columns must hold this exact value so
+  // the shorter side keeps an empty slot and the halves never desync.
+  const pairHeightAt = (k: number): number => (pairHeights === null ? ROW_HEIGHT_PX : (pairHeights[k] ?? ROW_HEIGHT_PX))
+  // Widest line (in characters) on each side, over the whole file. Used to pin
+  // the column's `.lines` width to the widest line so the horizontal scrollbar
+  // thumb's size and range stay stable while the virtual window scrolls.
+  const widestSide = useMemo(() => {
+    let left = 0
+    let right = 0
+    for (const p of pairs) {
+      if (p.left !== undefined) left = Math.max(left, p.left.text.length)
+      if (p.right !== undefined) right = Math.max(right, p.right.text.length)
+    }
+    return { left, right }
+  }, [pairs])
+
+  // Measure each column's content width and size its pinned scrollbar strip,
+  // then re-sync the strip's scrollLeft to the column's. Runs after the column
+  // content (or its width) changes; `overflow-x: hidden` still reports the full
+  // content width via scrollWidth.
+  useLayoutEffect(() => {
+    const sync = (side: 'left' | 'right') => {
+      const col = side === 'left' ? leftColRef.current : rightColRef.current
+      const strip = side === 'left' ? leftHScrollRef.current : rightHScrollRef.current
+      if (col === null || strip === null) return
+      const width = col.scrollWidth
+      setFillWidth(prev => (prev[side] === width ? prev : { ...prev, [side]: width }))
+      strip.scrollLeft = col.scrollLeft
+    }
+    sync('left')
+    sync('right')
+  }, [pairs, langWrap, tabWidthSpaces, bodyWidth])
+
+  // Dragging a pinned strip scrolls only that column's content.
+  const onHScroll = useCallback((side: 'left' | 'right') => {
+    const strip = side === 'left' ? leftHScrollRef.current : rightHScrollRef.current
+    const col = side === 'left' ? leftColRef.current : rightColRef.current
+    if (strip === null || col === null) return
+    col.scrollLeft = strip.scrollLeft
+  }, [])
+  // Search: pair indices whose left or right text contains the query.
+  const searchMatches = useMemo(() => searchPairs(pairs, searchQuery), [pairs, searchQuery])
+  const searchHitSet = useMemo(() => new Set(searchMatches), [searchMatches])
+  const currentSearchPair = searchMatches.length === 0 ? undefined : searchMatches[searchIndex % searchMatches.length]
+
+  const closeSearch = (): void => {
+    setSearchOpen(false)
+    setSearchQuery('')
+    setSearchIndex(0)
+    bodyRef.current?.focus()
+  }
+  const openSearch = (): void => {
+    setSearchOpen(true)
+    // Focus after the bar mounts (it is conditionally rendered).
+    requestAnimationFrame(() => { searchInputRef.current?.focus(); searchInputRef.current?.select() })
+  }
+  const goSearch = (direction: -1 | 1): void => {
+    const len = searchMatches.length
+    if (len === 0) return
+    const next = (searchIndex + direction + len) % len
+    setSearchIndex(next)
+    const pairIndex = searchMatches[next]
+    if (pairIndex === undefined) return
+    const body = bodyRef.current
+    if (body === null) return
+    // Center the matched pair near the viewport top, like the block jump.
+    const target = Math.max(0, off(pairIndex) - 2 * ROW_HEIGHT_PX)
+    const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
+    if (body.scrollTop !== clamped) body.scrollTop = clamped
+    setScrollTop(clamped)
+  }
+  const pairAtY = (y: number): number => {
+    if (pairOffsets === null) return Math.floor(y / ROW_HEIGHT_PX)
+    if (y <= 0) return 0
+    let lo = 0, hi = pairCount
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if ((pairOffsets[mid] ?? 0) <= y) lo = mid; else hi = mid - 1 }
+    return lo
+  }
+  const viewport = viewportH > 0 ? viewportH : totalHeight
+  const start = Math.max(0, pairAtY(scrollTop) - OVERSCAN_ROWS)
+  const end = Math.min(pairCount, pairAtY(scrollTop + viewport) + OVERSCAN_ROWS)
+  const visiblePairs = pairs.slice(start, end)
+
+  // Block navigation: jump between change blocks (flashes the focused one).
+  const jump = (direction: -1 | 1): void => {
+    if (blockOfPair.length === 0) return
+    setFocus(current => {
+      if (direction === -1) return (current - 1 + blockOfPair.length) % blockOfPair.length
+      const top = bodyRef.current?.scrollTop ?? 0
+      for (let index = current + 1; index < blockOfPair.length; index++) {
+        if (off(blockOfPair[index]!.start) >= top) return index
+      }
+      return 0
+    })
+    setFlashKey(k => k + 1)
+  }
+  // Expose the block jump to the parent so the shared toolbar/keyboard drives
+  // this split view's own (private) focus in split mode.
+  useImperativeHandle(ref, () => ({ jump, openSearch }), [jump, openSearch])
+
+  useLayoutEffect(() => {
+    if (pairCount === 0) return
+    const block = blockOfPair[focus]
+    if (block === undefined) return
+    const body = bodyRef.current
+    if (body === null) return
+    const target = off(block.start)
+    const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
+    if (body.scrollTop !== clamped) body.scrollTop = clamped
+    setScrollTop(clamped)
+  }, [model, focus, flashKey, pairCount])
+
+  const onScroll = (): void => { setScrollTop(bodyRef.current?.scrollTop ?? 0) }
+  const inFocused = (k: number): boolean => {
+    const block = blockOfPair[focus]
+    return block !== undefined && k >= block.start && k <= block.end
+  }
+
+  // Split keeps the whole-diff stats from the single-column model (same diff).
+  const blockRanges = useMemo(() => model.blocks.map(block => blockRangesOf(model.diff.rows, block)), [model])
+  const focusedBlock = blockOfPair[focus]
+  const flashTop = focusedBlock === undefined ? 0 : Math.max(0, off(focusedBlock.start) - scrollTop)
+  const flashBottom = focusedBlock === undefined
+    ? 0
+    : Math.min(viewportH > 0 ? viewportH : Number.POSITIVE_INFINITY, off(focusedBlock.end + 1) - scrollTop)
+  const flashHeight = Math.max(0, flashBottom - flashTop)
+  // Hovered block's actions frame, pinned to the block's bottom edge. The actions
+  // live in the non-scrolling wrapper (viewport coordinates), so subtract
+  // scrollTop; the frame is clamped to stay on-screen.
+  const blockActionsTop = hoveredBlock === undefined || blockOfPair[hoveredBlock] === undefined
+    ? 0
+    : Math.max(0, Math.min(off(blockOfPair[hoveredBlock]!.end + 1) - scrollTop, Math.max(0, viewportH - BLOCK_ACTIONS_FRAME_PX)))
+
+  return (
+    <div className={css.splitRoot}>
+      <div
+        className={`${css.diffBody} ${css.diffBodySplit}`}
+        ref={bodyRef}
+        tabIndex={0}
+        onScroll={onScroll}
+        onMouseLeave={() => setHoveredBlock(undefined)}
+        style={{ tabSize: tabWidthSpaces }}
+        data-diff-body
+      >
+        <div className={css.splitCols}>
+          <div className={css.splitCol} ref={leftColRef} data-diff-split-side="left">
+            <div
+              className={`${css.lines}${langWrap ? ' ' + css.wrap : ''}`}
+              style={langWrap ? undefined : { minWidth: `max(100%, ${widestSide.left}ch)` }}
+            >
+              {start > 0 && <div className={css.vSpacer} style={{ height: off(start) }} aria-hidden="true" />}
+              {visiblePairs.map((pair, offset) => {
+                const index = start + offset
+                const leftRuns = pair.left === undefined ? undefined : runs?.oldRuns?.[(pair.left.line ?? 0) - 1]
+                return (
+                  <SplitSideRow
+                    key={index}
+                    side={pair.left}
+                    wrapped={pairWrapped?.[index]?.left}
+                    runs={leftRuns}
+                    kind={pair.kind}
+                    isLeft
+                    height={pairHeightAt(index)}
+                    focused={inFocused(index)}
+                    searchHit={searchHitSet.has(index)}
+                    searchCurrent={index === currentSearchPair}
+                    onHover={() => onPairHover(index)}
+                  />
+                )
+              })}
+              {end < pairCount && <div className={css.vSpacer} style={{ height: totalHeight - off(end) }} aria-hidden="true" />}
+            </div>
+          </div>
+          <div className={css.splitDivider} />
+          <div className={css.splitCol} ref={rightColRef} data-diff-split-side="right">
+            <div
+              className={`${css.lines}${langWrap ? ' ' + css.wrap : ''}`}
+              style={langWrap ? undefined : { minWidth: `max(100%, ${widestSide.right}ch)` }}
+            >
+              {start > 0 && <div className={css.vSpacer} style={{ height: off(start) }} aria-hidden="true" />}
+              {visiblePairs.map((pair, offset) => {
+                const index = start + offset
+                const rightRuns = pair.right === undefined ? undefined : runs?.newRuns?.[(pair.right.line ?? 0) - 1]
+                return (
+                  <SplitSideRow
+                    key={index}
+                    side={pair.right}
+                    wrapped={pairWrapped?.[index]?.right}
+                    runs={rightRuns}
+                    kind={pair.kind}
+                    isLeft={false}
+                    height={pairHeightAt(index)}
+                    focused={inFocused(index)}
+                    searchHit={searchHitSet.has(index)}
+                    searchCurrent={index === currentSearchPair}
+                    onHover={() => onPairHover(index)}
+                  />
+                )
+              })}
+              {end < pairCount && <div className={css.vSpacer} style={{ height: totalHeight - off(end) }} aria-hidden="true" />}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className={css.splitHScrollRow} data-diff-hscroll-row>
+        <div className={css.splitHScroll} ref={leftHScrollRef} data-diff-hscroll="left" style={{ width: colWidth, flex: 'none' }} onScroll={() => onHScroll('left')}>
+          <div className={css.splitHScrollFill} style={{ width: fillWidth.left || undefined }} />
+        </div>
+        <div className={css.splitDivider} />
+        <div className={css.splitHScroll} ref={rightHScrollRef} data-diff-hscroll="right" style={{ width: colWidth, flex: 'none' }} onScroll={() => onHScroll('right')}>
+          <div className={css.splitHScrollFill} style={{ width: fillWidth.right || undefined }} />
+        </div>
+      </div>
+      {searchOpen && (
+        <div className={css.searchBar} data-diff-searchbar>
+          <input
+            ref={searchInputRef}
+            className={css.searchInput}
+            data-diff-search-input
+            value={searchQuery}
+            placeholder={t('panel.searchPlaceholder')}
+            onChange={(event) => { setSearchQuery(event.target.value); setSearchIndex(0) }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                goSearch(event.shiftKey ? -1 : 1)
+              } else if (event.key === 'Escape') {
+                closeSearch()
+              }
+            }}
+          />
+          <span className={css.searchCount} data-diff-search-count>
+            {searchMatches.length === 0
+              ? '0/0'
+              : `${(searchIndex % searchMatches.length) + 1}/${searchMatches.length}`}
+          </span>
+          <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-prev aria-label={t('action.prevDiff')} disabled={searchMatches.length === 0} onClick={() => { goSearch(-1) }}>
+            <IconChevronUpOutline14 size={14} />
+          </button>
+          <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-next aria-label={t('action.nextDiff')} disabled={searchMatches.length === 0} onClick={() => { goSearch(1) }}>
+            <IconChevronDownOutline14 size={14} />
+          </button>
+          <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-close aria-label={t('action.close')} onClick={closeSearch}>
+            <IconCloseOutline16 size={14} />
+          </button>
+        </div>
+      )}
+      {focusedBlock !== undefined && (
+        <div className={css.blockFlash} data-diff-block-flash style={{ top: flashTop, height: flashHeight }} />
+      )}
+      {hoveredBlock !== undefined && blockOfPair[hoveredBlock] !== undefined && (
+        <div className={css.blockActions} data-diff-block-actions style={{ top: blockActionsTop }}>
+          <span className={css.blockPosition} data-diff-block-position>
+            {t('panel.blockPosition', { current: hoveredBlock + 1, total: blockOfPair.length })}
+          </span>
+          <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-block-prev aria-label={t('action.prevDiff')} disabled={busy} onClick={() => jump(-1)}>
+            <IconChevronUpOutline14 size={14} />
+          </button>
+          <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-block-next aria-label={t('action.nextDiff')} disabled={busy} onClick={() => jump(1)}>
+            <IconChevronDownOutline14 size={14} />
+          </button>
+          <button type="button" className={`${css.action} ${css.actionPrimary}`} data-diff-block-keep disabled={busy} onClick={() => { void onBlockKeep(file.sessionId, file.id, blockRanges[hoveredBlock]!) }}>
+            {t('action.keep')}
+          </button>
+          <button type="button" className={`${css.action}`} data-diff-block-revert disabled={busy} onClick={() => { void onBlockRevert(file.sessionId, file.id, blockRanges[hoveredBlock]!) }}>
+            {t('action.revert')}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+})
+
 /** The diff-row index containing a node, or undefined. */
 function rowIndexAt(node: Node | null): number | undefined {
   if (node === null) return undefined
@@ -619,6 +1063,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // on the diff and the wrapped-line tab measurement, so both agree. Read once
   // on mount; a change in DSH Settings applies on the next panel open.
   const [tabWidthSpaces] = useState(() => tabWidth())
+  // Side-by-side (split) mode from settings. Read once on mount so a change
+  // applies on the next panel open, matching the tab-width behaviour above.
+  const splitView = splitMode()
+  // Handle to the split view's imperative block-jump, used to route the shared
+  // toolbar/keyboard to it while split mode is active (null in single column).
+  const splitDiffRef = useRef<SplitDiffHandle>(null)
   const model = useMemo<RowModel>(() => {
     const diff = computeWholeFileDiff(file.oldText, file.newText)
     return { diff, blocks: changeBlocksOf(diff) }
@@ -961,6 +1411,21 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     setFlashKey(key => key + 1)
   }
 
+  // Block jump the shared toolbar/keyboard/jumpSignal use. In split mode the
+  // single-column `jump` below has no body to drive (its `bodyRef` is null), so
+  // delegate to the split view's own imperative jump; otherwise use the
+  // single-column one. Kept in a ref so the capture-phase keydown listener
+  // always sees the current closure.
+  const jumpBlock = (direction: -1 | 1): void => {
+    if (splitView) {
+      splitDiffRef.current?.jump(direction)
+      return
+    }
+    jump(direction)
+  }
+  const jumpBlockRef = useRef(jumpBlock)
+  jumpBlockRef.current = jumpBlock
+
   // Step the hovered block's floating actions frame to the adjacent diff block
   // (wrapping). Both the hovered block (the frame follows it) and the focused
   // block (which recenters and re-flashes) advance together.
@@ -980,7 +1445,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // on the same file re-runs this, wrapping to the first block when needed.
   useEffect(() => {
     if (jumpSignal === 0) return
-    jump(1)
+    jumpBlock(1)
   }, [jumpSignal])
 
   const onScroll = () => {
@@ -1062,6 +1527,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return
       if (event.key.toLowerCase() !== 'f') return
       event.preventDefault()
+      // In split mode the single-column search bar isn't mounted; route to the
+      // split view's own search bar instead.
+      if (splitView) { splitDiffRef.current?.openSearch(); return }
       setSearchOpen(true)
       searchInputRef.current?.focus()
       searchInputRef.current?.select()
@@ -1081,8 +1549,8 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // TODO(editable code view): once the diff becomes an editable surface that
   // can hold focus, scope this back to the panel so the composer's own chords
   // are restored everywhere else.
-  const jumpRef = useRef(jump)
-  jumpRef.current = jump
+  const jumpRef = useRef(jumpBlock)
+  jumpRef.current = jumpBlock
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return
@@ -1174,7 +1642,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 data-diff-prev
                 aria-label={t('action.prevDiff')}
                 disabled={busy}
-                onClick={() => { jump(-1) }}
+                onClick={() => { jumpBlock(-1) }}
               >
                 <IconChevronUpOutline14 size={14} />
               </button>
@@ -1186,7 +1654,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 data-diff-next
                 aria-label={t('action.nextDiff')}
                 disabled={busy}
-                onClick={() => { jump(1) }}
+                onClick={() => { jumpBlock(1) }}
               >
                 <IconChevronDownOutline14 size={14} />
               </button>
@@ -1226,6 +1694,20 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       </div>
       {failedMessage !== undefined && <p className={css.actionError} data-diff-action-error>{failedMessage}</p>}
       {file.missing && <p className={css.missingHint}>{t('panel.missingHint')}</p>}
+      {splitView ? (
+        <SplitDiff
+          ref={splitDiffRef}
+          file={file}
+          model={model}
+          runs={runs}
+          langWrap={langWrap}
+          tabWidthSpaces={tabWidthSpaces}
+          busy={busy}
+          t={t}
+          onBlockKeep={onBlockKeep}
+          onBlockRevert={onBlockRevert}
+        />
+      ) : (
       <div className={css.diffBodyWrap}>
         <div
           className={css.diffBody}
@@ -1402,6 +1884,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
           </div>
         )}
       </div>
+      )}
       <div className={css.statusBar} data-diff-status-bar>
         {selectionReference === undefined ? null : (
           <Tooltip label={copied ? t('action.copied') : `${t('action.copyHint')} (Ctrl+L)`} side="top" delayMs={300}>

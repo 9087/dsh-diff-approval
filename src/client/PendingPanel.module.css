@@ -1110,3 +1110,103 @@
 .wrapActive:hover {
   background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 85%, var(--dsw-static-neutral-bluish-1000));
 }
+
+/* Split (two-column) view: one shared vertical scroller with two independent
+   horizontal scrollers — one per side. `.splitRoot` is a column flex that
+   stacks the vertical scroller (`.diffBody`, which scrolls vertically only —
+   a single scrollbar) above a pinned `.splitHScrollRow`, so each column's
+   horizontal scrollbar always sits at the bottom of the viewport instead of
+   at the bottom of the content. Inside it `.splitCols` lays the two columns,
+   and each `.splitCol` is `overflow-x: hidden` — its content scrolls
+   horizontally via `scrollLeft`, driven by the pinned strip, so its own
+   scrollbar never appears mid-file. Both columns are `flex: 1 1 0`, so they
+   are strictly 50/50 and the two halves always line up on the same Y; the
+   shared wrap-width math keys off that half-width, so no jump when one side
+   is longer. `.splitDivider` is the thin separator between them. */
+.splitRoot {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.diffBodySplit {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+}
+
+.splitCols {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+}
+
+.splitCol {
+  flex: 1 1 0;
+  min-width: 0;
+  box-sizing: border-box;
+  /* Horizontally scrollable (scrollLeft is settable) but with no visible
+     scrollbar: the pinned `.splitHScroll` strip is the visible control. */
+  overflow-x: hidden;
+  overflow-y: hidden;
+}
+
+.splitDivider {
+  flex: 0 0 1px;
+  background: var(--dsw-alias-border-l2);
+}
+
+/* Both halves top-align so a wrapped multi-sub-line side and its shorter
+   counterpart start their content on the same pixel across the divider. */
+.splitCol .gutter,
+.splitCol .code {
+  vertical-align: top;
+}
+
+/* Pinned horizontal scrollbar strip for one column, docked at the bottom of the
+   split view (a sibling of the vertical scroller, so it never scrolls away).
+   It is a real native horizontal scrollbar: `.splitHScrollFill` is a 1px-tall
+   spacer as wide as the column's content, giving the thumb the right size; the
+   strip's scrollLeft drives the column's content in JS. The two strips align
+   with the two columns via the same `flex: 1 1 0` and a shared 1px divider. */
+.splitHScrollRow {
+  flex: none;
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+}
+
+.splitHScroll {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  height: 15px;
+}
+
+.splitHScroll::-webkit-scrollbar {
+  height: 15px;
+}
+
+.splitHScroll::-webkit-scrollbar-track {
+  cursor: default;
+}
+
+.splitHScroll::-webkit-scrollbar-thumb {
+  cursor: default;
+}
+
+.splitHScrollFill {
+  height: 1px;
+}
+
+/* One side of a split pair: tinted by its own semantics (left deletion red,
+   right addition green), independent of the other column. */
+.splitLdel { background-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); }
+.splitLadd { background-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent); }
+.splitRdel { background-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); }
+.splitRadd { background-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent); }

@@ -3,6 +3,7 @@
 const PASTE_ON_COPY_KEY = 'diff-approval:paste-on-copy'
 const IMPORT_UNTRACKED_KEY = 'diff-approval:import-untracked'
 const TAB_WIDTH_KEY = 'diff-approval:tab-size'
+const SPLIT_MODE_KEY = 'diff-approval:split-mode'
 const WRAP_PREFIX = 'diff-approval:wrap:'
 
 /**
@@ -65,4 +66,19 @@ export function tabWidth(): number {
 /** Persist the diff's tab width (in spaces). */
 export function setTabWidth(value: number): void {
   localStorage.setItem(TAB_WIDTH_KEY, String(value))
+}
+
+/**
+ * Whether the whole-file diff view uses the two-column (side-by-side) layout.
+ * Default off (single column): the unified diff. Only an explicit `'1'` enables
+ * split mode.
+ * @returns whether the split (two-column) diff view is used.
+ */
+export function splitMode(): boolean {
+  return localStorage.getItem(SPLIT_MODE_KEY) === '1'
+}
+
+/** Persist the split-view preference. */
+export function setSplitMode(value: boolean): void {
+  localStorage.setItem(SPLIT_MODE_KEY, value ? '1' : '0')
 }

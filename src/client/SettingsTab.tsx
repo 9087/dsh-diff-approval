@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
-import { includeUntrackedEnabled, pasteOnCopyEnabled, setIncludeUntrackedEnabled, setPasteOnCopyEnabled, setTabWidth, tabWidth } from './settings.ts'
+import { includeUntrackedEnabled, pasteOnCopyEnabled, setIncludeUntrackedEnabled, setPasteOnCopyEnabled, setSplitMode, setTabWidth, splitMode, tabWidth } from './settings.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import css from './PendingPanel.module.css'
 
@@ -172,6 +172,8 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const [includeUntrackedOpen, setIncludeUntrackedOpen] = useState(false)
   const [tab, setTabState] = useState(tabWidth)
   const [tabOpen, setTabOpen] = useState(false)
+  const [split, setSplitState] = useState(splitMode)
+  const [splitOpen, setSplitOpen] = useState(false)
   const setPasteOnCopy = (value: boolean): void => {
     setPasteOnCopyState(value)
     setPasteOnCopyEnabled(value)
@@ -183,6 +185,10 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const setTab = (value: number): void => {
     setTabState(value)
     setTabWidth(value)
+  }
+  const setSplit = (value: boolean): void => {
+    setSplitState(value)
+    setSplitMode(value)
   }
   return (
     <div className={css.settingsPage} data-diff-settings>
@@ -214,6 +220,16 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
         onOpenChange={setTabOpen}
         onSelect={setTab}
         dataAttribute="data-diff-tab-width-select"
+      />
+      <PreferenceRow
+        title={t('panel.splitMode')}
+        description={t('panel.splitModeDesc')}
+        value={split}
+        open={splitOpen}
+        onOpenChange={setSplitOpen}
+        onSelect={setSplit}
+        dataAttribute="data-diff-split-mode-select"
+        t={t}
       />
     </div>
   )

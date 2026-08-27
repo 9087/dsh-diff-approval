@@ -2,6 +2,9 @@ node_modules/
 lib/
 *.tsbuildinfo
 
+# Local pnpm package-store cache: never committed (tool artifact).
+.pnpm-store/
+
 # Local, non-committed screenshot sources. Generated (annotated) screenshots live
 # directly under docs/images/; the raw screenshots that produce them are kept
 # here and are not committed.
