@@ -440,6 +440,9 @@ interface ChangeBlock {
 interface RowRange {
   start: number
   end: number
+  /** Which file's lines a split selection references: 'old' (left column), 'new'
+   *  (right column); undefined in single column (always the new file). */
+  side?: 'old' | 'new'
 }
 
 /**
@@ -527,7 +530,8 @@ function splitSideContent(
  * one side is longer. The gutter and code are top-aligned so sub-lines line up
  * across the divider.
  */
-function SplitSideRow({ side, wrapped, runs, kind, isLeft, height, focused, searchHit, searchCurrent, onHover }: {
+function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focused, searchHit, searchCurrent, onHover }: {
+  index: number
   side: SplitSide | undefined
   wrapped: string[] | undefined
   runs: readonly HighlightSpan[] | undefined
@@ -547,6 +551,7 @@ function SplitSideRow({ side, wrapped, runs, kind, isLeft, height, focused, sear
       className={css.line}
       style={{ height }}
       data-diff-split-row
+      data-diff-split-index={index}
       data-diff-split-side={isLeft ? 'left' : 'right'}
       data-diff-focused={focused ? '' : undefined}
       data-diff-search={searchHit ? (searchCurrent ? 'current' : 'hit') : undefined}
@@ -848,6 +853,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
                 return (
                   <SplitSideRow
                     key={index}
+                    index={index}
                     side={pair.left}
                     wrapped={pairWrapped?.[index]?.left}
                     runs={leftRuns}
@@ -877,6 +883,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
                 return (
                   <SplitSideRow
                     key={index}
+                    index={index}
                     side={pair.right}
                     wrapped={pairWrapped?.[index]?.right}
                     runs={rightRuns}
@@ -972,6 +979,39 @@ function rowIndexAt(node: Node | null): number | undefined {
   if (row === null || row === undefined) return undefined
   const index = Number((row as HTMLElement).dataset.diffRow)
   return Number.isFinite(index) ? index : undefined
+}
+
+/** The split pair index and which side (left=old, right=new) a node sits in, or undefined. */
+function splitRowInfoAt(node: Node | null): { pairIndex: number; side: 'old' | 'new' } | undefined {
+  if (node === null) return undefined
+  const element = node instanceof Element ? node : node.parentElement
+  const row = element?.closest('[data-diff-split-row]')
+  if (row === null || row === undefined) return undefined
+  const side = (row as HTMLElement).dataset.diffSplitSide
+  if (side !== 'left' && side !== 'right') return undefined
+  const index = Number((row as HTMLElement).dataset.diffSplitIndex)
+  if (!Number.isFinite(index)) return undefined
+  return { pairIndex: index, side: side === 'left' ? 'old' : 'new' }
+}
+
+/**
+ * Derive the selected split pair range per side (a left-column selection
+ * references the old file, a right-column selection the new file). A selection
+ * spanning the divider (both sides) references two files, so it is rejected.
+ */
+function splitRowRangeOf(selection: Selection | null): RowRange | undefined {
+  if (selection === null || selection.isCollapsed || selection.rangeCount === 0) return undefined
+  const range = selection.getRangeAt(0)
+  const startInfo = splitRowInfoAt(range.startContainer)
+  const endInfo = splitRowInfoAt(range.endContainer)
+  if (startInfo === undefined || endInfo === undefined) return undefined
+  if (startInfo.side !== endInfo.side) return undefined
+  let start = startInfo.pairIndex
+  let end = endInfo.pairIndex
+  if (lineOffsetAt(range.startContainer, range.startOffset) >= lineLengthAt(range.startContainer)) start += 1
+  if (lineOffsetAt(range.endContainer, range.endOffset) === 0) end -= 1
+  if (start > end) return undefined
+  return { start, end, side: startInfo.side }
 }
 
 /** Character offset of a selection boundary within its line's code text. */
@@ -1099,6 +1139,11 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     const diff = computeWholeFileDiff(file.oldText, file.newText)
     return { diff, blocks: changeBlocksOf(diff) }
   }, [file.oldText, file.newText])
+  // The aligned split pairs (only in split mode): used to map a left/right
+  // selection to the old/new line numbers for the copy reference.
+  const splitPairs = useMemo(() => (
+    splitView ? computeSideBySideDiff(model.diff.rows).pairs : null
+  ), [splitView, model])
 
   // Overview-ruler markers: one per maximal run of same-kind changed rows,
   // positioned as a fraction of the whole file so the scrollbar strip mirrors
@@ -1508,16 +1553,32 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // collapses. The toolbar's own mousedown prevents the default so the
   // selection survives the click that triggers the copy.
   useEffect(() => {
-    const update = () => setSelection(rowRangeOf(window.getSelection()))
+    const update = () => setSelection(
+      splitView ? splitRowRangeOf(window.getSelection()) : rowRangeOf(window.getSelection()),
+    )
     document.addEventListener('selectionchange', update)
     update()
     return () => { document.removeEventListener('selectionchange', update) }
-  }, [file.id])
+  }, [file.id, splitView])
 
   // The reference text for the current selection, shown in the status bar and
-  // copied on click; undefined when no lines are selected.
+  // copied on click; undefined when no lines are selected. In split mode the
+  // reference uses the side the selection is on: the left column references the
+  // old file's lines, the right column the new (current) file's lines.
   const selectionReference = (() => {
     if (selection === undefined) return undefined
+    if (splitView) {
+      if (selection.side === undefined || splitPairs === null) return undefined
+      const lineNumbers: number[] = []
+      for (let index = selection.start; index <= selection.end; index++) {
+        const pair = splitPairs[index]
+        if (pair === undefined) continue
+        const line = selection.side === 'old' ? pair.left?.line : pair.right?.line
+        if (line !== undefined) lineNumbers.push(line)
+      }
+      if (lineNumbers.length === 0) return undefined
+      return referenceOf(file.path, workspacePath, Math.min(...lineNumbers), Math.max(...lineNumbers))
+    }
     const rows = model.diff.rows.slice(selection.start, selection.end + 1)
     // Only the new (current) file's lines are referenceable: removed lines
     // have no current-side number, so they contribute nothing to the range.
