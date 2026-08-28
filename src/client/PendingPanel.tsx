@@ -583,6 +583,10 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   const [hoveredBlock, setHoveredBlock] = useState<number | undefined>(undefined)
   const [focus, setFocus] = useState(0)
   const [flashKey, setFlashKey] = useState(0)
+  // The block index recorded at hover: a keep/revert prefers the current
+  // `hoveredBlock` (the block the actions frame is for) and only falls back to
+  // this if the body's mouseleave cleared `hoveredBlock` before the click.
+  const hoveredBlockRef = useRef<number | undefined>(undefined)
   // Pinned horizontal scrollbars: each column's content is a hidden-scroll
   // `.splitCol` whose `scrollLeft` we drive from a pinned native scrollbar
   // strip in `.splitHScrollRow`. We track the content width of each column to
@@ -631,7 +635,11 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     blockOfPair.forEach((block, bi) => { for (let k = block.start; k <= block.end; k++) map.set(k, bi) })
     return map
   }, [blockOfPair])
-  const onPairHover = useCallback((k: number) => setHoveredBlock(blockIndexByPair.get(k)), [blockIndexByPair])
+  const onPairHover = useCallback((k: number) => {
+    const bi = blockIndexByPair.get(k)
+    setHoveredBlock(bi)
+    if (bi !== undefined) hoveredBlockRef.current = bi
+  }, [blockIndexByPair])
 
   // One column's content width: both columns are equal `flex: 1 1 0` shares of
   // `.diffBody`'s client box minus the 1px divider. `bodyWidth` already excludes
@@ -740,9 +748,10 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   // (if there is one), mirroring the single-column behaviour. The remaining
   // blocks shift into the operated block's slot, so that index is the next one.
   const handleBlockAction = async (action: 'keep' | 'revert'): Promise<void> => {
-    if (busy || hoveredBlock === undefined) return
-    const operated = hoveredBlock
-    const range = blockRanges[operated]!
+    const operated = hoveredBlock ?? hoveredBlockRef.current
+    if (operated === undefined) return
+    const range = blockRanges[operated]
+    if (range === undefined) return
     await (action === 'keep'
       ? onBlockKeep(file.sessionId, file.id, range)
       : onBlockRevert(file.sessionId, file.id, range))
@@ -816,13 +825,12 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     : Math.max(0, Math.min(off(blockOfPair[hoveredBlock]!.end + 1) - scrollTop, Math.max(0, viewportH - BLOCK_ACTIONS_FRAME_PX)))
 
   return (
-    <div className={css.splitRoot}>
+    <div className={css.splitRoot} onMouseLeave={() => setHoveredBlock(undefined)}>
       <div
         className={`${css.diffBody} ${css.diffBodySplit}`}
         ref={bodyRef}
         tabIndex={0}
         onScroll={onScroll}
-        onMouseLeave={() => setHoveredBlock(undefined)}
         style={{ tabSize: tabWidthSpaces }}
         data-diff-body
       >
