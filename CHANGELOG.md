@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.12.0](https://github.com/9087/dsh-diff-approval/compare/v0.11.0...v0.12.0) (2026-08-28)
+
+### Features
+
+* add opt-in side-by-side split diff view ([9d5902e](https://github.com/9087/dsh-diff-approval/commit/9d5902ede08bfbb256269a58942f37c6ef2408e4))
+* advance to the next diff block after a single-block keep/revert ([b5033c5](https://github.com/9087/dsh-diff-approval/commit/b5033c585c624e997c0eeaed86c73d598dfc2844))
+* leave two rows of lead above the focused block in split view ([06d6960](https://github.com/9087/dsh-diff-approval/commit/06d696054f295596b3c4e6cc35c75dce74974d1d))
+* per-side line references for split view selection (Ctrl+L) ([6d53d7e](https://github.com/9087/dsh-diff-approval/commit/6d53d7e21feabcf8378f7a9f6ea5c6f3bf36c09d))
+
+### Bug Fixes
+
+* make split-view block keep/revert clickable ([81bb54f](https://github.com/9087/dsh-diff-approval/commit/81bb54fb6c794633a6696ca3614fa85e5a134f2d))
+* replay split-view block flash on every focus change ([56952ae](https://github.com/9087/dsh-diff-approval/commit/56952aefd9ef9087d2ca4cc2402bc6103ad13997))
+
 ## [0.11.0](https://github.com/9087/dsh-diff-approval/compare/v0.10.0...v0.11.0) (2026-08-27)
 
 ### Features
