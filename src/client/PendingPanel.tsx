@@ -797,7 +797,8 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     if (block === undefined) return
     const body = bodyRef.current
     if (body === null) return
-    const target = off(block.start)
+    // Leave two rows of lead above the block, matching the single-column view.
+    const target = off(block.start) - 2 * ROW_HEIGHT_PX
     const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
     if (body.scrollTop !== clamped) body.scrollTop = clamped
     setScrollTop(clamped)
