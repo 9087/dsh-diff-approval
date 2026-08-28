@@ -945,8 +945,8 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
           </button>
         </div>
       )}
-      {focusedBlock !== undefined && (
-        <div className={css.blockFlash} data-diff-block-flash style={{ top: flashTop, height: flashHeight }} />
+      {focusedBlock !== undefined && flashKey > 0 && (
+        <div className={css.blockFlash} data-diff-block-flash key={flashKey} style={{ top: flashTop, height: flashHeight }} />
       )}
       {hoveredBlock !== undefined && blockOfPair[hoveredBlock] !== undefined && (
         <div className={css.blockActions} data-diff-block-actions style={{ top: blockActionsTop }}>
