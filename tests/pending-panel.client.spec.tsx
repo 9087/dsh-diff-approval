@@ -1217,6 +1217,8 @@ describe('PendingPanel', () => {
   })
 
   it('copies the reference with Ctrl+L', async () => {
+    // Auto-paste off: the reference is copied to the clipboard (with a toast).
+    localStorage.setItem('diff-approval:paste-on-copy', '0')
     const writeText = vi.fn(async () => {})
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
@@ -1246,7 +1248,8 @@ describe('PendingPanel', () => {
 
     fireEvent.keyDown(document, { key: 'l', ctrlKey: true })
     await vi.waitFor(() => { expect(writeText).toHaveBeenCalledWith('/repo/a.txt:1') })
-    await vi.waitFor(() => { expect(screen.getByText('action.copied')).toBeDefined() })
+    // The status bar button and the toast both carry the copied label.
+    await vi.waitFor(() => { expect(screen.getAllByText('action.copied').length).toBeGreaterThanOrEqual(1) })
   })
 
   /** Select the first two diff rows so a reference becomes copyable. */
@@ -1271,6 +1274,9 @@ describe('PendingPanel', () => {
   }
 
   it('pastes the copied reference into the composer when auto-paste is on', async () => {
+    // Auto-paste on: the reference is pasted into the composer and NOT copied
+    // to the clipboard (no toast).
+    localStorage.setItem('diff-approval:paste-on-copy', '1')
     const writeText = vi.fn(async () => {})
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
@@ -1280,11 +1286,11 @@ describe('PendingPanel', () => {
     selectFirstRows(view)
 
     fireEvent.keyDown(document, { key: 'l', ctrlKey: true })
-    await vi.waitFor(() => { expect(writeText).toHaveBeenCalledWith('/repo/a.txt:1') })
-    // The paste runs in the same async continuation after the clipboard write
-    // settles, so wait for it rather than reading the mock immediately.
+    // The paste runs in the same async continuation, so wait for it rather than
+    // reading the mock immediately.
     const pasteMock = props.onPasteReference as unknown as { mock: { calls: unknown[][] } }
     await vi.waitFor(() => { expect(pasteMock.mock.calls).toEqual([[S1, '/repo/a.txt:1']]) })
+    expect(writeText).not.toHaveBeenCalled()
   })
 
   it('skips auto-paste when the DSH Settings toggle is turned off', async () => {

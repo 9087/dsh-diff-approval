@@ -315,6 +315,8 @@ interface PendingDiffProps {
   failedMessage?: string | undefined
   /** Paste a copied reference into the session's chat input and focus it. */
   onPasteReference: (sessionId: SessionId, reference: string) => void
+  /** Show a transient toast (used when a reference is copied to the clipboard). */
+  onToast: (text: string) => void
   t: Translator
   onKeep: (sessionId: SessionId, id: string) => Promise<void>
   onRevert: (sessionId: SessionId, id: string) => Promise<void>
@@ -1098,7 +1100,7 @@ function PendingFileRow({ file, selected, failedMessage, t, onSelect }: PendingF
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedMessage, onPasteReference, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, floatMode, floatOpen, onToggleFileList }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedMessage, onPasteReference, onToast, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, floatMode, floatOpen, onToggleFileList }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -1591,14 +1593,21 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
 
   const copySelection = useCallback(async () => {
     if (selectionReference === undefined) return
+    // "Auto-paste to composer" (Settings → this plugin) takes the whole action:
+    // paste the reference into the composer and skip the clipboard write and the
+    // toast. Off, the reference is copied to the clipboard and a toast confirms
+    // it. The preference is read at copy time so a change takes effect without
+    // reopening the panel.
+    if (pasteOnCopyEnabled()) {
+      onPasteReference(file.sessionId, selectionReference)
+      return
+    }
     const accepted = await writeClipboard(selectionReference)
     if (!accepted) return
     setCopied(true)
-    // The preference lives in DSH Settings → this plugin's tab; read it at
-    // copy time so a change there takes effect without reopening the panel.
-    if (pasteOnCopyEnabled()) onPasteReference(file.sessionId, selectionReference)
+    onToast(t('action.copied'))
     window.setTimeout(() => { setCopied(false) }, 1500)
-  }, [file.sessionId, onPasteReference, selectionReference])
+  }, [file.sessionId, onPasteReference, onToast, selectionReference, t])
 
   // Ctrl/Cmd+L copies the selected line range. The detail pane is mounted
   // only while a file is open, so the chord is global while the diff is shown
@@ -2085,6 +2094,8 @@ export function PendingPanel({
   const [importToast, setImportToast] = useState<string | null>(null)
   /** A transient banner for a keep/revert failure. */
   const [actionToast, setActionToast] = useState<string | null>(null)
+  /** A transient banner confirming a reference was copied to the clipboard. */
+  const [copyToast, setCopyToast] = useState<string | null>(null)
   /** Whether the redo-cleared notice is showing (bottom-right, OK to dismiss). */
   const [redoClearedNotice, setRedoClearedNotice] = useState(false)
   /** Bottom offset tracking the chat composer's top edge so the input stays visible. */
@@ -2471,6 +2482,9 @@ export function PendingPanel({
       {actionToast !== null && (
         <Toast text={actionToast} onDone={() => { setActionToast(null) }} />
       )}
+      {copyToast !== null && (
+        <Toast text={copyToast} onDone={() => { setCopyToast(null) }} />
+      )}
       {/* Expanded keeps an 8px inset, so a full-screen backdrop painted with
           the sidebar's fill hides the app behind the seam instead of letting
           it show through. It sits just below the panel's z-index. */}
@@ -2569,6 +2583,7 @@ export function PendingPanel({
                     undoFlash={undoFlash}
                     failedMessage={failed.get(selectedFile.id)}
                     onPasteReference={onPasteReference}
+                    onToast={(text) => { setCopyToast(text) }}
                     t={t}
                     onKeep={onKeep}
                     onRevert={onRevert}
