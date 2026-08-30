@@ -35,7 +35,7 @@ describe('attachReferenceRemap', () => {
 
     let draft = '看 (a.txt:1)'
     const writeDraft = vi.fn((text: string) => { draft = text })
-    attachReferenceRemap({ store, readDraft: () => draft, writeDraft })
+    attachReferenceRemap({ store, readDraft: () => draft, writeDraft, readQueue: () => [], writeQueue: () => {} })
 
     list.mockResolvedValue({ files: [entry('a\nb\n')], workspacePath: '/repo' })
     await store.refresh(S1)
@@ -54,7 +54,7 @@ describe('attachReferenceRemap', () => {
 
     let draft = '(a.txt:2)'
     const writeDraft = vi.fn((text: string) => { draft = text })
-    attachReferenceRemap({ store, readDraft: () => draft, writeDraft })
+    attachReferenceRemap({ store, readDraft: () => draft, writeDraft, readQueue: () => [], writeQueue: () => {} })
 
     list.mockResolvedValue({ files: [entry('a\nb\nc\n')], workspacePath: '/repo' })
     await store.refresh(S1)
@@ -72,7 +72,7 @@ describe('attachReferenceRemap', () => {
     const store = createPendingDiffStore(portOf(list))
 
     const writeDraft = vi.fn()
-    attachReferenceRemap({ store, readDraft: () => '只有普通文字', writeDraft })
+    attachReferenceRemap({ store, readDraft: () => '只有普通文字', writeDraft, readQueue: () => [], writeQueue: () => {} })
 
     list.mockResolvedValue({ files: [entry('a\nb\n')], workspacePath: '/repo' })
     await store.refresh(S1)
@@ -81,5 +81,33 @@ describe('attachReferenceRemap', () => {
     await store.refresh(S1)
 
     expect(writeDraft).not.toHaveBeenCalled()
+  })
+
+  it('remaps references inside queued messages, preserving other blocks', async () => {
+    const list = vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>()
+    const store = createPendingDiffStore(portOf(list))
+
+    const queue: { id: string; content: readonly { type: string; text?: string }[] }[] = [
+      { id: 'q1', content: [{ type: 'text', text: '改 (a.txt:1)' }, { type: 'image' }] },
+      { id: 'q2', content: [{ type: 'text', text: '无引用' }] },
+    ]
+    const writeQueue = vi.fn()
+    attachReferenceRemap({
+      store,
+      readDraft: () => undefined,
+      writeDraft: () => {},
+      readQueue: () => queue,
+      writeQueue,
+    })
+
+    list.mockResolvedValue({ files: [entry('a\nb\n')], workspacePath: '/repo' })
+    await store.refresh(S1)
+
+    // Insert a line above: (a.txt:1) -> (a.txt:2) in q1 only; q2 is untouched.
+    list.mockResolvedValue({ files: [entry('x\na\nb\n')], workspacePath: '/repo' })
+    await store.refresh(S1)
+
+    expect(writeQueue).toHaveBeenCalledTimes(1)
+    expect(writeQueue).toHaveBeenCalledWith('q1', [{ type: 'text', text: '改 (a.txt:2)' }, { type: 'image' }])
   })
 })

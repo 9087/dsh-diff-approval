@@ -11,6 +11,7 @@ import { DiffApprovalSettingsTab } from './SettingsTab.tsx'
 import { createDiffApprovalPort } from './port.ts'
 import { createPendingDiffStore } from './store.ts'
 import { attachReferenceRemap } from './remap-sync.ts'
+import { conversationAccess } from './conversation-access.ts'
 import type { PendingPanelFace } from './slots.ts'
 import { en, NS, zh } from './locales.ts'
 
@@ -101,21 +102,14 @@ export function apply(ctx: ClientContext): void {
   // `remapFile` is also called directly after a whole-file revert (whose entry
   // leaves the list, so the observation loop cannot see its content change).
   let remapFile: (path: string, oldText: string, newText: string) => void = () => {}
+  const access = conversationAccess(ctx, () => currentSessionId)
   ctx.effect(() => {
     const attached = attachReferenceRemap({
       store,
       readDraft: () => document.querySelector<HTMLTextAreaElement>('[data-composer-card] textarea')?.value,
-      writeDraft: (text) => {
-        if (currentSessionId === undefined) return
-        const sessions = ctx.get('sessions') as { scope(id: SessionId): ClientContext | undefined } | undefined
-        const actx = sessions?.scope(currentSessionId)
-        if (actx === undefined) return
-        const conversation = actx.get('conversation') as
-          | { input?: { for(actx: unknown): { setDraft(text: string): void } } }
-          | undefined
-        if (conversation?.input === undefined) return
-        conversation.input.for(actx).setDraft(text)
-      },
+      writeDraft: access.writeDraft,
+      readQueue: access.readQueue,
+      writeQueue: access.writeQueue,
     })
     remapFile = attached.remapFile
     return attached.unsubscribe
