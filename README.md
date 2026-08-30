@@ -14,16 +14,20 @@ The numbered markers (① – ⑧) in the screenshot point to the matching detai
 ## ✨ Features
 
 - **Diff view**: syntax-highlighted whole-file diff ⑤ with +/− counts, an overview ruler ④ on the scrollbar showing where changes sit, and an in-file search (`Ctrl+F`). Rows are virtualized, so huge files stay smooth.
-- **Block navigation & decisions**: jump between change blocks with `Ctrl+↑/↓` (or the previous/next buttons) — the focused block flashes. Hover a block to **Keep** or **Revert** just that block from a small actions frame ③ that also shows its position (e.g. "2/5").
+- **Block navigation & decisions**: jump between change blocks with `Ctrl+↑/↓` (or the previous/next buttons) — the focused block flashes. Hover a block to **Keep** or **Revert** just that block from a small actions frame ③ that also shows its position (e.g. "2/5"); after a single-block decision, focus advances to the next block.
+- **Selection frame**: drag to select a range of lines and a frame appears to **Keep** / **Revert** exactly that range.
 - **Per-file and bulk decisions**: the files in the file list ② can be kept / reverted one at a time, or **Keep all** / **Revert all** from its footer ⑦.
+- **Resolved files stay listed**: once every change in a file has been kept/reverted, the entry remains in the list and the panel asks whether to remove it or keep it for later.
 - **Undo / Redo**: every keep, revert, and import is undoable with `Ctrl+Z` / `Ctrl+Y` (active while the panel is open; text inputs keep their own editing).
-- **Line references**: select text in the diff — the status bar shows its `file:start-end` reference; click it (or press `Ctrl+L`) to copy, and with the setting on it auto-pastes into the composer ⑥ and focuses it.
+- **Quick summon & file cycling**: `Ctrl+D` (configurable in settings) toggles the review panel from anywhere and `Esc` closes it; `Ctrl+Tab` / `Ctrl+Shift+Tab` cycle through the pending files.
+- **Line references**: select text in the diff — the status bar shows its `(file:line)` / `(file:start-end)` reference; click it (or press `Ctrl+L`) to copy, and with the setting on it auto-pastes into the composer ⑥ and focuses it. References in the composer and queued messages are **auto-aligned** when the referenced file changes: surviving lines re-map to their new range, and a fully-removed line becomes `(file:LINE_MISSING)`.
 - **Highlight language**: auto-detected from the file extension, or overridden from a dropdown ⑧.
 - **Auto-wrap**: a "Wrap lines" toggle beside the language selector ⑧ wraps long lines for that language (CJK breaks between characters, Latin words stay whole), remembered per language.
+- **Side-by-side split view**: an opt-in two-column diff (left "before" | right "current"), line-aligned with per-side horizontal scrolling and a shared vertical scrollbar. Enabled in settings; the default is the single-column unified view.
 - **External changes**: files already in the pending list are monitored — if one is later modified outside the reviewed edits (another tool, an editor), the panel adopts the new content and flags the divergence.
 - **Open / Reveal**: while reviewing a file's diff, open it in its default app or reveal it in the system file manager with one click.
 - **Import workspace changes**: when the list is empty, click the button to import the workspace's local changes from **Git / SVN / Perforce** — modified, deleted, and (opt-in) untracked files. The VCS root is found by walking up from the workspace, so a workspace inside a subdirectory works too.
-- **Settings**: a "Diff Approval" section in DeepSeek Harness settings with the preferences for auto-paste on copy, whether untracked files are included when importing, and the diff's tab width (2 / 4 / 8 spaces).
+- **Settings**: a "Diff Approval" section in DeepSeek Harness settings with preferences for auto-paste on copy, whether untracked files are included when importing, the diff's tab width (2 / 4 / 8 spaces), the side-by-side split view, and the quick-summon chord.
 - **Persistence**: pending state is stored per workspace at `<dshHome>/diff-approval/workspaces/<workspaceId>.json` and survives restarts — unhandled changes are still there when you come back, even in a fresh session.
 
 ## 📦 Install
@@ -65,7 +69,9 @@ Then restart `dsh web`.
 - Only tracked mutations (`edit`, `write`, and `str_replace_editor` editor calls) are recorded automatically. Deletions made outside these tools (e.g. shell `rm`) are sensed only for tracked files: the entry turns "File is gone" and its Revert restores the file.
 - The VCS import runs read-only Git/SVN/Perforce commands through the deployment's shell executor, so the respective CLI must be on `PATH`. Importing untracked files (default off) scans the whole workspace, which can be slow on large trees.
 - Reverting a created file deletes it (the fs seam has no delete API).
+- Reverting a file writes it back with its current line endings (LF / CRLF) preserved.
 - Sessions with no workspace keep their entries memory-only; corrupt persistence files are rejected and can be deleted to reset.
+- The sidebar footer entry stacks vertically with other plugins' footer actions and defers to the dedicated `dsh-footer-order` plugin when it is present.
 
 ## 🛠 Development
 
