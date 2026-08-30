@@ -776,6 +776,12 @@
      scroll area, leaving no band above/below the rows or beside the text. */
   padding: 0;
   font: var(--dsw-font-markdown-code-block);
+  /* Mobile browsers auto-inflate small text in wide blocks (text autosizing):
+     the boosted font re-measures the ch-keyed table width, so the first screen
+     renders larger and every row trails whitespace that outlives the boost.
+     Pin the declared size so the diff and its width stay stable. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
   /* The whole area reads as selectable code, so the text I-beam cursor
      covers blank space too; the gutter and the scrollbar opt back out below. */
   cursor: text;
