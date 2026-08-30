@@ -1263,6 +1263,32 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     return model.blocks.map(block => blockRangesOf(model.diff.rows, block))
   }, [model])
 
+  // Blocks fully covered by the current text selection, in order. A selection
+  // covering one or more complete blocks shows its own keep/revert frame (the
+  // combined range below) in place of the single-block hover frame.
+  const coveredBlockIndices = useMemo(() => {
+    if (selection === undefined || splitView) return []
+    const covered: number[] = []
+    for (let index = 0; index < model.blocks.length; index++) {
+      const block = model.blocks[index]!
+      if (selection.start <= block.start && block.end <= selection.end) covered.push(index)
+    }
+    return covered
+  }, [selection, splitView, model])
+
+  // The combined old/new range spanning the covered blocks (first to last), so
+  // keep/revert applies to every covered block in one host call.
+  const selectionRange = useMemo(() => {
+    if (coveredBlockIndices.length === 0) return undefined
+    const firstIndex = coveredBlockIndices[0]
+    const lastIndex = coveredBlockIndices[coveredBlockIndices.length - 1]
+    if (firstIndex === undefined || lastIndex === undefined) return undefined
+    const first = model.blocks[firstIndex]
+    const last = model.blocks[lastIndex]
+    if (first === undefined || last === undefined) return undefined
+    return blockRangesOf(model.diff.rows, { start: first.start, end: last.end })
+  }, [coveredBlockIndices, model])
+
   // In-file search: matching lines over the whole diff (not just the rendered
   // window), so the count and jumps stay correct while the virtual list
   // scrolls. A line counts once however many times the query appears in it.
@@ -1403,6 +1429,18 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     ? 0
     : Math.min(offsetOf(blockEnd + 1), Math.max(0, totalHeight - BLOCK_ACTIONS_FRAME_PX))
 
+  // The selection frame anchors to the last covered block's bottom edge — the
+  // same spot that block's own hover frame would use.
+  const selectionBlockEnd = ((): number | undefined => {
+    if (coveredBlockIndices.length === 0) return undefined
+    const lastIndex = coveredBlockIndices[coveredBlockIndices.length - 1]
+    if (lastIndex === undefined) return undefined
+    return model.blocks[lastIndex]?.end
+  })()
+  const selectionActionsTop = selectionBlockEnd === undefined
+    ? 0
+    : Math.min(offsetOf(selectionBlockEnd + 1), Math.max(0, totalHeight - BLOCK_ACTIONS_FRAME_PX))
+
   // Widest line in the file, in characters: pins the table's width so the
   // added/deleted tint spans the same width at every scroll position (the
   // rendered window's own widest line alone would make it jump).
@@ -1528,16 +1566,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     setFlashKey(key => key + 1)
   }
 
-  // Keep/revert the hovered block, then advance focus to the next change block
-  // (if there is one). The store removes the operated block and refreshes, so
-  // the remaining blocks shift into its slot; using the operated index makes the
-  // next block land on that index, and the clamp keeps it in range when the
-  // operated block was the last one. On a failed action the block is still
-  // present, so focus stays where it was.
-  const handleBlockAction = async (action: 'keep' | 'revert'): Promise<void> => {
-    if (busy || hoveredBlock === undefined) return
-    const operated = hoveredBlock
-    const range = blockRanges[operated]!
+  // Run one block (or combined multi-block) keep/revert, then advance focus to
+  // the next change block: the operated block(s) leave the list, so the next
+  // block shifts into the `operated` slot, and focusing that slot recenters and
+  // flashes the following change. Shared by the hover frame and the selection
+  // frame so the two stay aligned.
+  const runBlockAction = async (action: 'keep' | 'revert', range: DiffApprovalBlockRange, operated: number): Promise<void> => {
     await (action === 'keep'
       ? onBlockKeep(file.sessionId, file.id, range)
       : onBlockRevert(file.sessionId, file.id, range))
@@ -1548,6 +1582,23 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     setHoveredBlock(undefined)
     setScrollTick(tick => tick + 1)
     setFlashKey(key => key + 1)
+  }
+
+  const handleBlockAction = async (action: 'keep' | 'revert'): Promise<void> => {
+    if (busy || hoveredBlock === undefined) return
+    const operated = hoveredBlock
+    const range = blockRanges[operated]!
+    await runBlockAction(action, range, operated)
+  }
+
+  // Keep/revert every block covered by the current text selection in one
+  // combined host call (the covered blocks are contiguous); the shared post-
+  // action logic then advances focus to the next change block.
+  const handleSelectionAction = async (action: 'keep' | 'revert'): Promise<void> => {
+    if (busy || selectionRange === undefined) return
+    const firstCovered = coveredBlockIndices[0]
+    if (firstCovered === undefined) return
+    await runBlockAction(action, selectionRange, firstCovered)
   }
 
   // Re-clicking the already-open file in the list jumps to the next change
@@ -1880,7 +1931,32 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
               <div className={css.vSpacer} style={{ height: totalHeight - offsetOf(end) }} aria-hidden="true" />
             )}
           </div>
-          {hoveredBlock !== undefined && model.blocks[hoveredBlock] !== undefined && (
+          {selectionRange !== undefined ? (
+            <div
+              className={css.blockActions}
+              data-diff-selection-actions
+              style={{ top: selectionActionsTop }}
+            >
+              <button
+                type="button"
+                className={`${css.action} ${css.actionPrimary}`}
+                data-diff-selection-keep
+                disabled={busy}
+                onClick={() => { void handleSelectionAction('keep') }}
+              >
+                {t('action.keep')}
+              </button>
+              <button
+                type="button"
+                className={css.action}
+                data-diff-selection-revert
+                disabled={busy}
+                onClick={() => { void handleSelectionAction('revert') }}
+              >
+                {t('action.revert')}
+              </button>
+            </div>
+          ) : hoveredBlock !== undefined && model.blocks[hoveredBlock] !== undefined ? (
             <div
               className={css.blockActions}
               data-diff-block-actions
@@ -1928,7 +2004,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 {t('action.revert')}
               </button>
             </div>
-          )}
+          ) : null}
         </div>
         {focusedBlock !== undefined && flashKey > 0 && (
           <div

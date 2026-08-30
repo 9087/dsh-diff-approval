@@ -1262,6 +1262,78 @@ describe('PendingPanel', () => {
     expect(screen.getByText('a.txt:1')).toBeDefined()
   })
 
+  it('shows a keep/revert frame for a selection spanning multiple blocks', () => {
+    // 'a\nb\nc\nd\n' -> 'A\nb\nC\nd\n' has two change blocks (lines 1 and 3).
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    expect(rows.length).toBe(6)
+    const code0 = rows[0]!.querySelector('[data-diff-code]') ?? rows[0]!
+    const code5 = rows[5]!.querySelector('[data-diff-code]') ?? rows[5]!
+    const startNode = code0.firstChild ?? code0
+    const endNode = code5.firstChild ?? code5
+    const selection = {
+      isCollapsed: false,
+      anchorNode: startNode,
+      focusNode: endNode,
+      rangeCount: 1,
+      getRangeAt: () => ({
+        startContainer: startNode,
+        startOffset: 0,
+        endContainer: endNode,
+        endOffset: 1,
+      }),
+    } as unknown as Selection
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    // The multi-block selection frame shows, with only keep/revert (no block
+    // number and no prev/next).
+    expect(document.querySelector('[data-diff-selection-actions]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-selection-actions] [data-diff-block-position]')).toBeNull()
+    expect(document.querySelector('[data-diff-selection-actions] [data-diff-block-prev]')).toBeNull()
+    expect(document.querySelector('[data-diff-selection-actions] [data-diff-block-next]')).toBeNull()
+
+    // Keep applies the combined range in a single call.
+    fireEvent.click(document.querySelector('[data-diff-selection-keep]') as HTMLButtonElement)
+    expect(props.onBlockKeep).toHaveBeenCalledWith(S1, 'entry-multi', { oldStart: 1, oldEnd: 3, newStart: 1, newEnd: 3 })
+  })
+
+  it('shows the selection frame for a single covered block too', () => {
+    // 'a\n' -> 'b\n' has one block (both rows).
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    expect(rows.length).toBe(2)
+    const code0 = rows[0]!.querySelector('[data-diff-code]') ?? rows[0]!
+    const code1 = rows[1]!.querySelector('[data-diff-code]') ?? rows[1]!
+    const selection = {
+      isCollapsed: false,
+      anchorNode: code0.firstChild ?? code0,
+      focusNode: code1.firstChild ?? code1,
+      rangeCount: 1,
+      getRangeAt: () => ({
+        startContainer: code0.firstChild ?? code0,
+        startOffset: 0,
+        endContainer: code1.firstChild ?? code1,
+        endOffset: 1,
+      }),
+    } as unknown as Selection
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    expect(document.querySelector('[data-diff-selection-actions]')).not.toBeNull()
+    fireEvent.click(document.querySelector('[data-diff-selection-keep]') as HTMLButtonElement)
+    expect(props.onBlockKeep).toHaveBeenCalledWith(S1, 'entry-1', { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 })
+  })
+
   it('does not offer a reference for a selection of only removed lines', () => {
     // 'a\nb\n' -> 'b\n' removes line 1; the removed row has no current-file
     // number, so selecting it alone must not produce a copyable reference.
