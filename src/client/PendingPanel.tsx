@@ -814,7 +814,9 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
     if (body.scrollTop !== clamped) body.scrollTop = clamped
     setScrollTop(clamped)
-  }, [model, focus, flashKey, pairCount])
+    // `model`/`pairCount` are deliberately NOT deps — a content refresh would
+    // otherwise re-center the view and lose the user's scroll position.
+  }, [focus, flashKey])
 
   const onScroll = (): void => { setScrollTop(bodyRef.current?.scrollTop ?? 0) }
   const inFocused = (k: number): boolean => {
@@ -1227,6 +1229,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // files whose first change sits far down.
   useEffect(() => {
     setFocus(0)
+    // Bump the centering tick so switching files re-centers even when the
+    // focus index is unchanged (0 -> 0); the centering effect keys off this
+    // instead of the model, so a content refresh no longer re-centers.
+    setScrollTick(tick => tick + 1)
     bodyRef.current?.focus()
     setFlashKey(key => key + 1)
     setHoveredBlock(undefined)
@@ -1462,7 +1468,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     // an open-with-wrap-on file centers on the block's real (wrapped) offset
     // instead of the initial fixed-22px guess. `rowOffsets === null` flips only
     // on the readiness transition, not on every resize re-measure.
-  }, [model, focus, scrollTick, rowCount, rowOffsets === null])
+    // NOTE: `model`/`rowCount` are deliberately NOT deps — a content refresh
+    // would otherwise re-center the view and lose the user's scroll position.
+  }, [focus, scrollTick, rowOffsets === null])
 
   const jump = (direction: -1 | 1) => {
     if (rowCount === 0) return
