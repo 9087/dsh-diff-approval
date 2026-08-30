@@ -52,4 +52,7 @@ export interface PendingPanelFace {
   onImportVcs: (sessionId: SessionId, includeUntracked: boolean) => Promise<VcsImportValue>
   /** Acknowledge the redo-cleared notice so it is only surfaced once. */
   onAckRedoCleared: () => void
+  /** Collapse the DSH sidebar (no-op when already collapsed) before the modal
+   * opens or fullscreens, so an expanded sidebar can't overlap the modal. */
+  collapseSidebar: () => void
 }

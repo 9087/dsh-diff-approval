@@ -6,7 +6,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 // Type-only: brings the `settings.section` SlotMap entry into this program.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import { PendingPanel } from './PendingPanel.tsx'
+import { PendingPanel, SIDEBAR_AUTO_COLLAPSE_PX } from './PendingPanel.tsx'
 import { DiffApprovalSettingsTab } from './SettingsTab.tsx'
 import { createDiffApprovalPort } from './port.ts'
 import { createPendingDiffStore } from './store.ts'
@@ -18,8 +18,9 @@ export type { PendingDiffSnapshot, PendingPanelFace } from './slots.ts'
 export type { DiffApprovalKey } from './locales.ts'
 export { DIFF_APPROVAL_CHANNEL } from './port.ts'
 
-/** Required services: locale, slots, the wire channel, and the current session. */
-export const inject = ['slots', 'locale', 'connection', 'sessions']
+/** Required services: locale, slots, the wire channel, the current session, and
+ * the layout controller (this plugin collapses the sidebar before its modal opens). */
+export const inject = ['slots', 'locale', 'connection', 'sessions', 'layout']
 
 /**
  * The dsh web-react renderer gives `div[data-slot="sidebar.footer.action"]` an
@@ -90,6 +91,25 @@ export function apply(ctx: ClientContext): void {
   const connection = ctx.get('connection') as ConnectionHandle
   const store = createPendingDiffStore(createDiffApprovalPort(connection.rpc))
 
+  // Collapse the DSH sidebar before this plugin's modal opens, but only on the
+  // narrow (auto-collapse) breakpoint: a wide expanded sidebar is fine (the
+  // modal covers it) and must NOT be auto-collapsed. Narrow + manually
+  // re-expanded is the overlap case we collapse. The shell marks a closed
+  // sidebar with `data-sidebar-collapsed` on `.frame`; we only toggle when it
+  // is currently expanded, and guard the toggle so an unwired layout service
+  // never crashes the panel.
+  const collapseSidebar = (): void => {
+    if (window.innerWidth >= SIDEBAR_AUTO_COLLAPSE_PX) return
+    const ctxLayout = (ctx as unknown as { layout?: { toggleSidebar(): void } }).layout
+    if (ctxLayout === undefined) return
+    if (document.querySelector('[data-sidebar-collapsed]') !== null) return
+    try {
+      ctxLayout.toggleSidebar()
+    } catch {
+      // The layout face may not be attached yet; the panel still opens.
+    }
+  }
+
   ctx.on('connection/reset', () => { store.reset() })
 
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
@@ -125,6 +145,7 @@ export function apply(ctx: ClientContext): void {
         conversation.input.for(actx).setDraft(base === '' ? reference : `${base} ${reference}`)
         textarea?.focus()
       },
+      collapseSidebar,
     }),
   }, PendingPanel))
 

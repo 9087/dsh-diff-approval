@@ -49,6 +49,7 @@ function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
     onRedo: vi.fn(),
     onImportVcs: vi.fn(async () => ({ imported: 0, detected: false })),
     onAckRedoCleared: vi.fn(),
+    collapseSidebar: vi.fn(),
     t: (key: string, params?: Record<string, unknown>) => params === undefined ? key : `${key} ${JSON.stringify(params)}`,
   } as unknown as PanelProps
 }
@@ -59,7 +60,7 @@ describe('PendingPanel', () => {
     props.useSessions = ((select: (state: { current: SessionId | undefined; byId: Record<string, { blank?: boolean }> }) => SessionId | undefined) =>
       select({ current: undefined, byId: {} })) as unknown as typeof props.useSessions
     const view = render(<PendingPanel {...props} />)
-    const badge = view.container.querySelector('[data-diff-approval-badge]') as HTMLButtonElement
+    const badge = document.querySelector('[data-diff-approval-badge]') as HTMLButtonElement
     expect(badge.disabled).toBe(true)
   })
 
@@ -68,7 +69,7 @@ describe('PendingPanel', () => {
     props.useSessions = ((select: (state: { current: SessionId; byId: Record<string, { blank?: boolean }> }) => SessionId) =>
       select({ current: S1, byId: { [S1]: { blank: true } } })) as unknown as typeof props.useSessions
     const view = render(<PendingPanel {...props} />)
-    const badge = view.container.querySelector('[data-diff-approval-badge]') as HTMLButtonElement
+    const badge = document.querySelector('[data-diff-approval-badge]') as HTMLButtonElement
     expect(badge.disabled).toBe(true)
   })
 
@@ -261,6 +262,14 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
   })
 
+  it('collapses the sidebar when the modal opens (before opening)', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    expect(props.collapseSidebar).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(props.collapseSidebar).toHaveBeenCalledTimes(1)
+  })
+
   it('shows only the current session files, not other sessions in the workspace', () => {
     const other = entry({ id: 'entry-other', sessionId: 'session-2' as SessionId, path: '/repo/other.txt' })
     const props = panelProps({ read: true, files: [other, FILE], busy: new Set() })
@@ -424,7 +433,7 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
     // The empty note always offers the import button (no host probe until click).
-    const button = view.container.querySelector('[data-diff-import-vcs]') as HTMLElement
+    const button = document.querySelector('[data-diff-import-vcs]') as HTMLElement
     expect(button).not.toBeNull()
 
     // No VCS root: the note says so, and no refresh happened (nothing changed).
@@ -441,7 +450,7 @@ describe('PendingPanel', () => {
     const view = render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
-    fireEvent.click(view.container.querySelector('[data-diff-import-vcs]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-import-vcs]') as HTMLElement)
     await waitFor(() => {
       expect(importMock.mock.calls).toEqual([[S1, false]])
       expect(props.onRefresh).toHaveBeenCalled()
@@ -457,7 +466,7 @@ describe('PendingPanel', () => {
     const view = render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
-    fireEvent.click(view.container.querySelector('[data-diff-import-vcs]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-import-vcs]') as HTMLElement)
     // The DSH Toast renders portaled into the body.
     await waitFor(() => { expect(screen.getByText('panel.importNone')).toBeDefined() })
   })
@@ -547,7 +556,7 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
     // The first file opens automatically.
-    expect(view.container.querySelector('[data-diff-approval-diff]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-approval-diff]')).not.toBeNull()
     expect(screen.getByText('/repo/a.txt')).toBeDefined()
 
     // Handling it removes it; the next file takes its place.
@@ -562,7 +571,7 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
     fireEvent.click(screen.getByText('a.txt'))
-    expect(view.container.querySelector('[data-diff-approval-diff]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-approval-diff]')).not.toBeNull()
   })
 
   it('shows the per-file line change counts on each row', () => {
@@ -583,7 +592,7 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
 
-    const ruler = view.container.querySelector('[data-diff-approval-ruler]') as HTMLElement
+    const ruler = document.querySelector('[data-diff-approval-ruler]') as HTMLElement
     expect(ruler).not.toBeNull()
     const markers = [...ruler.querySelectorAll('[data-diff-ruler-marker]')] as HTMLElement[]
     // 'a\n' -> 'b\n' is one deleted line then one added line: two markers,
@@ -606,11 +615,11 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByText('a.txt'))
 
     // No block actions until a block is hovered.
-    expect(view.container.querySelector('[data-diff-block-actions]')).toBeNull()
-    const rows = [...view.container.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    expect(document.querySelector('[data-diff-block-actions]')).toBeNull()
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
     fireEvent.mouseEnter(rows[0]!) // del 'a' -> block 0 (old 1-1, new 1-1)
 
-    const actions = view.container.querySelector('[data-diff-block-actions]') as HTMLElement
+    const actions = document.querySelector('[data-diff-block-actions]') as HTMLElement
     expect(actions).not.toBeNull()
     const keep = actions.querySelector('[data-diff-block-keep]') as HTMLElement
     const revert = actions.querySelector('[data-diff-block-revert]') as HTMLElement
@@ -630,10 +639,10 @@ describe('PendingPanel', () => {
     expect(revertMock.mock.calls[0]).toEqual([S1, 'entry-blocks', { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 }])
 
     // Hovering context clears the floating actions.
-    const contextRow = [...view.container.querySelectorAll('[data-diff-row]')]
+    const contextRow = [...document.querySelectorAll('[data-diff-row]')]
       .find(row => row.getAttribute('data-diff-line') === 'context') as HTMLElement
     fireEvent.mouseEnter(contextRow)
-    expect(view.container.querySelector('[data-diff-block-actions]')).toBeNull()
+    expect(document.querySelector('[data-diff-block-actions]')).toBeNull()
   })
 
   it('steps the hovered block frame to the next/previous diff block', () => {
@@ -643,10 +652,10 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
 
-    const rows = [...view.container.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
     fireEvent.mouseEnter(rows[0]!) // block 0 (del 'a' -> line 1)
 
-    const actions = view.container.querySelector('[data-diff-block-actions]') as HTMLElement
+    const actions = document.querySelector('[data-diff-block-actions]') as HTMLElement
     expect(actions).not.toBeNull()
     const next = actions.querySelector('[data-diff-block-next]') as HTMLElement
     const prev = actions.querySelector('[data-diff-block-prev]') as HTMLElement
@@ -662,43 +671,43 @@ describe('PendingPanel', () => {
     expect(position.textContent).toContain('1')
   })
 
-  it('collapses the file list to a floating button when it would take a third of the panel', () => {
-    const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
-    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 600 })
+  it('collapses the file list to a floating button below the sidebar breakpoint', () => {
+    const originalWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth')
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 600 })
     try {
       const file = entry({ id: 'entry-float', oldText: 'a\n', newText: 'b\n' })
       const props = panelProps({ read: true, files: [file], busy: new Set() })
       const view = render(<PendingPanel {...props} />)
       fireEvent.click(screen.getByLabelText('panel.aria'))
 
-      // 240px (listWidth) > 600/3, so the in-flow list collapses to a button and
-      // the toggle appears in the diff actions row.
-      expect(view.container.querySelector('[data-diff-approval-file-list]')).toBeNull()
-      const toggle = view.container.querySelector('[data-diff-file-list-toggle]') as HTMLElement
+      // 600 < 1024 (the sidebar auto-collapse breakpoint), so the file list
+      // floats consistently with the sidebar and the toggle appears.
+      expect(document.querySelector('[data-diff-approval-file-list]')).toBeNull()
+      const toggle = document.querySelector('[data-diff-file-list-toggle]') as HTMLElement
       expect(toggle).not.toBeNull()
 
-      expect(view.container.querySelector('[data-diff-floating-file-list]')).toBeNull()
+      expect(document.querySelector('[data-diff-floating-file-list]')).toBeNull()
       fireEvent.click(toggle)
-      expect(view.container.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
+      expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
 
       fireEvent.click(toggle)
-      expect(view.container.querySelector('[data-diff-floating-file-list]')).toBeNull()
+      expect(document.querySelector('[data-diff-floating-file-list]')).toBeNull()
 
       fireEvent.click(toggle)
-      expect(view.container.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
+      expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
       // Clicking a file row keeps the floating list open (so you can browse
       // more files); only clicking outside the card folds it back.
-      const floatList = view.container.querySelector('[data-diff-floating-file-list]') as HTMLElement
+      const floatList = document.querySelector('[data-diff-floating-file-list]') as HTMLElement
       const row = [...floatList.querySelectorAll('button')].find(button => button.textContent?.includes('a.txt'))
       expect(row).toBeDefined()
       fireEvent.click(row!)
-      expect(view.container.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
+      expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
       // Clicking outside the card (the code box) folds it back.
-      fireEvent.pointerDown(view.container.querySelector('[data-diff-approval-panel]') as HTMLElement)
-      expect(view.container.querySelector('[data-diff-floating-file-list]')).toBeNull()
+      fireEvent.pointerDown(document.querySelector('[data-diff-approval-panel]') as HTMLElement)
+      expect(document.querySelector('[data-diff-floating-file-list]')).toBeNull()
     } finally {
-      if (original !== undefined) Object.defineProperty(HTMLElement.prototype, 'clientWidth', original)
-      else delete (HTMLElement.prototype as { clientWidth?: unknown }).clientWidth
+      if (originalWidth !== undefined) Object.defineProperty(window, 'innerWidth', originalWidth)
+      else delete (window as { innerWidth?: unknown }).innerWidth
     }
   })
 
@@ -711,11 +720,11 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
 
-    const rows = [...view.container.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
     const last = rows[rows.length - 1]!
     fireEvent.mouseEnter(last)
 
-    const actions = view.container.querySelector('[data-diff-block-actions]') as HTMLElement
+    const actions = document.querySelector('[data-diff-block-actions]') as HTMLElement
     expect(actions).not.toBeNull()
     // The block's last row is the file's last row (content bottom), so the
     // frame cannot sit below it; it moves UP so its own bottom stays at the
@@ -732,7 +741,7 @@ describe('PendingPanel', () => {
     // Opening the panel auto-selects the first file (block 0 focused).
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
-    const focusedLines = () => [...view.container.querySelectorAll('[data-diff-focused]')]
+    const focusedLines = () => [...document.querySelectorAll('[data-diff-focused]')]
     // Block 0: the first change (del a / add A), both lines highlighted.
     expect(focusedLines()).toHaveLength(2)
     expect(focusedLines()[0]!.textContent).toContain('a')
@@ -757,10 +766,10 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
     // Opening the panel auto-selects the file and focuses the diff body.
-    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
     expect(document.activeElement).toBe(body)
 
-    const focusedLines = () => [...view.container.querySelectorAll('[data-diff-focused]')]
+    const focusedLines = () => [...document.querySelectorAll('[data-diff-focused]')]
     expect(focusedLines()[0]!.textContent).toContain('a')
 
     fireEvent.keyDown(body, { key: 'ArrowDown', ctrlKey: true })
@@ -777,7 +786,7 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
     // Opening the file flashes the initially focused block 0 (rows 0-1).
-    const first = view.container.querySelector('[data-diff-block-flash]') as HTMLElement
+    const first = document.querySelector('[data-diff-block-flash]') as HTMLElement
     expect(first).not.toBeNull()
     expect(first.style.top).toBe('0px')
     expect(first.style.height).toBe('44px')
@@ -785,7 +794,7 @@ describe('PendingPanel', () => {
     // Jumping to block 1 remounts the flash over it: the del 'c' / add 'C'
     // pair at rows 3-4 -> top 66px, height 44px.
     fireEvent.click(screen.getByLabelText('action.nextDiff'))
-    const second = view.container.querySelector('[data-diff-block-flash]') as HTMLElement
+    const second = document.querySelector('[data-diff-block-flash]') as HTMLElement
     expect(second).not.toBeNull()
     expect(second).not.toBe(first)
     expect(second.style.top).toBe('66px')
@@ -798,7 +807,7 @@ describe('PendingPanel', () => {
     const view = render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
-    const flash = () => view.container.querySelector('[data-diff-block-flash]') as HTMLElement
+    const flash = () => document.querySelector('[data-diff-block-flash]') as HTMLElement
     expect(flash()).not.toBeNull()
 
     // NextDiff wraps to the only block: the overlay must remount (new node)
@@ -818,7 +827,7 @@ describe('PendingPanel', () => {
     const view = render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
-    const flash = view.container.querySelector('[data-diff-block-flash]') as HTMLElement
+    const flash = document.querySelector('[data-diff-block-flash]') as HTMLElement
     expect(flash).not.toBeNull()
     expect(flash.style.height).toBe('528px')
   })
@@ -827,7 +836,7 @@ describe('PendingPanel', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     const view = render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
-    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
 
     // No vertical scrollbar (offset == client): the ruler's 4px is reserved,
     // so the flash stops short of it. The clientHeight change forces the
@@ -836,13 +845,13 @@ describe('PendingPanel', () => {
     Object.defineProperty(body, 'offsetWidth', { value: 200, configurable: true })
     Object.defineProperty(body, 'clientHeight', { value: 100, configurable: true })
     fireEvent.scroll(body)
-    expect(view.container.querySelector('[data-diff-block-flash]')!.style.width).toBe('196px')
+    expect(document.querySelector('[data-diff-block-flash]')!.style.width).toBe('196px')
 
     // With a scrollbar (offset > client), clientWidth already ends at it.
     Object.defineProperty(body, 'offsetWidth', { value: 208, configurable: true })
     Object.defineProperty(body, 'clientHeight', { value: 120, configurable: true })
     fireEvent.scroll(body)
-    expect(view.container.querySelector('[data-diff-block-flash]')!.style.width).toBe('200px')
+    expect(document.querySelector('[data-diff-block-flash]')!.style.width).toBe('200px')
   })
 
   it('re-clicking the already-open file jumps to the next diff block', () => {
@@ -852,7 +861,7 @@ describe('PendingPanel', () => {
     // Opening the panel auto-selects the first file with block 0 focused.
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
-    const focusedLines = () => [...view.container.querySelectorAll('[data-diff-focused]')]
+    const focusedLines = () => [...document.querySelectorAll('[data-diff-focused]')]
     // Block 0 (del a / add A) is focused after the file is opened.
     expect(focusedLines()).toHaveLength(2)
     expect(focusedLines()[0]!.textContent).toContain('a')
@@ -875,32 +884,32 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
     // No search UI or highlights until the bar is opened.
-    expect(view.container.querySelector('[data-diff-searchbar]')).toBeNull()
-    expect(view.container.querySelectorAll('[data-diff-search]')).toHaveLength(0)
+    expect(document.querySelector('[data-diff-searchbar]')).toBeNull()
+    expect(document.querySelectorAll('[data-diff-search]')).toHaveLength(0)
 
     fireEvent.click(screen.getByLabelText('action.search'))
-    expect(view.container.querySelector('[data-diff-searchbar]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-searchbar]')).not.toBeNull()
 
     // Query 'a' matches 'bar' (context row 1) and 'baz' (del row 2); the
     // other rows 'foo'/'qux' have no 'a'.
-    const input = view.container.querySelector('[data-diff-search-input]') as HTMLInputElement
+    const input = document.querySelector('[data-diff-search-input]') as HTMLInputElement
     fireEvent.change(input, { target: { value: 'a' } })
 
-    expect(view.container.querySelector('[data-diff-search-count]')!.textContent).toBe('1/2')
-    expect(view.container.querySelectorAll('[data-diff-search="hit"]')).toHaveLength(1)
-    const firstCurrent = view.container.querySelector('[data-diff-search="current"]') as HTMLElement
+    expect(document.querySelector('[data-diff-search-count]')!.textContent).toBe('1/2')
+    expect(document.querySelectorAll('[data-diff-search="hit"]')).toHaveLength(1)
+    const firstCurrent = document.querySelector('[data-diff-search="current"]') as HTMLElement
     expect(firstCurrent.textContent).toContain('bar')
 
     // Next match moves to 'baz' and the count advances.
-    fireEvent.click(view.container.querySelector('[data-diff-search-next]') as HTMLElement)
-    expect(view.container.querySelector('[data-diff-search-count]')!.textContent).toBe('2/2')
-    const secondCurrent = view.container.querySelector('[data-diff-search="current"]') as HTMLElement
+    fireEvent.click(document.querySelector('[data-diff-search-next]') as HTMLElement)
+    expect(document.querySelector('[data-diff-search-count]')!.textContent).toBe('2/2')
+    const secondCurrent = document.querySelector('[data-diff-search="current"]') as HTMLElement
     expect(secondCurrent.textContent).toContain('baz')
 
     // Closing the bar clears the query and the highlights.
-    fireEvent.click(view.container.querySelector('[data-diff-search-close]') as HTMLElement)
-    expect(view.container.querySelector('[data-diff-searchbar]')).toBeNull()
-    expect(view.container.querySelectorAll('[data-diff-search]')).toHaveLength(0)
+    fireEvent.click(document.querySelector('[data-diff-search-close]') as HTMLElement)
+    expect(document.querySelector('[data-diff-searchbar]')).toBeNull()
+    expect(document.querySelectorAll('[data-diff-search]')).toHaveLength(0)
   })
 
   it('undoes with Ctrl+Z and redoes with Ctrl+Y globally, but not in text inputs', () => {
@@ -912,7 +921,7 @@ describe('PendingPanel', () => {
     const redoMock = props.onRedo as unknown as { mock: { calls: unknown[][] } }
 
     // Global: works from the diff body regardless of where focus sits.
-    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
     fireEvent.keyDown(body, { key: 'z', ctrlKey: true })
     expect(undoMock.mock.calls).toEqual([[S1]])
     fireEvent.keyDown(body, { key: 'y', ctrlKey: true })
@@ -939,7 +948,7 @@ describe('PendingPanel', () => {
 
     // Undo resolves to another file's id: the panel switches to it and its
     // diff mounts, flashing the first change block.
-    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
     fireEvent.keyDown(body, { key: 'z', ctrlKey: true })
     await waitFor(() => { expect(screen.getByText('/repo/b.txt')).toBeDefined() })
     expect(document.querySelector('[data-diff-block-flash]')).not.toBeNull()
@@ -957,7 +966,7 @@ describe('PendingPanel', () => {
 
     // Undo resolves to the open file's id: the panel re-keys the flash so the
     // highlight box replays on the undone diff (a new overlay node).
-    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
     fireEvent.keyDown(body, { key: 'z', ctrlKey: true })
     await waitFor(() => {
       expect(document.querySelector('[data-diff-block-flash]')).not.toBe(flashBefore)
@@ -969,12 +978,12 @@ describe('PendingPanel', () => {
     const props = panelProps({ read: true, files: [file], busy: new Set() })
     const view = render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
-    expect(view.container.querySelector('[data-diff-searchbar]')).toBeNull()
+    expect(document.querySelector('[data-diff-searchbar]')).toBeNull()
 
     // Ctrl+F with the focus on the page body (not inside the panel) still
     // opens the search bar instead of the browser's native find.
     fireEvent.keyDown(document.body, { key: 'f', ctrlKey: true })
-    expect(view.container.querySelector('[data-diff-searchbar]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-searchbar]')).not.toBeNull()
   })
 
   it('re-centers the sole block on every jump when it is the only one', () => {
@@ -986,7 +995,7 @@ describe('PendingPanel', () => {
 
     // Give the scroller a fake viewport and intercept scrollTop so the
     // re-center on each jump is observable.
-    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
     let scrollTop = 0
     let sets = 0
     Object.defineProperty(body, 'scrollTop', {
@@ -1024,11 +1033,11 @@ describe('PendingPanel', () => {
     // Blocks 0 and 1 start at rows 0 and 3 (top 0/66px); block 2 starts at
     // row 6 (132px). Scroll past the first two so the next jump must land on
     // the third instead of the ones scrolled out above.
-    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
     body.scrollTop = 6 * 22
 
     fireEvent.click(screen.getByLabelText('action.nextDiff'))
-    const focused = view.container.querySelector('[data-diff-focused]')
+    const focused = document.querySelector('[data-diff-focused]')
     expect(focused).not.toBeNull()
     expect(focused!.textContent).toContain('e')
   })
@@ -1040,12 +1049,12 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
 
-    const body = view.container.querySelector('[data-diff-body]') as HTMLElement
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
     // Fake a 440px viewport (20 rows) and let the scroller report it.
     Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 440 })
     fireEvent.scroll(body)
 
-    const rendered = view.container.querySelectorAll('[data-diff-row]').length
+    const rendered = document.querySelectorAll('[data-diff-row]').length
     // 20 visible + overscan, far fewer than the whole 4000-row file.
     expect(rendered).toBeGreaterThan(0)
     expect(rendered).toBeLessThan(100)
@@ -1075,7 +1084,7 @@ describe('PendingPanel', () => {
     expect(screen.getByText('panel.externalChanged')).toBeDefined()
     expect(props.onAckRedoCleared).toHaveBeenCalledTimes(1)
 
-    fireEvent.click(view.container.querySelector('[data-diff-notice-dismiss]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-notice-dismiss]') as HTMLElement)
     expect(document.querySelector('[data-diff-approval-notice]')).toBeNull()
   })
 
@@ -1084,11 +1093,11 @@ describe('PendingPanel', () => {
     const view = render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
-    const panel = view.container.querySelector('[data-diff-approval-panel]') as HTMLElement
-    const expand = view.container.querySelector('[data-diff-approval-expand]') as HTMLElement
+    const panel = document.querySelector('[data-diff-approval-panel]') as HTMLElement
+    const expand = document.querySelector('[data-diff-approval-expand]') as HTMLElement
     expect(expand).not.toBeNull()
     // The close button sits to the right of the expand button.
-    const close = view.container.querySelector('[data-diff-approval-close]') as HTMLElement
+    const close = document.querySelector('[data-diff-approval-close]') as HTMLElement
     expect(close.compareDocumentPosition(expand) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
     // Default bottom is the fallback composer offset.
     expect(panel.style.bottom).toBe('128px')
@@ -1106,7 +1115,7 @@ describe('PendingPanel', () => {
     fireEvent.click(expand)
     fireEvent.click(screen.getByLabelText('action.close'))
     fireEvent.click(screen.getByLabelText('panel.aria'))
-    const reopened = view.container.querySelector('[data-diff-approval-panel]') as HTMLElement
+    const reopened = document.querySelector('[data-diff-approval-panel]') as HTMLElement
     expect(reopened.style.bottom).toBe('8px')
   })
 
@@ -1116,15 +1125,15 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
     // No backdrop in the docked state.
-    expect(view.container.querySelector('[data-diff-fullscreen-backdrop]')).toBeNull()
+    expect(document.querySelector('[data-diff-fullscreen-backdrop]')).toBeNull()
 
-    fireEvent.click(view.container.querySelector('[data-diff-approval-expand]') as HTMLElement)
-    const backdrop = view.container.querySelector('[data-diff-fullscreen-backdrop]') as HTMLElement
+    fireEvent.click(document.querySelector('[data-diff-approval-expand]') as HTMLElement)
+    const backdrop = document.querySelector('[data-diff-fullscreen-backdrop]') as HTMLElement
     expect(backdrop).not.toBeNull()
 
     // Leaving fullscreen removes it.
-    fireEvent.click(view.container.querySelector('[data-diff-approval-expand]') as HTMLElement)
-    expect(view.container.querySelector('[data-diff-fullscreen-backdrop]')).toBeNull()
+    fireEvent.click(document.querySelector('[data-diff-approval-expand]') as HTMLElement)
+    expect(document.querySelector('[data-diff-fullscreen-backdrop]')).toBeNull()
   })
 
   it('shows the selection reference in the status bar when text is selected', () => {
@@ -1133,7 +1142,7 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
 
-    const rows = [...view.container.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
     expect(rows.length).toBeGreaterThan(1)
     const code0 = rows[0]!.querySelector('[data-diff-code]') ?? rows[0]!
     const code1 = rows[1]!.querySelector('[data-diff-code]') ?? rows[1]!
@@ -1154,9 +1163,9 @@ describe('PendingPanel', () => {
 
     // The status bar shows the line-range reference once lines are selected.
     // No workspace is known, so the reference carries the absolute path.
-    expect(view.container.querySelector('[data-diff-status-bar]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-status-bar]')).not.toBeNull()
     expect(screen.getByText('/repo/a.txt:1')).toBeDefined()
-    expect(view.container.querySelector('[data-diff-copy]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-copy]')).not.toBeNull()
   })
 
   it('uses a workspace-relative reference when the file is inside the workspace', () => {
@@ -1165,7 +1174,7 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
 
-    const rows = [...view.container.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
     const code0 = rows[0]!.querySelector('[data-diff-code]') ?? rows[0]!
     const code1 = rows[1]!.querySelector('[data-diff-code]') ?? rows[1]!
     const selection = {
@@ -1196,7 +1205,7 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
 
-    const rows = [...view.container.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
     const code0 = rows[0]!.querySelector('[data-diff-code]') ?? rows[0]!
     const selection = {
       isCollapsed: false,
@@ -1213,7 +1222,7 @@ describe('PendingPanel', () => {
     vi.spyOn(window, 'getSelection').mockReturnValue(selection)
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
 
-    expect(view.container.querySelector('[data-diff-copy]')).toBeNull()
+    expect(document.querySelector('[data-diff-copy]')).toBeNull()
   })
 
   it('copies the reference with Ctrl+L', async () => {
@@ -1226,7 +1235,7 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
 
-    const rows = [...view.container.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
     expect(rows.length).toBeGreaterThan(1)
     const code0 = rows[0]!.querySelector('[data-diff-code]') ?? rows[0]!
     const code1 = rows[1]!.querySelector('[data-diff-code]') ?? rows[1]!
@@ -1254,7 +1263,7 @@ describe('PendingPanel', () => {
 
   /** Select the first two diff rows so a reference becomes copyable. */
   function selectFirstRows(view: ReturnType<typeof render>): void {
-    const rows = [...view.container.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
     const code0 = rows[0]!.querySelector('[data-diff-code]') ?? rows[0]!
     const code1 = rows[1]!.querySelector('[data-diff-code]') ?? rows[1]!
     const selection = {
@@ -1314,7 +1323,7 @@ describe('PendingPanel', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     const view = render(<DiffApprovalSettingsTab {...props} />)
     // Re-query the pill each time: re-rendering can replace the node.
-    const pill = () => view.container.querySelector('[data-diff-paste-on-copy-select]') as HTMLButtonElement
+    const pill = () => document.querySelector('[data-diff-paste-on-copy-select]') as HTMLButtonElement
     expect(pill()).not.toBeNull()
     // On by default: the pill names the on state.
     expect(pill().textContent).toContain('action.toggleOn')
@@ -1335,7 +1344,7 @@ describe('PendingPanel', () => {
   it('the DSH Settings tab toggles the import-untracked preference in localStorage', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     const view = render(<DiffApprovalSettingsTab {...props} />)
-    const pill = () => view.container.querySelector('[data-diff-import-untracked-select]') as HTMLButtonElement
+    const pill = () => document.querySelector('[data-diff-import-untracked-select]') as HTMLButtonElement
     expect(pill()).not.toBeNull()
     // Off by default: the full untracked scan is opt-in.
     expect(pill().textContent).toContain('action.toggleOff')
@@ -1356,7 +1365,7 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
 
-    const trigger = view.container.querySelector('[data-diff-lang]') as HTMLElement
+    const trigger = document.querySelector('[data-diff-lang]') as HTMLElement
     expect(trigger).not.toBeNull()
     fireEvent.click(trigger)
     const typescript = screen.getByText('TypeScript')
@@ -1370,7 +1379,7 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
 
-    const trigger = view.container.querySelector('[data-diff-lang]') as HTMLElement
+    const trigger = document.querySelector('[data-diff-lang]') as HTMLElement
     fireEvent.click(trigger)
 
     const items = [...document.querySelectorAll('[role="menuitem"]')]
@@ -1393,7 +1402,7 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('index.html'))
 
-    const wrap = view.container.querySelector('[data-diff-wrap]') as HTMLElement
+    const wrap = document.querySelector('[data-diff-wrap]') as HTMLElement
     expect(wrap).not.toBeNull()
     // Default off.
     expect(wrap.getAttribute('aria-pressed')).toBe('false')

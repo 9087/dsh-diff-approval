@@ -1,6 +1,7 @@
 /** Sidebar-foot pending-edit review action and the split review panel it opens. */
 
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react'
 import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -56,6 +57,10 @@ const ROW_HEIGHT_PX = 22
 /** Total width of the two line-number gutters, subtracted from the code width
  * when measuring wrapped line heights. */
 const WRAP_GUTTERS_PX = 88
+/** The dsh shell's sidebar auto-collapse breakpoint (ui-layout columns.ts):
+ * below it the sidebar auto-collapses, and the file list floats on the same
+ * breakpoint so the two stay consistent. */
+export const SIDEBAR_AUTO_COLLAPSE_PX = 1024
 
 /** A shared canvas for measuring wrapped line heights (CPU-only, no DOM reflow). */
 let measureCanvas: CanvasRenderingContext2D | undefined
@@ -2063,7 +2068,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPasteReference, onUndo, onRedo, onImportVcs, onAckRedoCleared, t,
+  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPasteReference, onUndo, onRedo, onImportVcs, onAckRedoCleared, collapseSidebar, t,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
   // A newly created session is selected but still blank (no messages yet); it
@@ -2110,6 +2115,7 @@ export function PendingPanel({
   /** The review panel's width, measured so the file list can collapse when it
    * would take more than a third of it (browser zoom / window resize). */
   const [panelWidth, setPanelWidth] = useState(0)
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth)
   const panelRef = useRef<HTMLElement>(null)
   const splitRef = useRef<HTMLDivElement>(null)
   /** The code scroll box's bounds within the split, so the floating card is
@@ -2122,9 +2128,8 @@ export function PendingPanel({
     return () => { clearInterval(timer) }
   }, [current, onRefresh])
 
-  // Measure the panel width so the file list can auto-collapse to a floating
-  // button when it would occupy more than a third of the panel (narrow windows
-  // from browser zoom/resize). The panel only mounts while open.
+  // Track the panel's width as a resize trigger so the floating file-list card
+  // re-measures its bounds when the panel resizes. The panel only mounts open.
   useEffect(() => {
     const el = panelRef.current
     if (el === null) return
@@ -2135,8 +2140,18 @@ export function PendingPanel({
     return () => { observer?.disconnect() }
   }, [open])
 
-  const floatMode = panelWidth > 0 && listWidth > panelWidth / 3
+  // The file list floats on the same breakpoint the DSH sidebar auto-collapses
+  // on, so the two stay consistent (the sidebar closes at < 1024 and the file
+  // list folds into a floating button at the same width).
+  const floatMode = viewportWidth < SIDEBAR_AUTO_COLLAPSE_PX
   const toggleFileList = (): void => { setFloatOpen(value => !value) }
+
+  // Track the window width for the breakpoint above.
+  useEffect(() => {
+    const onResize = (): void => { setViewportWidth(window.innerWidth) }
+    window.addEventListener('resize', onResize)
+    return () => { window.removeEventListener('resize', onResize) }
+  }, [])
 
   // Clicking anywhere outside the floating card — or on the toggle button,
   // which toggles it — folds the floating list back.
@@ -2323,6 +2338,10 @@ export function PendingPanel({
   }
 
   const toggleOpen = () => {
+    // Opening the modal: collapse the sidebar first so it can't overlap the
+    // modal. Collapse before `setOpen` so the sidebar's own re-render doesn't
+    // disrupt the panel while it opens.
+    if (!open) collapseSidebar()
     setOpen(value => !value)
   }
 
@@ -2488,15 +2507,16 @@ export function PendingPanel({
       {/* Expanded keeps an 8px inset, so a full-screen backdrop painted with
           the sidebar's fill hides the app behind the seam instead of letting
           it show through. It sits just below the panel's z-index. */}
-      {open && expanded && <div className={css.fullscreenBackdrop} data-diff-fullscreen-backdrop />}
-      {open && (
-        <section
-          className={css.panel}
-          ref={panelRef}
-          style={{ bottom: expanded ? PANEL_INSET_PX : bottomPx }}
-          data-diff-approval-panel
-          aria-label={t('panel.title')}
-        >
+      {open && createPortal(
+        <>
+          {expanded && <div className={css.fullscreenBackdrop} data-diff-fullscreen-backdrop />}
+          <section
+            className={css.panel}
+            ref={panelRef}
+            style={{ bottom: expanded ? PANEL_INSET_PX : bottomPx }}
+            data-diff-approval-panel
+            aria-label={t('panel.title')}
+          >
           <header className={css.header}>
             <span className={css.title}>{t('panel.title')}</span>
             <div className={css.headerActions}>
@@ -2523,7 +2543,12 @@ export function PendingPanel({
                   className={expanded ? `${css.expand} ${css.expandExpanded}` : css.expand}
                   data-diff-approval-expand
                   aria-label={t(expanded ? 'action.exitFullscreen' : 'action.expand')}
-                  onClick={() => { setExpanded(value => !value) }}
+                  onClick={() => {
+                    // Fullscreening also collapses the sidebar (before the
+                    // expand) so the expanded modal isn't overlapped.
+                    if (!expanded) collapseSidebar()
+                    setExpanded(value => !value)
+                  }}
                 >
                   <IconFullscreenOutline16 size={14} />
                 </button>
@@ -2612,7 +2637,9 @@ export function PendingPanel({
               )}
             </div>
           )}
-        </section>
+          </section>
+        </>,
+        document.body,
       )}
       <div className={css.footerButtons}>
         <button
