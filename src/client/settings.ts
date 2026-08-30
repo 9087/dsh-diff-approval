@@ -82,3 +82,46 @@ export function splitMode(): boolean {
 export function setSplitMode(value: boolean): void {
   localStorage.setItem(SPLIT_MODE_KEY, value ? '1' : '0')
 }
+
+const QUICK_SUMMON_KEY = 'diff-approval:quick-summon-key'
+/** Default quick-summon chord (toggle the review panel open/closed). */
+export const DEFAULT_QUICK_SUMMON = 'Ctrl+D'
+
+/**
+ * The quick-summon chord. Stored as `Modifier+...+Key`; falls back to
+ * {@link DEFAULT_QUICK_SUMMON}.
+ * @returns the chord string.
+ */
+export function quickSummonKey(): string {
+  return localStorage.getItem(QUICK_SUMMON_KEY) ?? DEFAULT_QUICK_SUMMON
+}
+
+/** Persist the quick-summon chord. */
+export function setQuickSummonKey(value: string): void {
+  localStorage.setItem(QUICK_SUMMON_KEY, value)
+}
+
+/**
+ * Whether a keyboard event matches a chord string like `Ctrl+D`. Modifier
+ * names are matched case-insensitively (`Ctrl`/`Control`, `Alt`/`Option`,
+ * `Shift`, `Meta`/`Cmd`/`Command`/`Win`); the final part is the key. Exact
+ * modifier set is required (extra modifiers do not match).
+ * @param event - the keydown event.
+ * @param shortcut - the chord string.
+ * @returns whether the event matches.
+ */
+export function matchesShortcut(event: KeyboardEvent, shortcut: string): boolean {
+  const parts = shortcut.split('+').map(part => part.trim().toLowerCase())
+  const key = parts.pop()
+  if (key === undefined || key === '') return false
+  const mods = new Set(parts)
+  const ctrl = mods.has('ctrl') || mods.has('control')
+  const alt = mods.has('alt') || mods.has('option')
+  const shift = mods.has('shift')
+  const meta = mods.has('meta') || mods.has('cmd') || mods.has('command') || mods.has('win')
+  return event.key.toLowerCase() === key
+    && event.ctrlKey === ctrl
+    && event.altKey === alt
+    && event.shiftKey === shift
+    && event.metaKey === meta
+}

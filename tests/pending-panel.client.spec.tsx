@@ -583,6 +583,28 @@ describe('PendingPanel', () => {
     expect(screen.getByText('/repo/a.txt')).toBeDefined()
   })
 
+  it('toggles the panel with the quick-summon chord and closes with Escape', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+
+    // Closed initially.
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+
+    // Ctrl+D (the default chord) opens it.
+    fireEvent.keyDown(document.body, { key: 'd', ctrlKey: true })
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+
+    // Ctrl+D closes it again.
+    fireEvent.keyDown(document.body, { key: 'd', ctrlKey: true })
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+
+    // Escape closes it too.
+    fireEvent.keyDown(document.body, { key: 'd', ctrlKey: true })
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+  })
+
   it('cannot be deselected by clicking the selected row again', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     const view = render(<PendingPanel {...props} />)

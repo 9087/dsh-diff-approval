@@ -1,9 +1,10 @@
 /** DSH Settings top-level section for this plugin's preferences. */
 
 import { useState } from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
-import { includeUntrackedEnabled, pasteOnCopyEnabled, setIncludeUntrackedEnabled, setPasteOnCopyEnabled, setSplitMode, setTabWidth, splitMode, tabWidth } from './settings.ts'
+import { includeUntrackedEnabled, pasteOnCopyEnabled, quickSummonKey, setIncludeUntrackedEnabled, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth } from './settings.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import css from './PendingPanel.module.css'
 
@@ -158,6 +159,78 @@ function TabWidthRow({
   )
 }
 
+/** Build the `Modifier+...+Key` chord label from a keydown event; a bare
+ * modifier key alone returns undefined (wait for the full combo). */
+function chordLabel(event: ReactKeyboardEvent<HTMLElement>): string | undefined {
+  const key = event.key
+  if (key === 'Control' || key === 'Shift' || key === 'Alt' || key === 'Meta') return undefined
+  const parts: string[] = []
+  if (event.ctrlKey) parts.push('Ctrl')
+  if (event.altKey) parts.push('Alt')
+  if (event.shiftKey) parts.push('Shift')
+  if (event.metaKey) parts.push('Meta')
+  parts.push(key.length === 1 ? key.toUpperCase() : key)
+  return parts.join('+')
+}
+
+/** A button that records the next key chord (modifiers + key) as the shortcut. */
+function ShortcutRecorder({
+  value, onChange, dataAttribute, placeholder,
+}: {
+  value: string
+  onChange: (value: string) => void
+  dataAttribute: string
+  placeholder: string
+}) {
+  const [recording, setRecording] = useState(false)
+  return (
+    <button
+      type="button"
+      className={css.settingsSelector}
+      onClick={() => { setRecording(true) }}
+      onBlur={() => { setRecording(false) }}
+      onKeyDown={recording ? (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        if (event.key === 'Escape') { setRecording(false); return }
+        const chord = chordLabel(event)
+        if (chord !== undefined) { onChange(chord); setRecording(false) }
+      } : undefined}
+      {...{ [dataAttribute]: true }}
+    >
+      {recording ? placeholder : value}
+      <IconChevronDownOutline14 className={css.settingsSelectorChevron} />
+    </button>
+  )
+}
+
+/** One shortcut row: title + description, chord recorder right. */
+function ShortcutRow({
+  title, description, value, onChange, dataAttribute, placeholder,
+}: {
+  title: string
+  description: string
+  value: string
+  onChange: (value: string) => void
+  dataAttribute: string
+  placeholder: string
+}) {
+  return (
+    <div className={css.settingsRow}>
+      <div className={css.settingsRowText}>
+        <div className={css.settingsRowTitle}>{title}</div>
+        <div className={css.settingsRowDesc}>{description}</div>
+      </div>
+      <ShortcutRecorder
+        value={value}
+        onChange={onChange}
+        dataAttribute={dataAttribute}
+        placeholder={placeholder}
+      />
+    </div>
+  )
+}
+
 /**
  * The plugin's preferences: auto-paste a copied reference into the input,
  * whether importing workspace VCS changes includes untracked files, and the
@@ -174,6 +247,11 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const [tabOpen, setTabOpen] = useState(false)
   const [split, setSplitState] = useState(splitMode)
   const [splitOpen, setSplitOpen] = useState(false)
+  const [summon, setSummonState] = useState(quickSummonKey)
+  const setSummon = (value: string): void => {
+    setSummonState(value)
+    setQuickSummonKey(value)
+  }
   const setPasteOnCopy = (value: boolean): void => {
     setPasteOnCopyState(value)
     setPasteOnCopyEnabled(value)
@@ -230,6 +308,14 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
         onSelect={setSplit}
         dataAttribute="data-diff-split-mode-select"
         t={t}
+      />
+      <ShortcutRow
+        title={t('panel.quickSummon')}
+        description={t('panel.quickSummonDesc')}
+        value={summon}
+        onChange={setSummon}
+        dataAttribute="data-diff-quick-summon-key"
+        placeholder={t('panel.recordShortcut')}
       />
     </div>
   )

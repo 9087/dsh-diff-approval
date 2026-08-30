@@ -19,7 +19,7 @@ import { HIGHLIGHT_LANGS, highlightLines, languageDisplayName } from './highligh
 import type { HighlightSpan } from './highlight.ts'
 import { langFromPath } from './lang.ts'
 import { referenceOf } from './reference.ts'
-import { includeUntrackedEnabled, pasteOnCopyEnabled, setWrapEnabled, splitMode, tabWidth, wrapEnabled } from './settings.ts'
+import { includeUntrackedEnabled, matchesShortcut, pasteOnCopyEnabled, quickSummonKey, setWrapEnabled, splitMode, tabWidth, wrapEnabled } from './settings.ts'
 import css from './PendingPanel.module.css'
 
 /**
@@ -2496,6 +2496,40 @@ export function PendingPanel({
     window.addEventListener('keydown', onKeyDown, true)
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
   }, [open, current, files, selected])
+
+  // Quick-summon chord (default Ctrl+D): toggles the panel open/closed from
+  // anywhere, matching the chord stored in Settings. The panel is always mounted
+  // (its badge lives in the sidebar footer), so this handler stays live whether
+  // the modal is open or closed. Text inputs keep their own keys.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!matchesShortcut(event, quickSummonKey())) return
+      const target = event.target as Node | null
+      if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null) return
+      event.preventDefault()
+      // Same open path as the badge: collapse the narrow sidebar first so it
+      // can't overlap the modal, then toggle.
+      if (!open) collapseSidebar()
+      setOpen(value => !value)
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true) }
+  }, [open, collapseSidebar])
+
+  // Escape closes the open panel (a modal-close convention), ignoring text
+  // inputs so the composer keeps its own Esc behavior.
+  useEffect(() => {
+    if (!open) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      const target = event.target as Node | null
+      if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null) return
+      event.preventDefault()
+      setOpen(false)
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true) }
+  }, [open])
 
   /** Drag the list/detail divider; width follows the pointer within its bounds. */
   const startResize = (event: ReactMouseEvent<HTMLDivElement>) => {
