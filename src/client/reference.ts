@@ -6,6 +6,11 @@
  * @module dsh-diff-approval/client/reference
  */
 
+import { computeWholeFileDiff } from './whole-file-diff.ts'
+
+/** The marker that replaces a reference's line number when its lines are gone. */
+export const LINE_MISSING_LABEL = 'LINE_MISSING'
+
 /**
  * Last path segment of a file path, any separator style.
  * @param path - the path to shorten.
@@ -49,13 +54,78 @@ export function lineRangeLabel(start: number, end: number): string {
 }
 
 /**
- * Build the clipboard text for a selected line range.
+ * Build the clipboard text for a selected line range, wrapped in parentheses so
+ * the reference reads as one unambiguous token (and can be matched precisely).
  * @param path - the selected file's path.
  * @param workspacePath - the current workspace root, or `undefined`.
  * @param start - first selected line number.
  * @param end - last selected line number.
- * @returns the `path:range` reference text.
+ * @returns the `(path:range)` reference text.
  */
 export function referenceOf(path: string, workspacePath: string | undefined, start: number, end: number): string {
-  return `${referencePathOf(path, workspacePath)}:${lineRangeLabel(start, end)}`
+  return `(${referencePathOf(path, workspacePath)}:${lineRangeLabel(start, end)})`
+}
+
+/**
+ * Map one referenced line range from `oldContent` coordinates to `newContent`
+ * coordinates. Lines that survive (unchanged context) map to their new line
+ * numbers, and the surviving lines' min/max span is returned. When every line
+ * in the range was removed, returns `undefined` (the reference is expired).
+ * @param oldContent - the file content the reference was made against.
+ * @param newContent - the file content now.
+ * @param start - first referenced line (1-based, inclusive).
+ * @param end - last referenced line (1-based, inclusive).
+ * @returns the surviving range, or `undefined` when nothing survives.
+ */
+export function remapReferenceRange(
+  oldContent: string,
+  newContent: string,
+  start: number,
+  end: number,
+): { start: number; end: number } | undefined {
+  const diff = computeWholeFileDiff(oldContent, newContent)
+  const oldToNew = new Map<number, number>()
+  for (const row of diff.rows) {
+    if (row.oldLine !== undefined && row.newLine !== undefined) {
+      oldToNew.set(row.oldLine, row.newLine)
+    }
+  }
+  let min = Infinity
+  let max = -Infinity
+  for (let line = start; line <= end; line++) {
+    const next = oldToNew.get(line)
+    if (next === undefined) continue
+    min = Math.min(min, next)
+    max = Math.max(max, next)
+  }
+  if (min === Infinity) return undefined
+  return { start: min, end: max }
+}
+
+/**
+ * Rewrite every `(referencePath:line)` / `(referencePath:start-end)` occurrence
+ * in `text`, remapping each range from `oldContent` to `newContent`. A range
+ * whose lines all survived becomes the new range; one whose lines were all
+ * removed becomes `(referencePath:LINE_MISSING)`.
+ * @param text - the free text (composer draft, queued message) to rewrite.
+ * @param referencePath - the file's reference path (workspace-relative or absolute).
+ * @param oldContent - the file content the references were made against.
+ * @param newContent - the file content now.
+ * @returns the rewritten text.
+ */
+export function remapReferences(
+  text: string,
+  referencePath: string,
+  oldContent: string,
+  newContent: string,
+): string {
+  const escaped = referencePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const regex = new RegExp(`\\(${escaped}:(\\d+)(?:-(\\d+))?\\)`, 'g')
+  return text.replace(regex, (_whole, startText: string, endText: string | undefined) => {
+    const start = Number(startText)
+    const end = endText === undefined ? start : Number(endText)
+    const mapped = remapReferenceRange(oldContent, newContent, start, end)
+    if (mapped === undefined) return `(${referencePath}:${LINE_MISSING_LABEL})`
+    return `(${referencePath}:${lineRangeLabel(mapped.start, mapped.end)})`
+  })
 }

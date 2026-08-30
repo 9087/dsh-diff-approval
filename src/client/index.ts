@@ -10,6 +10,7 @@ import { PendingPanel, SIDEBAR_AUTO_COLLAPSE_PX } from './PendingPanel.tsx'
 import { DiffApprovalSettingsTab } from './SettingsTab.tsx'
 import { createDiffApprovalPort } from './port.ts'
 import { createPendingDiffStore } from './store.ts'
+import { attachReferenceRemap } from './remap-sync.ts'
 import type { PendingPanelFace } from './slots.ts'
 import { en, NS, zh } from './locales.ts'
 
@@ -91,6 +92,35 @@ export function apply(ctx: ClientContext): void {
   const connection = ctx.get('connection') as ConnectionHandle
   const store = createPendingDiffStore(createDiffApprovalPort(connection.rpc))
 
+  // The current session, latched from the panel's `onRefresh` so the reference
+  // remap can address the visible composer.
+  let currentSessionId: SessionId | undefined
+
+  // Rewrite stale references in the current composer when a pending file's
+  // content changes (agent edit, block revert, or an external adoption).
+  // `remapFile` is also called directly after a whole-file revert (whose entry
+  // leaves the list, so the observation loop cannot see its content change).
+  let remapFile: (path: string, oldText: string, newText: string) => void = () => {}
+  ctx.effect(() => {
+    const attached = attachReferenceRemap({
+      store,
+      readDraft: () => document.querySelector<HTMLTextAreaElement>('[data-composer-card] textarea')?.value,
+      writeDraft: (text) => {
+        if (currentSessionId === undefined) return
+        const sessions = ctx.get('sessions') as { scope(id: SessionId): ClientContext | undefined } | undefined
+        const actx = sessions?.scope(currentSessionId)
+        if (actx === undefined) return
+        const conversation = actx.get('conversation') as
+          | { input?: { for(actx: unknown): { setDraft(text: string): void } } }
+          | undefined
+        if (conversation?.input === undefined) return
+        conversation.input.for(actx).setDraft(text)
+      },
+    })
+    remapFile = attached.remapFile
+    return attached.unsubscribe
+  }, 'diff-approval: reference remap')
+
   // Collapse the DSH sidebar before this plugin's modal opens, but only on the
   // narrow (auto-collapse) breakpoint: a wide expanded sidebar is fine (the
   // modal covers it) and must NOT be auto-collapsed. Narrow + manually
@@ -118,9 +148,21 @@ export function apply(ctx: ClientContext): void {
     locale: NS,
     inject: (): PendingPanelFace => ({
       hooks: { pending: store },
-      onRefresh: (sessionId) => { void store.refresh(sessionId) },
+      onRefresh: (sessionId) => { currentSessionId = sessionId; void store.refresh(sessionId) },
       onKeep: (sessionId, path) => store.keep(sessionId, path),
-      onRevert: (sessionId, path) => store.revert(sessionId, path),
+      onRevert: (sessionId, path) => {
+        const entry = store.getSnapshot().files.find(file => file.id === path)
+        const before = entry?.newText
+        const after = entry?.oldText
+        const filePath = entry?.path
+        return store.revert(sessionId, path).then(() => {
+          // A whole-file revert writes the old text back, so references to the
+          // file shift from `newText` to `oldText`.
+          if (filePath !== undefined && before !== undefined && after !== undefined) {
+            remapFile(filePath, before, after)
+          }
+        })
+      },
       onBlockKeep: (sessionId, id, block) => store.blockKeep(sessionId, id, block),
       onBlockRevert: (sessionId, id, block) => store.blockRevert(sessionId, id, block),
       onOpen: (sessionId, id, action) => store.open(sessionId, id, action),

@@ -1230,7 +1230,7 @@ describe('PendingPanel', () => {
     // The status bar shows the line-range reference once lines are selected.
     // No workspace is known, so the reference carries the absolute path.
     expect(document.querySelector('[data-diff-status-bar]')).not.toBeNull()
-    expect(screen.getByText('/repo/a.txt:1')).toBeDefined()
+    expect(screen.getByText('(/repo/a.txt:1)')).toBeDefined()
     expect(document.querySelector('[data-diff-copy]')).not.toBeNull()
   })
 
@@ -1259,7 +1259,7 @@ describe('PendingPanel', () => {
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
 
     // Inside the workspace the reference drops the root and stays relative.
-    expect(screen.getByText('a.txt:1')).toBeDefined()
+    expect(screen.getByText('(a.txt:1)')).toBeDefined()
   })
 
   it('shows a keep/revert frame for a selection spanning multiple blocks', () => {
@@ -1391,10 +1391,10 @@ describe('PendingPanel', () => {
     } as unknown as Selection
     vi.spyOn(window, 'getSelection').mockReturnValue(selection)
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
-    expect(screen.getByText('/repo/a.txt:1')).toBeDefined()
+    expect(screen.getByText('(/repo/a.txt:1)')).toBeDefined()
 
     fireEvent.keyDown(document, { key: 'l', ctrlKey: true })
-    await vi.waitFor(() => { expect(writeText).toHaveBeenCalledWith('/repo/a.txt:1') })
+    await vi.waitFor(() => { expect(writeText).toHaveBeenCalledWith('(/repo/a.txt:1)') })
     // The status bar button and the toast both carry the copied label.
     await vi.waitFor(() => { expect(screen.getAllByText('action.copied').length).toBeGreaterThanOrEqual(1) })
   })
@@ -1436,7 +1436,7 @@ describe('PendingPanel', () => {
     // The paste runs in the same async continuation, so wait for it rather than
     // reading the mock immediately.
     const pasteMock = props.onPasteReference as unknown as { mock: { calls: unknown[][] } }
-    await vi.waitFor(() => { expect(pasteMock.mock.calls).toEqual([[S1, '/repo/a.txt:1']]) })
+    await vi.waitFor(() => { expect(pasteMock.mock.calls).toEqual([[S1, '(/repo/a.txt:1)']]) })
     expect(writeText).not.toHaveBeenCalled()
   })
 
@@ -1452,7 +1452,7 @@ describe('PendingPanel', () => {
 
     selectFirstRows(view)
     fireEvent.keyDown(document, { key: 'l', ctrlKey: true })
-    await vi.waitFor(() => { expect(writeText).toHaveBeenCalledWith('/repo/a.txt:1') })
+    await vi.waitFor(() => { expect(writeText).toHaveBeenCalledWith('(/repo/a.txt:1)') })
     const pasteMock = props.onPasteReference as unknown as { mock: { calls: unknown[][] } }
     expect(pasteMock.mock.calls).toHaveLength(0)
   })
