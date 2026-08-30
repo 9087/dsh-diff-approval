@@ -565,6 +565,24 @@ describe('PendingPanel', () => {
     expect(screen.getByText('/repo/b.txt')).toBeDefined()
   })
 
+  it('cycles the pending files with Ctrl+Tab and Ctrl+Shift+Tab', () => {
+    const second = entry({ id: 'entry-2', path: '/repo/b.txt' })
+    const props = panelProps({ read: true, files: [FILE, second], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // Auto-selects the first file (a.txt).
+    expect(screen.getByText('/repo/a.txt')).toBeDefined()
+
+    // Ctrl+Tab advances to the next file (b.txt).
+    fireEvent.keyDown(document.body, { key: 'Tab', ctrlKey: true })
+    expect(screen.getByText('/repo/b.txt')).toBeDefined()
+
+    // Ctrl+Shift+Tab returns to the previous file (a.txt).
+    fireEvent.keyDown(document.body, { key: 'Tab', ctrlKey: true, shiftKey: true })
+    expect(screen.getByText('/repo/a.txt')).toBeDefined()
+  })
+
   it('cannot be deselected by clicking the selected row again', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     const view = render(<PendingPanel {...props} />)

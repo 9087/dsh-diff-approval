@@ -2467,6 +2467,28 @@ export function PendingPanel({
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
   }, [open, current, handleUndo, handleRedo])
 
+  // Ctrl+Tab / Ctrl+Shift+Tab cycle the pending file list (forward / backward),
+  // wrapping at the ends. Same global-capture scope as the other chords so the
+  // panel works without its own focus, and text inputs keep the browser's
+  // native tab behavior.
+  useEffect(() => {
+    if (!open || current === undefined) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return
+      if (event.key.toLowerCase() !== 'tab') return
+      const target = event.target as Node | null
+      if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null) return
+      if (files.length === 0) return
+      event.preventDefault()
+      const index = files.findIndex(file => file.id === selected)
+      const direction = event.shiftKey ? -1 : 1
+      const next = files[(index + direction + files.length) % files.length]
+      if (next !== undefined) setSelected(next.id)
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true) }
+  }, [open, current, files, selected])
+
   /** Drag the list/detail divider; width follows the pointer within its bounds. */
   const startResize = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (event.button !== 0) return
