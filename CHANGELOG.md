@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.13.0](https://github.com/9087/dsh-diff-approval/compare/v0.12.0...v0.13.0) (2026-08-30)
+
+### Features
+
+* auto-paste reference to composer without clipboard write or toast ([e77ff41](https://github.com/9087/dsh-diff-approval/commit/e77ff413841ffd24012f03c623cd0036ad14e3bc))
+* cycle pending files with Ctrl+Tab / Ctrl+Shift+Tab ([b933950](https://github.com/9087/dsh-diff-approval/commit/b933950da7f337f21466ae2c13c3922cdedbe84c))
+* keep fully-resolved files listed and prompt remove-or-keep ([ab5ff8f](https://github.com/9087/dsh-diff-approval/commit/ab5ff8f355d84b7570ab7b8e6d2cb6a8784bea70))
+* keep/revert selected diff blocks via a selection frame ([cf8f893](https://github.com/9087/dsh-diff-approval/commit/cf8f8939dbb077c0561e766509dd5df85f048bf5))
+* portal the diff panel out of the sidebar and align sidebar behavior ([fb0c8f5](https://github.com/9087/dsh-diff-approval/commit/fb0c8f5d4f466c4cd95261696903b29007859abb))
+* quick-summon chord (Ctrl+D) toggles the review panel, Esc closes ([21d5493](https://github.com/9087/dsh-diff-approval/commit/21d54935971b5ca6c02049e5e0376dbc94d6d7c1))
+* remap stale references in queued messages ([66dbd67](https://github.com/9087/dsh-diff-approval/commit/66dbd6751b0916d6a908f6cdaf5dcea474805ee5))
+* wrap references in (path:line) and remap them as files change ([57bb1e1](https://github.com/9087/dsh-diff-approval/commit/57bb1e1c54a9d9b14a2f1191df955db07e4db2de))
+
+### Bug Fixes
+
+* disable mobile text autosizing in the diff view ([99c570d](https://github.com/9087/dsh-diff-approval/commit/99c570db2c50cb9ba5125bc085d901da6b8ebf62))
+* preserve scroll position when the diff refreshes ([d5bdd45](https://github.com/9087/dsh-diff-approval/commit/d5bdd450cb1f5cd2d36fc3d6d6e4232dc47cd2dd))
+
 ## [0.12.0](https://github.com/9087/dsh-diff-approval/compare/v0.11.0...v0.12.0) (2026-08-28)
 
 ### Features
