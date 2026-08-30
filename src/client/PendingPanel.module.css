@@ -348,6 +348,44 @@
   text-align: center;
 }
 
+/* Confirm-removal overlay: dims the panel behind a centered card. */
+.confirmBackdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--dsw-alias-bg-base) 55%, transparent);
+}
+
+.confirmCard {
+  max-width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-base);
+  box-shadow: var(--dsw-shadow-lv3);
+}
+
+.confirmText {
+  margin: 0;
+  font: var(--dsw-font-caption);
+  color: var(--dsw-alias-label-primary);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.confirmActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .title {
   font-size: 13px;
   font-weight: 500;

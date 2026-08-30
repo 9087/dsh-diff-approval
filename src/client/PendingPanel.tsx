@@ -1096,10 +1096,12 @@ function PendingFileRow({ file, selected, failedMessage, t, onSelect }: PendingF
           {file.kind === 'create' && <span className={css.kindTag}>{t('row.create')}</span>}
           {file.missing && <span className={css.missing} title={t('panel.missingHint')}>{t('panel.missing')}</span>}
           {failedMessage !== undefined && <span className={css.rowFailed} title={failedMessage}>{t('row.failed')}</span>}
-          <span className={css.rowMeta}>
-            <span className={css.addCount}>{t('row.added', { added: stats.added })}</span>
-            <span className={css.delCount}>{t('row.removed', { removed: stats.removed })}</span>
-          </span>
+          {(stats.added !== 0 || stats.removed !== 0) && (
+            <span className={css.rowMeta}>
+              <span className={css.addCount}>{t('row.added', { added: stats.added })}</span>
+              <span className={css.delCount}>{t('row.removed', { removed: stats.removed })}</span>
+            </span>
+          )}
         </button>
       </Tooltip>
     </li>
@@ -1762,7 +1764,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
             </button>
           </Tooltip>
         )}
-        <span className={css.diffStats}>{t('panel.stats', { added: model.diff.added, removed: model.diff.removed })}</span>
+        {(model.diff.added !== 0 || model.diff.removed !== 0) && (
+          <span className={css.diffStats}>{t('panel.stats', { added: model.diff.added, removed: model.diff.removed })}</span>
+        )}
         {file.kind === 'create' && <span className={css.kindHint}>{t('panel.createHint')}</span>}
         {model.blocks.length > 0 && (
           <>
@@ -2076,7 +2080,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPasteReference, onUndo, onRedo, onImportVcs, onAckRedoCleared, collapseSidebar, t,
+  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPasteReference, onUndo, onRedo, onImportVcs, onAckRedoCleared, onAckJustResolved, collapseSidebar, t,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
   // A newly created session is selected but still blank (no messages yet); it
@@ -2111,6 +2115,8 @@ export function PendingPanel({
   const [copyToast, setCopyToast] = useState<string | null>(null)
   /** Whether the redo-cleared notice is showing (bottom-right, OK to dismiss). */
   const [redoClearedNotice, setRedoClearedNotice] = useState(false)
+  /** A file whose last block just resolved, pending a remove-or-keep choice. */
+  const [confirmDismiss, setConfirmDismiss] = useState<string | null>(null)
   /** Bottom offset tracking the chat composer's top edge so the input stays visible. */
   const [bottomPx, setBottomPx] = useState(FALLBACK_BOTTOM_PX)
   /** Fullscreen expanded: the panel bottom pins to the window edge, ignoring the composer offset. */
@@ -2302,6 +2308,14 @@ export function PendingPanel({
     failedRef.current = current
   }, [snapshot.failed])
 
+  // The store latches `justResolved` when a block action clears the file's
+  // last block. Surface the remove-or-keep prompt once, then acknowledge.
+  useEffect(() => {
+    if (snapshot.justResolved === undefined) return
+    setConfirmDismiss(snapshot.justResolved)
+    onAckJustResolved()
+  }, [snapshot.justResolved, onAckJustResolved])
+
   // Auto-open the first pending file when the panel opens, and advance to the
   // next one once the selected file is handled. Selection is single and cannot
   // be cleared by clicking — only an empty list shows the empty state.
@@ -2391,6 +2405,8 @@ export function PendingPanel({
   )
 
   const selectedFile = files.find(file => file.id === selected)
+  /** The file whose removal is being confirmed, if any. */
+  const confirmFile = confirmDismiss === null ? undefined : files.find(file => file.id === confirmDismiss)
 
   // The file list's scrollable rows plus the pinned bulk footer, shared by the
   // in-flow left pane and the floating (collapsed) overlay.
@@ -2699,6 +2715,34 @@ export function PendingPanel({
                   {fileListBody}
                 </div>
               )}
+            </div>
+          )}
+          {confirmFile !== undefined && (
+            <div className={css.confirmBackdrop} data-diff-confirm>
+              <div className={css.confirmCard} role="dialog" aria-modal="true">
+                <p className={css.confirmText}>{t('panel.resolvedAsk', { file: basenameOf(confirmFile.path) })}</p>
+                <div className={css.confirmActions}>
+                  <button
+                    type="button"
+                    className={`${css.action} ${css.actionPrimary}`}
+                    data-diff-confirm-remove
+                    onClick={() => {
+                      setConfirmDismiss(null)
+                      void onKeep(confirmFile.sessionId, confirmFile.id)
+                    }}
+                  >
+                    {t('row.dismiss')}
+                  </button>
+                  <button
+                    type="button"
+                    className={css.action}
+                    data-diff-confirm-keep
+                    onClick={() => { setConfirmDismiss(null) }}
+                  >
+                    {t('panel.keepInList')}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
           </section>

@@ -773,22 +773,19 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         }
         // Accept this block: fold its new side into the tracked baseline so
         // the entry's diff no longer shows it. The file already holds the
-        // accepted content, so nothing is written.
+        // accepted content, so nothing is written. The entry stays even when
+        // now fully kept (oldText === newText): the file stays listed with no
+        // pending diff and its whole-file keep/revert removes it later.
         const accepted = contentRangeOf(entry.newText, blockTarget.block.newStart, blockTarget.block.newEnd)
         const updatedOld = replaceContentLines(entry.oldText, blockTarget.block.oldStart, blockTarget.block.oldEnd, accepted)
-        let afterEntry: PendingEntry | undefined
-        if (updatedOld === entry.newText) {
-          store.remove(blockTarget.sessionId, blockTarget.id)
-          afterEntry = undefined
-        } else {
-          store.update(blockTarget.sessionId, blockTarget.id, { oldText: updatedOld })
-          afterEntry = { ...entry, oldText: updatedOld, updatedAt: Date.now() }
-        }
+        store.update(blockTarget.sessionId, blockTarget.id, { oldText: updatedOld })
+        const afterEntry: PendingEntry = { ...entry, oldText: updatedOld, updatedAt: Date.now() }
         pushUndo(blockTarget.sessionId,
           { id: entry.id, path: entry.path, entry, fileText: undefined },
           { id: entry.id, path: entry.path, entry: afterEntry, fileText: undefined })
         await persistSession(blockTarget.sessionId)
-        const kept: DiffApprovalActionValue = { outcome: 'kept' }
+        const fullyResolved = updatedOld === entry.newText
+        const kept: DiffApprovalActionValue = fullyResolved ? { outcome: 'kept', resolved: true } : { outcome: 'kept' }
         return { ok: true, value: kept }
       }
       case 'block-revert': {
@@ -801,33 +798,26 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           return { ok: true, value }
         }
         // Undo this block: restore its old side into the new text and write
-        // the file back. A created file that reverts to empty is removed like
-        // the whole-file revert.
+        // the file back. The entry stays even when now fully reverted
+        // (newText === oldText): the file stays listed with no pending diff.
         const restored = contentRangeOf(entry.oldText, blockTarget.block.oldStart, blockTarget.block.oldEnd)
         const updatedNew = replaceContentLines(entry.newText, blockTarget.block.newStart, blockTarget.block.newEnd, restored)
         // Write the file in the entry's current EOL (uniform), and keep the
         // store's newText in step with the bytes actually written, so a later
-        // read never sees a line-ending-only drift. The "fully reverted" check
-        // compares content on an EOL-neutral basis.
+        // read never sees a line-ending-only drift.
         const content = reencodeEol(updatedNew, detectEol(entry.newText))
-        let afterEntry: PendingEntry | undefined
-        if (normalizeEol(updatedNew) === normalizeEol(entry.oldText)) {
-          store.remove(blockTarget.sessionId, blockTarget.id)
-          afterEntry = undefined
-        } else {
-          store.update(blockTarget.sessionId, blockTarget.id, { newText: content })
-          afterEntry = { ...entry, newText: content, updatedAt: Date.now() }
-        }
+        store.update(blockTarget.sessionId, blockTarget.id, { newText: content })
+        const afterEntry: PendingEntry = { ...entry, newText: content, updatedAt: Date.now() }
         // A block-revert that empties a created file deletes it and is not
         // undoable; one that writes keeps a snapshot for Ctrl+Z.
         let undo: { before: DiffApprovalUndoState; after: DiffApprovalUndoState } | undefined
         try {
-          const resolved = await ctx.fs.resolve(entry.path, { signal })
+          const target = await ctx.fs.resolve(entry.path, { signal })
           if (entry.kind === 'create' && content === '') {
-            await rm(ctx.fs.processPath(resolved), { force: true })
+            await rm(ctx.fs.processPath(target), { force: true })
           } else {
-            const preWrite = await ctx.fs.readText(resolved, undefined) ?? entry.newText
-            await writeRevert(resolved, content, blockTarget.sessionId, signal)
+            const preWrite = await ctx.fs.readText(target, undefined) ?? entry.newText
+            await writeRevert(target, content, blockTarget.sessionId, signal)
             undo = {
               before: { id: entry.id, path: entry.path, entry, fileText: preWrite },
               after: { id: entry.id, path: entry.path, entry: afterEntry, fileText: content },
@@ -838,7 +828,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         }
         if (undo !== undefined) pushUndo(blockTarget.sessionId, undo.before, undo.after)
         await persistSession(blockTarget.sessionId)
-        const reverted: DiffApprovalActionValue = { outcome: 'reverted' }
+        const fullyResolved = normalizeEol(updatedNew) === normalizeEol(entry.oldText)
+        const reverted: DiffApprovalActionValue = fullyResolved ? { outcome: 'reverted', resolved: true } : { outcome: 'reverted' }
         return { ok: true, value: reverted }
       }
       case 'undo': {

@@ -45,6 +45,14 @@ export interface WholeFileDiff {
 export function computeWholeFileDiff(oldText: string, newText: string): WholeFileDiff {
   oldText = oldText.replace(/\r\n?/g, '\n')
   newText = newText.replace(/\r\n?/g, '\n')
+  // Identical sides (e.g. a fully-resolved file) still show the content: render
+  // every line as context instead of an empty body.
+  if (oldText === newText) {
+    const rows: WholeFileDiffRow[] = contentLines(oldText).map((text, index) => ({
+      kind: 'context', text, oldLine: index + 1, newLine: index + 1,
+    }))
+    return { rows, removed: 0, added: 0 }
+  }
   const oldLines = contentLines(oldText)
   const newLines = contentLines(newText)
   const context = Math.max(1, oldLines.length, newLines.length)

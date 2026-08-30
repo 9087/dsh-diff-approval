@@ -116,4 +116,7 @@ export interface DiffApprovalActionValue {
   outcome: DiffApprovalActionOutcome
   /** Entry id the undo/redo affected; absent for a no-op or a non-undo action. */
   id?: string | undefined
+  /** Set when a block keep/revert just cleared the entry's last remaining
+   * block (the entry stays listed with no pending diff). */
+  resolved?: boolean | undefined
 }

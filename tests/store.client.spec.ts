@@ -163,6 +163,18 @@ describe('block actions', () => {
     expect(store.getSnapshot().error).toBeUndefined()
     expect(store.getSnapshot().busy).toEqual(new Set())
   })
+
+  it('latches justResolved when the last block resolves, then clears it', async () => {
+    const seam = port({ blockKeep: vi.fn(async () => ({ outcome: 'kept', resolved: true })) })
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+
+    await store.blockKeep(S1, FILE.id, BLOCK)
+    expect(store.getSnapshot().justResolved).toBe(FILE.id)
+
+    store.clearJustResolved()
+    expect(store.getSnapshot().justResolved).toBeUndefined()
+  })
 })
 
 describe('reset', () => {

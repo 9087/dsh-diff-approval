@@ -49,6 +49,7 @@ function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
     onRedo: vi.fn(),
     onImportVcs: vi.fn(async () => ({ imported: 0, detected: false })),
     onAckRedoCleared: vi.fn(),
+    onAckJustResolved: vi.fn(),
     collapseSidebar: vi.fn(),
     t: (key: string, params?: Record<string, unknown>) => params === undefined ? key : `${key} ${JSON.stringify(params)}`,
   } as unknown as PanelProps
@@ -624,6 +625,31 @@ describe('PendingPanel', () => {
     expect(screen.getAllByText('row.removed {"removed":1}')).toHaveLength(1)
     expect(screen.getAllByText('row.added {"added":2}')).toHaveLength(1)
     expect(screen.getAllByText('row.removed {"removed":0}')).toHaveLength(1)
+  })
+
+  it('asks whether to remove a file whose last block just resolved', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set(), justResolved: FILE.id })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    expect(document.querySelector('[data-diff-confirm]')).not.toBeNull()
+    expect(screen.getByText('panel.resolvedAsk {"file":"a.txt"}')).toBeDefined()
+
+    // "Keep in list" closes the dialog without removing the file.
+    fireEvent.click(document.querySelector('[data-diff-confirm-keep]') as HTMLButtonElement)
+    expect(document.querySelector('[data-diff-confirm]')).toBeNull()
+  })
+
+  it('removes the file when the confirm dialog is accepted', () => {
+    const keep = vi.fn(async () => {})
+    const props = panelProps({ read: true, files: [FILE], busy: new Set(), justResolved: FILE.id })
+    props.onKeep = keep
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    fireEvent.click(document.querySelector('[data-diff-confirm-remove]') as HTMLButtonElement)
+    expect(keep).toHaveBeenCalledWith(S1, FILE.id)
+    expect(document.querySelector('[data-diff-confirm]')).toBeNull()
   })
 
   it('marks changed lines on the scrollbar overview ruler in diff colors', () => {

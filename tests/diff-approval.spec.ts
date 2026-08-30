@@ -347,6 +347,30 @@ describe('block keep/revert', () => {
     expect(kept!.oldText).toBe('a\nb\nc\nd\n')
   })
 
+  it('keeps the entry with no pending diff when the last block is kept', async () => {
+    const { ctx, fs, handle } = await harness()
+    const entry = await twoBlocks({ ctx, fs, handle })
+    await handle('block-keep', { sessionId: 'session-1', id: entry.id, block: { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 } }, signal())
+    await expect(handle('block-keep', { sessionId: 'session-1', id: entry.id, block: { oldStart: 3, oldEnd: 3, newStart: 3, newEnd: 3 } }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'kept', resolved: true } })
+    expect(fs.writeText).not.toHaveBeenCalled()
+    const [kept] = await listEntries(handle, 'session-1')
+    // The entry stays listed, now with both sides equal (no pending diff).
+    expect(kept!.oldText).toBe('A\nb\nC\nd\n')
+    expect(kept!.newText).toBe('A\nb\nC\nd\n')
+  })
+
+  it('keeps the entry with no pending diff when the last block is reverted', async () => {
+    const { ctx, fs, handle } = await harness()
+    const entry = await twoBlocks({ ctx, fs, handle })
+    await handle('block-revert', { sessionId: 'session-1', id: entry.id, block: { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 } }, signal())
+    await expect(handle('block-revert', { sessionId: 'session-1', id: entry.id, block: { oldStart: 3, oldEnd: 3, newStart: 3, newEnd: 3 } }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'reverted', resolved: true } })
+    const [kept] = await listEntries(handle, 'session-1')
+    expect(kept!.oldText).toBe('a\nb\nc\nd\n')
+    expect(kept!.newText).toBe('a\nb\nc\nd\n')
+  })
+
   it('restores a purely deleted line by inserting at its new-side position', async () => {
     const { ctx, fs, handle } = await harness()
     emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a\nb\nc\n', 'b\n'))

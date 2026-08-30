@@ -49,6 +49,16 @@ describe('computeWholeFileDiff', () => {
     expect(computeWholeFileDiff('', '').rows).toEqual([])
   })
 
+  it('renders identical sides as context rows (a fully-resolved file)', () => {
+    const diff = computeWholeFileDiff('a\nb\n', 'a\nb\n')
+    expect(diff.rows).toEqual([
+      { kind: 'context', text: 'a', oldLine: 1, newLine: 1 },
+      { kind: 'context', text: 'b', oldLine: 2, newLine: 2 },
+    ])
+    expect(diff.removed).toBe(0)
+    expect(diff.added).toBe(0)
+  })
+
   it('drops the no-newline patch marker', () => {
     const diff = computeWholeFileDiff('x', 'x\ny')
     expect(diff.rows).toEqual([

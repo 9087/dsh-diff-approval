@@ -22,6 +22,9 @@ export interface PendingDiffSnapshot {
    * superseded the redo history; the panel surfaces it once (deferred if the
    * panel is closed) via a bottom-right notice. */
   redoCleared?: boolean
+  /** Latched file id whose last block just resolved; the panel prompts once to
+   * remove-or-keep it, then acknowledges to clear the latch. */
+  justResolved?: string | undefined
 }
 
 /** The injected face the panel component receives from the plugin body. */
@@ -52,6 +55,8 @@ export interface PendingPanelFace {
   onImportVcs: (sessionId: SessionId, includeUntracked: boolean) => Promise<VcsImportValue>
   /** Acknowledge the redo-cleared notice so it is only surfaced once. */
   onAckRedoCleared: () => void
+  /** Acknowledge the just-resolved prompt so it is only surfaced once. */
+  onAckJustResolved: () => void
   /** Collapse the DSH sidebar (no-op when already collapsed) before the modal
    * opens or fullscreens, so an expanded sidebar can't overlap the modal. */
   collapseSidebar: () => void

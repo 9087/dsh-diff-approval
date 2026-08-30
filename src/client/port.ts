@@ -127,7 +127,8 @@ function actionOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): Dif
   }
   const id = (value as Record<string, unknown>).id
   const entryId = typeof id === 'string' && id.length > 0 ? id : undefined
-  return { outcome, id: entryId }
+  const resolved = (value as Record<string, unknown>).resolved
+  return resolved === true ? { outcome, id: entryId, resolved: true } : { outcome, id: entryId }
 }
 
 /** Narrow the vcs-import endpoint's value; a malformed wire value is a failure. */

@@ -128,6 +128,11 @@ describe('block keep/revert', () => {
     expect(seam.call).toHaveBeenCalledWith('/diff-approval', 'block-revert', { sessionId: 'session-1', id: 'e1', block })
   })
 
+  it('passes the resolved flag through', async () => {
+    const seam = fakeRpc({ 'block-keep': { ok: true, value: { outcome: 'kept', resolved: true } } })
+    await expect(createDiffApprovalPort(seam.rpc).blockKeep(S1, 'e1', block)).resolves.toEqual({ outcome: 'kept', resolved: true })
+  })
+
   it('folds a transport error into a rejection', async () => {
     const seam = fakeRpc({ 'block-keep': { ok: false, error: { code: 'internal', message: 'down', details: {} } } })
     await expect(createDiffApprovalPort(seam.rpc).blockKeep(S1, 'e1', block)).rejects.toThrow('internal: down')

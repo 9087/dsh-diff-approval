@@ -34,6 +34,7 @@ export const zh = {
   'settings.tabLabel': '改动审批',
   'row.create': '新增文件',
   'row.failed': '失败',
+  'row.dismiss': '移除',
   'row.added': '+{added}',
   'row.removed': '-{removed}',
   'action.keep': '保留',
@@ -69,6 +70,8 @@ export const zh = {
   'status.kept': '已保留',
   'status.reverted': '已回退',
   'status.missing': '该改动已不存在',
+  'panel.resolvedAsk': '「{file}」的所有改动都已处理，是否从列表移除？',
+  'panel.keepInList': '保留在列表',
 } satisfies Record<string, string>
 
 /** Translation keys owned by the pending-edit review namespace. */
@@ -113,6 +116,7 @@ export const en = {
   'settings.tabLabel': 'Diff Approval',
   'row.create': 'New file',
   'row.failed': 'Failed',
+  'row.dismiss': 'Remove',
   'row.added': '+{added}',
   'row.removed': '-{removed}',
   'action.keep': 'Keep',
@@ -148,4 +152,6 @@ export const en = {
   'status.kept': 'Kept',
   'status.reverted': 'Reverted',
   'status.missing': 'This change no longer exists',
+  'panel.resolvedAsk': 'All changes in "{file}" are resolved. Remove it from the list?',
+  'panel.keepInList': 'Keep in list',
 } satisfies Record<DiffApprovalKey, string>

@@ -128,6 +128,7 @@ export function apply(ctx: ClientContext): void {
       onRedo: (sessionId) => store.redo(sessionId),
       onImportVcs: (sessionId, includeUntracked) => store.importVcs(sessionId, includeUntracked),
       onAckRedoCleared: () => store.clearRedoCleared(),
+      onAckJustResolved: () => store.clearJustResolved(),
       onPasteReference: (sessionId, reference) => {
         // The composer is reached through the session-scoped context: the
         // sessions service maps an id to its actx, whose conversation service
