@@ -9,6 +9,7 @@
 
 import type { PendingDiffStore } from './store.ts'
 import { referencePathOf, remapReferences } from './reference.ts'
+import { contentKey } from './whole-file-diff.ts'
 
 /** One queued message's minimal content block; text blocks carry `text`, and every other kind passes through verbatim. */
 interface QueueBlock { type: string; text?: string }
@@ -74,12 +75,14 @@ export function attachReferenceRemap(opts: ReferenceRemapOpts): {
     const snapshot = store.getSnapshot()
     for (const file of snapshot.files) {
       const previous = lastContent.get(file.path)
-      if (previous === undefined) {
-        lastContent.set(file.path, file.newText)
-      } else if (previous !== file.newText) {
+      // Remap only on a real content change, not a representation drift (an EOL
+      // re-encode or a trailing-newline flip), which must never expire a live
+      // reference. The baseline always advances so a later real change remaps
+      // from the right old content.
+      if (previous !== undefined && contentKey(previous) !== contentKey(file.newText)) {
         remap(file.path, previous, file.newText, snapshot.workspacePath)
-        lastContent.set(file.path, file.newText)
       }
+      lastContent.set(file.path, file.newText)
     }
     // Drop baselines for files that left the list (whole-file keep/revert).
     for (const path of [...lastContent.keys()]) {

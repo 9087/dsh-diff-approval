@@ -110,4 +110,23 @@ describe('attachReferenceRemap', () => {
     expect(writeQueue).toHaveBeenCalledTimes(1)
     expect(writeQueue).toHaveBeenCalledWith('q1', [{ type: 'text', text: '改 (a.txt:2)' }, { type: 'image' }])
   })
+
+  it('does not remap on a trailing-newline-only drift', async () => {
+    const list = vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>()
+    const store = createPendingDiffStore(portOf(list))
+
+    let draft = '(a.txt:2)'
+    const writeDraft = vi.fn((text: string) => { draft = text })
+    attachReferenceRemap({ store, readDraft: () => draft, writeDraft, readQueue: () => [], writeQueue: () => {} })
+
+    list.mockResolvedValue({ files: [entry('a\nb\n')], workspacePath: '/repo' })
+    await store.refresh(S1)
+
+    // Same content, trailing newline stripped: not a real change.
+    list.mockResolvedValue({ files: [entry('a\nb')], workspacePath: '/repo' })
+    await store.refresh(S1)
+
+    expect(writeDraft).not.toHaveBeenCalled()
+    expect(draft).toBe('(a.txt:2)')
+  })
 })

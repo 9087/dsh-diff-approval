@@ -42,21 +42,35 @@ export interface WholeFileDiff {
  * @param newText - the file content after the pending change.
  * @returns the complete row list with totals.
  */
+/**
+ * Normalize content for equality: line endings → `\n`, and a single trailing
+ * newline is a terminator rather than a line. The result is the line bodies
+ * joined by `\n` with no trailing newline, so representation-only differences
+ * (EOL style, trailing-newline presence) compare equal.
+ * @param text - the content to normalize.
+ * @returns the normalized line bodies.
+ */
+export function contentKey(text: string): string {
+  const normalized = text.replace(/\r\n?/g, '\n')
+  return normalized.endsWith('\n') ? normalized.slice(0, -1) : normalized
+}
+
 export function computeWholeFileDiff(oldText: string, newText: string): WholeFileDiff {
-  oldText = oldText.replace(/\r\n?/g, '\n')
-  newText = newText.replace(/\r\n?/g, '\n')
-  // Identical sides (e.g. a fully-resolved file) still show the content: render
-  // every line as context instead of an empty body.
-  if (oldText === newText) {
-    const rows: WholeFileDiffRow[] = contentLines(oldText).map((text, index) => ({
+  const oldNorm = oldText.replace(/\r\n?/g, '\n')
+  const newNorm = newText.replace(/\r\n?/g, '\n')
+  // Identical content — possibly differing only by EOL style (normalized above)
+  // or by the trailing newline (a terminator, not a line) — still shows every
+  // line as context, never a spurious delete+add of the last line.
+  if (contentKey(oldNorm) === contentKey(newNorm)) {
+    const rows: WholeFileDiffRow[] = contentLines(oldNorm).map((text, index) => ({
       kind: 'context', text, oldLine: index + 1, newLine: index + 1,
     }))
     return { rows, removed: 0, added: 0 }
   }
-  const oldLines = contentLines(oldText)
-  const newLines = contentLines(newText)
+  const oldLines = contentLines(oldNorm)
+  const newLines = contentLines(newNorm)
   const context = Math.max(1, oldLines.length, newLines.length)
-  const patch = structuredPatch('', '', oldText, newText, undefined, undefined, { context })
+  const patch = structuredPatch('', '', oldNorm, newNorm, undefined, undefined, { context })
   const rows: WholeFileDiffRow[] = []
   let removed = 0
   let added = 0

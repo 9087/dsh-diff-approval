@@ -80,4 +80,14 @@ describe('computeWholeFileDiff', () => {
     expect(diff.removed).toBe(1)
     expect(diff.added).toBe(1)
   })
+
+  it('treats a trailing-newline-only difference as identical content', () => {
+    const diff = computeWholeFileDiff('a\nb\n', 'a\nb')
+    expect(diff.rows).toEqual([
+      { kind: 'context', text: 'a', oldLine: 1, newLine: 1 },
+      { kind: 'context', text: 'b', oldLine: 2, newLine: 2 },
+    ])
+    expect(diff.removed).toBe(0)
+    expect(diff.added).toBe(0)
+  })
 })

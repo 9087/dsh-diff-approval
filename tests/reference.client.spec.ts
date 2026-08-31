@@ -69,6 +69,10 @@ describe('remapReferenceRange', () => {
     // 'a\nb\nc\nd\n' -> 'a\nX\nc\nd\n': line 2 removed, 1/3/4 survive.
     expect(remapReferenceRange('a\nb\nc\nd\n', 'a\nX\nc\nd\n', 1, 4)).toEqual({ start: 1, end: 4 })
   })
+
+  it('keeps a line when only the trailing newline changed', () => {
+    expect(remapReferenceRange('a\nb\n', 'a\nb', 2, 2)).toEqual({ start: 2, end: 2 })
+  })
 })
 
 describe('remapReferences', () => {
@@ -100,5 +104,10 @@ describe('remapReferences', () => {
   it('does not touch an unwrapped path:number', () => {
     expect(remapReferences('a.txt:1', 'a.txt', 'a\n', 'x\na\n'))
       .toBe('a.txt:1')
+  })
+
+  it('does not expire a reference when only the trailing newline changed', () => {
+    expect(remapReferences('(a.txt:2)', 'a.txt', 'a\nb\n', 'a\nb'))
+      .toBe('(a.txt:2)')
   })
 })
