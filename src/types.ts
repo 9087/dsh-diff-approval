@@ -7,26 +7,29 @@
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 
 /**
- * One file's pending entry in one session: the complete set of unhandled
- * changes folded into a single cumulative span. `oldText` is the earliest
- * captured basis and `newText` the latest captured content, so Keep/Revert
- * decides the whole file at once.
+ * One file's pending entry, global and unique per `path`: the complete set of
+ * unhandled changes folded into a single cumulative span across every session
+ * and workspace that touched the file. `oldText` is the earliest captured basis
+ * and `newText` the latest captured content, so Keep/Revert decides the whole
+ * file at once.
  */
 export interface PendingEntry {
-  /** Stable per-entry id (generated at capture; persisted with the entry). */
+  /** Stable per-entry id, equal to the path (the global key). */
   id: string
-  /** The session whose agent ran the operation. */
-  sessionId: SessionId
   /** Backend-resolved display path (the tool's output `path`). */
   path: string
   /** What the operation did: an in-place change or a file creation. */
   kind: PendingEntryKind
-  /** File content before the operation (empty for a creation). */
+  /** File content before the first captured operation (empty for a creation). */
   oldText: string
-  /** File content after the operation. */
+  /** File content after the latest captured operation. */
   newText: string
-  /** Epoch milliseconds of the capture. */
+  /** Epoch milliseconds of the latest capture. */
   updatedAt: number
+  /** The most recent session whose agent touched the file (back-compat). */
+  sessionId: SessionId
+  /** Every session that touched the file (drives the per-session list filter). */
+  sessionIds: SessionId[]
 }
 
 /** What one captured operation did to the file. */

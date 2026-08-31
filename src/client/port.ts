@@ -74,13 +74,16 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
 /** Narrow one pending entry from the wire; malformed rows are skipped. */
 function pendingFileOf(value: unknown): PendingFileDiff | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-  const { id, sessionId, path, kind, oldText, newText, updatedAt, missing, diverged } = value as Record<string, unknown>
+  const { id, sessionId, sessionIds, path, kind, oldText, newText, updatedAt, missing, diverged } = value as Record<string, unknown>
   if (typeof id !== 'string' || id.length === 0) return undefined
   if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
   if (typeof path !== 'string' || path.length === 0) return undefined
   if (kind !== 'edit' && kind !== 'create') return undefined
   if (typeof oldText !== 'string' || typeof newText !== 'string') return undefined
   if (typeof updatedAt !== 'number') return undefined
+  const touched = Array.isArray(sessionIds)
+    ? sessionIds.filter((value): value is string => typeof value === 'string' && value.length > 0)
+    : []
   return {
     id,
     sessionId: sessionId as SessionId,
@@ -89,6 +92,7 @@ function pendingFileOf(value: unknown): PendingFileDiff | undefined {
     oldText,
     newText,
     updatedAt,
+    sessionIds: touched.length > 0 ? touched as SessionId[] : [sessionId as SessionId],
     // An absent flag keeps older hosts listable; the flags are host truth.
     missing: missing === true,
     diverged: diverged === true,

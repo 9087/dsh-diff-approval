@@ -2371,7 +2371,10 @@ export function PendingPanel({
   // displayed file name so the list reads in dictionary order even before the
   // host's own ordering is picked up.
   const files = snapshot.files
-    .filter(file => file.sessionId === current)
+    // A globally-unique entry is shown to every session that touched it (its
+    // sessionIds), so a file edited by multiple sessions appears once in each
+    // of their views. Tolerant of a legacy row carrying only `sessionId`.
+    .filter(file => current !== undefined && (file.sessionIds ?? [file.sessionId]).includes(current))
     .sort((left, right) => compareFileNames(left.path, right.path))
   /** Per-file keep/revert failures, surfaced inline on the row and detail. */
   const failed = snapshot.failed ?? EMPTY_FAILED_MAP

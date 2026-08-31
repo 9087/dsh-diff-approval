@@ -606,7 +606,7 @@ describe('persistence', () => {
     const first = await harness({ sessionIds: [SessionId('session-1')], storageDir })
     emitResult(first.ctx, editExec(), editSuccess('/repo/a.txt', 'v1\n', 'v2\n'))
     await vi.waitFor(async () => {
-      await expect(readdir(first.storageDir)).resolves.toContain('workspace-1.json')
+      await expect(readdir(first.storageDir)).resolves.toContain('pending.json')
     })
 
     const second = await harness({ sessionIds: [SessionId('session-1')], storageDir })
@@ -620,29 +620,29 @@ describe('persistence', () => {
     ])
   })
 
-  it("surfaces an earlier session's persisted entries to a fresh session after restart", async () => {
+  it("keeps an earlier session's persisted entry global but scoped to its touching sessions", async () => {
     const storageDir = await mkdtemp(join(tmpdir(), 'dsh-diff-approval-'))
     tempDirs.push(storageDir)
-    // First run: an earlier session in the workspace records an edit, which
-    // is persisted under that session's id in the workspace file.
+    // First run: an earlier session records an edit, persisted to the global file.
     const first = await harness({ sessionIds: [SessionId('session-old')], storageDir })
     emitResult(first.ctx, { name: 'edit', agent: { id: SessionId('session-old') } },
       editSuccess('/repo/a.txt', 'v1\n', 'v2\n'))
     await vi.waitFor(async () => {
-      await expect(readdir(first.storageDir)).resolves.toContain('workspace-1.json')
+      await expect(readdir(first.storageDir)).resolves.toContain('pending.json')
     })
 
-    // Second run: a fresh session id in the same workspace must still list
-    // the earlier session's persisted change (workspace-level hydration).
-    const second = await harness({ sessionIds: [SessionId('session-new')], storageDir })
-    second.fs.readText.mockResolvedValue('v2\n')
-    const entries = await listEntries(second.handle, 'session-new')
-    expect(entries).toEqual([
-      expect.objectContaining({
-        sessionId: 'session-old', path: '/repo/a.txt', kind: 'edit',
-        oldText: 'v1\n', newText: 'v2\n', missing: false, diverged: false,
-      }) as object,
-    ])
+    // The touching session still sees its global entry after restart.
+    const same = await harness({ sessionIds: [SessionId('session-old')], storageDir })
+    same.fs.readText.mockResolvedValue('v2\n')
+    expect((await listEntries(same.handle, 'session-old'))[0]).toMatchObject({
+      sessionId: 'session-old', path: '/repo/a.txt', kind: 'edit',
+      oldText: 'v1\n', newText: 'v2\n', missing: false, diverged: false,
+    })
+
+    // A fresh session that never touched the file does not (current-session scope).
+    const fresh = await harness({ sessionIds: [SessionId('session-new')], storageDir })
+    fresh.fs.readText.mockResolvedValue('v2\n')
+    expect(await listEntries(fresh.handle, 'session-new')).toEqual([])
   })
 
   it('removes the persisted entry when it is kept', async () => {
@@ -658,11 +658,13 @@ describe('persistence', () => {
     expect(await listEntries(second.handle, 'session-1')).toEqual([])
   })
 
-  it('leaves a session without a workspace in memory only', async () => {
+  it('persists a session without a workspace once a global entry exists', async () => {
     const { ctx, handle, storageDir } = await harness()
     emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
     expect(await listEntries(handle, 'session-1')).toHaveLength(1)
-    await expect(readdir(storageDir)).resolves.toEqual([])
+    await vi.waitFor(async () => {
+      await expect(readdir(storageDir)).resolves.toContain('pending.json')
+    })
   })
 
   it('serves the live in-memory view when the persisted file is corrupt', async () => {
@@ -671,9 +673,9 @@ describe('persistence', () => {
     const first = await harness({ sessionIds: [SessionId('session-1')], storageDir })
     emitResult(first.ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
     await vi.waitFor(async () => {
-      await expect(readdir(first.storageDir)).resolves.toContain('workspace-1.json')
+      await expect(readdir(first.storageDir)).resolves.toContain('pending.json')
     })
-    await writeFile(join(storageDir, 'workspace-1.json'), '{not json', 'utf8')
+    await writeFile(join(storageDir, 'pending.json'), '{not json', 'utf8')
 
     const second = await harness({ sessionIds: [SessionId('session-1')], storageDir })
     expect(await listEntries(second.handle, 'session-1')).toEqual([])

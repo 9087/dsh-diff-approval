@@ -73,12 +73,10 @@ export function attachReferenceRemap(opts: ReferenceRemapOpts): {
 
   const observe = (): void => {
     const snapshot = store.getSnapshot()
-    // The list can carry more than one entry per path (successive folds keep the
-    // earliest id but advance newText), and the panel renders only the newest.
-    // A reference targets the newest entry's content, so seed/advance the
-    // baseline from it alone — iterating every duplicate would remap the
-    // reference against an older entry's content and corrupt it. Pick the newest
-    // by updatedAt, robust to list ordering.
+    // @deprecated The host now returns one entry per path (the list is globally
+    // unique), so this newest-by-updatedAt dedup is a safety net for any stale
+    // client transport that still delivers duplicate path entries. It is kept
+    // harmless, not load-bearing.
     const newestByPath = new Map<string, { newText: string; updatedAt: number }>()
     for (const file of snapshot.files) {
       const current = newestByPath.get(file.path)

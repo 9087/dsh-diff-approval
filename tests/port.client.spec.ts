@@ -44,10 +44,12 @@ describe('list', () => {
         {
           id: 'e1', sessionId: 'session-1', path: '/repo/a.txt', kind: 'edit',
           oldText: 'a', newText: 'b', updatedAt: 10, missing: true, diverged: false,
+          sessionIds: ['session-1'],
         },
         {
           id: 'e2', sessionId: 'session-1', path: '/repo/c.txt', kind: 'create',
           oldText: '', newText: 'c', updatedAt: 20, missing: false, diverged: false,
+          sessionIds: ['session-1'],
         },
       ],
     })

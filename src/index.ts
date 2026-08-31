@@ -34,7 +34,6 @@
  * @module dsh-diff-approval
  */
 
-import { randomUUID } from 'node:crypto'
 import { readFile, rm } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -248,11 +247,21 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   const store = new PendingDiffStore()
   const persistence = new PendingPersistence(resolve(expandHomePath(storageDir ?? defaultStorageDir())))
   const launchPath = config?.openPath ?? defaultOpenPath
-  /** Sessions seen per workspace, so the list can merge a workspace's sessions. */
-  const sessionsByWorkspace = new Map<string, Set<string>>()
-  /** Workspace ids whose persisted state has been hydrated into the store. */
-  const loadedWorkspaces = new Set<string>()
-  const loadingWorkspaces = new Map<string, Promise<void>>()
+  /** Hydrate the globally-unique store once from the single persistence file. */
+  let loadPromise: Promise<void> | undefined
+  const ensureLoaded = (): Promise<void> => {
+    loadPromise ??= (async () => {
+      try {
+        const { entries, migratedLegacy } = await persistence.loadAll()
+        if (entries.length > 0) store.hydrate(entries)
+        // A legacy per-workspace layout: fold once, then drop the old files.
+        if (migratedLegacy) await persistence.save(store.all())
+      } catch (error: unknown) {
+        ctx.logger.warn(`diff-approval: loading persisted state failed: ${errorMessage(error)}`)
+      }
+    })()
+    return loadPromise
+  }
 
   /** Pre-write bases captured at the intent seams, keyed by the tool call id. */
   const editorIntents = new Map<string, IntentBasis>()
@@ -309,17 +318,19 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     }
     if (basis.kind === 'edit' && after === basis.before) return
     const sessionId = basis.sessionId
+    const path = basis.target.displayPath
     const entry: PendingEntry = {
-      id: randomUUID(),
+      id: path,
       sessionId,
-      path: basis.target.displayPath,
+      path,
       kind: basis.kind,
       oldText: basis.before,
       newText: after,
       updatedAt: Date.now(),
+      sessionIds: [sessionId],
     }
-    await ensureLoaded(sessionId)
-    if (store.fold(entry)) await persistSession(sessionId)
+    await ensureLoaded()
+    if (store.fold(entry)) await persistSession()
   }
 
   /** One observation of a tracked path's live file. Existence is decided solely
@@ -371,21 +382,20 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * @param entries - the store's entries for one session.
    * @returns entries with `missing` and `diverged` set from the live file.
    */
-  /** Drop every undo/redo pair that belongs to a removed entry, so the LIFO
+  /** Drop every undo/redo pair that belongs to a removed file, so the LIFO
    * queue stays traversable without ever trying to restore an unreadable file. */
-  function purgeForEntry(sessionId: SessionId, entryId: string, path: string): void {
-    const key = String(sessionId)
-    for (const stacks of [undoStacks, redoStacks]) {
-      const stack = stacks.get(key)
-      if (stack === undefined) continue
-      stacks.set(key, stack.filter(pair => {
-        const touches = (state: DiffApprovalUndoState): boolean =>
-          state.id === entryId || state.path === path
+  function purgeForEntry(path: string): void {
+    const clean = (stack: DiffApprovalUndoPair[]): void => {
+      const kept = stack.filter(pair => {
         const batch = pair.before.batch ?? pair.after.batch
-        if (batch !== undefined) return !batch.some(item => item.id === entryId || item.path === path)
-        return !touches(pair.before) && !touches(pair.after)
-      }))
+        if (batch !== undefined) return !batch.some(item => item.path === path)
+        return pair.before.path !== path && pair.after.path !== path
+      })
+      stack.length = 0
+      stack.push(...kept)
     }
+    clean(undoStack)
+    clean(redoStack)
   }
 
   /**
@@ -394,43 +404,33 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * (Ctrl+Z recreates it and restores the entry), an unavailable one leaves the
    * list and has its undo/redo records dropped, and externally changed content
    * is adopted as the new baseline with its own checkpoint.
-   * @param sessionId - the session being listed.
-   * @param entries - the store's entries for one session.
+   * @param sessionId - the session being listed (its session-scoped view).
    * @returns the listed entries plus whether an external change cleared redo.
    */
   async function listWithState(
     sessionId: SessionId,
-    entries: readonly PendingEntry[],
   ): Promise<{ files: PendingFileDiff[]; redoCleared: boolean }> {
-    const byPath = new Map<string, PendingEntry[]>()
-    for (const entry of entries) {
-      const group = byPath.get(entry.path)
-      if (group === undefined) byPath.set(entry.path, [entry])
-      else group.push(entry)
-    }
     const listed: PendingFileDiff[] = []
     let redoCleared = false
-    for (const group of byPath.values()) {
-      const newest = group[group.length - 1]
-      if (newest === undefined) continue
-      const live = await liveStateOf(newest.path)
+    for (const entry of store.list(sessionId)) {
+      const live = await liveStateOf(entry.path)
       if (live.kind === 'deleted') {
         // The file is gone: remove it from the list, keeping an undoable
         // checkpoint that recreates the file (its tracked content) and restores
         // the entry to the list.
-        store.remove(sessionId, newest.id)
+        store.remove(entry.path)
         pushUndo(sessionId,
-          { id: newest.id, path: newest.path, entry: newest, fileText: newest.newText },
-          { id: newest.id, path: newest.path, entry: undefined, fileText: undefined })
-        await persistSession(sessionId)
+          { id: entry.path, path: entry.path, entry, fileText: entry.newText },
+          { id: entry.path, path: entry.path, entry: undefined, fileText: undefined })
+        await persistSession()
         continue
       }
       if (live.kind === 'unavailable') {
         // Present but unreadable: no operation is safe, so drop the entry and
         // purge its undo/redo records so the LIFO queue stays traversable.
-        store.remove(sessionId, newest.id)
-        purgeForEntry(sessionId, newest.id, newest.path)
-        await persistSession(sessionId)
+        store.remove(entry.path)
+        purgeForEntry(entry.path)
+        await persistSession()
         continue
       }
       // Present. A file changed outside the tracked operations (another tool,
@@ -438,23 +438,21 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       // panel tracks the file as it is now; the entry keeps its pre-change
       // `oldText`, and the adoption itself is a fresh undo checkpoint.
       const content = live.content as string | undefined
-      let adopted = newest.newText
+      let adopted = entry.newText
       const hasContent = typeof content === 'string'
-      if (hasContent && content !== newest.newText) {
+      if (hasContent && content !== entry.newText) {
         adopted = content
-        const beforeText = newest.newText
-        const redoWasPresent = redoStacks.has(String(sessionId))
-        store.update(sessionId, newest.id, { newText: content })
+        const beforeText = entry.newText
+        const redoWasPresent = redoStack.length > 0
+        store.update(entry.path, { newText: content })
         pushUndo(sessionId,
-          { id: newest.id, path: newest.path, entry: newest, fileText: beforeText },
-          { id: newest.id, path: newest.path, entry: { ...newest, newText: content, updatedAt: Date.now() }, fileText: content })
-        await persistSession(sessionId)
+          { id: entry.path, path: entry.path, entry, fileText: beforeText },
+          { id: entry.path, path: entry.path, entry: { ...entry, newText: content, updatedAt: Date.now() }, fileText: content })
+        await persistSession()
         if (redoWasPresent) redoCleared = true
       }
       const state = { missing: false, diverged: hasContent ? content !== adopted : true }
-      for (const entry of group) {
-        listed.push(entry.id === newest.id ? { ...entry, newText: adopted, ...state } : { ...entry, ...state })
-      }
+      listed.push({ ...entry, newText: adopted, ...state })
     }
     return { files: listed, redoCleared }
   }
@@ -516,16 +514,14 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   // undoable keep/revert/block action pushes its before/after pair; undo
   // restores `before`, redo re-applies `after`. Actions that delete a file
   // (revert of a created file, block-revert to empty) are not pushed.
-  const undoStacks = new Map<string, DiffApprovalUndoPair[]>()
-  const redoStacks = new Map<string, DiffApprovalUndoPair[]>()
+  // Global undo/redo: a single LIFO stack across every file, because entries are
+  // globally unique per path. A fresh action invalidates the whole redo history.
+  const undoStack: DiffApprovalUndoPair[] = []
+  const redoStack: DiffApprovalUndoPair[] = []
 
   function pushUndo(sessionId: SessionId, before: DiffApprovalUndoState, after: DiffApprovalUndoState): void {
-    const key = String(sessionId)
-    const stack = undoStacks.get(key) ?? []
-    stack.push({ sessionId, before, after })
-    undoStacks.set(key, stack)
-    // A fresh action invalidates any redo history for the session.
-    redoStacks.delete(key)
+    undoStack.push({ sessionId, before, after })
+    redoStack.length = 0
   }
 
   /**
@@ -559,124 +555,29 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     }
     if (state.batch !== undefined) {
       // A batch (one VCS import) touches no files: each item restores its entry
-      // or removes it by id, exactly reversing the import.
+      // or removes it by path, exactly reversing the import.
       for (const item of state.batch) {
-        if (item.entry !== undefined) store.restore(sessionId, item.entry)
-        else store.remove(sessionId, item.id)
+        if (item.entry !== undefined) store.restore(item.entry)
+        else store.remove(item.path)
       }
       return
     }
-    if (state.entry !== undefined) store.restore(sessionId, state.entry)
-    else store.remove(sessionId, state.id)
+    if (state.entry !== undefined) store.restore(state.entry)
+    else store.remove(state.path)
   }
 
   /**
-   * Record one session in its workspace's account. Every path that touches a
-   * session registers it, so the list merges all of a workspace's sessions'
-   * entries — a fresh session after restart still sees the workspace's
-   * persisted pending changes.
-   * @param sessionId - the session to register.
-   * @returns the owning workspace, or `undefined` when none accounts it.
-   */
-  function registerSession(sessionId: SessionId): Workspace | undefined {
-    const workspace = workspaceOf(sessionId)
-    if (workspace === undefined) return undefined
-    const key = String(workspace.id)
-    const sessions = sessionsByWorkspace.get(key)
-    if (sessions === undefined) sessionsByWorkspace.set(key, new Set([String(sessionId)]))
-    else sessions.add(String(sessionId))
-    return workspace
-  }
-
-  /**
-   * Merge one workspace's persisted entries into the store, once per
-   * workspace. Hydration is workspace-scoped: after a restart the current
-   * session has a fresh id while the persisted entries live under their
-   * original session ids in the same workspace file, so the whole workspace
-   * is loaded and every persisted session is accounted. Concurrent callers
-   * share the in-flight load, and folds arriving while the load runs stay
-   * safe: `hydrate` never overwrites a live entry.
-   * @param workspace - the workspace whose persisted state to merge.
-   * @returns resolution after the workspace's persisted state is merged (or skipped).
-   */
-  function ensureWorkspaceLoaded(workspace: Workspace): Promise<void> {
-    const key = String(workspace.id)
-    if (loadedWorkspaces.has(key)) return Promise.resolve()
-    const pending = loadingWorkspaces.get(key)
-    if (pending !== undefined) return pending
-    const task = (async () => {
-      try {
-        const persisted = await persistence.loadWorkspace(key)
-        const bySession = new Map<string, PendingEntry[]>()
-        for (const entry of persisted) {
-          const sessionKey = String(entry.sessionId)
-          const group = bySession.get(sessionKey)
-          if (group === undefined) bySession.set(sessionKey, [entry])
-          else group.push(entry)
-        }
-        for (const [sessionKey, entries] of bySession) {
-          const sessions = sessionsByWorkspace.get(key) ?? new Set<string>()
-          sessions.add(sessionKey)
-          sessionsByWorkspace.set(key, sessions)
-          store.hydrate(SessionId(sessionKey), entries)
-        }
-      } catch (error: unknown) {
-        ctx.logger.warn(`diff-approval: loading persisted state for workspace ${key} failed: ${errorMessage(error)}`)
-      }
-      loadedWorkspaces.add(key)
-      loadingWorkspaces.delete(key)
-    })()
-    loadingWorkspaces.set(key, task)
-    return task
-  }
-
-  /**
-   * Merge the session's workspace's persisted state into the store (a session
-   * with no workspace is the memory-only edge and has nothing to load).
-   * @param sessionId - the session to hydrate for.
-   * @returns resolution after the workspace's persisted state is merged.
-   */
-  function ensureLoaded(sessionId: SessionId): Promise<void> {
-    const workspace = registerSession(sessionId)
-    if (workspace === undefined) return Promise.resolve()
-    return ensureWorkspaceLoaded(workspace)
-  }
-
-  /**
-   * All entries visible to one session: every registered session of its
-   * workspace, merged oldest capture first. This is what makes an unhandled
-   * change survive a restart — the new session lists the workspace's whole
-   * pending set, its own live folds plus the earlier sessions' persisted
-   * entries.
-   * @param sessionId - the viewing session.
-   * @returns the merged entries; a session with no workspace lists only itself.
-   */
-  async function workspaceEntries(sessionId: SessionId): Promise<PendingEntry[]> {
-    await ensureLoaded(sessionId)
-    const workspace = workspaceOf(sessionId)
-    if (workspace === undefined) return store.list(sessionId)
-    const sessions = sessionsByWorkspace.get(String(workspace.id))
-    if (sessions === undefined) return store.list(sessionId)
-    const entries: PendingEntry[] = []
-    for (const sessionKey of sessions) entries.push(...store.list(SessionId(sessionKey)))
-    return entries.sort((left, right) => left.updatedAt - right.updatedAt)
-  }
-
-  /**
-   * Mirror one session's entries to disk. A write fault logs a warning and
-   * leaves the in-memory view intact: the review flow must not break on a
-   * storage fault, and the next successful mutation rewrites the whole file.
-   * @param sessionId - the session whose complete entry list to save.
+   * Mirror the whole (globally-unique) entry set to disk. A write fault logs a
+   * warning and leaves the in-memory view intact: the review flow must not
+   * break on a storage fault, and the next successful mutation rewrites the
+   * file.
    * @returns resolution after the write settles (successful or logged).
    */
-  async function persistSession(sessionId: SessionId): Promise<void> {
-    await ensureLoaded(sessionId)
-    const workspace = workspaceOf(sessionId)
-    if (workspace === undefined) return
+  async function persistSession(): Promise<void> {
     try {
-      await persistence.save(String(workspace.id), String(sessionId), store.list(sessionId))
+      await persistence.save(store.all())
     } catch (error: unknown) {
-      ctx.logger.warn(`diff-approval: persisting session ${String(sessionId)} failed: ${errorMessage(error)}`)
+      ctx.logger.warn(`diff-approval: persisting pending changes failed: ${errorMessage(error)}`)
     }
   }
 
@@ -689,11 +590,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     const outcome = exec.name === 'edit' ? editOutcomeOf(result.value) : exec.name === 'write' ? writeOutcomeOf(result.value) : undefined
     if (outcome === undefined || outcome.oldText === outcome.newText) return
     const sessionId = exec.agent.id
-    const entry: PendingEntry = { id: randomUUID(), sessionId, ...outcome, updatedAt: Date.now() }
-    void (async () => {
-      await ensureLoaded(sessionId)
-      if (store.fold(entry)) await persistSession(sessionId)
-    })()
+    const entry: PendingEntry = { id: outcome.path, sessionId, ...outcome, updatedAt: Date.now(), sessionIds: [sessionId] }
+    // Fold synchronously so the very next list sees the capture; persistence
+    // (hydration + save) rides the same turn asynchronously.
+    if (store.fold(entry)) void persistSession()
   })
 
   const handle: ConnectionRpcHandler = async (endpoint, payload, signal): Promise<RpcResult<unknown>> => {
@@ -701,32 +601,33 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       case 'list': {
         const sessionId = sessionOf(payload)
         if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
-        const { files, redoCleared } = await listWithState(sessionId, await workspaceEntries(sessionId))
+        await ensureLoaded()
+        const { files, redoCleared } = await listWithState(sessionId)
         const value: DiffApprovalListValue = { files, workspacePath: workspaceOf(sessionId)?.path, redoCleared: redoCleared || undefined }
         return { ok: true, value }
       }
       case 'keep': {
         const target = targetOf(payload)
         if (target === undefined) return rpcError('sessionId and id must be non-empty strings')
-        await ensureLoaded(target.sessionId)
-        const entry = store.get(target.sessionId, target.id)
+        await ensureLoaded()
+        const entry = store.get(target.id)
         if (entry === undefined) {
           const value: DiffApprovalActionValue = { outcome: 'missing' }
           return { ok: true, value }
         }
-        store.remove(target.sessionId, target.id)
+        store.remove(target.id)
         pushUndo(target.sessionId,
           { id: entry.id, path: entry.path, entry, fileText: undefined },
           { id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
-        await persistSession(target.sessionId)
+        await persistSession()
         const value: DiffApprovalActionValue = { outcome: 'kept' }
         return { ok: true, value }
       }
       case 'revert': {
         const target = targetOf(payload)
         if (target === undefined) return rpcError('sessionId and id must be non-empty strings')
-        await ensureLoaded(target.sessionId)
-        const entry = store.get(target.sessionId, target.id)
+        await ensureLoaded()
+        const entry = store.get(target.id)
         if (entry === undefined) {
           const value: DiffApprovalActionValue = { outcome: 'missing' }
           return { ok: true, value }
@@ -756,17 +657,17 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         } catch (error: unknown) {
           return rpcError(`revert failed: ${errorMessage(error)}`)
         }
-        store.remove(target.sessionId, target.id)
+        store.remove(target.id)
         if (undo !== undefined) pushUndo(target.sessionId, undo.before, undo.after)
-        await persistSession(target.sessionId)
+        await persistSession()
         const value: DiffApprovalActionValue = { outcome: 'reverted' }
         return { ok: true, value }
       }
       case 'block-keep': {
         const blockTarget = blockTargetOf(payload)
         if (blockTarget === undefined) return rpcError('sessionId, id, and block must be valid')
-        await ensureLoaded(blockTarget.sessionId)
-        const entry = store.get(blockTarget.sessionId, blockTarget.id)
+        await ensureLoaded()
+        const entry = store.get(blockTarget.id)
         if (entry === undefined) {
           const value: DiffApprovalActionValue = { outcome: 'missing' }
           return { ok: true, value }
@@ -778,12 +679,12 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // pending diff and its whole-file keep/revert removes it later.
         const accepted = contentRangeOf(entry.newText, blockTarget.block.newStart, blockTarget.block.newEnd)
         const updatedOld = replaceContentLines(entry.oldText, blockTarget.block.oldStart, blockTarget.block.oldEnd, accepted)
-        store.update(blockTarget.sessionId, blockTarget.id, { oldText: updatedOld })
+        store.update(blockTarget.id, { oldText: updatedOld })
         const afterEntry: PendingEntry = { ...entry, oldText: updatedOld, updatedAt: Date.now() }
         pushUndo(blockTarget.sessionId,
           { id: entry.id, path: entry.path, entry, fileText: undefined },
           { id: entry.id, path: entry.path, entry: afterEntry, fileText: undefined })
-        await persistSession(blockTarget.sessionId)
+        await persistSession()
         const fullyResolved = updatedOld === entry.newText
         const kept: DiffApprovalActionValue = fullyResolved ? { outcome: 'kept', resolved: true } : { outcome: 'kept' }
         return { ok: true, value: kept }
@@ -791,8 +692,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       case 'block-revert': {
         const blockTarget = blockTargetOf(payload)
         if (blockTarget === undefined) return rpcError('sessionId, id, and block must be valid')
-        await ensureLoaded(blockTarget.sessionId)
-        const entry = store.get(blockTarget.sessionId, blockTarget.id)
+        await ensureLoaded()
+        const entry = store.get(blockTarget.id)
         if (entry === undefined) {
           const value: DiffApprovalActionValue = { outcome: 'missing' }
           return { ok: true, value }
@@ -806,7 +707,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // store's newText in step with the bytes actually written, so a later
         // read never sees a line-ending-only drift.
         const content = reencodeEol(updatedNew, detectEol(entry.newText))
-        store.update(blockTarget.sessionId, blockTarget.id, { newText: content })
+        store.update(blockTarget.id, { newText: content })
         const afterEntry: PendingEntry = { ...entry, newText: content, updatedAt: Date.now() }
         // A block-revert that empties a created file deletes it and is not
         // undoable; one that writes keeps a snapshot for Ctrl+Z.
@@ -827,7 +728,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           return rpcError(`block revert failed: ${errorMessage(error)}`)
         }
         if (undo !== undefined) pushUndo(blockTarget.sessionId, undo.before, undo.after)
-        await persistSession(blockTarget.sessionId)
+        await persistSession()
         const fullyResolved = normalizeEol(updatedNew) === normalizeEol(entry.oldText)
         const reverted: DiffApprovalActionValue = fullyResolved ? { outcome: 'reverted', resolved: true } : { outcome: 'reverted' }
         return { ok: true, value: reverted }
@@ -835,9 +736,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       case 'undo': {
         const sessionId = sessionOf(payload)
         if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
-        const key = String(sessionId)
-        const stack = undoStacks.get(key) ?? []
-        const pair = stack.pop()
+        const pair = undoStack.pop()
         if (pair === undefined) {
           const value: DiffApprovalActionValue = { outcome: 'nothing' }
           return { ok: true, value }
@@ -846,22 +745,18 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           await restoreState(sessionId, pair.before, pair.after, signal)
         } catch (error: unknown) {
           // Keep the pair on the stack so a later, still-valid undo works.
-          stack.push(pair)
+          undoStack.push(pair)
           return rpcError(`undo failed: ${errorMessage(error)}`)
         }
-        const redoStack = redoStacks.get(key) ?? []
         redoStack.push(pair)
-        redoStacks.set(key, redoStack)
-        await persistSession(sessionId)
+        await persistSession()
         const value: DiffApprovalActionValue = { outcome: 'undone', id: pair.after.id }
         return { ok: true, value }
       }
       case 'redo': {
         const sessionId = sessionOf(payload)
         if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
-        const key = String(sessionId)
-        const stack = redoStacks.get(key) ?? []
-        const pair = stack.pop()
+        const pair = redoStack.pop()
         if (pair === undefined) {
           const value: DiffApprovalActionValue = { outcome: 'nothing' }
           return { ok: true, value }
@@ -869,13 +764,11 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         try {
           await restoreState(sessionId, pair.after, pair.before, signal)
         } catch (error: unknown) {
-          stack.push(pair)
+          redoStack.push(pair)
           return rpcError(`redo failed: ${errorMessage(error)}`)
         }
-        const undoStack = undoStacks.get(key) ?? []
         undoStack.push(pair)
-        undoStacks.set(key, undoStack)
-        await persistSession(sessionId)
+        await persistSession()
         const value: DiffApprovalActionValue = { outcome: 'redone', id: pair.after.id }
         return { ok: true, value }
       }
@@ -907,19 +800,20 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         } catch (error: unknown) {
           return rpcError(`import failed: ${errorMessage(error)}`)
         }
-        await ensureLoaded(sessionId)
+        await ensureLoaded()
         const before = new Map(store.list(sessionId).map(entry => [entry.path, entry]))
         let imported = 0
         const changedPaths: string[] = []
         for (const change of changes) {
           const entry: PendingEntry = {
-            id: randomUUID(),
+            id: change.path,
             sessionId,
             path: change.path,
             kind: change.kind,
             oldText: change.oldText,
             newText: change.newText,
             updatedAt: Date.now(),
+            sessionIds: [sessionId],
           }
           if (store.fold(entry)) {
             imported += 1
@@ -927,7 +821,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           }
         }
         if (imported > 0) {
-          await persistSession(sessionId)
+          await persistSession()
           // The import is undoable as one action: snapshot each affected path's
           // entry before and after, so Ctrl+Z undoes the whole import back to
           // the pre-import list (no file writes — the import never touched files).
@@ -954,8 +848,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       case 'open': {
         const target = openTargetOf(payload)
         if (target === undefined) return rpcError('sessionId, id, and action must be valid')
-        await ensureLoaded(target.sessionId)
-        const entry = store.get(target.sessionId, target.id)
+        await ensureLoaded()
+        const entry = store.get(target.id)
         if (entry === undefined) {
           const value: DiffApprovalOpenValue = { outcome: 'missing' }
           return { ok: true, value }

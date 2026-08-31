@@ -1,19 +1,22 @@
 /**
- * Durable pending-entry persistence under the harness home. One JSON file per
- * workspace holds every session's entries, at
- * `<storageDir>/<workspaceId>.json`; the default root is
- * `<dshHome>/diff-approval/workspaces` and the plugin's `storageDir` config
- * relocates it. `save` rewrites the whole workspace file so sibling sessions
- * survive; a session with no entries leaves the file, and a workspace with no
- * sessions loses its file. Writes are serialized per file, staged as a
- * sibling temp file, and atomically renamed, so a crash leaves either the old
- * or the new file. Missing files read as empty; corrupt content and unknown
- * versions throw so the caller can fail loud instead of silently dropping
- * persisted data.
+ * Durable pending-entry persistence under the harness home: one global JSON
+ * file holding one entry per file path (across all sessions and workspaces), at
+ * `<storageDir>/pending.json`; the default root is `<dshHome>/diff-approval/workspaces`
+ * and the plugin's `storageDir` config relocates it. Saves rewrite the whole
+ * file (the entry set is small), staged as a sibling temp file and atomically
+ * renamed, so a crash leaves either the old or the new file. A missing file
+ * reads as empty; corrupt content and unknown versions throw.
+ *
+ * Legacy layout: the pre-global schema stored one JSON file per workspace
+ * (`<storageDir>/<workspaceId>.json`, `{ version: 2, sessions: { [sessionId]:
+ * PendingEntry[] } }`). On first load without a global file, `loadAll` scans for
+ * those files, flattens every session's entries, and reports them so the caller
+ * can fold them into the global store once; `save` then writes the global file
+ * and deletes the legacy files.
  * @module dsh-diff-approval/src/persist
  */
 
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
@@ -24,172 +27,188 @@ export function defaultStorageDir(): string {
   return dshHomePath('diff-approval', 'workspaces')
 }
 
-/** On-disk envelope version; bumping it abandons older files (pre-release stance). */
-const FILE_VERSION = 2
+/** Global-file version (post per-workspace schema). */
+const FILE_VERSION = 3
+/** Legacy per-workspace-file version, accepted only for migration. */
+const LEGACY_FILE_VERSION = 2
 
-/** One workspace file on disk: every session's entries for that workspace. */
-interface WorkspaceFile {
+/** The global on-disk envelope: one entry per file path. */
+interface GlobalFile {
   version: number
-  sessions: Record<string, PendingEntry[]>
+  entries: PendingEntry[]
 }
 
 /** Narrow one JSON value to a pending entry; malformed rows are skipped. */
 function pendingEntryOf(value: unknown): PendingEntry | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-  const { id, sessionId, path, kind, oldText, newText, updatedAt } = value as Record<string, unknown>
+  const { id, path, kind, oldText, newText, updatedAt, sessionId, sessionIds } = value as Record<string, unknown>
   if (typeof id !== 'string' || id.length === 0) return undefined
-  if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
   if (typeof path !== 'string' || path.length === 0) return undefined
   if (kind !== 'edit' && kind !== 'create') return undefined
   if (typeof oldText !== 'string' || typeof newText !== 'string') return undefined
   if (typeof updatedAt !== 'number') return undefined
-  return { id, sessionId: sessionId as SessionId, path, kind, oldText, newText, updatedAt }
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
+  const ids = Array.isArray(sessionIds)
+    ? sessionIds.filter((value): value is string => typeof value === 'string' && value.length > 0)
+    : []
+  return {
+    id, path, kind, oldText, newText, updatedAt,
+    sessionId: sessionId as SessionId,
+    sessionIds: ids.length > 0 ? ids as SessionId[] : [sessionId as SessionId],
+  }
 }
 
-/**
- * Validate a parsed workspace file. Missing files yield `undefined` (empty);
- * anything else that is not a current-version workspace file throws so a
- * later save cannot silently overwrite unreadable persisted data.
- * @param file - the file path, for the error message.
- * @param value - the parsed JSON value.
- * @returns the validated file, or `undefined` when the file does not exist.
- */
-function workspaceFileOf(file: string, value: unknown): WorkspaceFile | undefined {
+/** Validate a parsed global file. */
+function globalFileOf(file: string, value: unknown): GlobalFile {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error(`pending persistence file '${file}' is not a workspace file`)
+    throw new Error(`pending persistence file '${file}' is not a global file`)
   }
-  const { version, sessions } = value as Record<string, unknown>
+  const { version, entries } = value as Record<string, unknown>
   if (version !== FILE_VERSION) {
     throw new Error(`pending persistence file '${file}' has unsupported version ${JSON.stringify(version)}`)
   }
-  if (typeof sessions !== 'object' || sessions === null || Array.isArray(sessions)) {
-    throw new Error(`pending persistence file '${file}' has no session map`)
+  if (!Array.isArray(entries)) {
+    throw new Error(`pending persistence file '${file}' has no entry list`)
   }
-  return { version, sessions: sessions as Record<string, unknown> } as unknown as WorkspaceFile
+  return { version, entries }
+}
+
+/** Read one file's content; `undefined` when absent (the normal empty state). */
+async function readJson(file: string): Promise<unknown | undefined> {
+  let raw: string
+  try {
+    raw = await readFile(file, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+  try {
+    return JSON.parse(raw) as unknown
+  } catch (error) {
+    throw new Error(
+      `pending persistence file '${file}' is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+}
+
+/** Stage a JSON envelope as a sibling temp file and atomically rename it into place. */
+async function writeJson(file: string, value: unknown): Promise<void> {
+  await mkdir(dirName(file), { recursive: true })
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
+  await writeFile(tmp, JSON.stringify(value), 'utf8')
+  try {
+    await rename(tmp, file)
+  } catch (error) {
+    await rm(tmp, { force: true }).catch(() => {})
+    throw error
+  }
+}
+
+function dirName(file: string): string {
+  const index = file.lastIndexOf('/')
+  return index < 0 ? '.' : file.slice(0, index)
 }
 
 /**
- * File-backed pending entries keyed by (workspace, session).
+ * File-backed pending entries, one global file keyed by path.
  */
 export class PendingPersistence {
   private readonly tails = new Map<string, Promise<unknown>>()
+  private readonly globalFile: string
 
   /**
-   * @param root - directory holding one JSON file per workspace.
+   * @param root - directory holding the global `pending.json` (and, pre-migration,
+   * one JSON file per workspace).
    */
-  constructor(private readonly root: string) {}
-
-  private fileOf(workspaceId: string): string {
-    return join(this.root, `${workspaceId}.json`)
-  }
-
-  /** Read one workspace file; a missing file reads as empty. */
-  private async readWorkspace(file: string): Promise<WorkspaceFile | undefined> {
-    let raw: string
-    try {
-      raw = await readFile(file, 'utf8')
-    } catch (error) {
-      // Absence is the normal empty state; every other fault propagates.
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-      throw error
-    }
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(raw) as unknown
-    } catch (error) {
-      throw new Error(
-        `pending persistence file '${file}' is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-      )
-    }
-    return workspaceFileOf(file, parsed)
-  }
-
-  /** Stage the envelope as a sibling temp file and atomically rename it into place. */
-  private async writeWorkspace(file: string, envelope: WorkspaceFile): Promise<void> {
-    await mkdir(this.root, { recursive: true })
-    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
-    await writeFile(tmp, JSON.stringify(envelope), 'utf8')
-    try {
-      await rename(tmp, file)
-    } catch (error) {
-      // Best-effort cleanup of the staged file; the write failure propagates.
-      await rm(tmp, { force: true }).catch(() => {})
-      throw error
-    }
+  constructor(private readonly root: string) {
+    this.globalFile = join(root, 'pending.json')
   }
 
   /**
-   * Load one session's entries from its workspace file, oldest capture first.
-   * @param workspaceId - the owning workspace's stable id.
-   * @param sessionId - the session whose entries to load.
-   * @returns the persisted entries; empty when none were saved.
+   * Load every persisted entry. Returns the global file's entries, or — when the
+   * global file is absent — flattens the legacy per-workspace files so the
+   * caller can fold them once and then save (which clears the legacy files).
+   * @returns the entries plus whether they came from the legacy layout (awaiting
+   * a save to finalize the migration).
    */
-  async load(workspaceId: string, sessionId: string): Promise<PendingEntry[]> {
-    const envelope = await this.readWorkspace(this.fileOf(workspaceId))
-    if (envelope === undefined) return []
-    const rows = envelope.sessions[String(sessionId)]
-    if (!Array.isArray(rows)) return []
-    const entries: PendingEntry[] = []
-    for (const row of rows) {
-      const entry = pendingEntryOf(row)
-      if (entry !== undefined) entries.push(entry)
+  async loadAll(): Promise<{ entries: PendingEntry[]; migratedLegacy: boolean }> {
+    const global = await readJson(this.globalFile)
+    if (global !== undefined) {
+      const parsed = globalFileOf(this.globalFile, global)
+      const entries: PendingEntry[] = []
+      for (const row of parsed.entries) {
+        const entry = pendingEntryOf(row)
+        if (entry !== undefined) entries.push(entry)
+      }
+      return { entries: entries.sort((l, r) => l.updatedAt - r.updatedAt), migratedLegacy: false }
     }
-    return entries.sort((left, right) => left.updatedAt - right.updatedAt)
+    const legacy = await collectLegacy(this.root)
+    if (legacy.length > 0) {
+      return { entries: legacy.sort((l, r) => l.updatedAt - r.updatedAt), migratedLegacy: true }
+    }
+    return { entries: [], migratedLegacy: false }
   }
 
   /**
-   * Load every session's entries for one workspace, oldest capture first.
-   * The list shows a workspace's pending changes across sessions — a session
-   * that restarted carries a fresh id while its earlier entries sit under the
-   * original session ids in the same workspace file — so hydration reads the
-   * whole workspace, not one session.
-   * @param workspaceId - the owning workspace's stable id.
-   * @returns the persisted entries across all sessions; empty when none were saved.
+   * Replace the persisted entry set durably. Saves to the one file are
+   * serialized; a previous save's failure does not block the next one. On a
+   * legacy migration this also removes the per-workspace files.
+   * @param entries - the complete entry list, possibly empty.
+   * @returns resolution after the file is durable.
    */
-  async loadWorkspace(workspaceId: string): Promise<PendingEntry[]> {
-    const envelope = await this.readWorkspace(this.fileOf(workspaceId))
-    if (envelope === undefined) return []
-    const entries: PendingEntry[] = []
-    for (const sessionId of Object.keys(envelope.sessions)) {
-      const rows = envelope.sessions[sessionId]
+  save(entries: readonly PendingEntry[]): Promise<void> {
+    const task = async () => {
+      await writeJson(this.globalFile, { version: FILE_VERSION, entries })
+      await removeLegacy(this.root)
+    }
+    const tail = this.tails.get(this.globalFile) ?? Promise.resolve()
+    const run = tail.then(task, task)
+    this.tails.set(this.globalFile, run.catch(() => {}))
+    return run
+  }
+}
+
+/** Flatten every legacy per-workspace file's entries (adding `sessionIds`). */
+async function collectLegacy(root: string): Promise<PendingEntry[]> {
+  let names: string[]
+  try {
+    names = await readdir(root)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
+  }
+  const entries: PendingEntry[] = []
+  for (const name of names) {
+    if (name === 'pending.json' || !name.endsWith('.json')) continue
+    const file = join(root, name)
+    const value = await readJson(file)
+    if (value === undefined) continue
+    if (typeof value !== 'object' || value === null) continue
+    const { version, sessions } = value as Record<string, unknown>
+    if (version !== LEGACY_FILE_VERSION) continue
+    if (typeof sessions !== 'object' || sessions === null) continue
+    for (const sessionId of Object.keys(sessions)) {
+      const rows = (sessions as Record<string, unknown>)[sessionId]
       if (!Array.isArray(rows)) continue
       for (const row of rows) {
         const entry = pendingEntryOf(row)
         if (entry !== undefined) entries.push(entry)
       }
     }
-    return entries.sort((left, right) => left.updatedAt - right.updatedAt)
   }
+  return entries
+}
 
-  /**
-   * Replace one session's entries durably. Saves to one file are serialized;
-   * a previous save's failure does not block the next one.
-   * @param workspaceId - the owning workspace's stable id.
-   * @param sessionId - the session whose entries to replace.
-   * @param entries - the session's complete entry list, possibly empty.
-   * @returns resolution after the file is durable.
-   */
-  save(workspaceId: string, sessionId: string, entries: readonly PendingEntry[]): Promise<void> {
-    const file = this.fileOf(workspaceId)
-    const task = async () => {
-      const envelope = await this.readWorkspace(file)
-      if (entries.length === 0) {
-        if (envelope === undefined) return
-        delete envelope.sessions[String(sessionId)]
-        if (Object.keys(envelope.sessions).length === 0) {
-          await rm(file, { force: true })
-          return
-        }
-        await this.writeWorkspace(file, envelope)
-        return
-      }
-      const next: WorkspaceFile = envelope ?? { version: FILE_VERSION, sessions: {} }
-      next.sessions[String(sessionId)] = [...entries]
-      await this.writeWorkspace(file, next)
-    }
-    const tail = this.tails.get(file) ?? Promise.resolve()
-    const run = tail.then(task, task)
-    this.tails.set(file, run.catch(() => {}))
-    return run
+/** Delete the legacy per-workspace files (post-migration cleanup). */
+async function removeLegacy(root: string): Promise<void> {
+  let names: string[]
+  try {
+    names = await readdir(root)
+  } catch {
+    return
+  }
+  for (const name of names) {
+    if (name === 'pending.json' || !name.endsWith('.json')) continue
+    await rm(join(root, name), { force: true }).catch(() => {})
   }
 }

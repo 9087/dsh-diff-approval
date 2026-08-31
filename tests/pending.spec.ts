@@ -1,4 +1,5 @@
-// PendingDiffStore: per-path folding, session scoping, hydration, removal.
+// PendingDiffStore: globally-unique per-path folding, session-scoped list,
+// hydration, removal.
 
 import { describe, expect, it } from 'vitest'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -9,20 +10,26 @@ const S1 = SessionId('session-1')
 const S2 = SessionId('session-2')
 
 function entry(overrides: Partial<PendingEntry> = {}): PendingEntry {
-  return {
-    id: 'entry-1', sessionId: S1, path: '/repo/a.txt', kind: 'edit',
-    oldText: 'old', newText: 'new', updatedAt: 10, ...overrides,
+  const sessionId = overrides.sessionId ?? S1
+  const base: PendingEntry = {
+    id: '/repo/a.txt', sessionId: S1, path: '/repo/a.txt', kind: 'edit',
+    oldText: 'old', newText: 'new', updatedAt: 10, sessionIds: [S1],
   }
+  const merged = { ...base, ...overrides }
+  if (overrides.sessionId !== undefined && overrides.sessionIds === undefined) {
+    merged.sessionIds = [overrides.sessionId as SessionId]
+  }
+  return merged
 }
 
 describe('PendingDiffStore.fold', () => {
   it('records the first operation of a path', () => {
     const store = new PendingDiffStore()
     expect(store.fold(entry())).toBe(true)
-    expect(store.get(S1, 'entry-1')).toEqual({
-      id: 'entry-1', sessionId: S1, path: '/repo/a.txt', kind: 'edit',
-      oldText: 'old', newText: 'new', updatedAt: 10,
-    })
+    expect(store.get('/repo/a.txt')).toEqual(expect.objectContaining({
+      id: '/repo/a.txt', sessionId: S1, path: '/repo/a.txt', kind: 'edit',
+      oldText: 'old', newText: 'new', updatedAt: 10, sessionIds: [S1],
+    }))
     expect(store.size).toBe(1)
   })
 
@@ -30,10 +37,9 @@ describe('PendingDiffStore.fold', () => {
     const store = new PendingDiffStore()
     store.fold(entry({ oldText: 'v1', newText: 'v2', updatedAt: 10 }))
     expect(store.fold(entry({ oldText: 'v2', newText: 'v3', updatedAt: 20 }))).toBe(true)
-    expect(store.get(S1, 'entry-1')).toEqual({
-      id: 'entry-1', sessionId: S1, path: '/repo/a.txt', kind: 'edit',
+    expect(store.get('/repo/a.txt')).toEqual(expect.objectContaining({
       oldText: 'v1', newText: 'v3', updatedAt: 20,
-    })
+    }))
     expect(store.size).toBe(1)
   })
 
@@ -41,17 +47,30 @@ describe('PendingDiffStore.fold', () => {
     const store = new PendingDiffStore()
     store.fold(entry({ kind: 'create', oldText: '', newText: 'content', updatedAt: 10 }))
     store.fold(entry({ oldText: 'content', newText: 'content2', updatedAt: 20 }))
-    expect(store.get(S1, 'entry-1')).toEqual(expect.objectContaining({ kind: 'create', newText: 'content2' }) as object)
+    expect(store.get('/repo/a.txt')).toEqual(expect.objectContaining({ kind: 'create', newText: 'content2' }))
   })
 
   it('keeps the earliest basis and takes the latest content even when the chain breaks', () => {
     const store = new PendingDiffStore()
     store.fold(entry({ oldText: 'v1', newText: 'v2', updatedAt: 10 }))
     expect(store.fold(entry({ oldText: 'external', newText: 'v3', updatedAt: 20 }))).toBe(true)
-    expect(store.get(S1, 'entry-1')).toEqual({
-      id: 'entry-1', sessionId: S1, path: '/repo/a.txt', kind: 'edit',
+    expect(store.get('/repo/a.txt')).toEqual(expect.objectContaining({
       oldText: 'v1', newText: 'v3', updatedAt: 20,
-    })
+    }))
+    expect(store.size).toBe(1)
+  })
+
+  it('folds across sessions into one globally-unique entry', () => {
+    const store = new PendingDiffStore()
+    store.fold(entry({ sessionId: S1, oldText: 'v1', newText: 'v2', updatedAt: 10 }))
+    expect(store.fold(entry({ sessionId: S2, oldText: 'v2', newText: 'v3', updatedAt: 20 }))).toBe(true)
+    const merged = store.get('/repo/a.txt')
+    expect(merged?.newText).toBe('v3')
+    expect(merged?.oldText).toBe('v1')
+    expect(merged?.sessionIds).toEqual([S1, S2])
+    // Both sessions see the one global entry.
+    expect(store.list(S1).map(f => f.path)).toEqual(['/repo/a.txt'])
+    expect(store.list(S2).map(f => f.path)).toEqual(['/repo/a.txt'])
     expect(store.size).toBe(1)
   })
 
@@ -65,61 +84,54 @@ describe('PendingDiffStore.fold', () => {
 })
 
 describe('PendingDiffStore.list', () => {
-  it('scopes entries to one session and orders by the oldest capture first', () => {
+  it('scopes entries to the touching session and orders by the oldest capture first', () => {
     const store = new PendingDiffStore()
-    store.fold(entry({ id: 'e1', path: '/repo/b.txt', updatedAt: 30 }))
-    store.fold(entry({ id: 'e2', sessionId: S2, path: '/repo/c.txt', updatedAt: 20 }))
-    store.fold(entry({ id: 'e3', path: '/repo/a.txt', updatedAt: 10 }))
-    expect(store.list(S1).map(file => file.id)).toEqual(['e3', 'e1'])
-    expect(store.list(S2).map(file => file.id)).toEqual(['e2'])
+    store.fold(entry({ path: '/repo/b.txt', updatedAt: 30 }))
+    store.fold(entry({ sessionId: S2, path: '/repo/c.txt', updatedAt: 20 }))
+    store.fold(entry({ path: '/repo/a.txt', updatedAt: 10 }))
+    expect(store.list(S1).map(file => file.path)).toEqual(['/repo/a.txt', '/repo/b.txt'])
+    expect(store.list(S2).map(file => file.path)).toEqual(['/repo/c.txt'])
     expect(store.list(SessionId('empty'))).toEqual([])
   })
 })
 
 describe('PendingDiffStore.remove', () => {
-  it('removes only the named entry and clears its path index', () => {
+  it('removes only the named path', () => {
     const store = new PendingDiffStore()
     store.fold(entry())
-    store.fold(entry({ id: 'entry-2', path: '/repo/b.txt' }))
-    expect(store.remove(S1, 'entry-1')).toBe(true)
-    expect(store.remove(S1, 'entry-1')).toBe(false)
-    expect(store.get(S1, 'entry-2')).toBeDefined()
+    store.fold(entry({ path: '/repo/b.txt' }))
+    expect(store.remove('/repo/a.txt')).toBe(true)
+    expect(store.remove('/repo/a.txt')).toBe(false)
+    expect(store.get('/repo/b.txt')).toBeDefined()
     // A fresh operation to the removed path starts a new entry.
     expect(store.fold(entry({ oldText: 'x', newText: 'y' }))).toBe(true)
-    expect(store.get(S1, 'entry-1')?.oldText).toBe('x')
-  })
-
-  it('treats the same id under another session as a separate entry', () => {
-    const store = new PendingDiffStore()
-    store.fold(entry())
-    store.fold(entry({ sessionId: S2, newText: 'other' }))
-    store.remove(S1, 'entry-1')
-    expect(store.get(S2, 'entry-1')?.newText).toBe('other')
+    expect(store.get('/repo/a.txt')?.oldText).toBe('x')
   })
 })
 
 describe('PendingDiffStore.hydrate', () => {
   it('folds persisted entries per path, oldest first', () => {
     const store = new PendingDiffStore()
-    store.hydrate(S1, [
-      entry({ id: 'a', oldText: 'v1', newText: 'v2', updatedAt: 10 }),
-      entry({ id: 'b', oldText: 'v2', newText: 'v3', updatedAt: 20 }),
+    store.hydrate([
+      entry({ oldText: 'v1', newText: 'v2', updatedAt: 10 }),
+      entry({ oldText: 'v2', newText: 'v3', updatedAt: 20 }),
     ])
     expect(store.size).toBe(1)
-    expect(store.get(S1, 'a')).toEqual(expect.objectContaining({ oldText: 'v1', newText: 'v3' }) as object)
+    expect(store.get('/repo/a.txt')).toEqual(expect.objectContaining({ oldText: 'v1', newText: 'v3' }))
   })
 
-  it('keeps a live entry over a persisted one for the same path', () => {
+  it('keeps a newer live fold over a stale hydrate for the same path', () => {
     const store = new PendingDiffStore()
-    store.fold(entry({ oldText: 'live-old', newText: 'live-new' }))
-    store.hydrate(S1, [entry({ oldText: 'stale-old', newText: 'stale-new' })])
-    expect(store.get(S1, 'entry-1')?.newText).toBe('live-new')
+    store.hydrate([entry({ oldText: 'stale-old', newText: 'stale-new', updatedAt: 10 })])
+    store.fold(entry({ oldText: 'live-old', newText: 'live-new', updatedAt: 20 }))
+    expect(store.get('/repo/a.txt')?.newText).toBe('live-new')
   })
 
-  it('rebrands merged entries to the calling session', () => {
+  it('preserves every touching session across hydration', () => {
     const store = new PendingDiffStore()
-    store.hydrate(S2, [entry()])
-    expect(store.get(S2, 'entry-1')?.sessionId).toBe(S2)
-    expect(store.get(S1, 'entry-1')).toBeUndefined()
+    store.hydrate([entry({ sessionId: S2, newText: 'b' }), entry({ sessionId: S1, oldText: 'x', newText: 'y' })])
+    expect(store.list(S1).map(f => f.path)).toEqual(['/repo/a.txt'])
+    expect(store.list(S2).map(f => f.path)).toEqual(['/repo/a.txt'])
+    expect(store.get('/repo/a.txt')?.sessionIds).toEqual([S2, S1])
   })
 })

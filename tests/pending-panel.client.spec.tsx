@@ -24,10 +24,15 @@ const S1 = 'session-1' as SessionId
 const FILE: PendingFileDiff = {
   id: 'entry-1', sessionId: S1, path: '/repo/a.txt', kind: 'edit',
   oldText: 'a\n', newText: 'b\n', updatedAt: 10, missing: false, diverged: false,
+  sessionIds: [S1],
 }
 
 function entry(overrides: Partial<PendingFileDiff>): PendingFileDiff {
-  return { ...FILE, ...overrides }
+  return {
+    ...FILE, ...overrides,
+    sessionIds: (overrides as Partial<{ sessionIds: SessionId[] }>).sessionIds
+      ?? [overrides.sessionId ?? S1],
+  }
 }
 
 type PanelProps = ComponentProps<typeof PendingPanel>

@@ -1,4 +1,4 @@
-// PendingPersistence: durable workspace files under a storage root.
+// PendingPersistence: a single global file plus legacy per-workspace migration.
 
 import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -13,7 +13,7 @@ const S1 = SessionId('session-1')
 const S2 = SessionId('session-2')
 
 function entry(sessionId: SessionId, path: string, updatedAt = 1, kind: 'edit' | 'create' = 'edit'): PendingEntry {
-  return { id: `${path}:${updatedAt}`, sessionId, path, kind, oldText: 'old', newText: 'new', updatedAt }
+  return { id: path, sessionId, path, kind, oldText: 'old', newText: 'new', updatedAt, sessionIds: [sessionId] }
 }
 
 let root = ''
@@ -29,81 +29,77 @@ async function persistence(): Promise<PendingPersistence> {
   return new PendingPersistence(root)
 }
 
-describe('load', () => {
-  it('reads an absent workspace file as empty', async () => {
-    await expect((await persistence()).load('workspace-1', String(S1))).resolves.toEqual([])
+describe('loadAll', () => {
+  it('reads an absent store file as empty', async () => {
+    await expect((await persistence()).loadAll()).resolves.toEqual({ entries: [], migratedLegacy: false })
   })
 
   it('round-trips saved entries, oldest capture first', async () => {
     const store = await persistence()
-    await store.save('workspace-1', String(S1), [entry(S1, '/repo/b.txt', 2), entry(S1, '/repo/a.txt', 1)])
-    await expect(store.load('workspace-1', String(S1))).resolves.toEqual([
-      entry(S1, '/repo/a.txt', 1),
-      entry(S1, '/repo/b.txt', 2),
-    ])
+    await store.save([entry(S1, '/repo/b.txt', 2), entry(S1, '/repo/a.txt', 1)])
+    const { entries, migratedLegacy } = await store.loadAll()
+    expect(entries).toEqual([entry(S1, '/repo/a.txt', 1), entry(S1, '/repo/b.txt', 2)])
+    expect(migratedLegacy).toBe(false)
   })
 
   it('round-trips a creation entry with its kind', async () => {
     const store = await persistence()
-    await store.save('workspace-1', String(S1), [entry(S1, '/repo/new.txt', 1, 'create')])
-    const loaded = await store.load('workspace-1', String(S1))
-    expect(loaded).toHaveLength(1)
-    expect(loaded[0]!.kind).toBe('create')
+    await store.save([entry(S1, '/repo/new.txt', 1, 'create')])
+    const { entries } = await store.loadAll()
+    expect(entries).toHaveLength(1)
+    expect(entries[0]!.kind).toBe('create')
   })
 
-  it('skips malformed rows inside an otherwise valid file', async () => {
+  it('skips malformed rows inside an otherwise valid global file', async () => {
     const store = await persistence()
-    await store.save('workspace-1', String(S1), [entry(S1, '/repo/a.txt')])
-    const file = join(root, 'workspace-1.json')
-    const parsed = JSON.parse(await readFile(file, 'utf8')) as { sessions: Record<string, unknown[]> }
-    parsed.sessions[String(S1)]!.push({ path: 42 })
+    await store.save([entry(S1, '/repo/a.txt')])
+    const file = join(root, 'pending.json')
+    const parsed = JSON.parse(await readFile(file, 'utf8')) as { entries: unknown[] }
+    parsed.entries.push({ path: 42 })
     await writeFile(file, JSON.stringify(parsed), 'utf8')
-    await expect(store.load('workspace-1', String(S1))).resolves.toEqual([entry(S1, '/repo/a.txt')])
+    const { entries } = await store.loadAll()
+    expect(entries).toEqual([entry(S1, '/repo/a.txt', 1)])
   })
 
   it('throws on a corrupt file and on an unsupported version', async () => {
     const store = await persistence()
-    const file = join(root, 'workspace-1.json')
+    const file = join(root, 'pending.json')
     await writeFile(file, '{not json', 'utf8')
-    await expect(store.load('workspace-1', String(S1))).rejects.toThrow(/not valid JSON/)
-    await writeFile(file, JSON.stringify({ version: 99, sessions: {} }), 'utf8')
-    await expect(store.load('workspace-1', String(S1))).rejects.toThrow(/version/)
+    await expect(store.loadAll()).rejects.toThrow(/not valid JSON/)
+    await writeFile(file, JSON.stringify({ version: 99, entries: [] }), 'utf8')
+    await expect(store.loadAll()).rejects.toThrow(/version/)
   })
 
-  it('rejects the previous on-disk format', async () => {
+  it('migrates legacy per-workspace files into the global store', async () => {
     const store = await persistence()
-    const file = join(root, 'workspace-1.json')
-    await writeFile(file, JSON.stringify({ version: 1, sessions: {} }), 'utf8')
-    await expect(store.load('workspace-1', String(S1))).rejects.toThrow(/version/)
+    const legacyFile = join(root, 'workspace-1.json')
+    await writeFile(legacyFile, JSON.stringify({
+      version: 2,
+      sessions: { [String(S1)]: [entry(S1, '/repo/a.txt', 1)] },
+    }), 'utf8')
+    const { entries, migratedLegacy } = await store.loadAll()
+    expect(migratedLegacy).toBe(true)
+    expect(entries).toEqual([entry(S1, '/repo/a.txt', 1)])
+    // A save finalizes the migration: the global file exists, legacy is gone.
+    await store.save(entries)
+    expect(await readdir(root)).toEqual(['pending.json'])
   })
 })
 
 describe('save', () => {
-  it('preserves sibling sessions when replacing one session', async () => {
+  it('replaces the whole global entry set', async () => {
     const store = await persistence()
-    await store.save('workspace-1', String(S1), [entry(S1, '/repo/a.txt')])
-    await store.save('workspace-1', String(S2), [entry(S2, '/repo/b.txt')])
-    await store.save('workspace-1', String(S1), [entry(S1, '/repo/a.txt', 9), entry(S1, '/repo/c.txt', 10)])
-    await expect(store.load('workspace-1', String(S1))).resolves.toEqual([
-      entry(S1, '/repo/a.txt', 9),
-      entry(S1, '/repo/c.txt', 10),
-    ])
-    await expect(store.load('workspace-1', String(S2))).resolves.toEqual([entry(S2, '/repo/b.txt')])
+    await store.save([entry(S1, '/repo/a.txt')])
+    await store.save([entry(S1, '/repo/a.txt', 1), entry(S2, '/repo/b.txt', 2)])
+    const { entries } = await store.loadAll()
+    expect(entries).toEqual([entry(S1, '/repo/a.txt', 1), entry(S2, '/repo/b.txt', 2)])
   })
 
-  it('drops the file when the last session empties', async () => {
+  it('writes an empty entry set durably', async () => {
     const store = await persistence()
-    await store.save('workspace-1', String(S1), [entry(S1, '/repo/a.txt')])
-    await store.save('workspace-1', String(S1), [])
-    await expect(readdir(root)).resolves.toEqual([])
-  })
-
-  it('removes one emptied session but keeps the sibling', async () => {
-    const store = await persistence()
-    await store.save('workspace-1', String(S1), [entry(S1, '/repo/a.txt')])
-    await store.save('workspace-1', String(S2), [entry(S2, '/repo/b.txt')])
-    await store.save('workspace-1', String(S1), [])
-    await expect(store.load('workspace-1', String(S1))).resolves.toEqual([])
-    await expect(store.load('workspace-1', String(S2))).resolves.toEqual([entry(S2, '/repo/b.txt')])
+    await store.save([entry(S1, '/repo/a.txt')])
+    await store.save([])
+    const { entries } = await store.loadAll()
+    expect(entries).toEqual([])
   })
 })
