@@ -1262,6 +1262,42 @@ describe('PendingPanel', () => {
     expect(screen.getByText('(a.txt:1)')).toBeDefined()
   })
 
+  it('shows the reference when a selection starts in the line-number gutter', () => {
+    // The reported drag-right-to-left bug: the selection boundary lands on the
+    // left line-number cell, so rowRangeOf measured it against an empty code
+    // cell (0 >= 0), skipped the row, and hid the copy-reference toolbar. The
+    // gutter boundary must now measure against the line's own code text.
+    const file = entry({ id: 'entry-ctx', oldText: 'a\nb\n', newText: 'a\nB\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    expect(rows.length).toBeGreaterThanOrEqual(3)
+    const row0 = rows[0]!
+    const gutter0 = row0.children[0] ?? row0 // the left line-number cell
+    const code0 = row0.querySelector('[data-diff-code]') ?? row0
+    const selection = {
+      isCollapsed: false,
+      anchorNode: code0.firstChild ?? code0,
+      focusNode: gutter0.firstChild ?? gutter0,
+      rangeCount: 1,
+      getRangeAt: () => ({
+        startContainer: gutter0.firstChild ?? gutter0,
+        startOffset: 0,
+        endContainer: code0.firstChild ?? code0,
+        endOffset: 1,
+      }),
+    } as unknown as Selection
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    // The gutter-start selection still yields a copyable reference for the row.
+    expect(document.querySelector('[data-diff-status-bar]')).not.toBeNull()
+    expect(screen.getByText('(/repo/a.txt:1)')).toBeDefined()
+  })
+
   it('shows a keep/revert frame for a selection spanning multiple blocks', () => {
     // 'a\nb\nc\nd\n' -> 'A\nb\nC\nd\n' has two change blocks (lines 1 and 3).
     const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })

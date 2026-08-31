@@ -968,6 +968,11 @@
   /* Fixed height: the virtual window and jump math are keyed to this value. */
   height: 22px;
   line-height: 22px;
+  /* Only the code column is selectable. The row opts out so a drag spanning
+     the whole row never includes the line-number gutters, which would otherwise
+     make the copy-reference range miss (the reference button hides). */
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* Virtual-list spacer rows: empty table rows holding the unrendered rows'
@@ -985,6 +990,7 @@
   color: var(--dsw-alias-label-tertiary);
   font-variant-numeric: tabular-nums;
   user-select: none;
+  -webkit-user-select: none;
   /* Line numbers are not selectable text; keep the default arrow here. */
   cursor: default;
 }
@@ -992,6 +998,10 @@
 .code {
   display: table-cell;
   white-space: pre;
+  /* The code column is the only selectable part of a row; it drives the
+     copy-reference toolbar. */
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .context {

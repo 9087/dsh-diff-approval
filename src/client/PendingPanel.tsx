@@ -1023,10 +1023,22 @@ function splitRowRangeOf(selection: Selection | null): RowRange | undefined {
   return { start, end, side: startInfo.side }
 }
 
-/** Character offset of a selection boundary within its line's code text. */
+/** The code cell in `node`'s visual row, a sibling of its gutter cells. A
+ * line-number boundary must measure against the line's own selectable text even
+ * though the gutter text is not inside the code cell; this resolves the cell
+ * for both the unified row and a split column row. */
+function codeCellAt(node: Node): HTMLElement | null {
+  const container = node instanceof Element ? node : node.parentElement
+  const row = container?.closest('[data-diff-row], [data-diff-split-row]')
+  return row?.querySelector<HTMLElement>('[data-diff-code]') ?? null
+}
+
+/** Character offset of a selection boundary within its line's code text. A
+ * boundary outside the code cell (the line-number gutter) sits at the line's
+ * start — offset 0, never the line's end — so it never skips the line. */
 function lineOffsetAt(node: Node, offset: number): number {
-  const code = (node instanceof Element ? node : node.parentElement)?.closest('[data-diff-code]')
-  if (code === null || code === undefined) return 0
+  const code = codeCellAt(node)
+  if (code === null || !code.contains(node)) return 0
   let before = 0
   const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT)
   let current: Node | null = walker.nextNode()
@@ -1053,10 +1065,10 @@ function lineOffsetAt(node: Node, offset: number): number {
   return before
 }
 
-/** Length of the code text on the line holding a node. */
+/** Length of the code text on the line holding a node (the line's selectable
+ * text, even when `node` is in a gutter cell of the same row). */
 function lineLengthAt(node: Node): number {
-  const code = (node instanceof Element ? node : node.parentElement)?.closest('[data-diff-code]')
-  return code?.textContent?.length ?? 0
+  return codeCellAt(node)?.textContent?.length ?? 0
 }
 
 /**
