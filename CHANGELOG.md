@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.0](https://github.com/9087/dsh-diff-approval/compare/v0.13.1...v0.14.0) (2026-08-31)
+
+### Bug Fixes
+
+* keep the copy-reference selection when a drag lands on a line number ([0528410](https://github.com/9087/dsh-diff-approval/commit/05284102ecff7b39aaab4d939a4b4d0136e9712e))
+* keep the entry removed after a whole-file keep (id must equal path) ([316fe41](https://github.com/9087/dsh-diff-approval/commit/316fe41525db94e5275524e54d1ba8db36603c8e))
+* remap references against only the newest entry per path ([8f7ac56](https://github.com/9087/dsh-diff-approval/commit/8f7ac56c645ad3091655bfa7f669d2437a894f36))
+
 ## [0.13.1](https://github.com/9087/dsh-diff-approval/compare/v0.13.0...v0.13.1) (2026-08-31)
 
 ### Bug Fixes
