@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.13.1](https://github.com/9087/dsh-diff-approval/compare/v0.13.0...v0.13.1) (2026-08-31)
+
+### Bug Fixes
+
+* don't expire references on a trailing-newline-only drift ([e2b03b9](https://github.com/9087/dsh-diff-approval/commit/e2b03b9d3e3bb7ce6536468f5153a0592c9bcb5a))
+
 ## [0.13.0](https://github.com/9087/dsh-diff-approval/compare/v0.12.0...v0.13.0) (2026-08-30)
 
 ### Features
