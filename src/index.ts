@@ -574,6 +574,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * @returns resolution after the write settles (successful or logged).
    */
   async function persistSession(): Promise<void> {
+    await ensureLoaded()
     try {
       await persistence.save(store.all())
     } catch (error: unknown) {
@@ -609,16 +610,22 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       case 'keep': {
         const target = targetOf(payload)
         if (target === undefined) return rpcError('sessionId and id must be non-empty strings')
-        await ensureLoaded()
-        const entry = store.get(target.id)
+        // Remove synchronously: once the user acts, the entry must be gone for
+        // any concurrent list. (The store is hydrated by the time an action
+        // runs, since the panel lists first.)
+        let entry = store.get(target.id)
         if (entry === undefined) {
-          const value: DiffApprovalActionValue = { outcome: 'missing' }
-          return { ok: true, value }
+          await ensureLoaded()
+          entry = store.get(target.id)
+          if (entry === undefined) {
+            const value: DiffApprovalActionValue = { outcome: 'missing' }
+            return { ok: true, value }
+          }
         }
         store.remove(target.id)
         pushUndo(target.sessionId,
-          { id: entry.id, path: entry.path, entry, fileText: undefined },
-          { id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
+          { id: entry.path, path: entry.path, entry, fileText: undefined },
+          { id: entry.path, path: entry.path, entry: undefined, fileText: undefined })
         await persistSession()
         const value: DiffApprovalActionValue = { outcome: 'kept' }
         return { ok: true, value }
@@ -626,11 +633,14 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       case 'revert': {
         const target = targetOf(payload)
         if (target === undefined) return rpcError('sessionId and id must be non-empty strings')
-        await ensureLoaded()
-        const entry = store.get(target.id)
+        let entry = store.get(target.id)
         if (entry === undefined) {
-          const value: DiffApprovalActionValue = { outcome: 'missing' }
-          return { ok: true, value }
+          await ensureLoaded()
+          entry = store.get(target.id)
+          if (entry === undefined) {
+            const value: DiffApprovalActionValue = { outcome: 'missing' }
+            return { ok: true, value }
+          }
         }
         // A revert that deletes a created file is not undoable (the file is
         // gone); a revert that writes keeps a snapshot for Ctrl+Z.
@@ -650,8 +660,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             const content = reencodeEol(entry.oldText, detectEol(entry.newText))
             await writeRevert(resolved, content, target.sessionId, signal)
             undo = {
-              before: { id: entry.id, path: entry.path, entry, fileText: preWrite },
-              after: { id: entry.id, path: entry.path, entry: undefined, fileText: content },
+              before: { id: entry.path, path: entry.path, entry, fileText: preWrite },
+              after: { id: entry.path, path: entry.path, entry: undefined, fileText: content },
             }
           }
         } catch (error: unknown) {

@@ -78,6 +78,8 @@ export class PendingDiffStore {
     const sessionIds = [...new Set([...touchedBy(a), b.sessionId])]
     return {
       ...later,
+      // The global identity is the path; `id` must always equal it.
+      id: later.path,
       oldText: earlier.oldText,
       // A creation always keeps kind 'create', so a revert removes the file.
       kind: earlier.kind === 'create' || later.kind === 'create' ? 'create' : 'edit',

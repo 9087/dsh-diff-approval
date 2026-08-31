@@ -52,7 +52,9 @@ function pendingEntryOf(value: unknown): PendingEntry | undefined {
     ? sessionIds.filter((value): value is string => typeof value === 'string' && value.length > 0)
     : []
   return {
-    id, path, kind, oldText, newText, updatedAt,
+    // The global identity is the path, so `id` must equal it regardless of any
+    // legacy uuid — the client uses `id` as the per-file action key.
+    id: path, path, kind, oldText, newText, updatedAt,
     sessionId: sessionId as SessionId,
     sessionIds: ids.length > 0 ? ids as SessionId[] : [sessionId as SessionId],
   }

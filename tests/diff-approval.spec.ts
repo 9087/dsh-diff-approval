@@ -653,6 +653,8 @@ describe('persistence', () => {
     const [entry] = await listEntries(first.handle, 'session-1')
     await expect(first.handle('keep', { sessionId: 'session-1', id: entry!.id }, signal()))
       .resolves.toEqual({ ok: true, value: { outcome: 'kept' } })
+    // The same live harness must also list it as gone (not just a fresh one).
+    expect(await listEntries(first.handle, 'session-1')).toEqual([])
 
     const second = await harness({ sessionIds: [SessionId('session-1')], storageDir })
     expect(await listEntries(second.handle, 'session-1')).toEqual([])
