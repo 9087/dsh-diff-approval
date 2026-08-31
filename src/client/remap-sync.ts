@@ -73,20 +73,33 @@ export function attachReferenceRemap(opts: ReferenceRemapOpts): {
 
   const observe = (): void => {
     const snapshot = store.getSnapshot()
+    // The list can carry more than one entry per path (successive folds keep the
+    // earliest id but advance newText), and the panel renders only the newest.
+    // A reference targets the newest entry's content, so seed/advance the
+    // baseline from it alone — iterating every duplicate would remap the
+    // reference against an older entry's content and corrupt it. Pick the newest
+    // by updatedAt, robust to list ordering.
+    const newestByPath = new Map<string, { newText: string; updatedAt: number }>()
     for (const file of snapshot.files) {
-      const previous = lastContent.get(file.path)
+      const current = newestByPath.get(file.path)
+      if (current === undefined || file.updatedAt >= current.updatedAt) {
+        newestByPath.set(file.path, { newText: file.newText, updatedAt: file.updatedAt })
+      }
+    }
+    for (const [path, { newText }] of newestByPath) {
+      const previous = lastContent.get(path)
       // Remap only on a real content change, not a representation drift (an EOL
       // re-encode or a trailing-newline flip), which must never expire a live
       // reference. The baseline always advances so a later real change remaps
       // from the right old content.
-      if (previous !== undefined && contentKey(previous) !== contentKey(file.newText)) {
-        remap(file.path, previous, file.newText, snapshot.workspacePath)
+      if (previous !== undefined && contentKey(previous) !== contentKey(newText)) {
+        remap(path, previous, newText, snapshot.workspacePath)
       }
-      lastContent.set(file.path, file.newText)
+      lastContent.set(path, newText)
     }
     // Drop baselines for files that left the list (whole-file keep/revert).
     for (const path of [...lastContent.keys()]) {
-      if (!snapshot.files.some(file => file.path === path)) lastContent.delete(path)
+      if (!newestByPath.has(path)) lastContent.delete(path)
     }
   }
 

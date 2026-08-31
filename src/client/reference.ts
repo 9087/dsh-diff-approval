@@ -69,8 +69,12 @@ export function referenceOf(path: string, workspacePath: string | undefined, sta
 /**
  * Map one referenced line range from `oldContent` coordinates to `newContent`
  * coordinates. Lines that survive (unchanged context) map to their new line
- * numbers, and the surviving lines' min/max span is returned. When every line
- * in the range was removed, returns `undefined` (the reference is expired).
+ * numbers, and a line whose content changed in place (a delete replaced by an
+ * add at the same logical position) maps to that position's new line — its text
+ * changed, but the line is not gone. Only a line that is genuinely removed
+ * (a delete with no replacement) is omitted. The surviving lines' min/max span
+ * is returned; when every line in the range is gone, returns `undefined` (the
+ * reference is expired).
  * @param oldContent - the file content the reference was made against.
  * @param newContent - the file content now.
  * @param start - first referenced line (1-based, inclusive).
@@ -85,9 +89,22 @@ export function remapReferenceRange(
 ): { start: number; end: number } | undefined {
   const diff = computeWholeFileDiff(oldContent, newContent)
   const oldToNew = new Map<number, number>()
+  // A line whose content changed in place is still the same logical line, so it
+  // must not expire. Pair each deleted line with the added line that replaces it
+  // (a delete run immediately followed by an add, before the next context/del),
+  // and map old -> new. A line that is truly removed (a delete with no
+  // replacement) stays unmapped and becomes LINE_MISSING.
+  let pendingDeletes: number[] = []
   for (const row of diff.rows) {
-    if (row.oldLine !== undefined && row.newLine !== undefined) {
-      oldToNew.set(row.oldLine, row.newLine)
+    if (row.kind === 'context') {
+      if (row.oldLine !== undefined && row.newLine !== undefined) oldToNew.set(row.oldLine, row.newLine)
+      pendingDeletes = []
+    } else if (row.kind === 'del' && row.oldLine !== undefined) {
+      pendingDeletes.push(row.oldLine)
+    } else if (row.kind === 'add' && row.newLine !== undefined) {
+      const replaced = pendingDeletes.shift()
+      if (replaced !== undefined) oldToNew.set(replaced, row.newLine)
+      pendingDeletes = []
     }
   }
   let min = Infinity
@@ -105,8 +122,9 @@ export function remapReferenceRange(
 /**
  * Rewrite every `(referencePath:line)` / `(referencePath:start-end)` occurrence
  * in `text`, remapping each range from `oldContent` to `newContent`. A range
- * whose lines all survived becomes the new range; one whose lines were all
- * removed becomes `(referencePath:LINE_MISSING)`.
+ * whose lines all survived (unchanged context or an in-place edit) becomes the
+ * new range; one whose lines were all genuinely removed becomes
+ * `(referencePath:LINE_MISSING)`.
  * @param text - the free text (composer draft, queued message) to rewrite.
  * @param referencePath - the file's reference path (workspace-relative or absolute).
  * @param oldContent - the file content the references were made against.

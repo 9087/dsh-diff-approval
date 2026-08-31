@@ -129,4 +129,27 @@ describe('attachReferenceRemap', () => {
     expect(writeDraft).not.toHaveBeenCalled()
     expect(draft).toBe('(a.txt:2)')
   })
+
+  it('uses only the newest entry when the list carries duplicate path entries', async () => {
+    // Successive folds keep the earliest id but advance newText, so the list can
+    // carry a stale and a fresh entry for one path. The panel renders only the
+    // newest, and a reference targets it — iterating both would remap the
+    // reference against the stale content and expire it.
+    const list = vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>()
+    const store = createPendingDiffStore(portOf(list))
+
+    let draft = '(a.txt:3)'
+    const writeDraft = vi.fn((text: string) => { draft = text })
+    attachReferenceRemap({ store, readDraft: () => draft, writeDraft, readQueue: () => [], writeQueue: () => {} })
+
+    const newer = { ...entry('a\nb\nc\nd\n'), id: 'entry-newer', updatedAt: 20 }
+    const older = { ...entry('a\nb\n'), id: 'entry-older', updatedAt: 10 }
+    list.mockResolvedValue({ files: [older, newer], workspacePath: '/repo' })
+    await store.refresh(S1)
+
+    // The stale 2-line entry must not be treated as a change: the reference (made
+    // against the newest 4-line content) stays untouched.
+    expect(writeDraft).not.toHaveBeenCalled()
+    expect(draft).toBe('(a.txt:3)')
+  })
 })

@@ -73,6 +73,16 @@ describe('remapReferenceRange', () => {
   it('keeps a line when only the trailing newline changed', () => {
     expect(remapReferenceRange('a\nb\n', 'a\nb', 2, 2)).toEqual({ start: 2, end: 2 })
   })
+
+  it('keeps a line whose content changed in place (not LINE_MISSING)', () => {
+    // 'a\nb\nc\n' -> 'a\nB\nc\n': line 2 was edited, not removed.
+    expect(remapReferenceRange('a\nb\nc\n', 'a\nB\nc\n', 2, 2)).toEqual({ start: 2, end: 2 })
+  })
+
+  it('maps an in-place-changed line to its shifted position', () => {
+    // A line inserted above an in-place edit still shifts the edited line.
+    expect(remapReferenceRange('a\nb\nc\n', 'x\na\nB\nc\n', 2, 2)).toEqual({ start: 3, end: 3 })
+  })
 })
 
 describe('remapReferences', () => {
@@ -108,6 +118,11 @@ describe('remapReferences', () => {
 
   it('does not expire a reference when only the trailing newline changed', () => {
     expect(remapReferences('(a.txt:2)', 'a.txt', 'a\nb\n', 'a\nb'))
+      .toBe('(a.txt:2)')
+  })
+
+  it('keeps an in-place-changed reference instead of expiring it', () => {
+    expect(remapReferences('(a.txt:2)', 'a.txt', 'a\nb\nc\n', 'a\nB\nc\n'))
       .toBe('(a.txt:2)')
   })
 })
