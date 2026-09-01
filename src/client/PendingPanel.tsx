@@ -44,7 +44,7 @@ const COMPOSER_HEIGHT_VAR = '--dsh-composer-height'
 /** Interactive composer/approval cards; clicking these keeps the panel open.
     Deliberately the cards themselves, not the seat: the approval frame's wide
     side gutters are blank space, so a click there must still close. */
-const KEEP_OPEN_SELECTOR = '[data-composer-card],[data-question-key] > *,[data-plan-review-key] > *'
+const KEEP_OPEN_SELECTOR = '[data-composer-card],[data-question-key] > *,[data-plan-review-key] > *,[data-approval-key] > *'
 /** Seat counts as docked when its bottom is this close to the window bottom. */
 const DOCKED_TOLERANCE_PX = 48
 /** File-list pane width bounds for the manual split drag, in px. */

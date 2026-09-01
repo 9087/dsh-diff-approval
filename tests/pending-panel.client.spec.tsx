@@ -249,6 +249,24 @@ describe('PendingPanel', () => {
     frame.remove()
   })
 
+  it('stays open on the approval-key card but closes on its blank gutter', () => {
+    const frame = document.createElement('div')
+    frame.setAttribute('data-approval-key', 'approval-1')
+    const card = document.createElement('section')
+    frame.appendChild(card)
+    document.body.appendChild(frame)
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    fireEvent.pointerDown(card)
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+
+    fireEvent.pointerDown(frame)
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+    frame.remove()
+  })
+
   it('closes via the header close button', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
