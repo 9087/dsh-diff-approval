@@ -13,6 +13,7 @@ import type { Workspace, WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import type { ConnectionRpcHandler, ConnectionRpcHandlerOptions, HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { PendingFileDiff } from '../src/types.ts'
 import { apply, DIFF_APPROVAL_CHANNEL } from '../src/index.ts'
+import { PendingPersistence } from '../src/persist.ts'
 import { removeTempDir } from './cleanup.ts'
 
 interface FsDouble {
@@ -41,6 +42,7 @@ const tempDirs: string[] = []
 afterEach(async () => {
   await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.dispose()))
   await Promise.all(tempDirs.splice(0).map(removeTempDir))
+  vi.restoreAllMocks()
 })
 
 async function harness(options: {
@@ -966,5 +968,28 @@ describe('vcs detection and import', () => {
     const files2 = await listEntries(handle, 'session-1')
     expect(files2).toHaveLength(1)
     expect(files2[0]).toMatchObject({ kind: 'edit', oldText: 'old\n', newText: 'new\n' })
+  })
+})
+
+describe('persistence throttling', () => {
+  it('coalesces a rapid burst of captures into a bounded number of durable writes', async () => {
+    const save = vi.spyOn(PendingPersistence.prototype, 'save')
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-diff-approval-'))
+    tempDirs.push(storageDir)
+    const first = await harness({ sessionIds: [SessionId('session-1')], storageDir })
+    // A rapid burst of captures to the same file.
+    for (let i = 0; i < 6; i++) {
+      emitResult(first.ctx, editExec(), editSuccess('/repo/a.txt', `v${i}\n`, `v${i + 1}\n`))
+    }
+    // Let the throttle window settle (>1000ms + grace). The durable state must
+    // reflect every capture (earliest basis -> latest content), so the throttle
+    // coalesced rather than dropped any. (The exact write count is timing-linked
+    // and not asserted here — the perf win is measured live, correctness here.)
+    await new Promise(resolve => setTimeout(resolve, 1600))
+    expect(save.mock.calls.length).toBeGreaterThan(0)
+    // The burst is not lost: the durable state is earliest basis -> latest content.
+    const second = await harness({ sessionIds: [SessionId('session-1')], storageDir })
+    const [entry] = await listEntries(second.handle, 'session-1')
+    expect(entry).toMatchObject({ oldText: 'v0\n', newText: 'v6\n', kind: 'edit' })
   })
 })

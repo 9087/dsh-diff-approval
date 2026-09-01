@@ -330,7 +330,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       sessionIds: [sessionId],
     }
     await ensureLoaded()
-    if (store.fold(entry)) await persistSession()
+    if (store.fold(entry)) persistSession()
   }
 
   /** One observation of a tracked path's live file. Existence is decided solely
@@ -422,7 +422,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         pushUndo(sessionId,
           { id: entry.path, path: entry.path, entry, fileText: entry.newText },
           { id: entry.path, path: entry.path, entry: undefined, fileText: undefined })
-        await persistSession()
+        persistSession()
         continue
       }
       if (live.kind === 'unavailable') {
@@ -430,7 +430,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // purge its undo/redo records so the LIFO queue stays traversable.
         store.remove(entry.path)
         purgeForEntry(entry.path)
-        await persistSession()
+        persistSession()
         continue
       }
       // Present. A file changed outside the tracked operations (another tool,
@@ -448,7 +448,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         pushUndo(sessionId,
           { id: entry.path, path: entry.path, entry, fileText: beforeText },
           { id: entry.path, path: entry.path, entry: { ...entry, newText: content, updatedAt: Date.now() }, fileText: content })
-        await persistSession()
+        persistSession()
         if (redoWasPresent) redoCleared = true
       }
       const state = { missing: false, diverged: hasContent ? content !== adopted : true }
@@ -573,12 +573,53 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * file.
    * @returns resolution after the write settles (successful or logged).
    */
-  async function persistSession(): Promise<void> {
-    await ensureLoaded()
+  // Persistence writes are throttled: coalesce to at most one durable write per
+  // PERSIST_THROTTLE_MS. A write runs immediately when the store has been idle
+  // longer than the window (write-through for a single change), so a lone
+  // capture persists without delay; a burst of agent captures coalesces to one
+  // write per window instead of one per event — the fix for the I/O/CPU storm.
+  // User actions (keep/revert/undo/redo) pass `force` so their outcome is
+  // durable immediately, not left in a throttled window.
+  const PERSIST_THROTTLE_MS = 1000
+  let persistDirty = false
+  let persistScheduled = false
+  let lastPersistAt = 0
+  let persistTimer: ReturnType<typeof setTimeout> | undefined
+
+  /** Actually write the (dirty) store to disk; one coalesced write. */
+  async function flushPersist(): Promise<void> {
+    if (!persistDirty) return
+    persistDirty = false
+    lastPersistAt = Date.now()
     try {
+      await ensureLoaded()
       await persistence.save(store.all())
     } catch (error: unknown) {
       ctx.logger.warn(`diff-approval: persisting pending changes failed: ${errorMessage(error)}`)
+    }
+  }
+
+  /** Mark the store dirty and schedule one throttled, coalesced write. Pass
+   * `force` to write immediately (user actions need durable, immediate results). */
+  function persistSession(force = false): void {
+    persistDirty = true
+    if (force) {
+      if (persistScheduled) { clearTimeout(persistTimer); persistScheduled = false }
+      void flushPersist()
+      return
+    }
+    if (persistScheduled) return
+    const delay = PERSIST_THROTTLE_MS - (Date.now() - lastPersistAt)
+    if (delay <= 0) {
+      void flushPersist()
+    } else {
+      persistScheduled = true
+      persistTimer = setTimeout(() => {
+        persistScheduled = false
+        void flushPersist()
+      }, delay)
+      // Do not hold the process open just for this timer.
+      persistTimer.unref?.()
     }
   }
 
@@ -594,7 +635,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     const entry: PendingEntry = { id: outcome.path, sessionId, ...outcome, updatedAt: Date.now(), sessionIds: [sessionId] }
     // Fold synchronously so the very next list sees the capture; persistence
     // (hydration + save) rides the same turn asynchronously.
-    if (store.fold(entry)) void persistSession()
+    if (store.fold(entry)) persistSession()
   })
 
   const handle: ConnectionRpcHandler = async (endpoint, payload, signal): Promise<RpcResult<unknown>> => {
@@ -626,7 +667,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         pushUndo(target.sessionId,
           { id: entry.path, path: entry.path, entry, fileText: undefined },
           { id: entry.path, path: entry.path, entry: undefined, fileText: undefined })
-        await persistSession()
+        persistSession(true)
         const value: DiffApprovalActionValue = { outcome: 'kept' }
         return { ok: true, value }
       }
@@ -669,7 +710,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         }
         store.remove(target.id)
         if (undo !== undefined) pushUndo(target.sessionId, undo.before, undo.after)
-        await persistSession()
+        persistSession(true)
         const value: DiffApprovalActionValue = { outcome: 'reverted' }
         return { ok: true, value }
       }
@@ -694,7 +735,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         pushUndo(blockTarget.sessionId,
           { id: entry.id, path: entry.path, entry, fileText: undefined },
           { id: entry.id, path: entry.path, entry: afterEntry, fileText: undefined })
-        await persistSession()
+        persistSession()
         const fullyResolved = updatedOld === entry.newText
         const kept: DiffApprovalActionValue = fullyResolved ? { outcome: 'kept', resolved: true } : { outcome: 'kept' }
         return { ok: true, value: kept }
@@ -738,7 +779,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           return rpcError(`block revert failed: ${errorMessage(error)}`)
         }
         if (undo !== undefined) pushUndo(blockTarget.sessionId, undo.before, undo.after)
-        await persistSession()
+        persistSession()
         const fullyResolved = normalizeEol(updatedNew) === normalizeEol(entry.oldText)
         const reverted: DiffApprovalActionValue = fullyResolved ? { outcome: 'reverted', resolved: true } : { outcome: 'reverted' }
         return { ok: true, value: reverted }
@@ -759,7 +800,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           return rpcError(`undo failed: ${errorMessage(error)}`)
         }
         redoStack.push(pair)
-        await persistSession()
+        persistSession(true)
         const value: DiffApprovalActionValue = { outcome: 'undone', id: pair.after.id }
         return { ok: true, value }
       }
@@ -778,7 +819,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           return rpcError(`redo failed: ${errorMessage(error)}`)
         }
         undoStack.push(pair)
-        await persistSession()
+        persistSession(true)
         const value: DiffApprovalActionValue = { outcome: 'redone', id: pair.after.id }
         return { ok: true, value }
       }
@@ -831,7 +872,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           }
         }
         if (imported > 0) {
-          await persistSession()
+          persistSession()
           // The import is undoable as one action: snapshot each affected path's
           // entry before and after, so Ctrl+Z undoes the whole import back to
           // the pre-import list (no file writes — the import never touched files).
