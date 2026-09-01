@@ -583,9 +583,10 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   tabWidthSpaces: number
   busy: boolean
   t: Translator
+  selection: RowRange | undefined
   onBlockKeep: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
   onBlockRevert: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
-}>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, onBlockKeep, onBlockRevert }, ref) {
+}>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, selection, onBlockKeep, onBlockRevert }, ref) {
   const { pairs, pairOfRow } = useMemo(() => computeSideBySideDiff(model.diff.rows), [model])
   const pairCount = pairs.length
   const bodyRef = useRef<HTMLDivElement>(null)
@@ -782,8 +783,14 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     return lo
   }
   const viewport = viewportH > 0 ? viewportH : totalHeight
-  const start = Math.max(0, pairAtY(scrollTop) - OVERSCAN_ROWS)
-  const end = Math.min(pairCount, pairAtY(scrollTop + viewport) + OVERSCAN_ROWS)
+  let start = Math.max(0, pairAtY(scrollTop) - OVERSCAN_ROWS)
+  let end = Math.min(pairCount, pairAtY(scrollTop + viewport) + OVERSCAN_ROWS)
+  // Keep the selected pairs rendered when scrolled out of the window, so
+  // virtualization never unmounts the nodes the native selection references.
+  if (selection !== undefined) {
+    start = Math.min(start, selection.start)
+    end = Math.max(end, selection.end + 1)
+  }
   const visiblePairs = pairs.slice(start, end)
 
   // Block navigation: jump between change blocks (flashes the focused one).
@@ -1427,8 +1434,17 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     return lo
   }
   const viewport = viewportHeight > 0 ? viewportHeight : totalHeight
-  const start = Math.max(0, rowAtY(scrollTop) - OVERSCAN_ROWS)
-  const end = Math.min(rowCount, rowAtY(scrollTop + viewport) + OVERSCAN_ROWS)
+  let start = Math.max(0, rowAtY(scrollTop) - OVERSCAN_ROWS)
+  let end = Math.min(rowCount, rowAtY(scrollTop + viewport) + OVERSCAN_ROWS)
+  // Keep the user's text selection rendered even when it scrolls out of the
+  // viewport window: virtualization would otherwise unmount the selected rows,
+  // and the browser's native Selection (whose anchor/focus reference those nodes)
+  // would be invalidated — the highlight comes back garbled. Pin the window to
+  // the selection so it survives a scroll out and back.
+  if (selection !== undefined) {
+    start = Math.min(start, selection.start)
+    end = Math.max(end, selection.end + 1)
+  }
   const visibleRows = rows.slice(start, end)
 
   // The floating Keep/Revert frame anchors to the hovered block's bottom edge.
@@ -1902,6 +1918,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
           tabWidthSpaces={tabWidthSpaces}
           busy={busy}
           t={t}
+          selection={selection}
           onBlockKeep={onBlockKeep}
           onBlockRevert={onBlockRevert}
         />
