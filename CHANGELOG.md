@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.1](https://github.com/9087/dsh-diff-approval/compare/v0.14.0...v0.14.1) (2026-09-01)
+
+### Bug Fixes
+
+* keep selected diff rows mounted across scroll ([cc3e061](https://github.com/9087/dsh-diff-approval/commit/cc3e06102ee7d05512a52b67d63fd63d2266c878))
+* keep the diff panel open when clicking the approval/permission card ([551b52f](https://github.com/9087/dsh-diff-approval/commit/551b52f6c9f2c2e44a36f4e416736f7cfca87cdd))
+* throttle persistence writes to coalesce agent capture bursts ([08fb74c](https://github.com/9087/dsh-diff-approval/commit/08fb74c578121896f4b17a00669d7b1b86c898ef))
+
 ## [0.14.0](https://github.com/9087/dsh-diff-approval/compare/v0.13.1...v0.14.0) (2026-08-31)
 
 ### Bug Fixes

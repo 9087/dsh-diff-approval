@@ -1,6 +1,6 @@
 {
   "name": "dsh-diff-approval",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "description": "DeepSeek Harness plugin: pending-edit review with whole-file diff and Keep/Revert",
   "packageManager": "pnpm@11.21.0",
   "author": "Wu Zhiwei",
