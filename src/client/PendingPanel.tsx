@@ -2049,7 +2049,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
           disabled={busy}
           onClick={() => { void onRevert(file.sessionId, file.id) }}
         >
-          {t('action.revert')}
+          {file.kind === 'create' ? t('action.delete') : t('action.revert')}
         </button>
       </div>
       {failedMessage !== undefined && <p className={css.actionError} data-diff-action-error>{failedMessage}</p>}
