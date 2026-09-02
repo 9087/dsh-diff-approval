@@ -9,6 +9,7 @@
  */
 
 import type { WholeFileDiffRow } from './whole-file-diff.ts'
+import { alignChangedBlock } from './whole-file-diff.ts'
 
 /** One side of a split pair: text plus its 1-based line number (absent on a pure add). */
 export interface SplitSide {
@@ -49,45 +50,59 @@ function rightSideOf(row: WholeFileDiffRow): SplitSide | undefined {
 }
 
 /**
- * Regroup the whole-file rows into aligned split pairs, pairing a deletion run
- * with a following addition run line-by-line (so a replaced line is one pair),
- * and leaving a stray deletion or addition as a one-sided pair.
+ * Regroup the whole-file rows into aligned split pairs. By order, a deletion
+ * run pairs line-by-line with a following addition run; with similarity
+ * alignment, each deletion pairs with its most-similar addition (order
+ * preserved, threshold-bounded) so a mixed insert/delete block does not force a
+ * wrong line together. A stray deletion or addition stays a one-sided pair.
  * @param rows - the whole-file diff rows.
+ * @param alignBySimilarity - align a change block by similarity instead of order.
  * @returns the split pairs plus the row→pair index map.
  */
-export function computeSideBySideDiff(rows: readonly WholeFileDiffRow[]): SplitDiff {
+export function computeSideBySideDiff(
+  rows: readonly WholeFileDiffRow[],
+  alignBySimilarity = false,
+): SplitDiff {
   const pairs: SplitPair[] = []
   const pairOfRow = new Map<number, number>()
-  const pendingDel: { index: number; row: WholeFileDiffRow }[] = []
-  const push = (pair: SplitPair, rows: readonly number[]): void => {
+  const push = (pair: SplitPair, pairRows: readonly number[]): void => {
     const index = pairs.length
     pairs.push(pair)
-    for (const r of rows) pairOfRow.set(r, index)
+    for (const r of pairRows) pairOfRow.set(r, index)
   }
-  const flushPending = (): void => {
-    for (const { index, row } of pendingDel) {
-      push({ kind: 'del', left: leftSideOf(row), right: undefined }, [index])
-    }
-    pendingDel.length = 0
-  }
-  for (let i = 0; i < rows.length; i++) {
+  let i = 0
+  while (i < rows.length) {
     const row = rows[i]!
     if (row.kind === 'context') {
-      flushPending()
       push({ kind: 'context', left: leftSideOf(row), right: rightSideOf(row) }, [i])
-    } else if (row.kind === 'del') {
-      pendingDel.push({ index: i, row })
-    } else {
-      // add: pair with the oldest pending deletion (1:1) when available.
-      const del = pendingDel.shift()
-      if (del !== undefined) {
-        push({ kind: 'replace', left: leftSideOf(del.row), right: rightSideOf(row) }, [del.index, i])
-      } else {
-        push({ kind: 'add', left: undefined, right: rightSideOf(row) }, [i])
-      }
+      i++
+      continue
+    }
+    const delRows: { index: number; row: WholeFileDiffRow }[] = []
+    const addRows: { index: number; row: WholeFileDiffRow }[] = []
+    if (row.kind === 'del') {
+      while (i < rows.length && rows[i]!.kind === 'del') { delRows.push({ index: i, row: rows[i]! }); i++ }
+    }
+    while (i < rows.length && rows[i]!.kind === 'add') { addRows.push({ index: i, row: rows[i]! }); i++ }
+    const alignment = alignChangedBlock(
+      delRows.map(d => ({ index: d.index, text: d.row.text })),
+      addRows.map(a => ({ index: a.index, text: a.row.text })),
+      alignBySimilarity,
+    )
+    for (const p of alignment.pairs) {
+      const del = delRows.find(d => d.index === p.delIndex)!
+      const add = addRows.find(a => a.index === p.addIndex)!
+      push({ kind: 'replace', left: leftSideOf(del.row), right: rightSideOf(add.row) }, [p.delIndex, p.addIndex])
+    }
+    for (const d of alignment.delOnly) {
+      const del = delRows.find(x => x.index === d)!
+      push({ kind: 'del', left: leftSideOf(del.row), right: undefined }, [d])
+    }
+    for (const a of alignment.addOnly) {
+      const add = addRows.find(x => x.index === a)!
+      push({ kind: 'add', left: undefined, right: rightSideOf(add.row) }, [a])
     }
   }
-  flushPending()
   return { pairs, pairOfRow }
 }
 

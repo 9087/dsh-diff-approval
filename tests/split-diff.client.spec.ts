@@ -66,6 +66,49 @@ describe('computeSideBySideDiff', () => {
     expect(pairs[1]).toEqual({ kind: 'replace', left: { text: 'b', line: 2 }, right: { text: 'C', line: 2 } })
     expect(pairs[2]).toEqual({ kind: 'del', left: { text: 'c', line: 3 }, right: undefined })
   })
+
+  it('keeps by-order pairing by default (similarity alignment is opt-in)', () => {
+    const rows = [
+      row('del', 'old line A', 1, undefined),
+      row('add', 'brand new unrelated', undefined, 1),
+      row('add', 'modified old line A', undefined, 2),
+    ]
+    const { pairs } = computeSideBySideDiff(rows)
+    // Default (align=false): the first deletion pairs with the first addition.
+    expect(pairs[0]).toEqual({ kind: 'replace', left: { text: 'old line A', line: 1 }, right: { text: 'brand new unrelated', line: 1 } })
+    expect(pairs[1]).toEqual({ kind: 'add', left: undefined, right: { text: 'modified old line A', line: 2 } })
+  })
+
+  it('aligns a 1-del/2-add block by content similarity, not order', () => {
+    const rows = [
+      row('del', 'old line A', 1, undefined),
+      row('add', 'brand new unrelated', undefined, 1),
+      row('add', 'modified old line A', undefined, 2),
+    ]
+    const { pairs } = computeSideBySideDiff(rows, true)
+    // The deletion pairs with its most-similar addition; the unrelated addition
+    // stays a right-only (inserted) pair.
+    expect(pairs).toEqual([
+      { kind: 'replace', left: { text: 'old line A', line: 1 }, right: { text: 'modified old line A', line: 2 } },
+      { kind: 'add', left: undefined, right: { text: 'brand new unrelated', line: 1 } },
+    ])
+  })
+
+  it('leaves a deletion and both additions unaligned when nothing matches', () => {
+    const rows = [
+      row('del', 'old line A', 1, undefined),
+      row('add', 'totally unrelated one', undefined, 1),
+      row('add', 'totally unrelated two', undefined, 2),
+    ]
+    const { pairs } = computeSideBySideDiff(rows, true)
+    // Nothing clears the similarity threshold, so the block is three one-sided
+    // pairs — the red row does not force-align to a green row.
+    expect(pairs).toEqual([
+      { kind: 'del', left: { text: 'old line A', line: 1 }, right: undefined },
+      { kind: 'add', left: undefined, right: { text: 'totally unrelated one', line: 1 } },
+      { kind: 'add', left: undefined, right: { text: 'totally unrelated two', line: 2 } },
+    ])
+  })
 })
 
 describe('searchPairs', () => {

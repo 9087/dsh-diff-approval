@@ -1612,4 +1612,111 @@ describe('PendingPanel', () => {
     expect(wrap.getAttribute('aria-pressed')).toBe('false')
     expect(localStorage.getItem('diff-approval:wrap:html')).toBe('0')
   })
+
+  it('shows no intra-line chips in the single-column view', () => {
+    // Intra-line highlighting is split-view only: in single column a modified
+    // plain (`.txt`) line keeps its text without any per-span chips.
+    const intra = entry({ id: 'entry-intra', path: '/repo/intra.txt', oldText: 'foo bar\n', newText: 'foo baz\n' })
+    const props = panelProps({ read: true, files: [intra], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('intra.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    expect(rows.length).toBe(2)
+    const delRow = rows.find(r => r.dataset.diffLine === 'del')!
+    const addRow = rows.find(r => r.dataset.diffLine === 'add')!
+    const delCode = delRow.querySelector('[data-diff-code]') ?? delRow
+    const addCode = addRow.querySelector('[data-diff-code]') ?? addRow
+    expect(delCode.textContent).toBe('foo bar')
+    expect(addCode.textContent).toBe('foo baz')
+    // No grammar and no intra-line chips: the code cells stay plain text nodes.
+    expect(delCode.querySelectorAll('span').length).toBe(0)
+    expect(addCode.querySelectorAll('span').length).toBe(0)
+  })
+
+  it('renders intra-line chips on a highlighted markdown line in the split view', () => {
+    // Split view keeps the highlight + intra-line merge path; a `.md` file is
+    // syntax-highlighted (grammar present), so both columns show chip spans.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const head = '- **Block navigation & decisions**: jump between change blocks with `Ctrl+↑/↓` '
+    const file = entry({
+      id: 'entry-md-intra', path: '/repo/README.md',
+      oldText: head + 'OLD\n', newText: head + 'NEW\n',
+    })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+
+    const leftCode = document.querySelector('[data-diff-split-row][data-diff-split-side="left"] [data-diff-code]')
+    const rightCode = document.querySelector('[data-diff-split-row][data-diff-split-side="right"] [data-diff-code]')
+    expect(leftCode?.textContent).toContain('- **Block navigation & decisions**: jump between change blocks')
+    expect(rightCode?.textContent).toContain('- **Block navigation & decisions**: jump between change blocks')
+    expect(leftCode?.querySelectorAll('span').length ?? 0).toBeGreaterThanOrEqual(2)
+    expect(rightCode?.querySelectorAll('span').length ?? 0).toBeGreaterThanOrEqual(2)
+  })
+
+  it('renders intra-line chips in both columns of the split view', () => {
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const intra = entry({ id: 'entry-split-intra', path: '/repo/split.txt', oldText: 'foo bar\n', newText: 'foo baz\n' })
+    const props = panelProps({ read: true, files: [intra], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('split.txt'))
+
+    const leftCode = document.querySelector('[data-diff-split-row][data-diff-split-side="left"] [data-diff-code]')
+    const rightCode = document.querySelector('[data-diff-split-row][data-diff-split-side="right"] [data-diff-code]')
+    expect(leftCode?.textContent).toBe('foo bar')
+    expect(rightCode?.textContent).toBe('foo baz')
+    // Both columns clip into chip spans (shared prefix + changed tail).
+    expect(leftCode?.querySelectorAll('span').length ?? 0).toBeGreaterThanOrEqual(2)
+    expect(rightCode?.querySelectorAll('span').length ?? 0).toBeGreaterThanOrEqual(2)
+  })
+
+  it('row-aligns a similarity-matched del/add pair in the split view', () => {
+    // The split view always aligns by similarity: the deletion "old line A"
+    // pairs with its most-similar addition "modified old line A", so both sit
+    // on the same pair index (same Y row); the unrelated addition is a separate
+    // row.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const file = entry({ id: 'entry-split-align', path: '/repo/sa.txt', oldText: 'old line A\n', newText: 'brand new unrelated\nmodified old line A\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('sa.txt'))
+
+    const left = [...document.querySelectorAll('[data-diff-split-row][data-diff-split-side="left"]')] as HTMLElement[]
+    const right = [...document.querySelectorAll('[data-diff-split-row][data-diff-split-side="right"]')] as HTMLElement[]
+    const leftText = (el: HTMLElement) => el.querySelector('[data-diff-code]')?.textContent ?? ''
+    const rightText = (el: HTMLElement) => el.querySelector('[data-diff-code]')?.textContent ?? ''
+    const leftPair = left.map(el => Number(el.dataset.diffSplitIndex))
+    const rightPair = right.map(el => Number(el.dataset.diffSplitIndex))
+    // The matched pair shares one pair index (same Y) in both columns.
+    const matchIdx = left.findIndex(el => leftText(el) === 'old line A')
+    expect(matchIdx).toBeGreaterThanOrEqual(0)
+    expect(rightText(right[leftPair[matchIdx]!])).toBe('modified old line A')
+    expect(leftPair).toEqual(rightPair)
+  })
+
+  it('leaves a dissimilar del/add split row unaligned with no intra-line chips', () => {
+    // Similarity alignment keeps an unrelated pair apart (separate del-only /
+    // add-only rows), and neither side carries intra-line chips.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const rewrite = entry({ id: 'entry-rewrite', path: '/repo/rewrite.txt', oldText: 'hello world here\n', newText: 'completely different text now\n' })
+    const props = panelProps({ read: true, files: [rewrite], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('rewrite.txt'))
+
+    const leftCode = [...document.querySelectorAll('[data-diff-split-row][data-diff-split-side="left"] [data-diff-code]')]
+      .find(el => (el.textContent ?? '') !== '')
+    const rightCode = [...document.querySelectorAll('[data-diff-split-row][data-diff-split-side="right"] [data-diff-code]')]
+      .find(el => (el.textContent ?? '') !== '')
+    expect(leftCode?.textContent).toBe('hello world here')
+    expect(rightCode?.textContent).toBe('completely different text now')
+    // No grammar, no intra-line chips: plain text nodes.
+    expect(leftCode?.querySelectorAll('span').length ?? 0).toBe(0)
+    expect(rightCode?.querySelectorAll('span').length ?? 0).toBe(0)
+  })
 })

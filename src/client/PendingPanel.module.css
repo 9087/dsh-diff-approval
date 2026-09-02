@@ -1264,3 +1264,14 @@
 .splitLadd { background-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent); }
 .splitRdel { background-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); }
 .splitRadd { background-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent); }
+
+/* Intra-line (inline) diff chips: the removed characters of a del line and the
+   added characters of its paired add line. A stronger tint than the row's own
+   line-level background, so the changed span reads as a distinct chip. */
+.intraDel {
+  background-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 26%, transparent);
+  text-decoration: line-through;
+}
+.intraAdd {
+  background-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 24%, transparent);
+}

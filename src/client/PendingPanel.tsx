@@ -11,8 +11,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { DiffApprovalBlockRange, DiffApprovalOpenAction, PendingFileDiff } from '../types.ts'
 import type { PendingPanelFace } from './slots.ts'
 import type { DiffApprovalKey } from './locales.ts'
-import { computeWholeFileDiff } from './whole-file-diff.ts'
-import type { WholeFileDiffRow } from './whole-file-diff.ts'
+import { computeIntraLineDiff, computeWholeFileDiff } from './whole-file-diff.ts'
+import type { IntraRun, WholeFileDiffRow } from './whole-file-diff.ts'
 import { computeSideBySideDiff, searchPairs } from './split-diff.ts'
 import type { SplitPair, SplitSide } from './split-diff.ts'
 import { HIGHLIGHT_LANGS, highlightLines, languageDisplayName } from './highlight.ts'
@@ -366,6 +366,59 @@ function clipRuns(runs: readonly HighlightSpan[], start: number, end: number): R
   return nodes.length === 0 ? '\u00a0' : nodes
 }
 
+/** Chip styling for each intra-line run: removed chars and added chars stand out. */
+const INTRA_CLASS: Record<IntraRun['kind'], string | undefined> = {
+  same: undefined,
+  del: css.intraDel,
+  add: css.intraAdd,
+}
+
+/** Clip intra-line runs to a character range, renumbering each cut run. */
+function clipIntra(intra: readonly IntraRun[], start: number, end: number): IntraRun[] {
+  const out: IntraRun[] = []
+  let pos = 0
+  for (const run of intra) {
+    const runStart = pos
+    const runEnd = pos + run.text.length
+    pos = runEnd
+    if (runEnd <= start || runStart >= end) continue
+    const text = run.text.slice(Math.max(runStart, start) - runStart, Math.min(runEnd, end) - runStart)
+    if (text.length === 0) continue
+    out.push({ text, kind: run.kind })
+  }
+  return out
+}
+
+/**
+ * Render a character range as intra-line runs, with the syntax color clipped
+ * back onto each run. Context (`same`) runs show no draw; removed/added runs
+ * carry the chip draw. `intra` must cover `[start, end)` — it is clipped and
+ * reassembled per run, so the returned nodes concatenate to that range.
+ * @param runs - the syntax highlight for the whole line, or undefined.
+ * @param intra - the intra-line runs for the whole line.
+ * @param start - the range start (character offset in the line).
+ * @param end - the range end (exclusive).
+ * @returns the merged spans for the range.
+ */
+function renderIntra(
+  runs: readonly HighlightSpan[] | undefined,
+  intra: readonly IntraRun[],
+  start: number,
+  end: number,
+): ReactNode {
+  const clipped = clipIntra(intra, start, end)
+  let cursor = start
+  return clipped.map((run, i) => {
+    const runStart = cursor
+    const runEnd = runStart + run.text.length
+    cursor = runEnd
+    const syntax = runs !== undefined && runs.length > 0
+      ? clipRuns(runs, runStart, runEnd)
+      : run.text
+    return <span key={i} className={INTRA_CLASS[run.kind]}>{syntax}</span>
+  })
+}
+
 /**
  * One rendered diff row, memoized so a poll or an unrelated state change
  * does not re-render rows whose content, highlight, and focus are unchanged.
@@ -429,6 +482,8 @@ interface RowModel {
   diff: ReturnType<typeof computeWholeFileDiff>
   /** Maximal runs of changed rows (inclusive row indices); one per modification. */
   blocks: ChangeBlock[]
+  /** Intra-line runs keyed by row index, present only for annotated del/add rows. */
+  intra: Map<number, IntraRun[]>
 }
 
 /** One file's deferred syntax-highlight runs, one entry per side. */
@@ -511,19 +566,27 @@ function splitSideContent(
   side: SplitSide | undefined,
   wrapped: string[] | undefined,
   runs: readonly HighlightSpan[] | undefined,
+  intra: IntraRun[] | undefined,
 ): ReactNode {
   if (side === undefined) return ''
   const highlighted = runs !== undefined && runs.length > 0
+  const hasIntra = intra !== undefined && intra.length > 0
   if (wrapped === undefined) {
-    return highlighted
-      ? runs.map((span, i) => <span key={i} style={span.style}>{span.text}</span>)
-      : (side.text === '' ? '\u00a0' : side.text)
+    return hasIntra
+      ? renderIntra(runs, intra, 0, side.text.length)
+      : highlighted
+        ? runs.map((span, i) => <span key={i} style={span.style}>{span.text}</span>)
+        : (side.text === '' ? '\u00a0' : side.text)
   }
   let offset = 0
   return wrapped.map((line, i) => {
     const start = offset
     offset += line.length
-    const content = highlighted ? clipRuns(runs, start, offset) : (line === '' ? '\u00a0' : line)
+    const content = hasIntra
+      ? renderIntra(runs, intra, start, offset)
+      : highlighted
+        ? clipRuns(runs, start, offset)
+        : (line === '' ? '\u00a0' : line)
     return <div key={i} className={css.subline}>{content}</div>
   })
 }
@@ -537,7 +600,7 @@ function splitSideContent(
  * one side is longer. The gutter and code are top-aligned so sub-lines line up
  * across the divider.
  */
-function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focused, searchHit, searchCurrent, onHover }: {
+function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focused, searchHit, searchCurrent, onHover, intra }: {
   index: number
   side: SplitSide | undefined
   wrapped: string[] | undefined
@@ -549,6 +612,7 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
   searchHit: boolean
   searchCurrent: boolean
   onHover: () => void
+  intra: IntraRun[] | undefined
 }) {
   const tint = isLeft
     ? (kind === 'del' || kind === 'replace' ? css.splitLdel : '')
@@ -565,7 +629,7 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
       onMouseEnter={onHover}
     >
       <span className={css.gutter}>{side?.line ?? ''}</span>
-      <span className={`${css.code} ${tint}`} data-diff-code>{splitSideContent(side, wrapped, runs)}</span>
+      <span className={`${css.code} ${tint}`} data-diff-code>{splitSideContent(side, wrapped, runs, intra)}</span>
     </div>
   )
 }
@@ -587,8 +651,25 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   onBlockKeep: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
   onBlockRevert: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
 }>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, selection, onBlockKeep, onBlockRevert }, ref) {
-  const { pairs, pairOfRow } = useMemo(() => computeSideBySideDiff(model.diff.rows), [model])
+  const { pairs, pairOfRow } = useMemo(
+    () => computeSideBySideDiff(model.diff.rows, true),
+    [model],
+  )
   const pairCount = pairs.length
+  // Pair index → the whole-file row indices of its left (old) and right (new)
+  // sides, so the split view can look up a side's intra-line runs.
+  const pairRowIndices = useMemo(() => {
+    const map = new Map<number, { left?: number; right?: number }>()
+    model.diff.rows.forEach((row, rowIndex) => {
+      const pairIndex = pairOfRow.get(rowIndex)
+      if (pairIndex === undefined) return
+      const entry = map.get(pairIndex) ?? {}
+      if (row.kind !== 'add') entry.left = rowIndex
+      if (row.kind !== 'del') entry.right = rowIndex
+      map.set(pairIndex, entry)
+    })
+    return map
+  }, [model, pairOfRow])
   const bodyRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportH, setViewportH] = useState(0)
@@ -866,6 +947,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
               {visiblePairs.map((pair, offset) => {
                 const index = start + offset
                 const leftRuns = pair.left === undefined ? undefined : runs?.oldRuns?.[(pair.left.line ?? 0) - 1]
+                const sideIndex = pairRowIndices.get(index)
                 return (
                   <SplitSideRow
                     key={index}
@@ -880,6 +962,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
                     searchHit={searchHitSet.has(index)}
                     searchCurrent={index === currentSearchPair}
                     onHover={() => onPairHover(index)}
+                    intra={sideIndex?.left === undefined ? undefined : model.intra.get(sideIndex.left)}
                   />
                 )
               })}
@@ -896,6 +979,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
               {visiblePairs.map((pair, offset) => {
                 const index = start + offset
                 const rightRuns = pair.right === undefined ? undefined : runs?.newRuns?.[(pair.right.line ?? 0) - 1]
+                const sideIndex = pairRowIndices.get(index)
                 return (
                   <SplitSideRow
                     key={index}
@@ -910,6 +994,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
                     searchHit={searchHitSet.has(index)}
                     searchCurrent={index === currentSearchPair}
                     onHover={() => onPairHover(index)}
+                    intra={sideIndex?.right === undefined ? undefined : model.intra.get(sideIndex.right)}
                   />
                 )
               })}
@@ -1167,12 +1252,16 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const splitDiffRef = useRef<SplitDiffHandle>(null)
   const model = useMemo<RowModel>(() => {
     const diff = computeWholeFileDiff(file.oldText, file.newText)
-    return { diff, blocks: changeBlocksOf(diff) }
-  }, [file.oldText, file.newText])
+    // The split view always aligns changed blocks by content similarity and
+    // highlights intra-line runs; the single-column view never uses either, so
+    // skip the (O(n·m)) computation entirely when split is off.
+    const intra = splitView ? computeIntraLineDiff(diff.rows, true) : new Map<number, IntraRun[]>()
+    return { diff, blocks: changeBlocksOf(diff), intra }
+  }, [file.oldText, file.newText, splitView])
   // The aligned split pairs (only in split mode): used to map a left/right
   // selection to the old/new line numbers for the copy reference.
   const splitPairs = useMemo(() => (
-    splitView ? computeSideBySideDiff(model.diff.rows).pairs : null
+    splitView ? computeSideBySideDiff(model.diff.rows, true).pairs : null
   ), [splitView, model])
 
   // Overview-ruler markers: one per maximal run of same-kind changed rows,
