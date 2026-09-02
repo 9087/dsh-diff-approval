@@ -1164,6 +1164,43 @@ function lineLengthAt(node: Node): number {
 }
 
 /**
+ * Reconstruct the plain text of the current selection so auto-wrap's visual
+ * line breaks never leak into the clipboard. A wrapped row renders its code as
+ * several `.subline` block elements, and the browser's default copy inserts a
+ * newline between them; those segments form one logical line, so they are joined
+ * without a newline while the real newline between diff rows is kept.
+ */
+export function selectedPlainText(): string | undefined {
+  const selection = window.getSelection()
+  if (selection === null || selection.rangeCount === 0 || selection.isCollapsed) return undefined
+  const range = selection.getRangeAt(0)
+  const container = document.createElement('div')
+  container.appendChild(range.cloneContents())
+  const parts: string[] = []
+  let atLineStart = true
+  const push = (text: string): void => {
+    if (text.length === 0) return
+    parts.push(text)
+    atLineStart = text.endsWith('\n')
+  }
+  const walk = (node: Node): void => {
+    if (node.nodeType === Node.TEXT_NODE) { push(node.textContent ?? ''); return }
+    if (!(node instanceof Element)) return
+    const el = node as HTMLElement
+    // A diff row (unified or split) is a logical line: precede it with a
+    // newline unless we are already at a line start. A wrapped `.subline` is
+    // a segment of that same line, so it is intentionally NOT a boundary.
+    const isRow = el.dataset.diffRow !== undefined
+      || el.dataset.diffSplitRow !== undefined
+      || el.dataset.diffSplitIndex !== undefined
+    if (isRow && !atLineStart) push('\n')
+    for (const child of node.childNodes) walk(child)
+  }
+  walk(container)
+  return parts.join('')
+}
+
+/**
  * Derive the selected diff-row range from a native text selection. A
  * boundary sitting exactly at a line edge contributes no content: a start at
  * the line's end skips to the next line, an end at the line's start falls
@@ -1745,6 +1782,25 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     update()
     return () => { document.removeEventListener('selectionchange', update) }
   }, [file.id, splitView])
+
+  // Override copy so auto-wrap's visual line breaks never leak into the
+  // clipboard: rebuild the selected plain text (join a wrapped line's sub-lines
+  // back together) instead of the browser's block-newline text. Only active
+  // when the selection is inside a code cell of this diff.
+  useEffect(() => {
+    const onCopy = (event: ClipboardEvent): void => {
+      const selection = window.getSelection()
+      const anchor = selection?.anchorNode
+      const inCode = (anchor instanceof Element ? anchor : anchor?.parentElement)?.closest('[data-diff-code]') !== null
+      if (!inCode) return
+      const text = selectedPlainText()
+      if (text === undefined) return
+      event.preventDefault()
+      event.clipboardData?.setData('text/plain', text)
+    }
+    document.addEventListener('copy', onCopy)
+    return () => { document.removeEventListener('copy', onCopy) }
+  }, [])
 
   // The reference text for the current selection, shown in the status bar and
   // copied on click; undefined when no lines are selected. In split mode the
