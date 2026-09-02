@@ -694,13 +694,18 @@
 .diffPath {
   min-width: 0;
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* The full path is shown in full: an over-long path scrolls horizontally so
+     nothing is hidden behind a truncation ellipsis, and the text is selectable
+     by drag so the path can be copied. */
+  overflow-x: auto;
+  overflow-y: hidden;
   white-space: nowrap;
   color: var(--dsw-alias-label-primary);
   font: var(--dsw-font-markdown-code-block);
   font-size: 12px;
   line-height: 18px;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .diffActions {
