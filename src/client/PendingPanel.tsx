@@ -1992,7 +1992,6 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
         {(model.diff.added !== 0 || model.diff.removed !== 0) && (
           <span className={css.diffStats}>{t('panel.stats', { added: model.diff.added, removed: model.diff.removed })}</span>
         )}
-        {file.kind === 'create' && <span className={css.kindHint}>{t('panel.createHint')}</span>}
         {model.blocks.length > 0 && (
           <>
             <Tooltip label={`${t('action.prevDiff')} (Ctrl+↑)`} side="bottom" delayMs={500}>

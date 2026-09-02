@@ -385,7 +385,7 @@ describe('PendingPanel', () => {
     expect(screen.queryByText(sibling.path)).toBeNull()
   })
 
-  it('tags a created file on its row, shows the delete hint, and labels the whole-file button Delete', () => {
+  it('tags a created file on its row and labels the whole-file button Delete, with no delete hint', () => {
     const created = entry({ id: 'entry-new', kind: 'create', oldText: '', newText: 'content', path: '/repo/new.txt' })
     const props = panelProps({ read: true, files: [created], busy: new Set() })
     render(<PendingPanel {...props} />)
@@ -393,10 +393,10 @@ describe('PendingPanel', () => {
 
     expect(screen.getByText('row.create')).toBeDefined()
     fireEvent.click(screen.getByText('new.txt'))
-    expect(screen.getByText('panel.createHint')).toBeDefined()
     // A newly-created file has nothing to "revert" to, so the whole-file action
-    // is a delete, not a revert.
+    // is a delete, not a revert. No explanatory hint text is shown.
     expect(screen.getByText('action.delete')).toBeDefined()
+    expect(screen.queryByText('panel.createHint')).toBeNull()
   })
 
   it('expands the whole-file diff and keeps through the owning session', () => {
