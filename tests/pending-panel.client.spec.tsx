@@ -1528,42 +1528,37 @@ describe('PendingPanel', () => {
 
   it('the DSH Settings tab toggles the auto-paste preference in localStorage', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
-    const view = render(<DiffApprovalSettingsTab {...props} />)
-    // Re-query the pill each time: re-rendering can replace the node.
-    const pill = () => document.querySelector('[data-diff-paste-on-copy-select]') as HTMLButtonElement
-    expect(pill()).not.toBeNull()
-    // On by default: the pill names the on state.
-    expect(pill().textContent).toContain('action.toggleOn')
+    render(<DiffApprovalSettingsTab {...props} />)
+    // Re-query the switch each time: re-rendering can replace the node.
+    const toggle = () => document.querySelector('[data-diff-paste-on-copy-select]') as HTMLButtonElement
+    expect(toggle()).not.toBeNull()
+    // On by default.
+    expect(toggle().getAttribute('aria-checked')).toBe('true')
 
-    // Pick 关闭 from the dropdown (the other row's pill can also read 关闭 now,
-    // so the menu item is the last match).
-    fireEvent.click(pill())
-    fireEvent.click(screen.getAllByText('action.toggleOff').at(-1)!)
+    fireEvent.click(toggle())
     expect(localStorage.getItem('diff-approval:paste-on-copy')).toBe('0')
+    expect(toggle().getAttribute('aria-checked')).toBe('false')
 
-    // The pill now names the off state; pick 打开 to turn it back on.
-    expect(pill().textContent).toContain('action.toggleOff')
-    fireEvent.click(pill())
-    fireEvent.click(screen.getAllByText('action.toggleOn').at(-1)!)
+    fireEvent.click(toggle())
     expect(localStorage.getItem('diff-approval:paste-on-copy')).toBe('1')
+    expect(toggle().getAttribute('aria-checked')).toBe('true')
   })
 
   it('the DSH Settings tab toggles the import-untracked preference in localStorage', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
-    const view = render(<DiffApprovalSettingsTab {...props} />)
-    const pill = () => document.querySelector('[data-diff-import-untracked-select]') as HTMLButtonElement
-    expect(pill()).not.toBeNull()
+    render(<DiffApprovalSettingsTab {...props} />)
+    const toggle = () => document.querySelector('[data-diff-import-untracked-select]') as HTMLButtonElement
+    expect(toggle()).not.toBeNull()
     // Off by default: the full untracked scan is opt-in.
-    expect(pill().textContent).toContain('action.toggleOff')
+    expect(toggle().getAttribute('aria-checked')).toBe('false')
 
-    fireEvent.click(pill())
-    fireEvent.click(screen.getAllByText('action.toggleOn').at(-1)!)
+    fireEvent.click(toggle())
     expect(localStorage.getItem('diff-approval:import-untracked')).toBe('1')
+    expect(toggle().getAttribute('aria-checked')).toBe('true')
 
-    expect(pill().textContent).toContain('action.toggleOn')
-    fireEvent.click(pill())
-    fireEvent.click(screen.getAllByText('action.toggleOff').at(-1)!)
+    fireEvent.click(toggle())
     expect(localStorage.getItem('diff-approval:import-untracked')).toBe('0')
+    expect(toggle().getAttribute('aria-checked')).toBe('false')
   })
 
   it('lets the status bar pick the highlight language', () => {

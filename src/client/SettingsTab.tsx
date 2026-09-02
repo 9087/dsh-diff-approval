@@ -15,58 +15,37 @@ export type DiffApprovalSettingsTabProps =
 /** The same translator shape the panel uses. */
 type Translator = (key: DiffApprovalKey, params?: Record<string, unknown>) => string
 
-/** A pill picker offering the two boolean states 打开 / 关闭. */
-function OnOffPicker({
-  value, open, onOpenChange, onSelect, dataAttribute, t,
+/** A toggle switch offering the two boolean states 打开 / 关闭. */
+function OnOffToggle({
+  value, onSelect, dataAttribute, t,
 }: {
   value: boolean
-  open: boolean
-  onOpenChange: (open: boolean) => void
   onSelect: (value: boolean) => void
   dataAttribute: string
   t: Translator
 }) {
   return (
-    <Menu
-      open={open}
-      onClose={() => { onOpenChange(false) }}
-      items={[
-        { id: 'on', label: t('action.toggleOn') },
-        { id: 'off', label: t('action.toggleOff') },
-      ]}
-      selectedId={value ? 'on' : 'off'}
-      onSelect={(id) => {
-        onOpenChange(false)
-        onSelect(id === 'on')
-      }}
-      align="end"
-      portal
-      anchor={(
-        <button
-          type="button"
-          className={css.settingsSelector}
-          aria-haspopup="menu"
-          aria-expanded={open}
-          onClick={() => { onOpenChange(!open) }}
-          {...{ [dataAttribute]: true }}
-        >
-          {value ? t('action.toggleOn') : t('action.toggleOff')}
-          <IconChevronDownOutline14 className={css.settingsSelectorChevron} />
-        </button>
-      )}
-    />
+    <button
+      type="button"
+      role="switch"
+      aria-checked={value}
+      aria-label={value ? t('action.toggleOn') : t('action.toggleOff')}
+      className={`${css.toggle}${value ? ' ' + css.toggleOn : ''}`}
+      {...{ [dataAttribute]: true }}
+      onClick={() => { onSelect(!value) }}
+    >
+      <span className={css.toggleThumb} aria-hidden="true" />
+    </button>
   )
 }
 
-/** One Agent-preset-style preference row: title + description, pill picker right. */
+/** One Agent-preset-style preference row: title + description, toggle right. */
 function PreferenceRow({
-  title, description, value, open, onOpenChange, onSelect, dataAttribute, t,
+  title, description, value, onSelect, dataAttribute, t,
 }: {
   title: string
   description: string
   value: boolean
-  open: boolean
-  onOpenChange: (open: boolean) => void
   onSelect: (value: boolean) => void
   dataAttribute: string
   t: Translator
@@ -77,10 +56,8 @@ function PreferenceRow({
         <div className={css.settingsRowTitle}>{title}</div>
         <div className={css.settingsRowDesc}>{description}</div>
       </div>
-      <OnOffPicker
+      <OnOffToggle
         value={value}
-        open={open}
-        onOpenChange={onOpenChange}
         onSelect={onSelect}
         dataAttribute={dataAttribute}
         t={t}
@@ -240,13 +217,10 @@ function ShortcutRow({
  */
 export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const [pasteOnCopy, setPasteOnCopyState] = useState(pasteOnCopyEnabled)
-  const [pasteOnCopyOpen, setPasteOnCopyOpen] = useState(false)
   const [includeUntracked, setIncludeUntrackedState] = useState(includeUntrackedEnabled)
-  const [includeUntrackedOpen, setIncludeUntrackedOpen] = useState(false)
   const [tab, setTabState] = useState(tabWidth)
   const [tabOpen, setTabOpen] = useState(false)
   const [split, setSplitState] = useState(splitMode)
-  const [splitOpen, setSplitOpen] = useState(false)
   const [summon, setSummonState] = useState(quickSummonKey)
   const setSummon = (value: string): void => {
     setSummonState(value)
@@ -274,8 +248,6 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
         title={t('panel.pasteOnCopy')}
         description={t('panel.pasteOnCopyDesc')}
         value={pasteOnCopy}
-        open={pasteOnCopyOpen}
-        onOpenChange={setPasteOnCopyOpen}
         onSelect={setPasteOnCopy}
         dataAttribute="data-diff-paste-on-copy-select"
         t={t}
@@ -284,8 +256,6 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
         title={t('panel.importUntracked')}
         description={t('panel.importUntrackedDesc')}
         value={includeUntracked}
-        open={includeUntrackedOpen}
-        onOpenChange={setIncludeUntrackedOpen}
         onSelect={setIncludeUntracked}
         dataAttribute="data-diff-import-untracked-select"
         t={t}
@@ -303,8 +273,6 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
         title={t('panel.splitMode')}
         description={t('panel.splitModeDesc')}
         value={split}
-        open={splitOpen}
-        onOpenChange={setSplitOpen}
         onSelect={setSplit}
         dataAttribute="data-diff-split-mode-select"
         t={t}
