@@ -4,7 +4,7 @@ import { useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
-import { includeUntrackedEnabled, pasteOnCopyEnabled, quickSummonKey, setIncludeUntrackedEnabled, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth } from './settings.ts'
+import { includeUntrackedEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setIncludeUntrackedEnabled, setNavLeadRows, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import css from './PendingPanel.module.css'
 
@@ -136,6 +136,52 @@ function TabWidthRow({
   )
 }
 
+/** A +/- number stepper for an integer preference, clamped to [min, max]. */
+function StepperRow({
+  title, description, value, onChange, min, max, dataAttribute, t,
+}: {
+  title: string
+  description: string
+  value: number
+  onChange: (value: number) => void
+  min: number
+  max: number
+  dataAttribute: string
+  t: Translator
+}) {
+  return (
+    <div className={css.settingsRow}>
+      <div className={css.settingsRowText}>
+        <div className={css.settingsRowTitle}>{title}</div>
+        <div className={css.settingsRowDesc}>{description}</div>
+      </div>
+      <div className={css.stepper}>
+        <button
+          type="button"
+          className={css.stepperButton}
+          data-diff-stepper-down
+          aria-label={t('action.decrease')}
+          disabled={value <= min}
+          onClick={() => { onChange(Math.max(min, value - 1)) }}
+        >
+          −
+        </button>
+        <span className={css.stepperValue} {...{ [dataAttribute]: true }}>{value}</span>
+        <button
+          type="button"
+          className={css.stepperButton}
+          data-diff-stepper-up
+          aria-label={t('action.increase')}
+          disabled={value >= max}
+          onClick={() => { onChange(Math.min(max, value + 1)) }}
+        >
+          +
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /** Build the `Modifier+...+Key` chord label from a keydown event; a bare
  * modifier key alone returns undefined (wait for the full combo). */
 function chordLabel(event: ReactKeyboardEvent<HTMLElement>): string | undefined {
@@ -221,6 +267,7 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const [tab, setTabState] = useState(tabWidth)
   const [tabOpen, setTabOpen] = useState(false)
   const [split, setSplitState] = useState(splitMode)
+  const [lead, setLeadState] = useState(navLeadRows)
   const [summon, setSummonState] = useState(quickSummonKey)
   const setSummon = (value: string): void => {
     setSummonState(value)
@@ -241,6 +288,10 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const setSplit = (value: boolean): void => {
     setSplitState(value)
     setSplitMode(value)
+  }
+  const setLead = (value: number): void => {
+    setLeadState(value)
+    setNavLeadRows(value)
   }
   return (
     <div className={css.settingsPage} data-diff-settings>
@@ -275,6 +326,16 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
         value={split}
         onSelect={setSplit}
         dataAttribute="data-diff-split-mode-select"
+        t={t}
+      />
+      <StepperRow
+        title={t('panel.navLeadRows')}
+        description={t('panel.navLeadRowsDesc')}
+        value={lead}
+        onChange={setLead}
+        min={NAV_LEAD_ROWS_MIN}
+        max={NAV_LEAD_ROWS_MAX}
+        dataAttribute="data-diff-nav-lead-rows"
         t={t}
       />
       <ShortcutRow

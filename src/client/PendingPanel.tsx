@@ -19,7 +19,7 @@ import { HIGHLIGHT_LANGS, highlightLines, languageDisplayName } from './highligh
 import type { HighlightSpan } from './highlight.ts'
 import { langFromPath } from './lang.ts'
 import { referenceOf } from './reference.ts'
-import { includeUntrackedEnabled, matchesShortcut, pasteOnCopyEnabled, quickSummonKey, setWrapEnabled, splitMode, tabWidth, wrapEnabled } from './settings.ts'
+import { includeUntrackedEnabled, matchesShortcut, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setWrapEnabled, splitMode, tabWidth, wrapEnabled } from './settings.ts'
 import css from './PendingPanel.module.css'
 
 /**
@@ -54,6 +54,10 @@ const MAX_LIST_WIDTH_PX = 560
 const FLOAT_LIST_MARGIN_PX = 12
 /** Fixed diff-row height in px; the virtual window and jump math are built on it. */
 const ROW_HEIGHT_PX = 22
+/** Tolerance absorbed when comparing a block's offset to the navigation anchor,
+ *  so a sub-pixel float error (wrapped row heights, fractional scrollTop) never
+ *  mis-classifies the block the view is sitting on. Half a row height. */
+const NAV_ANCHOR_TOLERANCE_PX = ROW_HEIGHT_PX / 4
 /** Total width of the two line-number gutters, subtracted from the code width
  * when measuring wrapped line heights. */
 const WRAP_GUTTERS_PX = 88
@@ -648,9 +652,10 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   busy: boolean
   t: Translator
   selection: RowRange | undefined
+  leadRows: number
   onBlockKeep: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
   onBlockRevert: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
-}>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, selection, onBlockKeep, onBlockRevert }, ref) {
+}>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert }, ref) {
   const { pairs, pairOfRow } = useMemo(
     () => computeSideBySideDiff(model.diff.rows, true),
     [model],
@@ -897,16 +902,36 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     if (block === undefined) return
     const body = bodyRef.current
     if (body === null) return
-    // Leave two rows of lead above the block, matching the single-column view.
-    const target = off(block.start) - 2 * ROW_HEIGHT_PX
+    // Leave the configured lead rows above the block, matching the single-column view.
+    const target = off(block.start) - leadRows * ROW_HEIGHT_PX
     const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
     if (body.scrollTop !== clamped) body.scrollTop = clamped
     setScrollTop(clamped)
     // `model`/`pairCount` are deliberately NOT deps — a content refresh would
-    // otherwise re-center the view and lose the user's scroll position.
-  }, [focus, flashKey])
+    // otherwise re-center the view and lose the user's scroll position. `focus`
+    // is also NOT a dep: a scroll re-anchors `focus` to the block under the
+    // viewport (see `onScroll`), and that must NOT recenter and fight the scroll.
+  }, [flashKey])
 
-  const onScroll = (): void => { setScrollTop(bodyRef.current?.scrollTop ?? 0) }
+  const onScroll = (): void => {
+    const body = bodyRef.current
+    if (body === null) return
+    setScrollTop(body.scrollTop)
+    // Re-anchor the "current diff" (`focus`) to the block under the viewport
+    // anchor, so a manual scroll updates which block prev/next walk from
+    // instead of a stale last-jumped-to block. Updating focus does NOT recenter
+    // (the effect above keys off `flashKey`, not `focus`), so it never fights
+    // the user's scroll; this only runs on real user scrolls, since programmatic
+    // recenters set scrollTop directly and do NOT fire a scroll event.
+    const count = blockOfPair.length
+    if (count === 0) return
+    const anchor = body.scrollTop + leadRows * ROW_HEIGHT_PX
+    let ref = -1
+    for (let index = 0; index < count; index++) {
+      if (off(blockOfPair[index]!.start) <= anchor + NAV_ANCHOR_TOLERANCE_PX) ref = index
+    }
+    setFocus(ref === -1 ? 0 : ref)
+  }
   const inFocused = (k: number): boolean => {
     const block = blockOfPair[focus]
     return block !== undefined && k >= block.start && k <= block.end
@@ -1284,6 +1309,8 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // Side-by-side (split) mode from settings. Read once on mount so a change
   // applies on the next panel open, matching the tab-width behaviour above.
   const splitView = splitMode()
+  // Rows of lead left above a jumped-to diff block (configurable in Settings).
+  const leadRows = navLeadRows()
   // Handle to the split view's imperative block-jump, used to route the shared
   // toolbar/keyboard to it while split mode is active (null in single column).
   const splitDiffRef = useRef<SplitDiffHandle>(null)
@@ -1653,9 +1680,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     if (block === undefined) return
     const body = bodyRef.current
     if (body === null) return
-    // Leave two rows of lead above the block's top edge; when the block is too
-    // close to the top or bottom to afford it, clamp to the scrollable range.
-    const target = offsetOf(block.start) - 2 * ROW_HEIGHT_PX
+    // Leave the configured lead rows above the block's top edge; when the block
+    // is too close to the top or bottom to afford it, clamp to the scroll range.
+    const target = offsetOf(block.start) - leadRows * ROW_HEIGHT_PX
     const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
     if (body.scrollTop !== clamped) body.scrollTop = clamped
     setScrollTop(clamped)
@@ -1663,9 +1690,13 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     // an open-with-wrap-on file centers on the block's real (wrapped) offset
     // instead of the initial fixed-22px guess. `rowOffsets === null` flips only
     // on the readiness transition, not on every resize re-measure.
+    // The `focus` is deliberately NOT a dep: a scroll re-anchors `focus` to the
+    // block under the viewport (see `onScroll`), and that must NOT recenter and
+    // fight the user's scroll. Only a jump/keep/switch (which bump `scrollTick`)
+    // recenters the focused block.
     // NOTE: `model`/`rowCount` are deliberately NOT deps — a content refresh
     // would otherwise re-center the view and lose the user's scroll position.
-  }, [focus, scrollTick, rowOffsets === null])
+  }, [scrollTick, rowOffsets === null])
 
   const jump = (direction: -1 | 1) => {
     if (rowCount === 0) return
@@ -1769,6 +1800,21 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     if (body === null) return
     setScrollTop(body.scrollTop)
     setViewportHeight(body.clientHeight)
+    // Re-anchor the "current diff" (`focus`) to the block under the viewport
+    // anchor, so a manual scroll updates which block prev/next walk from instead
+    // of a stale last-jumped-to block. Updating focus does NOT recenter — the
+    // centering effect keys off `scrollTick`, not `focus` — so this never fights
+    // the user's scroll. This only runs on real user scrolls: programmatic
+    // recenters set scrollTop directly and do NOT fire a scroll event.
+    const count = model.blocks.length
+    if (rowCount === 0 || count === 0) return
+    const anchor = body.scrollTop + leadRows * ROW_HEIGHT_PX
+    let ref = -1
+    for (let index = 0; index < count; index++) {
+      const block = model.blocks[index]
+      if (block !== undefined && offsetOf(block.start) <= anchor + NAV_ANCHOR_TOLERANCE_PX) ref = index
+    }
+    setFocus(ref === -1 ? 0 : ref)
   }
 
   // Track the native text selection inside the diff: the copy-reference
@@ -2064,6 +2110,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
           busy={busy}
           t={t}
           selection={selection}
+          leadRows={leadRows}
           onBlockKeep={onBlockKeep}
           onBlockRevert={onBlockRevert}
         />

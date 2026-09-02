@@ -839,6 +839,11 @@ describe('PendingPanel', () => {
     const view = render(<PendingPanel {...props} />)
     // Opening the panel auto-selects the first file (block 0 focused).
     fireEvent.click(screen.getByLabelText('panel.aria'))
+    // Mock a scrollable 6-row body in a 4-row viewport so the block-jump
+    // recenter can actually move scrollTop (jsdom measures 0 otherwise).
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 6 * 22 })
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 4 * 22 })
 
     const focusedLines = () => [...document.querySelectorAll('[data-diff-focused]')]
     // Block 0: the first change (del a / add A), both lines highlighted.
@@ -867,6 +872,10 @@ describe('PendingPanel', () => {
     // Opening the panel auto-selects the file and focuses the diff body.
     const body = document.querySelector('[data-diff-body]') as HTMLElement
     expect(document.activeElement).toBe(body)
+    // Mock a scrollable body so the jump recenter moves scrollTop and the
+    // navigation re-anchors to it.
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 6 * 22 })
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 4 * 22 })
 
     const focusedLines = () => [...document.querySelectorAll('[data-diff-focused]')]
     expect(focusedLines()[0]!.textContent).toContain('a')
@@ -959,6 +968,10 @@ describe('PendingPanel', () => {
     const view = render(<PendingPanel {...props} />)
     // Opening the panel auto-selects the first file with block 0 focused.
     fireEvent.click(screen.getByLabelText('panel.aria'))
+    // Mock a scrollable body so the jump recenter can move scrollTop.
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 6 * 22 })
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 4 * 22 })
 
     const focusedLines = () => [...document.querySelectorAll('[data-diff-focused]')]
     // Block 0 (del a / add A) is focused after the file is opened.
@@ -1118,7 +1131,7 @@ describe('PendingPanel', () => {
     expect(scrollTop).toBe(0)
   })
 
-  it('skips blocks scrolled above the viewport when jumping to the next one', () => {
+  it('skips blocks scrolled above the viewport anchor when jumping to the next one', () => {
     const threeBlocks = entry({
       id: 'entry-three',
       oldText: 'a\nb\nc\nd\ne\nf\n',
@@ -1129,16 +1142,104 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
 
-    // Blocks 0 and 1 start at rows 0 and 3 (top 0/66px); block 2 starts at
-    // row 6 (132px). Scroll past the first two so the next jump must land on
-    // the third instead of the ones scrolled out above.
+    // Blocks 0 and 1 start at rows 0 and 3 (offsets 0/66px); block 2 starts at
+    // row 6 (132px). Scroll so the first two sit above the navigation anchor
+    // (viewport top + 2 lead rows = 88px): the next jump must land on the third.
     const body = document.querySelector('[data-diff-body]') as HTMLElement
-    body.scrollTop = 6 * 22
+    body.scrollTop = 2 * 22
+    fireEvent.scroll(body)
 
     fireEvent.click(screen.getByLabelText('action.nextDiff'))
     const focused = document.querySelector('[data-diff-focused]')
     expect(focused).not.toBeNull()
     expect(focused!.textContent).toContain('e')
+  })
+
+  it('re-anchors block navigation to the current scroll, not the last focused block', () => {
+    const threeBlocks = entry({
+      id: 'entry-scroll-anchor',
+      oldText: 'a\nb\nc\nd\ne\nf\n',
+      newText: 'A\nb\nC\nd\nE\nf\n',
+    })
+    const props = panelProps({ read: true, files: [threeBlocks], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+
+    // Scroll near block 2, then next focuses it.
+    body.scrollTop = 2 * 22
+    fireEvent.scroll(body)
+    fireEvent.click(screen.getByLabelText('action.nextDiff'))
+    const focused = () => document.querySelector('[data-diff-focused]')!
+    expect(focused().textContent).toContain('e')
+
+    // Scroll back to the top: prev must now be relative to the top anchor, so
+    // it steps to the block above the first — wrapping to the last from the
+    // re-anchored position — not the stale previously-focused block 2.
+    body.scrollTop = 0
+    fireEvent.scroll(body)
+    fireEvent.click(screen.getByLabelText('action.prevDiff'))
+    // At the top, the reference block is block 0, so prev wraps to the last (block 2).
+    expect(focused().textContent).toContain('e')
+  })
+
+  it('absorbs a sub-pixel anchor boundary so the next block is not stuck', () => {
+    const threeBlocks = entry({
+      id: 'entry-tolerance',
+      oldText: 'a\nb\nc\nd\ne\nf\n',
+      newText: 'A\nb\nC\nd\nE\nf\n',
+    })
+    const props = panelProps({ read: true, files: [threeBlocks], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+
+    // Block 1 starts at 66px. Put the anchor (scrollTop + 2 rows = 44px) just
+    // below it (scrollTop 21.5 -> anchor 65.5), so without a tolerance block 1
+    // would count as "above" and the next jump would fall back onto it. The
+    // tolerance must keep it as the reference and advance past it to block 2.
+    body.scrollTop = 21.5
+    fireEvent.scroll(body)
+    fireEvent.click(screen.getByLabelText('action.nextDiff'))
+    const focused = document.querySelector('[data-diff-focused]')
+    expect(focused).not.toBeNull()
+    expect(focused!.textContent).toContain('e')
+  })
+
+  it('reaches the last block and wraps instead of sticking at the bottom', () => {
+    const threeBlocks = entry({
+      id: 'entry-bottom-wrap',
+      oldText: 'a\nb\nc\nd\ne\nf\n',
+      newText: 'A\nb\nC\nd\nE\nf\n',
+    })
+    const props = panelProps({ read: true, files: [threeBlocks], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+    // Fake a small viewport so the last block clamps to the bottom when recentered.
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 6 * 22 })
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 4 * 22 })
+
+    // Scroll to the max (maxScroll = 6*22 - 4*22 = 44): the anchor (44 + 44 = 88)
+    // sits above block 2 (offset 132), so the current diff re-anchors to block 1.
+    body.scrollTop = 2 * 22
+    fireEvent.scroll(body)
+    const focused = () => document.querySelector('[data-diff-focused]')!
+
+    // Next reaches the last block (block 2) even though it's below the anchor.
+    fireEvent.click(screen.getByLabelText('action.nextDiff'))
+    expect(focused().textContent).toContain('e')
+
+    // ...and the press after the last block wraps to the first (block 0) instead
+    // of sticking on block 2, because navigation is a ±1 step that always wraps.
+    fireEvent.click(screen.getByLabelText('action.nextDiff'))
+    // Block 0's focused content is the removed side of row 0 ('a'); the old block
+    // 2 ('e') must be gone, proving the wrap happened rather than a stick.
+    expect(focused().textContent).toContain('a')
+    expect(focused().textContent).not.toContain('e')
   })
 
   it('renders only a viewport window of rows for a large file', () => {
@@ -1559,6 +1660,34 @@ describe('PendingPanel', () => {
     fireEvent.click(toggle())
     expect(localStorage.getItem('diff-approval:import-untracked')).toBe('0')
     expect(toggle().getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('the DSH Settings tab steps the block-jump lead rows and clamps to the bounds', () => {
+    const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
+    render(<DiffApprovalSettingsTab {...props} />)
+    const value = () => document.querySelector('[data-diff-nav-lead-rows]') as HTMLElement
+    expect(value().textContent).toBe('2')
+
+    // Step up to 3 and persist.
+    fireEvent.click(document.querySelector('[data-diff-stepper-up]') as HTMLElement)
+    expect(value().textContent).toBe('3')
+    expect(localStorage.getItem('diff-approval:nav-lead-rows')).toBe('3')
+
+    // Step down back to 2.
+    fireEvent.click(document.querySelector('[data-diff-stepper-down]') as HTMLElement)
+    expect(value().textContent).toBe('2')
+    expect(localStorage.getItem('diff-approval:nav-lead-rows')).toBe('2')
+
+    // Clamp at 0 (the min): the down button disables.
+    for (let i = 0; i < 5; i++) fireEvent.click(document.querySelector('[data-diff-stepper-down]') as HTMLElement)
+    expect(value().textContent).toBe('0')
+    expect((document.querySelector('[data-diff-stepper-down]') as HTMLButtonElement).disabled).toBe(true)
+
+    // Clamp at 10 (the max): the up button disables.
+    fireEvent.click(document.querySelector('[data-diff-stepper-up]') as HTMLElement)
+    for (let i = 0; i < 15; i++) fireEvent.click(document.querySelector('[data-diff-stepper-up]') as HTMLElement)
+    expect(value().textContent).toBe('10')
+    expect((document.querySelector('[data-diff-stepper-up]') as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('lets the status bar pick the highlight language', () => {

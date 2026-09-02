@@ -4,7 +4,13 @@ const PASTE_ON_COPY_KEY = 'diff-approval:paste-on-copy'
 const IMPORT_UNTRACKED_KEY = 'diff-approval:import-untracked'
 const TAB_WIDTH_KEY = 'diff-approval:tab-size'
 const SPLIT_MODE_KEY = 'diff-approval:split-mode'
+const NAV_LEAD_KEY = 'diff-approval:nav-lead-rows'
 const WRAP_PREFIX = 'diff-approval:wrap:'
+
+/** Default lead rows above a jumped-to diff block (kept small and bounded). */
+export const NAV_LEAD_ROWS_DEFAULT = 2
+export const NAV_LEAD_ROWS_MIN = 0
+export const NAV_LEAD_ROWS_MAX = 10
 
 /**
  * Whether copying a reference should also paste it into the chat input and
@@ -81,6 +87,23 @@ export function splitMode(): boolean {
 /** Persist the split-view preference. */
 export function setSplitMode(value: boolean): void {
   localStorage.setItem(SPLIT_MODE_KEY, value ? '1' : '0')
+}
+
+/**
+ * How many rows of lead the diff block jump leaves above the jumped-to block,
+ * and how far the anchored navigation scans. Defaults to 2; an out-of-range or
+ * non-integer value falls back to the default.
+ * @returns the lead row count.
+ */
+export function navLeadRows(): number {
+  const raw = Number.parseInt(localStorage.getItem(NAV_LEAD_KEY) ?? '', 10)
+  if (!Number.isInteger(raw)) return NAV_LEAD_ROWS_DEFAULT
+  return Math.max(NAV_LEAD_ROWS_MIN, Math.min(NAV_LEAD_ROWS_MAX, raw))
+}
+
+/** Persist the block-jump lead row count. */
+export function setNavLeadRows(value: number): void {
+  localStorage.setItem(NAV_LEAD_KEY, String(Math.max(NAV_LEAD_ROWS_MIN, Math.min(NAV_LEAD_ROWS_MAX, value))))
 }
 
 const QUICK_SUMMON_KEY = 'diff-approval:quick-summon-key'
