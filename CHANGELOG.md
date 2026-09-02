@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.15.0](https://github.com/9087/dsh-diff-approval/compare/v0.14.1...v0.15.0) (2026-09-02)
+
+### Features
+
+* intra-line word diff and similarity alignment in the split view ([4112aa7](https://github.com/9087/dsh-diff-approval/commit/4112aa74b0e6b5b1deb4b40ad4295f142f09f3c2))
+* re-anchor diff-block navigation to the scroll position and make lead rows configurable ([9566714](https://github.com/9087/dsh-diff-approval/commit/9566714eaca4c5ff087ac196ad34a5315802af81))
+* settings booleans use a toggle switch instead of a dropdown picker ([5255a25](https://github.com/9087/dsh-diff-approval/commit/5255a253057ead27a55137fe87ac1e18bc5d38d3))
+* show the full diff path scrollable and drag-selectable ([5eff6c1](https://github.com/9087/dsh-diff-approval/commit/5eff6c1c9c89c9aad2eadbf295195d48adfe3738))
+
+### Bug Fixes
+
+* pin the per-block review frame to the diff viewport in single-column ([1dfe261](https://github.com/9087/dsh-diff-approval/commit/1dfe261ae179e81b7bc67597336a03406a2ff7e1))
+* read large VCS blobs without the shell stdout cap ([155d775](https://github.com/9087/dsh-diff-approval/commit/155d77561228dccc701ecd3672f6fbf10ae792e4))
+* strip auto-wrap's visual line breaks from copied diff text ([7ef2ddb](https://github.com/9087/dsh-diff-approval/commit/7ef2ddb0ed0ce4094ce71a660ab83b2c7c523d5e))
+
 ## [0.14.1](https://github.com/9087/dsh-diff-approval/compare/v0.14.0...v0.14.1) (2026-09-01)
 
 ### Bug Fixes
