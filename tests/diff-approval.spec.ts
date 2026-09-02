@@ -3,7 +3,7 @@
 
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -105,14 +105,44 @@ async function listEntries(handle: ConnectionRpcHandler, sessionId: string): Pro
 }
 
 /** A scriptable fake `ctx.shell` executor answering routed commands. Paths the
- * implementation quotes are matched after stripping the quotes. */
+ * implementation quotes are matched after stripping the quotes. A `> file`
+ * redirection writes the routed output to that file instead of returning it on
+ * stdout; `git checkout-index --temp` writes the routed blob to a temp file in
+ * the workdir and prints `TEMPNAME\tPATH` (as the real git does), so the import
+ * reads it back with the uncapped file reader. */
 function fakeShell(routes: Record<string, string>): unknown {
   return {
     resolve: (request: { command: string; workdir?: string; timeoutMs?: number }) => ({ ...request }),
-    run: async (spec: { command: string }) => {
+    run: async (spec: { command: string; workdir?: string }) => {
       const command = spec.command.replace(/'/g, '')
+      const workdir = spec.workdir ?? process.cwd()
+      // git checkout-index --temp --force -- <path>: write the routed blob to a
+      // temp file and print `TEMPNAME\tPATH`; the importer reads the file.
+      const co = /^git checkout-index --temp --force --\s+(.+)$/.exec(command)
+      if (co !== null) {
+        const path = co[1]!
+        for (const [needle, output] of Object.entries(routes)) {
+          if (command.includes(needle)) {
+            const name = '.merge_file_test'
+            const file = resolve(workdir, name)
+            const { writeFile } = await import('node:fs/promises')
+            await writeFile(file, output, 'utf8')
+            return { exitCode: 0, stdout: { text: `${name}\t${path}` }, stderr: { text: '' } }
+          }
+        }
+        return { exitCode: 1, stdout: { text: '' }, stderr: { text: `no route for ${spec.command}` } }
+      }
+      // Split a trailing `> 'file'` redirection off; other commands capture large
+      // blobs through a temp file to dodge the executor's stdout cap.
+      const redir = /(.*?)\s*>\s*'([^']*)'\s*$/.exec(spec.command)
+      const file = redir?.[2]
+      const bare = (redir?.[1] ?? spec.command).replace(/'/g, '')
       for (const [needle, output] of Object.entries(routes)) {
-        if (command.includes(needle)) {
+        if (bare.includes(needle)) {
+          if (file !== undefined) {
+            const { writeFile } = await import('node:fs/promises')
+            await writeFile(file, output, 'utf8')
+          }
           return { exitCode: 0, stdout: { text: output }, stderr: { text: '' } }
         }
       }
@@ -816,7 +846,9 @@ describe('vcs detection and import', () => {
     const shell = fakeShell({
       'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all':
         ' M sub/a.txt\u0000 D sub/gone.txt\u0000?? sub/new.txt\u0000',
+      'git cat-file -s :0:sub/a.txt': '13',
       'git show :0:sub/a.txt': 'old content\n',
+      'git cat-file -s :0:sub/gone.txt': '9',
       'git show :0:sub/gone.txt': 'gone old\n',
     })
     const { handle } = await harness({
@@ -847,6 +879,7 @@ describe('vcs detection and import', () => {
     const shell = fakeShell({
       'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all':
         ' M sub/a.txt\u0000?? sub/new.txt\u0000',
+      'git cat-file -s :0:sub/a.txt': '13',
       'git show :0:sub/a.txt': 'old content\n',
     })
     const { handle } = await harness({
@@ -928,6 +961,7 @@ describe('vcs detection and import', () => {
     await writeFile(aPath, 'new\n')
     const shell = fakeShell({
       'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all': ' M sub/a.txt\u0000',
+      'git cat-file -s :0:sub/a.txt': '4',
       'git show :0:sub/a.txt': 'old\n',
     })
     const { ctx, handle } = await harness({

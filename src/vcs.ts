@@ -20,6 +20,7 @@
  */
 
 import { existsSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { dirname, resolve, sep } from 'node:path'
 
 /** The version-control systems this integration knows. */
@@ -71,6 +72,12 @@ export interface VcsImportInput {
 /** Cap on one VCS command's runtime; scans (git status, svn status) can be slow
  * on large trees but must not hang the import. */
 const VCS_COMMAND_TIMEOUT_MS = 60_000
+
+/** Blobs up to this size are read straight off the executor's buffered stdout
+ * (the small-blob path, no temp file); larger blobs go through the checkout-index
+ * temp-file path because the executor cap truncates its stdout. Kept below the
+ * cap so the small path never truncates. */
+const GIT_BLOB_STDOUT_SAFE = 60_000
 
 /** Quote one argument for a POSIX-ish shell, so paths with spaces or special
  * characters survive interpolation into VCS command lines. */
@@ -180,10 +187,36 @@ async function gitChanges(input: VcsImportInput): Promise<VcsChange[]> {
     const worktree = xy[1] ?? ' '
     if (worktree !== 'M' && worktree !== 'D') continue
     // Baseline = the index (stage 0) content, i.e. what `git diff` compares
-    // against; `git show :0:<path>` reads it without touching the working tree.
+    // against. Small blobs are read straight off the (buffered) stdout — no
+    // temp file. A big blob would be truncated by the executor's stdout cap, so
+    // it is written to a git temp file by `git checkout-index --temp` (which
+    // prints only the temp file's name, a small stdout) and read back with the
+    // uncapped fs reader. The temp file lands in the repo root — `checkout-index
+    // --temp` writes it there and ignores `TMPDIR`, and a shell redirect (which
+    // could target a temp dir) is not supported by this executor — but it is
+    // removed immediately after reading.
     let oldText = ''
     try {
-      oldText = await runShell(shell, `git show :0:${shq(rel)}`, root, signal)
+      let size = 0
+      try {
+        size = Number.parseInt((await runShell(shell, `git cat-file -s :0:${shq(rel)}`, root, signal)).trim(), 10)
+      } catch {
+        size = 0
+      }
+      if (Number.isFinite(size) && size > 0 && size <= GIT_BLOB_STDOUT_SAFE) {
+        oldText = await runShell(shell, `git show :0:${shq(rel)}`, root, signal)
+      } else {
+        const tempOut = await runShell(shell, `git checkout-index --temp --force -- ${shq(rel)}`, root, signal)
+        const tempRel = tempOut.trim().split(/\s+/)[0] ?? ''
+        if (tempRel !== '') {
+          const tempFile = resolve(root, tempRel)
+          try {
+            oldText = await readText(tempFile) ?? ''
+          } finally {
+            await rm(tempFile, { force: true }).catch(() => {})
+          }
+        }
+      }
     } catch {
       oldText = ''
     }
