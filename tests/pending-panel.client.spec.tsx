@@ -800,27 +800,34 @@ describe('PendingPanel', () => {
     }
   })
 
-  it('anchors the block frame to the block bottom and pads the diff bottom when the block is the last row', () => {
+  it('anchors the block frame to the block bottom and clamps it inside the viewport', () => {
     // Last row of the file is the changed row, so the floating frame would be
-    // clipped unless the diff bottom is padded to fit it.
-    const lastRowDiff = entry({ id: 'entry-last-row', oldText: 'a\nb\nc\n', newText: 'a\nb\nC\n' })
-    const props = panelProps({ read: true, files: [lastRowDiff], busy: new Set() })
-    const view = render(<PendingPanel {...props} />)
-    fireEvent.click(screen.getByLabelText('panel.aria'))
-    fireEvent.click(screen.getByText('a.txt'))
+    // pushed off the viewport bottom unless clamped up to fit. The frame lives
+    // in the non-scrolling wrapper (viewport coordinates), so its `top` is the
+    // block-bottom offset minus scrollTop, clamped to the viewport bottom.
+    const clientHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight')
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get: () => 120 })
+    try {
+      const lastRowDiff = entry({ id: 'entry-last-row', oldText: 'a\nb\nc\n', newText: 'a\nb\nC\n' })
+      const props = panelProps({ read: true, files: [lastRowDiff], busy: new Set() })
+      render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      fireEvent.click(screen.getByText('a.txt'))
 
-    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
-    const last = rows[rows.length - 1]!
-    fireEvent.mouseEnter(last)
+      const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+      const last = rows[rows.length - 1]!
+      fireEvent.mouseEnter(last)
 
-    const actions = document.querySelector('[data-diff-block-actions]') as HTMLElement
-    expect(actions).not.toBeNull()
-    // The block's last row is the file's last row (content bottom), so the
-    // frame cannot sit below it; it moves UP so its own bottom stays at the
-    // content bottom. Total height is 4 rows = 88px; the 40px frame clamps to
-    // top = 88 - 40 = 48px. The content height never grows (no bottom pad), so
-    // the last rows do not jump.
-    expect(actions.style.top).toBe('48px')
+      const actions = document.querySelector('[data-diff-block-actions]') as HTMLElement
+      expect(actions).not.toBeNull()
+      // 4 rows = 88px content; the block's last row is the content bottom, so
+      // the frame cannot sit below it. With a 120px viewport and a 40px frame,
+      // it clamps up to `120 - 40 = 80px` so its own bottom stays on-screen.
+      expect(actions.style.top).toBe('80px')
+    } finally {
+      if (clientHeight !== undefined) Object.defineProperty(HTMLElement.prototype, 'clientHeight', clientHeight)
+      else delete (HTMLElement.prototype as { clientHeight?: unknown }).clientHeight
+    }
   })
 
   it('moves the focus between contiguous change blocks', () => {

@@ -1574,14 +1574,15 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const visibleRows = rows.slice(start, end)
 
   // The floating Keep/Revert frame anchors to the hovered block's bottom edge.
-  // When that edge runs into the content's bottom, the frame must move up so
-  // its own bottom stays inside the scrollable content — padding the bottom
-  // would grow the content and make the last rows jump. Clamping to
-  // `totalHeight - FRAME_HEIGHT` (never past `0`) keeps the frame reachable.
+  // It lives in the non-scrolling wrapper (viewport coordinates), so subtract
+  // scrollTop, and clamp it so its own bottom never passes the visible diff
+  // area's bottom (`viewportHeight - FRAME_PX`) — a block near the viewport
+  // bottom would otherwise push the frame off into the status bar/composer.
+  // Never clamps past 0.
   const blockEnd = hoveredBlock === undefined ? undefined : model.blocks[hoveredBlock]?.end
   const blockActionsTop = blockEnd === undefined
     ? 0
-    : Math.min(offsetOf(blockEnd + 1), Math.max(0, totalHeight - BLOCK_ACTIONS_FRAME_PX))
+    : Math.max(0, Math.min(offsetOf(blockEnd + 1) - scrollTop, Math.max(0, viewportHeight - BLOCK_ACTIONS_FRAME_PX)))
 
   // The selection frame anchors to the last covered block's bottom edge — the
   // same spot that block's own hover frame would use.
@@ -1593,7 +1594,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   })()
   const selectionActionsTop = selectionBlockEnd === undefined
     ? 0
-    : Math.min(offsetOf(selectionBlockEnd + 1), Math.max(0, totalHeight - BLOCK_ACTIONS_FRAME_PX))
+    : Math.max(0, Math.min(offsetOf(selectionBlockEnd + 1) - scrollTop, Math.max(0, viewportHeight - BLOCK_ACTIONS_FRAME_PX)))
 
   // Widest line in the file, in characters: pins the table's width so the
   // added/deleted tint spans the same width at every scroll position (the
@@ -2068,13 +2069,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
           onBlockRevert={onBlockRevert}
         />
       ) : (
-      <div className={css.diffBodyWrap}>
+      <div className={css.diffBodyWrap} onMouseLeave={() => { setHoveredBlock(undefined) }}>
         <div
           className={css.diffBody}
           ref={bodyRef}
           tabIndex={0}
           onScroll={onScroll}
-          onMouseLeave={() => { setHoveredBlock(undefined) }}
           style={{ tabSize: tabWidthSpaces }}
           data-diff-body
         >
@@ -2105,81 +2105,81 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
               <div className={css.vSpacer} style={{ height: totalHeight - offsetOf(end) }} aria-hidden="true" />
             )}
           </div>
-          {selectionRange !== undefined ? (
-            <div
-              className={css.blockActions}
-              data-diff-selection-actions
-              style={{ top: selectionActionsTop }}
-            >
-              <button
-                type="button"
-                className={`${css.action} ${css.actionPrimary}`}
-                data-diff-selection-keep
-                disabled={busy}
-                onClick={() => { void handleSelectionAction('keep') }}
-              >
-                {t('action.keep')}
-              </button>
-              <button
-                type="button"
-                className={css.action}
-                data-diff-selection-revert
-                disabled={busy}
-                onClick={() => { void handleSelectionAction('revert') }}
-              >
-                {t('action.revert')}
-              </button>
-            </div>
-          ) : hoveredBlock !== undefined && model.blocks[hoveredBlock] !== undefined ? (
-            <div
-              className={css.blockActions}
-              data-diff-block-actions
-              style={{ top: blockActionsTop }}
-            >
-              <span className={css.blockPosition} data-diff-block-position>
-                {t('panel.blockPosition', { current: hoveredBlock + 1, total: model.blocks.length })}
-              </span>
-              <button
-                type="button"
-                className={`${css.action} ${css.iconAction}`}
-                data-diff-block-prev
-                aria-label={t('action.prevDiff')}
-                disabled={busy}
-                onClick={() => { stepBlock(-1) }}
-              >
-                <IconChevronUpOutline14 size={14} />
-              </button>
-              <button
-                type="button"
-                className={`${css.action} ${css.iconAction}`}
-                data-diff-block-next
-                aria-label={t('action.nextDiff')}
-                disabled={busy}
-                onClick={() => { stepBlock(1) }}
-              >
-                <IconChevronDownOutline14 size={14} />
-              </button>
-              <button
-                type="button"
-                className={`${css.action} ${css.actionPrimary}`}
-                data-diff-block-keep
-                disabled={busy}
-                onClick={() => { void handleBlockAction('keep') }}
-              >
-                {t('action.keep')}
-              </button>
-              <button
-                type="button"
-                className={css.action}
-                data-diff-block-revert
-                disabled={busy}
-                onClick={() => { void handleBlockAction('revert') }}
-              >
-                {t('action.revert')}
-              </button>
-            </div>
-          ) : null}
         </div>
+        {selectionRange !== undefined ? (
+          <div
+            className={css.blockActions}
+            data-diff-selection-actions
+            style={{ top: selectionActionsTop }}
+          >
+            <button
+              type="button"
+              className={`${css.action} ${css.actionPrimary}`}
+              data-diff-selection-keep
+              disabled={busy}
+              onClick={() => { void handleSelectionAction('keep') }}
+            >
+              {t('action.keep')}
+            </button>
+            <button
+              type="button"
+              className={css.action}
+              data-diff-selection-revert
+              disabled={busy}
+              onClick={() => { void handleSelectionAction('revert') }}
+            >
+              {t('action.revert')}
+            </button>
+          </div>
+        ) : hoveredBlock !== undefined && model.blocks[hoveredBlock] !== undefined ? (
+          <div
+            className={css.blockActions}
+            data-diff-block-actions
+            style={{ top: blockActionsTop }}
+          >
+            <span className={css.blockPosition} data-diff-block-position>
+              {t('panel.blockPosition', { current: hoveredBlock + 1, total: model.blocks.length })}
+            </span>
+            <button
+              type="button"
+              className={`${css.action} ${css.iconAction}`}
+              data-diff-block-prev
+              aria-label={t('action.prevDiff')}
+              disabled={busy}
+              onClick={() => { stepBlock(-1) }}
+            >
+              <IconChevronUpOutline14 size={14} />
+            </button>
+            <button
+              type="button"
+              className={`${css.action} ${css.iconAction}`}
+              data-diff-block-next
+              aria-label={t('action.nextDiff')}
+              disabled={busy}
+              onClick={() => { stepBlock(1) }}
+            >
+              <IconChevronDownOutline14 size={14} />
+            </button>
+            <button
+              type="button"
+              className={`${css.action} ${css.actionPrimary}`}
+              data-diff-block-keep
+              disabled={busy}
+              onClick={() => { void handleBlockAction('keep') }}
+            >
+              {t('action.keep')}
+            </button>
+            <button
+              type="button"
+              className={css.action}
+              data-diff-block-revert
+              disabled={busy}
+              onClick={() => { void handleBlockAction('revert') }}
+            >
+              {t('action.revert')}
+            </button>
+          </div>
+        ) : null}
         {focusedBlock !== undefined && flashKey > 0 && (
           <div
             key={flashKey}
