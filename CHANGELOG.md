@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.16.0](https://github.com/9087/dsh-diff-approval/compare/v0.15.0...v0.16.0) (2026-09-03)
+
+### Features
+
+* toggle the diff view between unified and side-by-side from the toolbar ([cd38252](https://github.com/9087/dsh-diff-approval/commit/cd38252d7d47a1348e7037568df4f41dc5c57c89))
+
+### Bug Fixes
+
+* read large VCS baseline blobs via git show with a per-command stdout budget ([75b6f91](https://github.com/9087/dsh-diff-approval/commit/75b6f91c4fbc57c65de9a5e0f16a66ab189867f5))
+* surface the block approval frame on every pair of a similarity-aligned block ([6b8e83e](https://github.com/9087/dsh-diff-approval/commit/6b8e83ecfc140b95f282480f3dc59fc831178f7d))
+
 ## [0.15.0](https://github.com/9087/dsh-diff-approval/compare/v0.14.1...v0.15.0) (2026-09-02)
 
 ### Features
