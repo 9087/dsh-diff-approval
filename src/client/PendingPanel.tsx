@@ -19,7 +19,7 @@ import { HIGHLIGHT_LANGS, highlightLines, languageDisplayName } from './highligh
 import type { HighlightSpan } from './highlight.ts'
 import { langFromPath } from './lang.ts'
 import { referenceOf } from './reference.ts'
-import { includeUntrackedEnabled, matchesShortcut, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setWrapEnabled, splitMode, tabWidth, wrapEnabled } from './settings.ts'
+import { includeUntrackedEnabled, matchesShortcut, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled } from './settings.ts'
 import css from './PendingPanel.module.css'
 
 /**
@@ -58,6 +58,30 @@ const ROW_HEIGHT_PX = 22
  *  so a sub-pixel float error (wrapped row heights, fractional scrollTop) never
  *  mis-classifies the block the view is sitting on. Half a row height. */
 const NAV_ANCHOR_TOLERANCE_PX = ROW_HEIGHT_PX / 4
+/** The diff view-mode toggle glyph: the whole file as one column of text lines
+ *  (unified) or two side-by-side columns of text lines (split). Hand-drawn
+ *  because the icon library has no single/double-column glyph. Rendered 1:1
+ *  (viewBox matches the size) with integer bar geometry, so every thin line
+ *  lands on whole pixels and stays crisp on any display scale. */
+function ViewModeIcon({ split, size = 14 }: { split: boolean; size?: number }) {
+  // Integer-aligned thin "text line" bars: 5 lines, 1px tall, 2px apart (1px top
+  // margin), square corners, so every edge is on a whole pixel and reads crisp.
+  const lineY = [1, 4, 7, 10, 13]
+  const lineH = 1
+  return (
+    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+      {split
+        ? (
+          <>
+            {lineY.map(y => <rect key={`l${y}`} x="1" y={y} width="5" height={lineH} fill="currentColor" />)}
+            {lineY.map(y => <rect key={`r${y}`} x="8" y={y} width="5" height={lineH} fill="currentColor" />)}
+          </>
+        ) : (
+          lineY.map(y => <rect key={`u${y}`} x="1" y={y} width="12" height={lineH} fill="currentColor" />)
+        )}
+    </svg>
+  )
+}
 /** Total width of the two line-number gutters, subtracted from the code width
  * when measuring wrapped line heights. */
 const WRAP_GUTTERS_PX = 88
@@ -1306,11 +1330,20 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // on the diff and the wrapped-line tab measurement, so both agree. Read once
   // on mount; a change in DSH Settings applies on the next panel open.
   const [tabWidthSpaces] = useState(() => tabWidth())
-  // Side-by-side (split) mode from settings. Read once on mount so a change
-  // applies on the next panel open, matching the tab-width behaviour above.
-  const splitView = splitMode()
+  // Side-by-side (split) mode from settings. Held in state so the toolbar
+  // toggle can switch the view live (and persist the choice); a change in DSH
+  // Settings still applies on the next panel open.
+  const [splitView, setSplitView] = useState(() => splitMode())
   // Rows of lead left above a jumped-to diff block (configurable in Settings).
   const leadRows = navLeadRows()
+  // Quick toolbar toggle between the single-column (unified) and side-by-side
+  // (split) views. Persists the choice through the same setting the Settings
+  // tab uses, so the two stay in sync and the view survives a reopen.
+  const toggleSplitView = (): void => {
+    const next = !splitView
+    setSplitView(next)
+    setSplitMode(next)
+  }
   // Handle to the split view's imperative block-jump, used to route the shared
   // toolbar/keyboard to it while split mode is active (null in single column).
   const splitDiffRef = useRef<SplitDiffHandle>(null)
@@ -2075,6 +2108,18 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
             onClick={toggleSearch}
           >
             <IconSearchOutline16 size={14} />
+          </button>
+        </Tooltip>
+        <span className={css.divider} />
+        <Tooltip label={t(splitView ? 'action.viewUnified' : 'action.viewSplit')} side="bottom" delayMs={500}>
+          <button
+            type="button"
+            className={`${css.action} ${css.iconAction}`}
+            data-diff-toggle-view
+            aria-label={t(splitView ? 'action.viewUnified' : 'action.viewSplit')}
+            onClick={toggleSplitView}
+          >
+            <ViewModeIcon split={splitView} />
           </button>
         </Tooltip>
         <span className={css.flexSpacer} />

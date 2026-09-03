@@ -1853,4 +1853,27 @@ describe('PendingPanel', () => {
     expect(leftCode?.querySelectorAll('span').length ?? 0).toBe(0)
     expect(rightCode?.querySelectorAll('span').length ?? 0).toBe(0)
   })
+
+  it('toggles the single-column / side-by-side view from the header toolbar', () => {
+    localStorage.setItem('diff-approval:split-mode', '0')
+    const file = entry({ id: 'entry-toggle-view', path: '/repo/tl.txt', oldText: 'a\n', newText: 'b\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('tl.txt'))
+
+    // Starts in the single-column (unified) view: no split horizontal-scroll strip.
+    expect(document.querySelector('[data-diff-hscroll]')).toBeNull()
+
+    // Toggle to the side-by-side (split) view.
+    fireEvent.click(screen.getByLabelText('action.viewSplit'))
+    expect(document.querySelector('[data-diff-hscroll="left"]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-split-row]')).not.toBeNull()
+    expect(localStorage.getItem('diff-approval:split-mode')).toBe('1')
+
+    // Toggle back to single-column.
+    fireEvent.click(screen.getByLabelText('action.viewUnified'))
+    expect(document.querySelector('[data-diff-hscroll]')).toBeNull()
+    expect(localStorage.getItem('diff-approval:split-mode')).toBe('0')
+  })
 })

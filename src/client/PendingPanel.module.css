@@ -727,6 +727,14 @@
   flex: 1;
 }
 
+/* Vertical divider between grouped toolbar controls (e.g. search | view mode). */
+.divider {
+  align-self: stretch;
+  width: 1px;
+  margin: 2px 0;
+  background: var(--dsw-alias-border-l1);
+}
+
 .action {
   padding: 3px 12px;
   border: 1px solid var(--dsw-alias-border-l1);
