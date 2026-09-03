@@ -1854,6 +1854,27 @@ describe('PendingPanel', () => {
     expect(rightCode?.querySelectorAll('span').length ?? 0).toBe(0)
   })
 
+  it('surfaces the block approval frame when hovering a similarity-aligned pair', () => {
+    // One contiguous change block, but similarity re-orders its del/add pairing:
+    // del0 'alpha' pairs with add1 'alpha modified' (peaks similarity), leaving
+    // del1 'beta' del-only and add0 'gamma' add-only. The block's whole pair range
+    // spans those three pairs, but deriving it from the first/last row collapses it
+    // to one pair, so hovering the del-only/add-only pairs would not surface the
+    // frame. The block index must come from the block's own rows' pair indices.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const file = entry({ id: 'entry-split-reorder', path: '/repo/reorder.txt', oldText: 'alpha\nbeta\n', newText: 'gamma\nalpha modified\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('reorder.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-split-row]')] as HTMLElement[]
+    const delOnly = rows.find(row => (row.querySelector('[data-diff-code]')?.textContent ?? '') === 'beta')
+    expect(delOnly).toBeDefined()
+    fireEvent.mouseEnter(delOnly!)
+    expect(document.querySelector('[data-diff-block-actions]')).not.toBeNull()
+  })
+
   it('toggles the single-column / side-by-side view from the header toolbar', () => {
     localStorage.setItem('diff-approval:split-mode', '0')
     const file = entry({ id: 'entry-toggle-view', path: '/repo/tl.txt', oldText: 'a\n', newText: 'b\n' })

@@ -748,16 +748,36 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     return () => { observer?.disconnect() }
   }, [file.id])
 
-  // Pair index range per change block (mapped from the original row range).
-  const blockOfPair = useMemo(() => model.blocks.map(block => ({
-    start: pairOfRow.get(block.start) ?? 0,
-    end: pairOfRow.get(block.end) ?? 0,
-  })), [model, pairOfRow])
+  // Pair index range per change block (mapped from the original row range). For
+  // a similarity-aligned block the rows pair by similarity rather than order, so
+  // `pairOfRow(block.start)`/`pairOfRow(block.end)` can collapse to one pair while
+  // the block spans several; fold the block's OWN rows' pair indices to the
+  // [min, max] extent so the flash/frame covers the whole block.
+  const blockOfPair = useMemo(() => model.blocks.map(block => {
+    let start = Number.POSITIVE_INFINITY
+    let end = Number.NEGATIVE_INFINITY
+    for (let row = block.start; row <= block.end; row++) {
+      const pair = pairOfRow.get(row)
+      if (pair === undefined) continue
+      if (pair < start) start = pair
+      if (pair > end) end = pair
+    }
+    return { start: Number.isFinite(start) ? start : 0, end: Number.isFinite(end) ? end : 0 }
+  }), [model, pairOfRow])
+  // Pair index → the change block covering it. Fold the block's own rows' pair
+  // indices, not a contiguous range: similarity alignment reorders a block's
+  // pairs, so a [start,end]-row-range assumption misses some of them and
+  // hovering those pairs would fail to surface the block's approval frame.
   const blockIndexByPair = useMemo(() => {
     const map = new Map<number, number>()
-    blockOfPair.forEach((block, bi) => { for (let k = block.start; k <= block.end; k++) map.set(k, bi) })
+    model.blocks.forEach((block, bi) => {
+      for (let row = block.start; row <= block.end; row++) {
+        const pair = pairOfRow.get(row)
+        if (pair !== undefined) map.set(pair, bi)
+      }
+    })
     return map
-  }, [blockOfPair])
+  }, [model, pairOfRow])
   const onPairHover = useCallback((k: number) => {
     const bi = blockIndexByPair.get(k)
     setHoveredBlock(bi)
