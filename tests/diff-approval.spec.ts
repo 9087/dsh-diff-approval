@@ -872,6 +872,46 @@ describe('vcs detection and import', () => {
     expect(files[2]).toMatchObject({ kind: 'create', oldText: '', newText: 'fresh\n' })
   })
 
+  it('reads a large baseline blob via git show with a raised stdout budget (no temp file)', async () => {
+    const { workspace } = await gitRepo()
+    await writeFile(join(workspace, 'big.txt'), 'big new content\n')
+    const resolves: { command: string; stdoutMaxBytes?: number }[] = []
+    const routes: Record<string, string> = {
+      'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all': ' M sub/big.txt\u0000',
+      'git cat-file -s :0:sub/big.txt': '70000', // > the default stdout cap
+      'git show :0:sub/big.txt': 'big old content\n',
+    }
+    const shell = {
+      resolve: (request: { command: string; stdoutMaxBytes?: number }) => {
+        resolves.push({ command: request.command, stdoutMaxBytes: request.stdoutMaxBytes })
+        return { ...request }
+      },
+      run: async (spec: { command: string }) => {
+        const bare = spec.command.replace(/'/g, '')
+        for (const [needle, output] of Object.entries(routes)) {
+          if (bare.includes(needle)) return { exitCode: 0, stdout: { text: output }, stderr: { text: '' } }
+        }
+        return { exitCode: 1, stdout: { text: '' }, stderr: { text: `no route for ${spec.command}` } }
+      },
+    }
+    const { handle } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (ctx) => { ctx.provide('shell', shell) },
+    })
+
+    await handle('vcs-import', { sessionId: 'session-1', includeUntracked: true }, signal())
+    const files = await listEntries(handle, 'session-1')
+    expect(files).toHaveLength(1)
+    expect(files[0]).toMatchObject({ kind: 'edit', oldText: 'big old content\n', newText: 'big new content\n' })
+    // The baseline came off `git show :0:` with a raised per-command stdout
+    // budget, not a temp-file write to the repo root.
+    const show = resolves.find(request => request.command.startsWith('git show :0:'))
+    expect(show).toBeDefined()
+    expect(show!.stdoutMaxBytes).toBeGreaterThanOrEqual(70000)
+    expect(resolves.some(request => request.command.includes('checkout-index'))).toBe(false)
+  })
+
   it('skips untracked files when the import-untracked preference is off', async () => {
     const { workspace } = await gitRepo()
     await writeFile(join(workspace, 'a.txt'), 'new content\n')

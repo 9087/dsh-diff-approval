@@ -20,7 +20,6 @@
  */
 
 import { existsSync } from 'node:fs'
-import { rm } from 'node:fs/promises'
 import { dirname, resolve, sep } from 'node:path'
 
 /** The version-control systems this integration knows. */
@@ -47,7 +46,14 @@ export interface VcsChange {
 /** The subset of `ctx.shell`'s executor this module calls (kept structural so
  * the module stays dependency-light and testable with a fake). */
 export interface ShellExecutorLike {
-  resolve(request: { command: string; workdir?: string | undefined; timeoutMs?: number | undefined; signal?: AbortSignal | undefined }): unknown
+  resolve(request: {
+    command: string
+    workdir?: string | undefined
+    timeoutMs?: number | undefined
+    signal?: AbortSignal | undefined
+    /** Foreground stdout capture budget in bytes; absent uses the executor's cap. */
+    stdoutMaxBytes?: number | undefined
+  }): unknown
   run(spec: unknown): Promise<{ exitCode: number | null; stdout: { text: string }; stderr: { text: string } }>
 }
 
@@ -73,11 +79,9 @@ export interface VcsImportInput {
  * on large trees but must not hang the import. */
 const VCS_COMMAND_TIMEOUT_MS = 60_000
 
-/** Blobs up to this size are read straight off the executor's buffered stdout
- * (the small-blob path, no temp file); larger blobs go through the checkout-index
- * temp-file path because the executor cap truncates its stdout. Kept below the
- * cap so the small path never truncates. */
-const GIT_BLOB_STDOUT_SAFE = 60_000
+/** Slack added to a blob's size when raising the per-command stdout budget
+ * (`stdoutMaxBytes`), so a baseline blob is never truncated at the boundary. */
+const GIT_BLOB_STDOUT_SLACK = 1024
 
 /** Quote one argument for a POSIX-ish shell, so paths with spaces or special
  * characters survive interpolation into VCS command lines. */
@@ -126,8 +130,9 @@ async function runShell(
   command: string,
   workdir: string,
   signal: AbortSignal | undefined,
+  stdoutMaxBytes?: number,
 ): Promise<string> {
-  const spec = shell.resolve({ command, workdir, timeoutMs: VCS_COMMAND_TIMEOUT_MS, signal })
+  const spec = shell.resolve({ command, workdir, timeoutMs: VCS_COMMAND_TIMEOUT_MS, signal, stdoutMaxBytes })
   const result = await shell.run(spec)
   if (result.exitCode !== 0) {
     const detail = (result.stderr.text || result.stdout.text).trim()
@@ -187,14 +192,10 @@ async function gitChanges(input: VcsImportInput): Promise<VcsChange[]> {
     const worktree = xy[1] ?? ' '
     if (worktree !== 'M' && worktree !== 'D') continue
     // Baseline = the index (stage 0) content, i.e. what `git diff` compares
-    // against. Small blobs are read straight off the (buffered) stdout — no
-    // temp file. A big blob would be truncated by the executor's stdout cap, so
-    // it is written to a git temp file by `git checkout-index --temp` (which
-    // prints only the temp file's name, a small stdout) and read back with the
-    // uncapped fs reader. The temp file lands in the repo root — `checkout-index
-    // --temp` writes it there and ignores `TMPDIR`, and a shell redirect (which
-    // could target a temp dir) is not supported by this executor — but it is
-    // removed immediately after reading.
+    // against. It is read straight off `git show :0:` with a per-call stdout
+    // budget (`stdoutMaxBytes`) large enough for the blob, so the executor does
+    // not truncate a large blob — read-only, no temp-file write, so it works
+    // even where the sandbox denies a write to the repo root.
     let oldText = ''
     try {
       let size = 0
@@ -203,19 +204,8 @@ async function gitChanges(input: VcsImportInput): Promise<VcsChange[]> {
       } catch {
         size = 0
       }
-      if (Number.isFinite(size) && size > 0 && size <= GIT_BLOB_STDOUT_SAFE) {
-        oldText = await runShell(shell, `git show :0:${shq(rel)}`, root, signal)
-      } else {
-        const tempOut = await runShell(shell, `git checkout-index --temp --force -- ${shq(rel)}`, root, signal)
-        const tempRel = tempOut.trim().split(/\s+/)[0] ?? ''
-        if (tempRel !== '') {
-          const tempFile = resolve(root, tempRel)
-          try {
-            oldText = await readText(tempFile) ?? ''
-          } finally {
-            await rm(tempFile, { force: true }).catch(() => {})
-          }
-        }
+      if (Number.isFinite(size) && size > 0) {
+        oldText = await runShell(shell, `git show :0:${shq(rel)}`, root, signal, size + GIT_BLOB_STDOUT_SLACK)
       }
     } catch {
       oldText = ''
