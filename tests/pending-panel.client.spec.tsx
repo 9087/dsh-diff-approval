@@ -897,6 +897,44 @@ describe('PendingPanel', () => {
     expect(focusedLines()[0]!.textContent).toContain('a')
   })
 
+  it('at the boundary a keyboard jump toasts and needs one more press to wrap', () => {
+    const twoBlocks = entry({ id: 'entry-blocks', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [twoBlocks], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 6 * 22 })
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 4 * 22 })
+    const focusedLines = () => [...document.querySelectorAll('[data-diff-focused]')]
+
+    // Jump to the last block (block 1, 'c').
+    fireEvent.keyDown(body, { key: 'ArrowDown', ctrlKey: true })
+    expect(focusedLines()[0]!.textContent).toContain('c')
+
+    // At the last block a further Ctrl+Down toasts and does NOT wrap.
+    fireEvent.keyDown(body, { key: 'ArrowDown', ctrlKey: true })
+    expect(screen.getAllByText('panel.blockAtEnd').length).toBeGreaterThanOrEqual(1)
+    expect(focusedLines()[0]!.textContent).toContain('c')
+
+    // The next Ctrl+Down wraps to the first block.
+    fireEvent.keyDown(body, { key: 'ArrowDown', ctrlKey: true })
+    expect(focusedLines()[0]!.textContent).toContain('a')
+  })
+
+  it('toasts "only one block" when there is a single block', () => {
+    const oneBlock = entry({ id: 'entry-one', oldText: 'a\nb\n', newText: 'A\nb\n' })
+    const props = panelProps({ read: true, files: [oneBlock], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 3 * 22 })
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 2 * 22 })
+
+    // Ctrl+Down with a single block toasts "only one block" (nothing to wrap to).
+    fireEvent.keyDown(body, { key: 'ArrowDown', ctrlKey: true })
+    expect(screen.getAllByText('panel.blockSingle').length).toBeGreaterThanOrEqual(1)
+  })
+
   it('flashes the focused block on open and on every block switch', () => {
     const twoBlocks = entry({ id: 'entry-blocks', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [twoBlocks], busy: new Set() })

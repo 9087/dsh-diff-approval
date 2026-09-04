@@ -1025,12 +1025,30 @@
   border: 2px solid var(--dsw-alias-state-business-primary);
   border-radius: 4px;
   pointer-events: none;
-  animation: diffFlash 1s ease-out forwards;
+  animation: diffFlashFade 1s ease-out forwards;
 }
 
-@keyframes diffFlash {
+/* The boundary pin: a short positional shake that settles, then fades —
+   "you are pinned here" rather than a bare opacity flash. */
+.blockFlashShake {
+  animation: diffFlashShake 0.7s ease-out forwards;
+}
+
+@keyframes diffFlashFade {
   from { opacity: 1; }
   to { opacity: 0; }
+}
+
+@keyframes diffFlashShake {
+  0%   { opacity: 1; transform: translateY(0); }
+  10%  { transform: translateY(1px); }
+  20%  { transform: translateY(-1px); }
+  30%  { transform: translateY(1px); }
+  40%  { transform: translateY(-1px); }
+  50%  { transform: translateY(1px); }
+  60%  { transform: translateY(-1px); }
+  70%  { transform: translateY(0); opacity: 1; }
+  100% { opacity: 0; transform: translateY(0); }
 }
 
 /* Overview ruler over the vertical scrollbar: changed-line markers at their

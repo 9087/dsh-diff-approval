@@ -737,7 +737,7 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
 
 /** Imperative surface the parent uses to drive block navigation from the
  *  shared toolbar/keyboard in split mode (its own `focus` is private here). */
-export interface SplitDiffHandle { jump: (direction: -1 | 1) => void; openSearch: () => void; searchNext: (direction: -1 | 1) => boolean }
+export interface SplitDiffHandle { jump: (direction: -1 | 1, byKeyboard?: boolean) => void; openSearch: () => void; searchNext: (direction: -1 | 1) => boolean }
 
 /** The two-column (side-by-side) whole-file diff view. */
 export const SplitDiff = forwardRef<SplitDiffHandle, {
@@ -752,7 +752,9 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   leadRows: number
   onBlockKeep: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
   onBlockRevert: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
-}>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert }, ref) {
+  /** Notify the parent to toast a block-wrap boundary / single-block (Ctrl+Up/Down). */
+  onWrapToast: (text: string) => void
+}>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert, onWrapToast }, ref) {
   const { pairs, pairOfRow } = useMemo(
     () => computeSideBySideDiff(model.diff.rows, true),
     [model],
@@ -779,6 +781,13 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   const [hoveredBlock, setHoveredBlock] = useState<number | undefined>(undefined)
   const [focus, setFocus] = useState(0)
   const [flashKey, setFlashKey] = useState(0)
+  // When the flash is a "boundary pin" it shakes instead of fading. Set per-flash
+  // by `bumpFlash` so the overlay className stays stable for its whole life.
+  const pinShakeRef = useRef(false)
+  const bumpFlash = (shake: boolean): void => {
+    pinShakeRef.current = shake
+    setFlashKey(prev => prev + 1)
+  }
   // The block index recorded at hover: a keep/revert prefers the current
   // `hoveredBlock` (the block the actions frame is for) and only falls back to
   // this if the body's mouseleave cleared `hoveredBlock` before the click.
@@ -804,7 +813,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   useEffect(() => {
     setFocus(0)
     bodyRef.current?.focus()
-    setFlashKey(k => k + 1)
+    bumpFlash(false)
     setHoveredBlock(undefined)
     setSearchOpen(false)
     setSearchQuery('')
@@ -1017,7 +1026,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     const next = Math.max(0, Math.min(operated, count - 1))
     setFocus(next)
     setHoveredBlock(undefined)
-    setFlashKey(key => key + 1)
+    bumpFlash(false)
   }
   const pairAtY = (y: number): number => {
     if (pairOffsets === null) return Math.floor(y / ROW_HEIGHT_PX)
@@ -1038,17 +1047,42 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   const visiblePairs = pairs.slice(start, end)
 
   // Block navigation: jump between change blocks (flashes the focused one).
-  const jump = (direction: -1 | 1): void => {
-    if (blockOfPair.length === 0) return
+  // At the wrap boundary (last block + down, first block + up) a keyboard press
+  // only toasts; the next press in the same direction wraps. Armed direction = 0.
+  const wrapArmedRef = useRef<0 | -1 | 1>(0)
+  const jump = (direction: -1 | 1, byKeyboard = false): void => {
+    const count = blockOfPair.length
+    if (count === 0) return
+    if (byKeyboard) {
+      if (count === 1) {
+        onWrapToast(t('panel.blockSingle'))
+      } else {
+        const atBoundary = (direction === 1 && focus === count - 1)
+          || (direction === -1 && focus === 0)
+        if (atBoundary) {
+          // Toast only on the press that does NOT jump; the next press wraps.
+          if (wrapArmedRef.current !== direction) {
+            wrapArmedRef.current = direction
+            onWrapToast(t(direction === 1 ? 'panel.blockAtEnd' : 'panel.blockAtStart'))
+            // Flash the current block with a shake to show it is pinned here.
+            bumpFlash(true)
+            return
+          }
+          wrapArmedRef.current = 0
+        } else {
+          wrapArmedRef.current = 0
+        }
+      }
+    }
     setFocus(current => {
-      if (direction === -1) return (current - 1 + blockOfPair.length) % blockOfPair.length
+      if (direction === -1) return (current - 1 + count) % count
       const top = bodyRef.current?.scrollTop ?? 0
-      for (let index = current + 1; index < blockOfPair.length; index++) {
+      for (let index = current + 1; index < count; index++) {
         if (off(blockOfPair[index]!.start) >= top) return index
       }
       return 0
     })
-    setFlashKey(k => k + 1)
+    bumpFlash(false)
   }
   // Step the search (F3 / Shift+F3), but only when this view's own search bar
   // is open — so a closed bar never advances a stale match list.
@@ -1258,7 +1292,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
         </div>
       )}
       {focusedBlock !== undefined && flashKey > 0 && (
-        <div className={css.blockFlash} data-diff-block-flash key={flashKey} style={{ top: flashTop, height: flashHeight }} />
+        <div className={pinShakeRef.current ? `${css.blockFlash} ${css.blockFlashShake}` : css.blockFlash} data-diff-block-flash key={flashKey} style={{ top: flashTop, height: flashHeight }} />
       )}
       {hoveredBlock !== undefined && blockOfPair[hoveredBlock] !== undefined && (
         <div className={css.blockActions} data-diff-block-actions style={{ top: blockActionsTop }}>
@@ -1600,6 +1634,15 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // animation restarts. Bumped on file open/switch and on every jump (even a
   // same-block wrap), so the focused block flashes whenever it is (re)shown.
   const [flashKey, setFlashKey] = useState(0)
+  // When the flash is a "boundary pin" (no jump) it shakes; otherwise it fades.
+  // Set per-flash by `bumpFlash`, so the overlay's className stays stable for
+  // the whole flash and is never flipped mid-animation (which would cut the
+  // shake short).
+  const pinShakeRef = useRef(false)
+  const bumpFlash = (shake: boolean): void => {
+    pinShakeRef.current = shake
+    setFlashKey(prev => prev + 1)
+  }
 
   // Reset transient viewer state whenever the selected file changes, take
   // keyboard focus into the diff body so the Ctrl+Up/Down block-jump (scoped
@@ -1615,7 +1658,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     // instead of the model, so a content refresh no longer re-centers.
     setScrollTick(tick => tick + 1)
     bodyRef.current?.focus()
-    setFlashKey(key => key + 1)
+    bumpFlash(false)
     setHoveredBlock(undefined)
     setSelection(undefined)
     setLangOverride(undefined)
@@ -1634,7 +1677,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     if (undoFlash === 0) return
     setFocus(0)
     setScrollTick(tick => tick + 1)
-    setFlashKey(key => key + 1)
+    bumpFlash(false)
   }, [undoFlash])
 
   // Old/new line ranges per diff block, for block-level keep/revert.
@@ -1973,16 +2016,45 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     // would otherwise re-center the view and lose the user's scroll position.
   }, [scrollTick, rowOffsets === null])
 
-  const jump = (direction: -1 | 1) => {
+  // At the wrap boundary (last block + down, first block + up) a keyboard press
+  // only toasts; the next press in the same direction wraps. Armed direction = 0.
+  const wrapArmedRef = useRef<0 | -1 | 1>(0)
+  const jump = (direction: -1 | 1, byKeyboard = false) => {
     if (rowCount === 0) return
+    const count = model.blocks.length
+    if (count === 0) return
+    // Keyboard boundary guard. A single block has nothing to wrap to, so it just
+    // toasts; with several blocks, a boundary press toasts and the next press in
+    // the same direction wraps.
+    if (byKeyboard) {
+      if (count === 1) {
+        onToast(t('panel.blockSingle'))
+      } else {
+        const atBoundary = (direction === 1 && focus === count - 1)
+          || (direction === -1 && focus === 0)
+        if (atBoundary) {
+          // Toast only on the press that does NOT jump; the next press wraps.
+          if (wrapArmedRef.current !== direction) {
+            wrapArmedRef.current = direction
+            onToast(t(direction === 1 ? 'panel.blockAtEnd' : 'panel.blockAtStart'))
+            // Flash the current block with a shake to show it is pinned here.
+            bumpFlash(true)
+            return
+          }
+          wrapArmedRef.current = 0
+        } else {
+          wrapArmedRef.current = 0
+        }
+      }
+    }
     setFocus(current => {
       if (direction === -1) {
-        return (current - 1 + model.blocks.length) % model.blocks.length
+        return (current - 1 + count) % count
       }
       const top = bodyRef.current?.scrollTop ?? 0
       // Forward scan without wrapping: land on the first block at or below
       // the viewport top (blocks scrolled out above are skipped).
-      for (let index = current + 1; index < model.blocks.length; index++) {
+      for (let index = current + 1; index < count; index++) {
         const block = model.blocks[index]
         if (block === undefined) continue
         if (offsetOf(block.start) >= top) return index
@@ -1995,7 +2067,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     // re-flash the block (its key changes -> the overlay remounts) so the
     // fade-out replays when the same block is selected again.
     setScrollTick(tick => tick + 1)
-    setFlashKey(key => key + 1)
+    bumpFlash(false)
   }
 
   // Block jump the shared toolbar/keyboard/jumpSignal use. In split mode the
@@ -2003,12 +2075,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // delegate to the split view's own imperative jump; otherwise use the
   // single-column one. Kept in a ref so the capture-phase keydown listener
   // always sees the current closure.
-  const jumpBlock = (direction: -1 | 1): void => {
+  const jumpBlock = (direction: -1 | 1, byKeyboard = false): void => {
     if (splitView) {
-      splitDiffRef.current?.jump(direction)
+      splitDiffRef.current?.jump(direction, byKeyboard)
       return
     }
-    jump(direction)
+    jump(direction, byKeyboard)
   }
   const jumpBlockRef = useRef(jumpBlock)
   jumpBlockRef.current = jumpBlock
@@ -2024,7 +2096,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     setHoveredBlock(target)
     setFocus(target)
     setScrollTick(tick => tick + 1)
-    setFlashKey(key => key + 1)
+    bumpFlash(false)
   }
 
   // Run one block (or combined multi-block) keep/revert, then advance focus to
@@ -2042,7 +2114,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     setFocus(next)
     setHoveredBlock(undefined)
     setScrollTick(tick => tick + 1)
-    setFlashKey(key => key + 1)
+    bumpFlash(false)
   }
 
   const handleBlockAction = async (action: 'keep' | 'revert'): Promise<void> => {
@@ -2278,7 +2350,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       const target = event.target as Node | null
       if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null) return
       event.preventDefault()
-      jumpRef.current(key === 'arrowup' ? -1 : 1)
+      jumpRef.current(key === 'arrowup' ? -1 : 1, true)
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
@@ -2440,6 +2512,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
           leadRows={leadRows}
           onBlockKeep={onBlockKeep}
           onBlockRevert={onBlockRevert}
+          onWrapToast={(text) => onToast(text)}
         />
       ) : (
       <div className={css.diffBodyWrap} onMouseLeave={() => { setHoveredBlock(undefined) }}>
@@ -2557,7 +2630,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
         {focusedBlock !== undefined && flashKey > 0 && (
           <div
             key={flashKey}
-            className={css.blockFlash}
+            className={pinShakeRef.current ? `${css.blockFlash} ${css.blockFlashShake}` : css.blockFlash}
             data-diff-block-flash
             style={{
               // The flash is fixed relative to the scroll box, so `top`/`height`
@@ -2746,7 +2819,13 @@ export function PendingPanel({
   /** A transient banner for a keep/revert failure. */
   const [actionToast, setActionToast] = useState<string | null>(null)
   /** A transient banner confirming a reference was copied to the clipboard. */
-  const [copyToast, setCopyToast] = useState<string | null>(null)
+  const [copyToast, setCopyToast] = useState<{ text: string; n: number } | null>(null)
+  // Show a transient toast that re-triggers even for the same text: each call
+  // bumps the nonce, and the Toast is keyed on it, so a repeated boundary press
+  // re-shows rather than being a React no-op on an unchanged string.
+  const showCopyToast = (text: string): void => {
+    setCopyToast(prev => ({ text, n: (prev?.n ?? 0) + 1 }))
+  }
   /** Whether the redo-cleared notice is showing (bottom-right, OK to dismiss). */
   const [redoClearedNotice, setRedoClearedNotice] = useState(false)
   /** A file whose last block just resolved, pending a remove-or-keep choice. */
@@ -3225,7 +3304,7 @@ export function PendingPanel({
         <Toast text={actionToast} onDone={() => { setActionToast(null) }} />
       )}
       {copyToast !== null && (
-        <Toast text={copyToast} onDone={() => { setCopyToast(null) }} />
+        <Toast key={copyToast.n} text={copyToast.text} onDone={() => { setCopyToast(null) }} />
       )}
       {/* Expanded keeps an 8px inset, so a full-screen backdrop painted with
           the sidebar's fill hides the app behind the seam instead of letting
@@ -3331,7 +3410,7 @@ export function PendingPanel({
                     undoFlash={undoFlash}
                     failedMessage={failed.get(selectedFile.id)}
                     onPasteReference={onPasteReference}
-                    onToast={(text) => { setCopyToast(text) }}
+                    onToast={showCopyToast}
                     t={t}
                     onKeep={onKeep}
                     onRevert={onRevert}
