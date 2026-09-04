@@ -655,15 +655,25 @@ describe('PendingPanel', () => {
 
   it('asks whether to remove a file whose last block just resolved', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set(), justResolved: FILE.id })
+    vi.useFakeTimers()
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
+    // The prompt pops from the latched id.
     expect(document.querySelector('[data-diff-confirm]')).not.toBeNull()
     expect(screen.getByText('panel.resolvedAsk {"file":"a.txt"}')).toBeDefined()
+
+    // The latch is consumed on the next tick (after the prompt commits), so it
+    // does not linger and re-prompt on a later reopen — no matter whether the
+    // user clicks anything.
+    act(() => { vi.advanceTimersByTime(0) })
+    expect(props.onAckJustResolved).toHaveBeenCalledTimes(1)
 
     // "Keep in list" closes the dialog without removing the file.
     fireEvent.click(document.querySelector('[data-diff-confirm-keep]') as HTMLButtonElement)
     expect(document.querySelector('[data-diff-confirm]')).toBeNull()
+
+    vi.useRealTimers()
   })
 
   it('removes the file when the confirm dialog is accepted', () => {

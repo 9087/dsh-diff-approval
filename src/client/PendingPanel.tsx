@@ -2936,11 +2936,17 @@ export function PendingPanel({
   }, [snapshot.failed])
 
   // The store latches `justResolved` when a block action clears the file's
-  // last block. Surface the remove-or-keep prompt once, then acknowledge.
+  // last block. Surface the remove-or-keep prompt. The latch is consumed on the
+  // next tick (after the prompt has committed): acking it on the exact snapshot
+  // the panel reads would let a concurrent refresh batch the flag away before
+  // the prompt renders (so the prompt sometimes never appeared). Consuming it
+  // right after the pop also means the prompt fires once and does not linger
+  // (re-prompting) on a later reopen.
   useEffect(() => {
     if (snapshot.justResolved === undefined) return
     setConfirmDismiss(snapshot.justResolved)
-    onAckJustResolved()
+    const timer = window.setTimeout(() => { onAckJustResolved() }, 0)
+    return () => { window.clearTimeout(timer) }
   }, [snapshot.justResolved, onAckJustResolved])
 
   // Auto-open the first pending file when the panel opens, and advance to the
