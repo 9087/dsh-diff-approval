@@ -447,6 +447,77 @@ function renderIntra(
   })
 }
 
+/** Character ranges of each case-insensitive occurrence of `query` in `text`. */
+function matchRangesOf(text: string, query: string): [number, number][] {
+  if (query === '') return []
+  const lower = text.toLowerCase()
+  const q = query.toLowerCase()
+  const out: [number, number][] = []
+  let from = 0
+  for (;;) {
+    const at = lower.indexOf(q, from)
+    if (at === -1) return out
+    out.push([at, at + query.length])
+    from = at + query.length
+  }
+}
+
+/** Render `text[segStart, segEnd)` with every `query` match wrapped in a search
+ *  highlight, keeping the syntax highlight and intra-line chips on the non-match
+ *  parts. When no match is present it renders exactly as before (syntax / intra /
+ *  plain). `segStart`/`segEnd` let the caller render a wrapped sub-line range. */
+function textWithSearch(
+  text: string,
+  runs: readonly HighlightSpan[] | undefined,
+  intra: IntraRun[] | undefined,
+  query: string,
+  segStart = 0,
+  segEnd = text.length,
+  current = false,
+): ReactNode {
+  const segText = text.slice(segStart, segEnd)
+  const ranges = matchRangesOf(segText, query)
+  if (ranges.length === 0) {
+    return intra !== undefined && intra.length > 0
+      ? renderIntra(runs, intra, segStart, segEnd)
+      : runs !== undefined && runs.length > 0
+        ? clipRuns(runs, segStart, segEnd)
+        : (segText === '' ? '\u00a0' : segText)
+  }
+  const nodes: ReactNode[] = []
+  const push = (absStart: number, absEnd: number, isMatch: boolean): void => {
+    if (isMatch) {
+      nodes.push(
+        <span
+          key={nodes.length}
+          className={current ? css.searchMatchCurrent : css.searchMatch}
+          data-diff-search-match={current ? 'current' : 'hit'}
+        >
+          {text.slice(absStart, absEnd)}
+        </span>,
+      )
+      return
+    }
+    if (intra !== undefined && intra.length > 0) {
+      nodes.push(<span key={nodes.length}>{renderIntra(runs, intra, absStart, absEnd)}</span>)
+    } else if (runs !== undefined && runs.length > 0) {
+      nodes.push(<span key={nodes.length}>{clipRuns(runs, absStart, absEnd)}</span>)
+    } else {
+      nodes.push(<span key={nodes.length}>{text.slice(absStart, absEnd)}</span>)
+    }
+  }
+  let cursor = segStart
+  for (const [s, e] of ranges) {
+    const absS = segStart + s
+    const absE = segStart + e
+    if (absS > cursor) push(cursor, absS, false)
+    push(absS, absE, true)
+    cursor = absE
+  }
+  if (cursor < segEnd) push(cursor, segEnd, false)
+  return nodes
+}
+
 /**
  * One rendered diff row, memoized so a poll or an unrelated state change
  * does not re-render rows whose content, highlight, and focus are unchanged.
@@ -462,29 +533,26 @@ const DiffRow = memo(function DiffRow(props: {
   /** Whether this row contains a search hit, and if so whether it is current. */
   searchHit: boolean
   searchCurrent: boolean
+  /** The active search query, used to highlight the matched substrings. */
+  searchQuery: string
   onRowHover: (index: number) => void
   /** Visual sub-lines when auto-wrap is on, else undefined (single line). */
   wrappedLines: string[] | undefined
 }) {
-  const { index, row, runs, focused, searchHit, searchCurrent, onRowHover, wrappedLines } = props
+  const { index, row, runs, focused, searchHit, searchCurrent, searchQuery, onRowHover, wrappedLines } = props
   const lineNumber = row.kind === 'del' ? row.oldLine : row.newLine
   const sideRuns = row.kind === 'del' ? runs?.oldRuns : runs?.newRuns
   const lineRuns = lineNumber === undefined ? undefined : sideRuns?.[lineNumber - 1]
 
   let code: ReactNode
   if (wrappedLines === undefined) {
-    code = lineRuns !== undefined && lineRuns.length > 0
-      ? lineRuns.map((span, spanIndex) => <span key={spanIndex} style={span.style}>{span.text}</span>)
-      : (row.text === '' ? '\u00a0' : row.text)
+    code = textWithSearch(row.text, lineRuns, undefined, searchQuery, 0, row.text.length, searchCurrent)
   } else {
-    const highlighted = lineRuns !== undefined && lineRuns.length > 0
     let offset = 0
     code = wrappedLines.map((line, lineIndex) => {
       const start = offset
       offset += line.length
-      const content = highlighted
-        ? clipRuns(lineRuns!, start, offset)
-        : (line === '' ? '\u00a0' : line)
+      const content = textWithSearch(row.text, lineRuns, undefined, searchQuery, start, offset, searchCurrent)
       return <div key={lineIndex} className={css.subline}>{content}</div>
     })
   }
@@ -589,32 +657,35 @@ function changeBlocksOf(diff: ReturnType<typeof computeWholeFileDiff>): ChangeBl
   return blocks
 }
 
+/** Row indices whose text contains `query` (case-insensitive); empty for ''. */
+function matchingRows(rows: readonly WholeFileDiffRow[], query: string): number[] {
+  if (query === '') return []
+  const lower = query.toLowerCase()
+  const out: number[] = []
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i]!.text.toLowerCase().includes(lower)) out.push(i)
+  }
+  return out
+}
+
 /** One side's line-content for the split view: the highlighted runs or plain text. */
 function splitSideContent(
   side: SplitSide | undefined,
   wrapped: string[] | undefined,
   runs: readonly HighlightSpan[] | undefined,
   intra: IntraRun[] | undefined,
+  query: string,
+  current: boolean,
 ): ReactNode {
   if (side === undefined) return ''
-  const highlighted = runs !== undefined && runs.length > 0
-  const hasIntra = intra !== undefined && intra.length > 0
   if (wrapped === undefined) {
-    return hasIntra
-      ? renderIntra(runs, intra, 0, side.text.length)
-      : highlighted
-        ? runs.map((span, i) => <span key={i} style={span.style}>{span.text}</span>)
-        : (side.text === '' ? '\u00a0' : side.text)
+    return textWithSearch(side.text, runs, intra, query, 0, side.text.length, current)
   }
   let offset = 0
   return wrapped.map((line, i) => {
     const start = offset
     offset += line.length
-    const content = hasIntra
-      ? renderIntra(runs, intra, start, offset)
-      : highlighted
-        ? clipRuns(runs, start, offset)
-        : (line === '' ? '\u00a0' : line)
+    const content = textWithSearch(side.text, runs, intra, query, start, offset, current)
     return <div key={i} className={css.subline}>{content}</div>
   })
 }
@@ -628,7 +699,7 @@ function splitSideContent(
  * one side is longer. The gutter and code are top-aligned so sub-lines line up
  * across the divider.
  */
-function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focused, searchHit, searchCurrent, onHover, intra }: {
+function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focused, searchHit, searchCurrent, searchQuery, onHover, intra }: {
   index: number
   side: SplitSide | undefined
   wrapped: string[] | undefined
@@ -639,6 +710,8 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
   focused: boolean
   searchHit: boolean
   searchCurrent: boolean
+  /** The active search query, used to highlight the matched substrings. */
+  searchQuery: string
   onHover: () => void
   intra: IntraRun[] | undefined
 }) {
@@ -657,7 +730,7 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
       onMouseEnter={onHover}
     >
       <span className={css.gutter}>{side?.line ?? ''}</span>
-      <span className={`${css.code} ${tint}`} data-diff-code>{splitSideContent(side, wrapped, runs, intra)}</span>
+      <span className={`${css.code} ${tint}`} data-diff-code>{splitSideContent(side, wrapped, runs, intra, searchQuery, searchCurrent)}</span>
     </div>
   )
 }
@@ -868,6 +941,38 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     bodyRef.current?.focus()
   }
   const openSearch = (): void => {
+    // The selection acts as the search's start position (there is no text
+    // cursor in a diff): auto-fill the query with it and seed the current match.
+    // Already open: keep the current query and match, just refocus the box (a
+    // repeated Ctrl+F must not re-anchor an earlier match).
+    if (searchOpen) {
+      searchInputRef.current?.focus()
+      searchInputRef.current?.select()
+      return
+    }
+    const live = window.getSelection()
+    const liveRange = splitRowRangeOf(live)
+    // Fall back to the last tracked selection: clicking the search button moves
+    // focus and can collapse the live selection before this handler runs.
+    const range = liveRange !== undefined ? liveRange : (selection as RowRange | undefined)
+    const liveText = (live?.toString() ?? '').trim()
+    const value = liveText !== '' && !liveText.includes('\n') ? liveText : ''
+    setSearchQuery(value)
+    const matches = value === '' ? [] : searchPairs(pairs, value)
+    let index = 0
+    if (matches.length > 0) {
+      const inSel =
+        range === undefined ? -1 : matches.findIndex(i => i >= range.start && i <= range.end)
+      if (inSel !== -1) {
+        index = inSel
+      } else {
+        const body = bodyRef.current
+        const top = body === null ? 0 : pairAtY(body.scrollTop)
+        const at = matches.findIndex(i => i >= top)
+        index = at === -1 ? 0 : at
+      }
+    }
+    setSearchIndex(index)
     setSearchOpen(true)
     // Focus after the bar mounts (it is conditionally rendered).
     requestAnimationFrame(() => { searchInputRef.current?.focus(); searchInputRef.current?.select() })
@@ -881,8 +986,17 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     if (pairIndex === undefined) return
     const body = bodyRef.current
     if (body === null) return
-    // Center the matched pair near the viewport top, like the block jump.
-    const target = Math.max(0, off(pairIndex) - 2 * ROW_HEIGHT_PX)
+    // Bring the pair into view only when it is off-screen; never recenter a
+    // match that is already visible.
+    if (body.clientHeight <= 0) return
+    const viewTop = body.scrollTop
+    const viewBottom = viewTop + body.clientHeight
+    const pairTop = off(pairIndex)
+    const pairBottom = pairTop + ROW_HEIGHT_PX
+    let target: number | undefined
+    if (pairTop < viewTop) target = pairTop
+    else if (pairBottom > viewBottom) target = pairBottom - body.clientHeight
+    if (target === undefined) return
     const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
     if (body.scrollTop !== clamped) body.scrollTop = clamped
     setScrollTop(clamped)
@@ -1030,6 +1144,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
                     focused={inFocused(index)}
                     searchHit={searchHitSet.has(index)}
                     searchCurrent={index === currentSearchPair}
+                    searchQuery={searchQuery}
                     onHover={() => onPairHover(index)}
                     intra={sideIndex?.left === undefined ? undefined : model.intra.get(sideIndex.left)}
                   />
@@ -1062,6 +1177,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
                     focused={inFocused(index)}
                     searchHit={searchHitSet.has(index)}
                     searchCurrent={index === currentSearchPair}
+                    searchQuery={searchQuery}
                     onHover={() => onPairHover(index)}
                     intra={sideIndex?.right === undefined ? undefined : model.intra.get(sideIndex.right)}
                   />
@@ -1089,7 +1205,22 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
             data-diff-search-input
             value={searchQuery}
             placeholder={t('panel.searchPlaceholder')}
-            onChange={(event) => { setSearchQuery(event.target.value); setSearchIndex(0) }}
+            onChange={(event) => {
+              const value = event.target.value
+              setSearchQuery(value)
+              if (value !== '') {
+                const body = bodyRef.current
+                const matches = searchPairs(pairs, value)
+                // Anchor from the current highlighted pair (the search "cursor").
+                // On the very first input there is no highlight yet, so fall back
+                // to the row at the viewport top.
+                const anchor = currentSearchPair ?? (body === null ? 0 : pairAtY(body.scrollTop))
+                const at = matches.findIndex(index => index >= anchor)
+                setSearchIndex(at === -1 ? 0 : at)
+              } else {
+                setSearchIndex(0)
+              }
+            }}
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
                 event.preventDefault()
@@ -1437,6 +1568,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const [hScrollbarPx, setHScrollbarPx] = useState(0)
   const [hoveredBlock, setHoveredBlock] = useState<number | undefined>(undefined)
   const [selection, setSelection] = useState<RowRange | undefined>(undefined)
+  // The plain text of the last valid (single-line) diff selection, so opening
+  // search auto-fills the query even after clicking the search button collapses
+  // the native selection.
+  const selectionTextRef = useRef<string>('')
   const [copied, setCopied] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -1517,32 +1652,94 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // In-file search: matching lines over the whole diff (not just the rendered
   // window), so the count and jumps stay correct while the virtual list
   // scrolls. A line counts once however many times the query appears in it.
-  const searchMatches = useMemo(() => {
-    if (searchQuery === '') return []
-    const lower = searchQuery.toLowerCase()
-    const matches: number[] = []
-    for (let index = 0; index < model.diff.rows.length; index++) {
-      if (model.diff.rows[index]!.text.toLowerCase().includes(lower)) matches.push(index)
-    }
-    return matches
-  }, [model, searchQuery])
+  const searchMatches = useMemo(() => matchingRows(model.diff.rows, searchQuery), [model, searchQuery])
   const searchHitSet = useMemo(() => new Set(searchMatches), [searchMatches])
   const currentSearchRow = searchMatches.length === 0 ? undefined : searchMatches[searchIndex % searchMatches.length]
 
   const goSearch = (direction: -1 | 1) => {
     if (searchMatches.length === 0) return
+    // A just-recorded cursor (a fresh selection made while the bar is open) sets
+    // the anchor: land on the selected occurrence first (so "选中这个作为第一个"
+    // holds), then subsequent presses advance normally.
+    if (cursorPosRef.current !== undefined) {
+      setSearchIndex(startIndexFor(searchQuery))
+      return
+    }
     setSearchIndex(current => (current + direction + searchMatches.length) % searchMatches.length)
   }
+
+  /**
+   * The search's start index for `value`. The recorded cursor (the selection, if
+   * any) anchors ONE search, then is consumed; after that the current highlight
+   * drives subsequent searches, and, with neither set, the viewport top is the
+   * start (the "no cursor" fallback).
+   */
+  const startIndexFor = (value: string): number => {
+    const matches = value === '' ? [] : matchingRows(model.diff.rows, value)
+    const pos = cursorPosRef.current
+    cursorPosRef.current = undefined // consumed after this search
+    if (matches.length === 0) return 0
+    // The selected occurrence is the first result when the cursor covers it.
+    const inPos = pos === undefined ? -1 : matches.findIndex(i => i >= pos.start && i <= pos.end)
+    if (inPos !== -1) return inPos
+    const body = bodyRef.current
+    const fromRow = pos !== undefined ? pos.start : (currentSearchRow ?? (body === null ? 0 : rowAtY(body.scrollTop)))
+    const at = matches.findIndex(i => i >= fromRow)
+    return at === -1 ? 0 : at
+  }
+
+  // The search's cursor position: the recorded location (a diff selection) that
+  // the next search starts from, since a diff has no text caret. Cleared once
+  // consumed, and whenever the search bar closes.
+  const cursorPosRef = useRef<RowRange | undefined>(undefined)
+  // Remembers the range the cursor was last recorded from, so a repeated
+  // `selectionchange` for the same lingering selection (e.g. after a focus move)
+  // does not re-record it.
+  const lastRecordedCursorRef = useRef<RowRange | undefined>(undefined)
+
+  const openSearchWithSelection = () => {
+    // Already open: keep the current query and current match, just refocus the
+    // box for editing. Re-running the first-search anchoring here would re-read
+    // the (now-collapsed) selection / viewport top and recenter an earlier match.
+    if (searchOpen) {
+      searchInputRef.current?.focus()
+      searchInputRef.current?.select()
+      return
+    }
+    const live = window.getSelection()
+    const liveRange = splitView ? splitRowRangeOf(live) : rowRangeOf(live)
+    // Fall back to the last tracked selection: clicking the search button moves
+    // focus and can collapse the live selection before this handler runs.
+    const pos = liveRange !== undefined ? liveRange : selection
+    cursorPosRef.current = pos
+    lastRecordedCursorRef.current = pos
+    const liveText = (live?.toString() ?? '').trim()
+    const value =
+      liveText !== '' && !liveText.includes('\n') ? liveText : selectionTextRef.current
+    setSearchQuery(value)
+    setSearchIndex(startIndexFor(value)) // consumes the cursor
+    setSearchOpen(true)
+    // Focus after the bar mounts (it is conditionally rendered).
+    requestAnimationFrame(() => { searchInputRef.current?.focus(); searchInputRef.current?.select() })
+  }
+  const openSearchRef = useRef(openSearchWithSelection)
+  openSearchRef.current = openSearchWithSelection
+  const searchOpenRef = useRef(searchOpen)
+  searchOpenRef.current = searchOpen
   const toggleSearch = () => {
     if (searchOpen) {
+      cursorPosRef.current = undefined
+      lastRecordedCursorRef.current = undefined
       setSearchOpen(false)
       setSearchQuery('')
       setSearchIndex(0)
     } else {
-      setSearchOpen(true)
+      openSearchWithSelection()
     }
   }
   const closeSearch = () => {
+    cursorPosRef.current = undefined
+    lastRecordedCursorRef.current = undefined
     setSearchOpen(false)
     setSearchQuery('')
     setSearchIndex(0)
@@ -1553,19 +1750,23 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     if (searchOpen) searchInputRef.current?.focus()
   }, [searchOpen])
 
-  // A new query or a new file lands on the first match.
-  useEffect(() => {
-    setSearchIndex(0)
-  }, [searchQuery, file.id])
-
-  // Center the current search match in the scroller (same arithmetic as the
-  // block centering; layout timing keeps the search state consistent too).
+  // Bring the current search match into view, but never recenter when it is
+  // already inside the viewport: a search shouldn't yank the scroll position if
+  // the match is already visible.
   useLayoutEffect(() => {
     const row = currentSearchRow
     if (row === undefined) return
     const body = bodyRef.current
     if (body === null) return
-    const target = offsetOf(row) + extentOf(row, row) / 2 - body.clientHeight / 2
+    if (body.clientHeight <= 0) return
+    const viewTop = body.scrollTop
+    const viewBottom = viewTop + body.clientHeight
+    const rowTop = offsetOf(row)
+    const rowBottom = rowTop + extentOf(row, row)
+    let target: number | undefined
+    if (rowTop < viewTop) target = rowTop
+    else if (rowBottom > viewBottom) target = rowBottom - body.clientHeight
+    if (target === undefined) return
     const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
     if (body.scrollTop !== clamped) body.scrollTop = clamped
     setScrollTop(clamped)
@@ -1875,9 +2076,31 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // collapses. The toolbar's own mousedown prevents the default so the
   // selection survives the click that triggers the copy.
   useEffect(() => {
-    const update = () => setSelection(
-      splitView ? splitRowRangeOf(window.getSelection()) : rowRangeOf(window.getSelection()),
-    )
+    const update = () => {
+      const live = window.getSelection()
+      const range = splitView ? splitRowRangeOf(live) : rowRangeOf(live)
+      // Only serialize the selected text when there is a real in-diff selection;
+      // jsdom fires `selectionchange` repeatedly during a large render and
+      // `Selection#toString()` is expensive to run for every event.
+      let text = ''
+      if (range !== undefined) {
+        const raw = live?.toString() ?? ''
+        text = raw !== '' && !raw.includes('\n') ? raw.trim() : ''
+      }
+      selectionTextRef.current = text
+      setSelection(range)
+      // While the search bar is open, a fresh single-line diff selection records
+      // the cursor (the position the next search starts from). The query is
+      // deliberately left unchanged — matching a mature find box. A repeated
+      // `selectionchange` for the same range is skipped.
+      const last = lastRecordedCursorRef.current
+      const sameRange =
+        last !== undefined && range !== undefined && last.start === range.start && last.end === range.end
+      if (searchOpenRef.current && range !== undefined && text !== '' && !sameRange) {
+        lastRecordedCursorRef.current = range
+        cursorPosRef.current = range
+      }
+    }
     document.addEventListener('selectionchange', update)
     update()
     return () => { document.removeEventListener('selectionchange', update) }
@@ -1987,13 +2210,11 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       // In split mode the single-column search bar isn't mounted; route to the
       // split view's own search bar instead.
       if (splitView) { splitDiffRef.current?.openSearch(); return }
-      setSearchOpen(true)
-      searchInputRef.current?.focus()
-      searchInputRef.current?.select()
+      openSearchRef.current?.()
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
-  }, [])
+  }, [searchOpen, splitView])
 
   // Ctrl+Up/Down jumps between change blocks. The detail pane is mounted only
   // while a file is open, so this intercepts globally while the diff is shown
@@ -2207,6 +2428,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                   focused={inFocusedBlock(index)}
                   searchHit={searchHitSet.has(index)}
                   searchCurrent={index === currentSearchRow}
+                  searchQuery={searchQuery}
                   onRowHover={onRowHover}
                   wrappedLines={rowWrapped?.[index]}
                 />
@@ -2316,7 +2538,13 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
               data-diff-search-input
               value={searchQuery}
               placeholder={t('panel.searchPlaceholder')}
-              onChange={(event) => { setSearchQuery(event.target.value) }}
+              onChange={(event) => {
+                const value = event.target.value
+                setSearchQuery(value)
+                // Anchor from the recorded cursor if one is pending, else the
+                // current highlight, else the viewport top (no cursor).
+                setSearchIndex(startIndexFor(value))
+              }}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') {
                   event.preventDefault()

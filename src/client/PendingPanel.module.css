@@ -973,16 +973,17 @@
   white-space: nowrap;
 }
 
-/* Search hits over the whole-file diff: a translucent amber tint layered on
-   top of the row's own context/del/add background (background-image paints
-   above background-color), so the +/- tint stays visible under the hit. The
-   current match is emphasized at a stronger opacity. */
-.diffBody [data-diff-search='hit'] {
-  background-image: linear-gradient(rgba(250, 204, 21, 0.16), rgba(250, 204, 21, 0.16));
+/* Per-occurrence search highlight: the exact matched substring (not the whole
+   line), with a color that tells the current match from the other hits — the
+   current match uses the stronger `.searchMatchCurrent`, the rest `.searchMatch`. */
+.searchMatch {
+  background-color: rgba(250, 204, 21, 0.26);
+  border-radius: 2px;
 }
 
-.diffBody [data-diff-search='current'] {
-  background-image: linear-gradient(rgba(250, 204, 21, 0.32), rgba(250, 204, 21, 0.32));
+.searchMatchCurrent {
+  background-color: rgba(250, 204, 21, 0.6);
+  border-radius: 2px;
 }
 
 /* Transient flash framing the just-focused change block: a 1s brand-blue

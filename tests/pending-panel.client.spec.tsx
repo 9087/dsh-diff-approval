@@ -1012,6 +1012,15 @@ describe('PendingPanel', () => {
     const firstCurrent = document.querySelector('[data-diff-search="current"]') as HTMLElement
     expect(firstCurrent.textContent).toContain('bar')
 
+    // The matched substring is highlighted, not the whole line: each match span
+    // holds exactly the query 'a', the current row's match is marked 'current'
+    // (stronger), and the other hit row's match is 'hit'.
+    const marks = [...document.querySelectorAll('[data-diff-search-match]')] as HTMLElement[]
+    expect(marks.length).toBeGreaterThan(0)
+    for (const mark of marks) expect(mark.textContent).toBe('a')
+    expect(document.querySelector('[data-diff-search="current"] [data-diff-search-match="current"]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-search="hit"] [data-diff-search-match="hit"]')).not.toBeNull()
+
     // Next match moves to 'baz' and the count advances.
     fireEvent.click(document.querySelector('[data-diff-search-next]') as HTMLElement)
     expect(document.querySelector('[data-diff-search-count]')!.textContent).toBe('2/2')
@@ -1022,6 +1031,212 @@ describe('PendingPanel', () => {
     fireEvent.click(document.querySelector('[data-diff-search-close]') as HTMLElement)
     expect(document.querySelector('[data-diff-searchbar]')).toBeNull()
     expect(document.querySelectorAll('[data-diff-search]')).toHaveLength(0)
+  })
+
+  it('starts the first search from the current scroll position, wrapping to the top', () => {
+    const file = entry({ id: 'entry-search-scroll', oldText: 'foo\nbar\nbaz\n', newText: 'foo\nbar\nqux\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByLabelText('action.search'))
+
+    // 'a' matches 'bar' (row 1) and 'baz' (row 2). Scroll so the top visible row
+    // is row 2, so the first search lands on 'baz' — not the top match 'bar'.
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+    body.scrollTop = 2 * 22
+    const input = document.querySelector('[data-diff-search-input]') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'a' } })
+
+    const current = document.querySelector('[data-diff-search="current"]') as HTMLElement
+    expect(current.textContent).toContain('baz')
+  })
+
+  it('Ctrl+F auto-fills the query from the selected text and lands on that occurrence first', () => {
+    // 'data' appears in row 0 and row 2 (both context) so the auto-filled query
+    // has two matches; selecting row 2 must make IT the first (current) result,
+    // not the earlier row 0.
+    const file = entry({ id: 'entry-search-select', oldText: 'data\nother\ndata\nend\n', newText: 'data\nother\ndata\nend!\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const code2 = rows[2]!.querySelector('[data-diff-code]') ?? rows[2]!
+    const codeNode = code2.firstChild ?? code2
+    const selection = {
+      isCollapsed: false,
+      anchorNode: codeNode,
+      focusNode: codeNode,
+      rangeCount: 1,
+      toString: () => 'data',
+      getRangeAt: () => ({
+        startContainer: codeNode,
+        startOffset: 0,
+        endContainer: codeNode,
+        endOffset: 4,
+      }),
+    } as unknown as Selection
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    // Ctrl+F opens the bar, auto-fills the selected text, and lands on the
+    // selected occurrence (row 2) instead of the earlier one (row 0).
+    fireEvent.keyDown(document.body, { key: 'f', ctrlKey: true })
+    expect(document.querySelector('[data-diff-searchbar]')).not.toBeNull()
+    expect((document.querySelector('[data-diff-search-input]') as HTMLInputElement).value).toBe('data')
+    expect(rows[0]!.getAttribute('data-diff-search')).toBe('hit')
+    expect(rows[2]!.getAttribute('data-diff-search')).toBe('current')
+
+    // A repeated Ctrl+F while the bar is already open must NOT re-run the
+    // first-search anchoring (which would recenter an earlier match); it keeps
+    // the current match and just refocuses the box.
+    fireEvent.keyDown(document.body, { key: 'f', ctrlKey: true })
+    expect(rows[0]!.getAttribute('data-diff-search')).toBe('hit')
+    expect(rows[2]!.getAttribute('data-diff-search')).toBe('current')
+  })
+
+  it('consumes the opening selection: later query edits anchor from the current highlight', () => {
+    const file = entry({ id: 'entry-search-consume', oldText: 'data\nother\ndata\nend\n', newText: 'data\nother\ndata\nend!\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const code2 = rows[2]!.querySelector('[data-diff-code]') ?? rows[2]!
+    const codeNode = code2.firstChild ?? code2
+    const selection = {
+      isCollapsed: false,
+      anchorNode: codeNode,
+      focusNode: codeNode,
+      rangeCount: 1,
+      toString: () => 'data',
+      getRangeAt: () => ({
+        startContainer: codeNode,
+        startOffset: 0,
+        endContainer: codeNode,
+        endOffset: 4,
+      }),
+    } as unknown as Selection
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    // Open over the selected row 2 → the first result is that row.
+    fireEvent.keyDown(document.body, { key: 'f', ctrlKey: true })
+    expect(rows[2]!.getAttribute('data-diff-search')).toBe('current')
+
+    // Move the highlight to the earlier 'data' (row 0) with "previous".
+    fireEvent.click(document.querySelector('[data-diff-search-prev]') as HTMLElement)
+    expect(rows[0]!.getAttribute('data-diff-search')).toBe('current')
+
+    // Re-editing the query must anchor from the CURRENT highlight (row 0), not
+    // the consumed opening selection (row 2): if the stale selection were still
+    // honored, this would jump back to row 2.
+    const input = document.querySelector('[data-diff-search-input]') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'data' } })
+    expect(rows[0]!.getAttribute('data-diff-search')).toBe('current')
+    expect(rows[2]!.getAttribute('data-diff-search')).toBe('hit')
+  })
+
+  it('records the cursor from a selection made while the bar is open (query unchanged), and the next search consumes it', () => {
+    const file = entry({ id: 'entry-search-cursor', oldText: 'data\nother\ndata\nend\n', newText: 'data\nother\ndata\nend!\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // Open the search bar with no selection → empty query.
+    fireEvent.click(screen.getByLabelText('action.search'))
+    const input = document.querySelector('[data-diff-search-input]') as HTMLInputElement
+    expect(input.value).toBe('')
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const code2 = rows[2]!.querySelector('[data-diff-code]') ?? rows[2]!
+    const codeNode = code2.firstChild ?? code2
+    const selection = {
+      isCollapsed: false,
+      anchorNode: codeNode,
+      focusNode: codeNode,
+      rangeCount: 1,
+      toString: () => 'data',
+      getRangeAt: () => ({
+        startContainer: codeNode,
+        startOffset: 0,
+        endContainer: codeNode,
+        endOffset: 4,
+      }),
+    } as unknown as Selection
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    // Recording the cursor does NOT touch the query (a mature find box keeps the
+    // query); it only sets where the next search starts.
+    expect(input.value).toBe('')
+
+    // The next search anchors from the recorded cursor (row 2): typing 'data'
+    // lands on the selected occurrence, not the earlier row 0.
+    fireEvent.change(input, { target: { value: 'data' } })
+    expect(rows[0]!.getAttribute('data-diff-search')).toBe('hit')
+    expect(rows[2]!.getAttribute('data-diff-search')).toBe('current')
+  })
+
+  it('Escape in the search input closes only the search bar; a second Escape closes the panel', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+
+    // Open the search bar and leave focus in its input.
+    fireEvent.click(screen.getByLabelText('action.search'))
+    const input = document.querySelector('[data-diff-search-input]') as HTMLInputElement
+    expect(input).not.toBeNull()
+
+    // Escape in the input closes the search bar only — the panel stays open.
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(document.querySelector('[data-diff-searchbar]')).toBeNull()
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+
+    // A second Escape (focus no longer on a text input) closes the panel.
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+  })
+
+  it('a selection made while the bar is open anchors find-next to the selected occurrence', () => {
+    const file = entry({ id: 'entry-search-next-cursor', oldText: 'data\nother\ndata\nend\n', newText: 'data\nother\ndata\nend!\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // Search a query with two matches; without a cursor the first result is the
+    // viewport-top match (row 0).
+    fireEvent.click(screen.getByLabelText('action.search'))
+    const input = document.querySelector('[data-diff-search-input]') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'data' } })
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    expect(rows[0]!.getAttribute('data-diff-search')).toBe('current')
+
+    // Select row 2 while the bar is open → records the cursor.
+    const code2 = rows[2]!.querySelector('[data-diff-code]') ?? rows[2]!
+    const codeNode = code2.firstChild ?? code2
+    const selection = {
+      isCollapsed: false,
+      anchorNode: codeNode,
+      focusNode: codeNode,
+      rangeCount: 1,
+      toString: () => 'data',
+      getRangeAt: () => ({
+        startContainer: codeNode,
+        startOffset: 0,
+        endContainer: codeNode,
+        endOffset: 4,
+      }),
+    } as unknown as Selection
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    // find-next anchors to the selected occurrence (row 2), not the earlier row 0.
+    fireEvent.click(document.querySelector('[data-diff-search-next]') as HTMLElement)
+    expect(rows[2]!.getAttribute('data-diff-search')).toBe('current')
+    expect(rows[0]!.getAttribute('data-diff-search')).toBe('hit')
   })
 
   it('undoes with Ctrl+Z and redoes with Ctrl+Y globally, but not in text inputs', () => {
