@@ -110,6 +110,29 @@ function alignLargeMiddle(
   return { rows, removed, added }
 }
 
+/** Reorder each contiguous change run (a maximal run of non-context rows) into
+ *  the standard unified-diff shape — all `del` rows first, then all `add` rows.
+ *  The diff package's Myers scan can emit per-line replacements (`del add del
+ *  add`) for some content, which reads as interleaved in the viewer and makes
+ *  the split view pair each line separately. Reordering a run to del-block→add-
+ *  block keeps each row's own line numbers and never changes the run's row
+ *  boundaries, so change blocks, split alignment, and keep/revert ranges stay
+ *  correct — it only tidies the display order. */
+export function normalizeChangeRuns(rows: WholeFileDiffRow[]): void {
+  for (let i = 0; i < rows.length;) {
+    if (rows[i]!.kind === 'context') { i++; continue }
+    const start = i
+    while (i < rows.length && rows[i]!.kind !== 'context') i++
+    const run = rows.slice(start, i)
+    const dels = run.filter(row => row.kind === 'del')
+    const adds = run.filter(row => row.kind === 'add')
+    if (dels.length !== 0 && adds.length !== 0) {
+      rows.splice(start, run.length)
+      rows.splice(start, 0, ...dels, ...adds)
+    }
+  }
+}
+
 export function computeWholeFileDiff(oldText: string, newText: string): WholeFileDiff {
   const oldNorm = oldText.replace(/\r\n?/g, '\n')
   const newNorm = newText.replace(/\r\n?/g, '\n')
@@ -191,6 +214,7 @@ export function computeWholeFileDiff(oldText: string, newText: string): WholeFil
   for (let k = 0; k < suffixLen; k++) {
     rows.push({ kind: 'context', text: oldLines[endOld + k]!, oldLine: endOld + k + 1, newLine: endNew + k + 1 })
   }
+  normalizeChangeRuns(rows)
   return { rows, removed, added }
 }
 

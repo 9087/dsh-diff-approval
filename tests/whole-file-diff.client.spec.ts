@@ -1,7 +1,41 @@
 // computeWholeFileDiff: whole-file rows, change marking, and terminator rules.
 
 import { describe, expect, it } from 'vitest'
-import { computeWholeFileDiff } from '../src/client/whole-file-diff.ts'
+import { computeWholeFileDiff, normalizeChangeRuns } from '../src/client/whole-file-diff.ts'
+import type { WholeFileDiffRow } from '../src/client/whole-file-diff.ts'
+
+describe('normalizeChangeRuns', () => {
+  it('groups a per-line interleaved change run into del-block then add-block', () => {
+    const rows: WholeFileDiffRow[] = [
+      { kind: 'context', text: 'a', oldLine: 1, newLine: 1 },
+      { kind: 'del', text: 'old2', oldLine: 2, newLine: undefined },
+      { kind: 'add', text: 'new2', oldLine: undefined, newLine: 2 },
+      { kind: 'del', text: 'old3', oldLine: 3, newLine: undefined },
+      { kind: 'add', text: 'new3', oldLine: undefined, newLine: 3 },
+      { kind: 'context', text: 'b', oldLine: 4, newLine: 4 },
+    ]
+    normalizeChangeRuns(rows)
+    expect(rows.map(r => r.kind)).toEqual(['context', 'del', 'del', 'add', 'add', 'context'])
+    // Line numbers are preserved on each row (dels sequential, adds sequential).
+    expect(rows[1]!.text).toBe('old2')
+    expect(rows[1]!.oldLine).toBe(2)
+    expect(rows[3]!.text).toBe('new2')
+    expect(rows[3]!.newLine).toBe(2)
+    expect(rows[4]!.text).toBe('new3')
+    expect(rows[4]!.newLine).toBe(3)
+  })
+
+  it('leaves an already-grouped run unchanged', () => {
+    const rows: WholeFileDiffRow[] = [
+      { kind: 'del', text: 'x', oldLine: 1, newLine: undefined },
+      { kind: 'del', text: 'y', oldLine: 2, newLine: undefined },
+      { kind: 'add', text: 'X', oldLine: undefined, newLine: 1 },
+      { kind: 'add', text: 'Y', oldLine: undefined, newLine: 2 },
+    ]
+    normalizeChangeRuns(rows)
+    expect(rows.map(r => r.kind)).toEqual(['del', 'del', 'add', 'add'])
+  })
+})
 
 describe('computeWholeFileDiff', () => {
   it('renders every line of both sides with changed lines marked', () => {
