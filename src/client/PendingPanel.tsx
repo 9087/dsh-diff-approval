@@ -1505,6 +1505,14 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     const next = !splitView
     setSplitView(next)
     setSplitMode(next)
+    // Switching back to the single-column view mounts a fresh body whose real
+    // scrollTop is 0, but the `scrollTop` state is stale. A stale window would
+    // render nothing until the next wheel (the rows sit below a huge spacer).
+    // Reset the window and re-centre on the focused change block, like opening.
+    if (!next) {
+      setScrollTop(0)
+      setScrollTick(tick => tick + 1)
+    }
   }
   // Handle to the split view's imperative block-jump, used to route the shared
   // toolbar/keyboard to it while split mode is active (null in single column).
@@ -1900,7 +1908,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   }, [model])
 
   // Measure the scroller's viewport once it mounts and on resize, so the
-  // render window tracks the visible area.
+  // render window tracks the visible area. `splitView` is a dep so toggling to
+  // the single-column view re-measures the fresh body (otherwise the stale
+  // viewportHeight would leave the window wrong until a scroll).
   useEffect(() => {
     const body = bodyRef.current
     if (body === null) return
@@ -1909,7 +1919,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
     observer?.observe(body)
     return () => { observer?.disconnect() }
-  }, [file.id])
+  }, [file.id, splitView])
 
   // Measure the code scroll box's width so wrapped line heights can be computed.
   // Re-measure immediately on resize so a drag re-wraps live. ResizeObserver
