@@ -163,20 +163,16 @@ function StepperRow({
           aria-label={t('action.decrease')}
           disabled={value <= min}
           onClick={() => { onChange(Math.max(min, value - 1)) }}
-        >
-          −
-        </button>
+        />
         <span className={css.stepperValue} {...{ [dataAttribute]: true }}>{value}</span>
         <button
           type="button"
-          className={css.stepperButton}
+          className={`${css.stepperButton} ${css.stepperButtonUp}`}
           data-diff-stepper-up
           aria-label={t('action.increase')}
           disabled={value >= max}
           onClick={() => { onChange(Math.min(max, value + 1)) }}
-        >
-          +
-        </button>
+        />
       </div>
     </div>
   )

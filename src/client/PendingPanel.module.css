@@ -302,16 +302,38 @@
   gap: 6px;
 }
 .stepperButton {
+  position: relative;
   width: 32px;
   height: 32px;
+  padding: 0;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 8px;
   background: var(--dsw-alias-bg-module-platform);
   color: var(--dsw-alias-label-primary);
-  font: inherit;
-  font-size: 16px;
-  line-height: 1;
   cursor: pointer;
+}
+/* The +/− symbol, drawn as crisp centered lines so it never drifts with the
+   font's baseline. `currentColor` keeps the disabled grey via the rule below. */
+.stepperButton::before,
+.stepperButton::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  background: currentColor;
+}
+.stepperButton::before {
+  width: 10px;
+  height: 1px;
+}
+.stepperButton::after {
+  width: 1px;
+  height: 10px;
+  display: none;
+}
+.stepperButtonUp::after {
+  display: block;
 }
 .stepperButton:hover:not(:disabled) {
   background: var(--dsw-alias-interactive-bg-hover);
