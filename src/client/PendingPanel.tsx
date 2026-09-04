@@ -1662,7 +1662,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const blockEnd = hoveredBlock === undefined ? undefined : model.blocks[hoveredBlock]?.end
   const blockActionsTop = blockEnd === undefined
     ? 0
-    : Math.max(0, Math.min(offsetOf(blockEnd + 1) - scrollTop, Math.max(0, viewportHeight - BLOCK_ACTIONS_FRAME_PX)))
+    : Math.max(0, Math.min(offsetOf(blockEnd + 1) - scrollTop - 2, Math.max(0, viewportHeight - BLOCK_ACTIONS_FRAME_PX)))
 
   // The selection frame anchors to the last covered block's bottom edge — the
   // same spot that block's own hover frame would use.
@@ -1674,7 +1674,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   })()
   const selectionActionsTop = selectionBlockEnd === undefined
     ? 0
-    : Math.max(0, Math.min(offsetOf(selectionBlockEnd + 1) - scrollTop, Math.max(0, viewportHeight - BLOCK_ACTIONS_FRAME_PX)))
+    : Math.max(0, Math.min(offsetOf(selectionBlockEnd + 1) - scrollTop - 2, Math.max(0, viewportHeight - BLOCK_ACTIONS_FRAME_PX)))
 
   // Widest line in the file, in characters: pins the table's width so the
   // added/deleted tint spans the same width at every scroll position (the
