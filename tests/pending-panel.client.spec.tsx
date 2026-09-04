@@ -1510,18 +1510,19 @@ describe('PendingPanel', () => {
     Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 6 * 22 })
     Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 4 * 22 })
 
-    // Scroll to the max (maxScroll = 6*22 - 4*22 = 44): the anchor (44 + 44 = 88)
-    // sits above block 2 (offset 132), so the current diff re-anchors to block 1.
+    // Scroll to the max (maxScroll = 6*22 - 4*22 = 44): the scroller is pinned to
+    // the bottom, so the current diff stays on the LAST block (block 2) rather than
+    // being pulled back to the anchor block (block 1) — that is what the re-anchor
+    // off-by-one fix does.
     body.scrollTop = 2 * 22
     fireEvent.scroll(body)
     const focused = () => document.querySelector('[data-diff-focused]')!
 
-    // Next reaches the last block (block 2) even though it's below the anchor.
-    fireEvent.click(screen.getByLabelText('action.nextDiff'))
+    // Pinned at the bottom, the current block is the last one (block 2).
     expect(focused().textContent).toContain('e')
 
-    // ...and the press after the last block wraps to the first (block 0) instead
-    // of sticking on block 2, because navigation is a ±1 step that always wraps.
+    // The press after the last block wraps to the first (block 0) instead of
+    // sticking on block 2, because navigation is a ±1 step that always wraps.
     fireEvent.click(screen.getByLabelText('action.nextDiff'))
     // Block 0's focused content is the removed side of row 0 ('a'); the old block
     // 2 ('e') must be gone, proving the wrap happened rather than a stick.

@@ -1124,10 +1124,20 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     // recenters set scrollTop directly and do NOT fire a scroll event.
     const count = blockOfPair.length
     if (count === 0) return
-    const anchor = body.scrollTop + leadRows * ROW_HEIGHT_PX
+    // Edge-clamp: pinned to top/bottom → first/last block, not the anchor one
+    // (the last block's `start` sits below the anchor when clamped to the bottom,
+    // so the anchor lookup would pull focus off-by-one after a boundary wrap).
     let ref = -1
-    for (let index = 0; index < count; index++) {
-      if (off(blockOfPair[index]!.start) <= anchor + NAV_ANCHOR_TOLERANCE_PX) ref = index
+    if (body.clientHeight > 0) {
+      const viewportBottom = body.scrollTop + body.clientHeight
+      if (body.scrollTop <= NAV_ANCHOR_TOLERANCE_PX) ref = 0
+      else if (body.scrollHeight - viewportBottom <= NAV_ANCHOR_TOLERANCE_PX) ref = count - 1
+    }
+    if (ref === -1) {
+      const anchor = body.scrollTop + leadRows * ROW_HEIGHT_PX
+      for (let index = 0; index < count; index++) {
+        if (off(blockOfPair[index]!.start) <= anchor + NAV_ANCHOR_TOLERANCE_PX) ref = index
+      }
     }
     setFocus(ref === -1 ? 0 : ref)
   }
@@ -2155,11 +2165,24 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     // recenters set scrollTop directly and do NOT fire a scroll event.
     const count = model.blocks.length
     if (rowCount === 0 || count === 0) return
-    const anchor = body.scrollTop + leadRows * ROW_HEIGHT_PX
+    // Edge-clamp: when the scroller is pinned to the top or bottom, the "current"
+    // block is the first/last change block, not the one at the anchor — the first
+    // block can sit below the anchor at the top, and the last block's `start` sits
+    // below the anchor when clamped to the bottom, so the anchor lookup would pick
+    // the neighboring block and pull focus off-by-one after a boundary wrap. Only
+    // with a real viewport (jsdom has no layout, heights read 0).
     let ref = -1
-    for (let index = 0; index < count; index++) {
-      const block = model.blocks[index]
-      if (block !== undefined && offsetOf(block.start) <= anchor + NAV_ANCHOR_TOLERANCE_PX) ref = index
+    if (body.clientHeight > 0) {
+      const viewportBottom = body.scrollTop + body.clientHeight
+      if (body.scrollTop <= NAV_ANCHOR_TOLERANCE_PX) ref = 0
+      else if (body.scrollHeight - viewportBottom <= NAV_ANCHOR_TOLERANCE_PX) ref = count - 1
+    }
+    if (ref === -1) {
+      const anchor = body.scrollTop + leadRows * ROW_HEIGHT_PX
+      for (let index = 0; index < count; index++) {
+        const block = model.blocks[index]
+        if (block !== undefined && offsetOf(block.start) <= anchor + NAV_ANCHOR_TOLERANCE_PX) ref = index
+      }
     }
     setFocus(ref === -1 ? 0 : ref)
   }
