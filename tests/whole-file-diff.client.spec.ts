@@ -62,10 +62,13 @@ describe('computeWholeFileDiff', () => {
   it('drops the no-newline patch marker', () => {
     const diff = computeWholeFileDiff('x', 'x\ny')
     expect(diff.rows).toEqual([
-      { kind: 'del', text: 'x', oldLine: 1, newLine: undefined },
-      { kind: 'add', text: 'x', oldLine: undefined, newLine: 1 },
+      { kind: 'context', text: 'x', oldLine: 1, newLine: 1 },
       { kind: 'add', text: 'y', oldLine: undefined, newLine: 2 },
     ])
+    // The un-changed first line is context now (the previous full-file Myers
+    // wrongly showed it as a del+add across the no-trailing-newline boundary).
+    expect(diff.removed).toBe(0)
+    expect(diff.added).toBe(1)
   })
 
   it('normalizes line endings, so a CRLF/LF difference is not a whole-file change', () => {

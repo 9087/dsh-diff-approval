@@ -55,6 +55,61 @@ export function contentKey(text: string): string {
   return normalized.endsWith('\n') ? normalized.slice(0, -1) : normalized
 }
 
+/** A changed middle larger than this many old×new line cells falls back to the
+ *  greedy anchor alignment: the `diff` package's O((N+M)·D) Myers scan (and its
+ *  high constant) would otherwise stall on a big, heavily-edited region for no
+ *  benefit. */
+const MIDDLE_CELL_CAP = 1_000_000
+
+/** A fast, greedy line alignment for a large changed middle. Lines present on
+ * both sides (in order) become context; a line only on one side is del/add;
+ * two unmatched side-by-side lines are a replacement. It is O(N+M) (amortized,
+ * with per-line index queues) and recognises unchanged lines as context, so a
+ * big scattered file does not get marked as all-changed — it only gives up the
+ * minimal-edit property Myers would provide. */
+function alignLargeMiddle(
+  midOld: string[],
+  midNew: string[],
+  start: number,
+): { rows: WholeFileDiffRow[]; removed: number; added: number } {
+  const rows: WholeFileDiffRow[] = []
+  let removed = 0
+  let added = 0
+  const newPos = new Map<string, number[]>()
+  const oldPos = new Map<string, number[]>()
+  midNew.forEach((line, index) => { const q = newPos.get(line); if (q) q.push(index); else newPos.set(line, [index]) })
+  midOld.forEach((line, index) => { const q = oldPos.get(line); if (q) q.push(index); else oldPos.set(line, [index]) })
+  let oldLine = start
+  let newLine = start
+  let i = 0
+  let j = 0
+  while (i < midOld.length && j < midNew.length) {
+    if (midOld[i] === midNew[j]) {
+      rows.push({ kind: 'context', text: midOld[i]!, oldLine: ++oldLine, newLine: ++newLine })
+      i++
+      j++
+      continue
+    }
+    const nxtNew = newPos.get(midOld[i]!)?.find(index => index >= j)
+    const nxtOld = oldPos.get(midNew[j]!)?.find(index => index >= i)
+    if (nxtNew !== undefined && (nxtOld === undefined || nxtNew - j <= nxtOld - i)) {
+      for (let k = j; k < nxtNew; k++) { rows.push({ kind: 'add', text: midNew[k]!, oldLine: undefined, newLine: ++newLine }); added++ }
+      j = nxtNew
+    } else if (nxtOld !== undefined) {
+      for (let k = i; k < nxtOld; k++) { rows.push({ kind: 'del', text: midOld[k]!, oldLine: ++oldLine, newLine: undefined }); removed++ }
+      i = nxtOld
+    } else {
+      rows.push({ kind: 'del', text: midOld[i]!, oldLine: ++oldLine, newLine: undefined }); removed++
+      i++
+      rows.push({ kind: 'add', text: midNew[j]!, oldLine: undefined, newLine: ++newLine }); added++
+      j++
+    }
+  }
+  while (i < midOld.length) { rows.push({ kind: 'del', text: midOld[i]!, oldLine: ++oldLine, newLine: undefined }); removed++; i++ }
+  while (j < midNew.length) { rows.push({ kind: 'add', text: midNew[j]!, oldLine: undefined, newLine: ++newLine }); added++; j++ }
+  return { rows, removed, added }
+}
+
 export function computeWholeFileDiff(oldText: string, newText: string): WholeFileDiff {
   const oldNorm = oldText.replace(/\r\n?/g, '\n')
   const newNorm = newText.replace(/\r\n?/g, '\n')
@@ -69,30 +124,72 @@ export function computeWholeFileDiff(oldText: string, newText: string): WholeFil
   }
   const oldLines = contentLines(oldNorm)
   const newLines = contentLines(newNorm)
-  const context = Math.max(1, oldLines.length, newLines.length)
-  const patch = structuredPatch('', '', oldNorm, newNorm, undefined, undefined, { context })
+  // Trim the common prefix and suffix first: the whole-file diff compares every
+  // line only inside the changed middle. The `diff` package's Myers scan is
+  // O((N+M)·D), which stalls on a large file when the whole thing is fed in;
+  // trimming means a localized change diffs only its own hunk, so opening a big
+  // edited file stays fast.
+  let start = 0
+  const minLen = Math.min(oldLines.length, newLines.length)
+  while (start < minLen && oldLines[start] === newLines[start]) start++
+  let endOld = oldLines.length
+  let endNew = newLines.length
+  while (start < endOld && start < endNew && oldLines[endOld - 1] === newLines[endNew - 1]) {
+    endOld--
+    endNew--
+  }
   const rows: WholeFileDiffRow[] = []
   let removed = 0
   let added = 0
-  let oldLine = 0
-  let newLine = 0
-  for (const hunk of patch.hunks) {
-    for (const line of hunk.lines) {
-      if (line.startsWith('\\')) continue
-      if (line.startsWith('-')) {
-        oldLine++
-        rows.push({ kind: 'del', text: line.slice(1), oldLine, newLine: undefined })
-        removed++
-      } else if (line.startsWith('+')) {
-        newLine++
-        rows.push({ kind: 'add', text: line.slice(1), oldLine: undefined, newLine })
-        added++
-      } else {
-        oldLine++
-        newLine++
-        rows.push({ kind: 'context', text: line.slice(1), oldLine, newLine })
+  for (let i = 0; i < start; i++) rows.push({ kind: 'context', text: oldLines[i]!, oldLine: i + 1, newLine: i + 1 })
+  const midOld = oldLines.slice(start, endOld)
+  const midNew = newLines.slice(start, endNew)
+  if (midOld.length === 0 && midNew.length === 0) {
+    // No lines actually differ.
+  } else if (midOld.length === 0) {
+    for (let j = 0; j < midNew.length; j++) {
+      rows.push({ kind: 'add', text: midNew[j]!, oldLine: undefined, newLine: start + j + 1 })
+      added++
+    }
+  } else if (midNew.length === 0) {
+    for (let i = 0; i < midOld.length; i++) {
+      rows.push({ kind: 'del', text: midOld[i]!, oldLine: start + i + 1, newLine: undefined })
+      removed++
+    }
+  } else if (midOld.length * midNew.length > MIDDLE_CELL_CAP) {
+    // A big, heavily-edited middle: the Myers scan would stall, so align it
+    // greedily instead (fast, and unchanged lines stay context).
+    const aligned = alignLargeMiddle(midOld, midNew, start)
+    rows.push(...aligned.rows)
+    removed += aligned.removed
+    added += aligned.added
+  } else {
+    const context = Math.max(1, midOld.length, midNew.length)
+    const patch = structuredPatch('', '', midOld.join('\n'), midNew.join('\n'), undefined, undefined, { context })
+    let oldLine = start
+    let newLine = start
+    for (const hunk of patch.hunks) {
+      for (const line of hunk.lines) {
+        if (line.startsWith('\\')) continue
+        if (line.startsWith('-')) {
+          oldLine++
+          rows.push({ kind: 'del', text: line.slice(1), oldLine, newLine: undefined })
+          removed++
+        } else if (line.startsWith('+')) {
+          newLine++
+          rows.push({ kind: 'add', text: line.slice(1), oldLine: undefined, newLine })
+          added++
+        } else {
+          oldLine++
+          newLine++
+          rows.push({ kind: 'context', text: line.slice(1), oldLine, newLine })
+        }
       }
     }
+  }
+  const suffixLen = oldLines.length - endOld
+  for (let k = 0; k < suffixLen; k++) {
+    rows.push({ kind: 'context', text: oldLines[endOld + k]!, oldLine: endOld + k + 1, newLine: endNew + k + 1 })
   }
   return { rows, removed, added }
 }
