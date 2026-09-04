@@ -737,7 +737,7 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
 
 /** Imperative surface the parent uses to drive block navigation from the
  *  shared toolbar/keyboard in split mode (its own `focus` is private here). */
-export interface SplitDiffHandle { jump: (direction: -1 | 1) => void; openSearch: () => void }
+export interface SplitDiffHandle { jump: (direction: -1 | 1) => void; openSearch: () => void; searchNext: (direction: -1 | 1) => boolean }
 
 /** The two-column (side-by-side) whole-file diff view. */
 export const SplitDiff = forwardRef<SplitDiffHandle, {
@@ -1050,9 +1050,16 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     })
     setFlashKey(k => k + 1)
   }
+  // Step the search (F3 / Shift+F3), but only when this view's own search bar
+  // is open — so a closed bar never advances a stale match list.
+  const searchNext = (direction: -1 | 1): boolean => {
+    if (!searchOpen) return false
+    goSearch(direction)
+    return true
+  }
   // Expose the block jump to the parent so the shared toolbar/keyboard drives
   // this split view's own (private) focus in split mode.
-  useImperativeHandle(ref, () => ({ jump, openSearch }), [jump, openSearch])
+  useImperativeHandle(ref, () => ({ jump, openSearch, searchNext }), [jump, openSearch, searchNext])
 
   useLayoutEffect(() => {
     if (pairCount === 0) return
@@ -1235,12 +1242,16 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
               ? '0/0'
               : `${(searchIndex % searchMatches.length) + 1}/${searchMatches.length}`}
           </span>
-          <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-prev aria-label={t('action.prevDiff')} disabled={searchMatches.length === 0} onClick={() => { goSearch(-1) }}>
-            <IconChevronUpOutline14 size={14} />
-          </button>
-          <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-next aria-label={t('action.nextDiff')} disabled={searchMatches.length === 0} onClick={() => { goSearch(1) }}>
-            <IconChevronDownOutline14 size={14} />
-          </button>
+          <Tooltip label={`${t('action.prevDiff')} (Shift+F3)`} side="bottom" delayMs={500}>
+            <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-prev aria-label={t('action.prevDiff')} disabled={searchMatches.length === 0} onClick={() => { goSearch(-1) }}>
+              <IconChevronUpOutline14 size={14} />
+            </button>
+          </Tooltip>
+          <Tooltip label={`${t('action.nextDiff')} (F3)`} side="bottom" delayMs={500}>
+            <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-next aria-label={t('action.nextDiff')} disabled={searchMatches.length === 0} onClick={() => { goSearch(1) }}>
+              <IconChevronDownOutline14 size={14} />
+            </button>
+          </Tooltip>
           <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-close aria-label={t('action.close')} onClick={closeSearch}>
             <IconCloseOutline16 size={14} />
           </button>
@@ -2216,6 +2227,26 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
   }, [searchOpen, splitView])
 
+  // F3 / Shift+F3 step the search to the next/previous match while the plugin's
+  // own search bar is open (leaving F3 to the browser's find otherwise). Routed
+  // to the split view's search when split mode is active.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'F3') return
+      const direction = event.shiftKey ? -1 : 1
+      if (splitView) {
+        if (splitDiffRef.current?.searchNext(direction)) event.preventDefault()
+        return
+      }
+      if (searchOpen && searchMatches.length > 0) {
+        event.preventDefault()
+        goSearch(direction)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true) }
+  }, [searchOpen, searchMatches, splitView])
+
   // Ctrl+Up/Down jumps between change blocks. The detail pane is mounted only
   // while a file is open, so this intercepts globally while the diff is shown
   // — the code view is read-only and never reliably holds focus (after any
@@ -2559,26 +2590,30 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 ? '0/0'
                 : `${(searchIndex % searchMatches.length) + 1}/${searchMatches.length}`}
             </span>
-            <button
-              type="button"
-              className={`${css.action} ${css.iconAction}`}
-              data-diff-search-prev
-              aria-label={t('action.prevDiff')}
-              disabled={searchMatches.length === 0}
-              onClick={() => { goSearch(-1) }}
-            >
-              <IconChevronUpOutline14 size={14} />
-            </button>
-            <button
-              type="button"
-              className={`${css.action} ${css.iconAction}`}
-              data-diff-search-next
-              aria-label={t('action.nextDiff')}
-              disabled={searchMatches.length === 0}
-              onClick={() => { goSearch(1) }}
-            >
-              <IconChevronDownOutline14 size={14} />
-            </button>
+            <Tooltip label={`${t('action.prevDiff')} (Shift+F3)`} side="bottom" delayMs={500}>
+              <button
+                type="button"
+                className={`${css.action} ${css.iconAction}`}
+                data-diff-search-prev
+                aria-label={t('action.prevDiff')}
+                disabled={searchMatches.length === 0}
+                onClick={() => { goSearch(-1) }}
+              >
+                <IconChevronUpOutline14 size={14} />
+              </button>
+            </Tooltip>
+            <Tooltip label={`${t('action.nextDiff')} (F3)`} side="bottom" delayMs={500}>
+              <button
+                type="button"
+                className={`${css.action} ${css.iconAction}`}
+                data-diff-search-next
+                aria-label={t('action.nextDiff')}
+                disabled={searchMatches.length === 0}
+                onClick={() => { goSearch(1) }}
+              >
+                <IconChevronDownOutline14 size={14} />
+              </button>
+            </Tooltip>
             <button
               type="button"
               className={`${css.action} ${css.iconAction}`}

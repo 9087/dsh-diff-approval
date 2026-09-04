@@ -1239,6 +1239,30 @@ describe('PendingPanel', () => {
     expect(rows[0]!.getAttribute('data-diff-search')).toBe('hit')
   })
 
+  it('F3 / Shift+F3 step the search to the next / previous match', () => {
+    const file = entry({ id: 'entry-search-f3', oldText: 'data\nother\ndata\nend\n', newText: 'data\nother\ndata\nend!\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    fireEvent.click(screen.getByLabelText('action.search'))
+    const input = document.querySelector('[data-diff-search-input]') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'data' } })
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    // Without a cursor the first result is the viewport-top match (row 0).
+    expect(rows[0]!.getAttribute('data-diff-search')).toBe('current')
+
+    // F3 → the next match (row 2).
+    fireEvent.keyDown(document.body, { key: 'F3' })
+    expect(rows[2]!.getAttribute('data-diff-search')).toBe('current')
+    expect(rows[0]!.getAttribute('data-diff-search')).toBe('hit')
+
+    // Shift+F3 → back to the previous match (row 0).
+    fireEvent.keyDown(document.body, { key: 'F3', shiftKey: true })
+    expect(rows[0]!.getAttribute('data-diff-search')).toBe('current')
+    expect(rows[2]!.getAttribute('data-diff-search')).toBe('hit')
+  })
+
   it('undoes with Ctrl+Z and redoes with Ctrl+Y globally, but not in text inputs', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     const view = render(<PendingPanel {...props} />)
