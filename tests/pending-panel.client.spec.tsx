@@ -355,7 +355,9 @@ describe('PendingPanel', () => {
     const view = render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
-    expect(document.querySelector('[role="alert"]')).toBeNull()
+    // The file is auto-selected, so this re-click is a jump and (a single-block
+    // file) toasts "only one block"; verify no FAILURE toast is up yet.
+    expect(screen.queryByText('revert failed: disk full')).toBeNull()
 
     // A keep/revert fails: the snapshot gains the failure marker, which toasts
     // (the DSH Toast renders portaled into the body with role="alert").
@@ -366,9 +368,11 @@ describe('PendingPanel', () => {
       failed: new Map([[FILE.id, 'revert failed: disk full']]),
     })} />)
     await waitFor(() => {
-      const alert = document.querySelector('[role="alert"]')
-      expect(alert).not.toBeNull()
-      expect(alert!.textContent).toContain('revert failed: disk full')
+      // The re-click toast ("only one block") may already be up as another
+      // alert; look for the FAILURE toast specifically.
+      const alert = [...document.querySelectorAll('[role="alert"]')]
+        .find(el => el.textContent?.includes('revert failed: disk full'))
+      expect(alert).toBeDefined()
     })
   })
 
@@ -867,8 +871,12 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('action.prevDiff'))
     expect(focusedLines()[0]!.textContent).toContain('a')
 
-    // From the last block, next wraps back to the first.
+    // From the last block, the first next is at the wrap boundary: it toasts
+    // the hint and stays; the next click wraps back to the first.
     fireEvent.click(screen.getByLabelText('action.nextDiff'))
+    fireEvent.click(screen.getByLabelText('action.nextDiff'))
+    expect(screen.getAllByText('panel.blockAtEnd').length).toBeGreaterThanOrEqual(1)
+    expect(focusedLines()[0]!.textContent).toContain('c')
     fireEvent.click(screen.getByLabelText('action.nextDiff'))
     expect(focusedLines()[0]!.textContent).toContain('a')
   })
@@ -918,6 +926,30 @@ describe('PendingPanel', () => {
 
     // The next Ctrl+Down wraps to the first block.
     fireEvent.keyDown(body, { key: 'ArrowDown', ctrlKey: true })
+    expect(focusedLines()[0]!.textContent).toContain('a')
+  })
+
+  it('at the boundary a toolbar click toasts and needs one more click to wrap', () => {
+    const twoBlocks = entry({ id: 'entry-blocks', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [twoBlocks], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 6 * 22 })
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 4 * 22 })
+    const focusedLines = () => [...document.querySelectorAll('[data-diff-focused]')]
+
+    // Jump to the last block (block 1, 'c') with the toolbar next button.
+    fireEvent.click(screen.getByLabelText('action.nextDiff'))
+    expect(focusedLines()[0]!.textContent).toContain('c')
+
+    // At the last block a further next click toasts and does NOT wrap.
+    fireEvent.click(screen.getByLabelText('action.nextDiff'))
+    expect(screen.getAllByText('panel.blockAtEnd').length).toBeGreaterThanOrEqual(1)
+    expect(focusedLines()[0]!.textContent).toContain('c')
+
+    // The next click wraps to the first block.
+    fireEvent.click(screen.getByLabelText('action.nextDiff'))
     expect(focusedLines()[0]!.textContent).toContain('a')
   })
 
@@ -1032,7 +1064,13 @@ describe('PendingPanel', () => {
     expect(focusedLines()).toHaveLength(2)
     expect(focusedLines()[0]!.textContent).toContain('c')
 
-    // And again wraps around to the first block.
+    // Now at the last block: the next re-click is at the wrap boundary, so it
+    // toasts the hint and stays on the last block (same as the toolbar/keyboard).
+    fireEvent.click(screen.getByText('a.txt'))
+    expect(screen.getAllByText('panel.blockAtEnd').length).toBeGreaterThanOrEqual(1)
+    expect(focusedLines()[0]!.textContent).toContain('c')
+
+    // The following re-click wraps around to the first block.
     fireEvent.click(screen.getByText('a.txt'))
     expect(focusedLines()[0]!.textContent).toContain('a')
   })
@@ -1386,7 +1424,9 @@ describe('PendingPanel', () => {
   })
 
   it('re-centers the sole block on every jump when it is the only one', () => {
-    const single = entry({ id: 'entry-single', oldText: 'a\nb\nc\nd\ne\n', newText: 'A\nb\nc\nd\nE\n' })
+    // A fully-rewritten file is one contiguous change block (every row is a
+    // change), so `count === 1` and jumping never changes the focus.
+    const single = entry({ id: 'entry-single', oldText: 'a\nb\nc\nd\ne\n', newText: 'A\nB\nC\nD\nE\n' })
     const props = panelProps({ read: true, files: [single], busy: new Set() })
     const view = render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
@@ -1467,7 +1507,11 @@ describe('PendingPanel', () => {
     body.scrollTop = 0
     fireEvent.scroll(body)
     fireEvent.click(screen.getByLabelText('action.prevDiff'))
-    // At the top, the reference block is block 0, so prev wraps to the last (block 2).
+    // At the top, the reference block is block 0, so prev is at the wrap
+    // boundary: it toasts the hint and stays; the next prev wraps to the last.
+    expect(screen.getAllByText('panel.blockAtStart').length).toBeGreaterThanOrEqual(1)
+    expect(focused().textContent).toContain('a')
+    fireEvent.click(screen.getByLabelText('action.prevDiff'))
     expect(focused().textContent).toContain('e')
   })
 
@@ -1521,8 +1565,11 @@ describe('PendingPanel', () => {
     // Pinned at the bottom, the current block is the last one (block 2).
     expect(focused().textContent).toContain('e')
 
-    // The press after the last block wraps to the first (block 0) instead of
-    // sticking on block 2, because navigation is a ±1 step that always wraps.
+    // The press at the last block is at the wrap boundary: it toasts the hint
+    // and stays on block 2; the next press wraps to the first (block 0).
+    fireEvent.click(screen.getByLabelText('action.nextDiff'))
+    expect(screen.getAllByText('panel.blockAtEnd').length).toBeGreaterThanOrEqual(1)
+    expect(focused().textContent).toContain('e')
     fireEvent.click(screen.getByLabelText('action.nextDiff'))
     // Block 0's focused content is the removed side of row 0 ('a'); the old block
     // 2 ('e') must be gone, proving the wrap happened rather than a stick.

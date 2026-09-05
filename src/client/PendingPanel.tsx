@@ -737,7 +737,7 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
 
 /** Imperative surface the parent uses to drive block navigation from the
  *  shared toolbar/keyboard in split mode (its own `focus` is private here). */
-export interface SplitDiffHandle { jump: (direction: -1 | 1, byKeyboard?: boolean) => void; openSearch: () => void; searchNext: (direction: -1 | 1) => boolean }
+export interface SplitDiffHandle { jump: (direction: -1 | 1, wrapGuard?: boolean) => void; openSearch: () => void; searchNext: (direction: -1 | 1) => boolean }
 
 /** The two-column (side-by-side) whole-file diff view. */
 export const SplitDiff = forwardRef<SplitDiffHandle, {
@@ -1047,13 +1047,14 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   const visiblePairs = pairs.slice(start, end)
 
   // Block navigation: jump between change blocks (flashes the focused one).
-  // At the wrap boundary (last block + down, first block + up) a keyboard press
-  // only toasts; the next press in the same direction wraps. Armed direction = 0.
+  // At the wrap boundary (last block + down, first block + up) a guarded press
+  // (keyboard or toolbar) only toasts; the next press in the same direction
+  // wraps. Armed direction = 0.
   const wrapArmedRef = useRef<0 | -1 | 1>(0)
-  const jump = (direction: -1 | 1, byKeyboard = false): void => {
+  const jump = (direction: -1 | 1, wrapGuard = false): void => {
     const count = blockOfPair.length
     if (count === 0) return
-    if (byKeyboard) {
+    if (wrapGuard) {
       if (count === 1) {
         onWrapToast(t('panel.blockSingle'))
       } else {
@@ -1309,10 +1310,10 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
           <span className={css.blockPosition} data-diff-block-position>
             {t('panel.blockPosition', { current: hoveredBlock + 1, total: blockOfPair.length })}
           </span>
-          <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-block-prev aria-label={t('action.prevDiff')} disabled={busy} onClick={() => jump(-1)}>
+          <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-block-prev aria-label={t('action.prevDiff')} disabled={busy} onClick={() => jump(-1, true)}>
             <IconChevronUpOutline14 size={14} />
           </button>
-          <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-block-next aria-label={t('action.nextDiff')} disabled={busy} onClick={() => jump(1)}>
+          <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-block-next aria-label={t('action.nextDiff')} disabled={busy} onClick={() => jump(1, true)}>
             <IconChevronDownOutline14 size={14} />
           </button>
           <button type="button" className={`${css.action} ${css.actionPrimary}`} data-diff-block-keep disabled={busy} onClick={() => { void handleBlockAction('keep') }}>
@@ -2026,17 +2027,18 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     // would otherwise re-center the view and lose the user's scroll position.
   }, [scrollTick, rowOffsets === null])
 
-  // At the wrap boundary (last block + down, first block + up) a keyboard press
-  // only toasts; the next press in the same direction wraps. Armed direction = 0.
+  // At the wrap boundary (last block + down, first block + up) a guarded press
+  // (keyboard or toolbar) only toasts; the next press in the same direction
+  // wraps. Armed direction = 0.
   const wrapArmedRef = useRef<0 | -1 | 1>(0)
-  const jump = (direction: -1 | 1, byKeyboard = false) => {
+  const jump = (direction: -1 | 1, wrapGuard = false) => {
     if (rowCount === 0) return
     const count = model.blocks.length
     if (count === 0) return
-    // Keyboard boundary guard. A single block has nothing to wrap to, so it just
-    // toasts; with several blocks, a boundary press toasts and the next press in
-    // the same direction wraps.
-    if (byKeyboard) {
+    // Boundary guard. A single block has nothing to wrap to, so it just toasts;
+    // with several blocks, a boundary press toasts and the next press in the
+    // same direction wraps.
+    if (wrapGuard) {
       if (count === 1) {
         onToast(t('panel.blockSingle'))
       } else {
@@ -2085,12 +2087,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // delegate to the split view's own imperative jump; otherwise use the
   // single-column one. Kept in a ref so the capture-phase keydown listener
   // always sees the current closure.
-  const jumpBlock = (direction: -1 | 1, byKeyboard = false): void => {
+  const jumpBlock = (direction: -1 | 1, wrapGuard = false): void => {
     if (splitView) {
-      splitDiffRef.current?.jump(direction, byKeyboard)
+      splitDiffRef.current?.jump(direction, wrapGuard)
       return
     }
-    jump(direction, byKeyboard)
+    jump(direction, wrapGuard)
   }
   const jumpBlockRef = useRef(jumpBlock)
   jumpBlockRef.current = jumpBlock
@@ -2147,9 +2149,11 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // Re-clicking the already-open file in the list jumps to the next change
   // block; the panel bumps `jumpSignal` to trigger it. A fresh signal while
   // on the same file re-runs this, wrapping to the first block when needed.
+  // Pass the wrap guard so a re-click at the last block shows the boundary
+  // toast + shake too, exactly like the toolbar next button.
   useEffect(() => {
     if (jumpSignal === 0) return
-    jumpBlock(1)
+    jumpBlock(1, true)
   }, [jumpSignal])
 
   const onScroll = () => {
@@ -2457,7 +2461,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 data-diff-prev
                 aria-label={t('action.prevDiff')}
                 disabled={busy}
-                onClick={() => { jumpBlock(-1) }}
+                onClick={() => { jumpBlock(-1, true) }}
               >
                 <IconChevronUpOutline14 size={14} />
               </button>
@@ -2469,7 +2473,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 data-diff-next
                 aria-label={t('action.nextDiff')}
                 disabled={busy}
-                onClick={() => { jumpBlock(1) }}
+                onClick={() => { jumpBlock(1, true) }}
               >
                 <IconChevronDownOutline14 size={14} />
               </button>
