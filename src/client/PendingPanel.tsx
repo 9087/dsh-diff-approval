@@ -1085,6 +1085,19 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     })
     bumpFlash(false)
   }
+  // Step the hovered block's floating actions frame to the adjacent diff block
+  // (wrapping), matching the single-column frame: both the hovered block (the
+  // frame follows it) and the focused block advance together, and the view
+  // recenters + re-flashes via `bumpFlash`.
+  const stepBlock = (direction: -1 | 1): void => {
+    const count = blockOfPair.length
+    if (count === 0) return
+    const base = hoveredBlock ?? focus
+    const target = (base + direction + count) % count
+    setHoveredBlock(target)
+    setFocus(target)
+    bumpFlash(false)
+  }
   // Step the search (F3 / Shift+F3), but only when this view's own search bar
   // is open — so a closed bar never advances a stale match list.
   const searchNext = (direction: -1 | 1): boolean => {
@@ -1310,10 +1323,10 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
           <span className={css.blockPosition} data-diff-block-position>
             {t('panel.blockPosition', { current: hoveredBlock + 1, total: blockOfPair.length })}
           </span>
-          <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-block-prev aria-label={t('action.prevDiff')} disabled={busy} onClick={() => jump(-1, true)}>
+          <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-block-prev aria-label={t('action.prevDiff')} disabled={busy} onClick={() => stepBlock(-1)}>
             <IconChevronUpOutline14 size={14} />
           </button>
-          <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-block-next aria-label={t('action.nextDiff')} disabled={busy} onClick={() => jump(1, true)}>
+          <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-block-next aria-label={t('action.nextDiff')} disabled={busy} onClick={() => stepBlock(1)}>
             <IconChevronDownOutline14 size={14} />
           </button>
           <button type="button" className={`${css.action} ${css.actionPrimary}`} data-diff-block-keep disabled={busy} onClick={() => { void handleBlockAction('keep') }}>

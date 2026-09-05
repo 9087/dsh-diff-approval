@@ -2210,6 +2210,36 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-block-actions]')).not.toBeNull()
   })
 
+  it('steps the split block approval frame and wraps straight back to the first block', () => {
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const twoBlocks = entry({ id: 'entry-split-steps', path: '/repo/ss.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [twoBlocks], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('ss.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-split-row]')] as HTMLElement[]
+    // Hover block 0's left row (del 'a').
+    const block0Left = rows.find(row => (row.querySelector('[data-diff-code]')?.textContent ?? '') === 'a')
+    expect(block0Left).toBeDefined()
+    fireEvent.mouseEnter(block0Left!)
+
+    const actions = document.querySelector('[data-diff-block-actions]') as HTMLElement
+    expect(actions).not.toBeNull()
+    const position = actions.querySelector('[data-diff-block-position]') as HTMLElement
+    const next = actions.querySelector('[data-diff-block-next]') as HTMLElement
+    expect(position.textContent).toContain('1')
+
+    // Next steps the frame (and focus) to block 1.
+    fireEvent.click(next)
+    expect(position.textContent).toContain('2')
+
+    // One more next wraps straight back to the first, exactly like the
+    // single-column frame — no boundary toast pin, no second press needed.
+    fireEvent.click(next)
+    expect(position.textContent).toContain('1')
+  })
+
   it('toggles the single-column / side-by-side view from the header toolbar', () => {
     localStorage.setItem('diff-approval:split-mode', '0')
     const file = entry({ id: 'entry-toggle-view', path: '/repo/tl.txt', oldText: 'a\n', newText: 'b\n' })
