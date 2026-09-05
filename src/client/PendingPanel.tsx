@@ -2151,12 +2151,17 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
 
   // Keep/revert every block covered by the current text selection in one
   // combined host call (the covered blocks are contiguous); the shared post-
-  // action logic then advances focus to the next change block.
+  // action logic then advances focus to the next change block. The operated
+  // blocks leave the diff, so their old row-range selection no longer maps to
+  // real rows — clear it (and the native highlight) once the action settles, or
+  // the stale selection lingers offset against the now-smaller diff.
   const handleSelectionAction = async (action: 'keep' | 'revert'): Promise<void> => {
     if (busy || selectionRange === undefined) return
     const firstCovered = coveredBlockIndices[0]
     if (firstCovered === undefined) return
     await runBlockAction(action, selectionRange, firstCovered)
+    setSelection(undefined)
+    window.getSelection()?.removeAllRanges?.()
   }
 
   // Re-clicking the already-open file in the list jumps to the next change

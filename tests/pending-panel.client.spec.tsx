@@ -1767,7 +1767,7 @@ describe('PendingPanel', () => {
     expect(screen.getByText('(/repo/a.txt:1)')).toBeDefined()
   })
 
-  it('shows a keep/revert frame for a selection spanning multiple blocks', () => {
+  it('shows a keep/revert frame for a selection spanning multiple blocks', async () => {
     // 'a\nb\nc\nd\n' -> 'A\nb\nC\nd\n' has two change blocks (lines 1 and 3).
     const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [multi], busy: new Set() })
@@ -1806,9 +1806,15 @@ describe('PendingPanel', () => {
     // Keep applies the combined range in a single call.
     fireEvent.click(document.querySelector('[data-diff-selection-keep]') as HTMLButtonElement)
     expect(props.onBlockKeep).toHaveBeenCalledWith(S1, 'entry-multi', { oldStart: 1, oldEnd: 3, newStart: 1, newEnd: 3 })
+
+    // The operated blocks leave the diff, so the selection is cleared and the
+    // multi-block frame hides — the old row-range must not linger offset.
+    await act(async () => {})
+    expect(document.querySelector('[data-diff-selection-actions]')).toBeNull()
+    expect(document.querySelector('[data-diff-copy]')).toBeNull()
   })
 
-  it('shows the selection frame for a single covered block too', () => {
+  it('shows the selection frame for a single covered block too', async () => {
     // 'a\n' -> 'b\n' has one block (both rows).
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
@@ -1837,6 +1843,11 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-selection-actions]')).not.toBeNull()
     fireEvent.click(document.querySelector('[data-diff-selection-keep]') as HTMLButtonElement)
     expect(props.onBlockKeep).toHaveBeenCalledWith(S1, 'entry-1', { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 })
+
+    // The operated block leaves the diff, so the selection is cleared too.
+    await waitFor(() => {
+      expect(document.querySelector('[data-diff-selection-actions]')).toBeNull()
+    })
   })
 
   it('does not offer a reference for a selection of only removed lines', () => {
