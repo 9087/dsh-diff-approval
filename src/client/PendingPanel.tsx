@@ -2770,17 +2770,42 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       <div className={css.statusBar} data-diff-status-bar>
         {selectionReference === undefined ? null : (
           <Tooltip label={copied ? t('action.copied') : `${t('action.copyHint')} (Ctrl+L)`} side="top" delayMs={300}>
-            <button
-              type="button"
+            {/*
+             * Deliberately NOT a native <button>/<a>: the "dsh-pocket" mobile
+             * bridge hijacks any button/link whose text *looks like a file path*
+             * (its fileGuard looksLikeFilePath heuristic matches a `path/file.ext`
+             * substring anywhere in the text). This control's text is a copy
+             * reference `(path:line)` like `(Source/foo.cpp:42)`, which that
+             * heuristic false-positives on — so on phones dsh-pocket would
+             * (1) swallow the click and show "手机上无法直接打开电脑上的文件"
+             *     instead of copying the reference, and
+             * (2) inject an extra 复制 button beside it.
+             * Rendering it as a non-button role=button keeps it out of the
+             * `button, a` selectors dsh-pocket scans, while we keep real
+             * semantics (role, tabIndex, Enter/Space) for keyboard/AT users.
+             * The data-mobile-nav-copy marker is defensive: if dsh-pocket ever
+             * widens its selector beyond `button, a`, the marker still opts this
+             * element out of its 复制 injection (it skips elements carrying it).
+             */}
+            <span
+              role="button"
+              tabIndex={0}
               className={css.statusAction}
               data-diff-copy
+              data-mobile-nav-copy="1"
               // Keep the native selection alive across the click so the
               // reference stays in the status bar after copying.
               onMouseDown={(event) => { event.preventDefault() }}
               onClick={() => { void copySelection() }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  void copySelection()
+                }
+              }}
             >
               {copied ? t('action.copied') : selectionReference}
-            </button>
+            </span>
           </Tooltip>
         )}
         <span className={css.flexSpacer} />

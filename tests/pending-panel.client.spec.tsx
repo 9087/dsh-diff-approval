@@ -1868,6 +1868,46 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-copy]')).toBeNull()
   })
 
+  it('renders the copy-reference control as a non-button span to dodge the mobile file-guard', () => {
+    // dsh-pocket's mobile bridge hijacks any <button>/<a> whose text looks like
+    // a file path (its fileGuard looksLikeFilePath matches a `path/file.ext`
+    // substring anywhere in the text). A copy reference is `(path:line)` and
+    // would false-positive, so the plugin renders this control as a role=button
+    // span and opts it out via the data-mobile-nav-copy marker. Assert both so
+    // a future refactor back to <button> does not silently reintroduce the bug.
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const code0 = rows[0]!.querySelector('[data-diff-code]') ?? rows[0]!
+    const code1 = rows[1]!.querySelector('[data-diff-code]') ?? rows[1]!
+    const selection = {
+      isCollapsed: false,
+      anchorNode: code0.firstChild ?? code0,
+      focusNode: code1.firstChild ?? code1,
+      rangeCount: 1,
+      getRangeAt: () => ({
+        startContainer: code0.firstChild ?? code0,
+        startOffset: 1,
+        endContainer: code1.firstChild ?? code1,
+        endOffset: 1,
+      }),
+    } as unknown as Selection
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    const copy = document.querySelector('[data-diff-copy]') as HTMLElement
+    expect(copy).not.toBeNull()
+    expect(copy.tagName.toLowerCase()).toBe('span')
+    expect(copy.getAttribute('role')).toBe('button')
+    expect(copy.getAttribute('tabindex')).toBe('0')
+    expect(copy.getAttribute('data-mobile-nav-copy')).toBe('1')
+    // Must not be a native button/a, or dsh-pocket's file guard scans it.
+    expect(copy.matches('button, a')).toBe(false)
+  })
+
   it('copies the reference with Ctrl+L', async () => {
     // Auto-paste off: the reference is copied to the clipboard (with a toast).
     localStorage.setItem('diff-approval:paste-on-copy', '0')
