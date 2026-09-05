@@ -166,21 +166,13 @@ export function apply(ctx: ClientContext): void {
       onAckRedoCleared: () => store.clearRedoCleared(),
       onAckJustResolved: () => store.clearJustResolved(),
       onPasteReference: (sessionId, reference) => {
-        // The composer is reached through the session-scoped context: the
-        // sessions service maps an id to its actx, whose conversation service
-        // owns the input facade (`setDraft` is the single draft write path).
-        const sessions = ctx.get('sessions') as { scope(id: SessionId): ClientContext | undefined } | undefined
-        const actx = sessions?.scope(sessionId)
-        if (actx === undefined) return
-        const conversation = actx.get('conversation') as
-          | { input?: { for(actx: unknown): { setDraft(text: string): void } } }
-          | undefined
-        if (conversation?.input === undefined) return
-        // Append when the composer already holds a draft; replace when empty.
-        const textarea = document.querySelector<HTMLTextAreaElement>('[data-composer-card] textarea')
-        const base = textarea?.value ?? ''
-        conversation.input.for(actx).setDraft(base === '' ? reference : `${base} ${reference}`)
-        textarea?.focus()
+        // Append the reference to the session's composer draft (replace only
+        // when empty), addressed explicitly to the copied reference's session
+        // rather than the current-session accessor used by the remap sync.
+        conversationAccess(ctx, () => sessionId).appendDraft(reference)
+        // The composer surface is a contenteditable div (`[data-composer-input]`),
+        // not a <textarea>, so bring it into focus there.
+        document.querySelector<HTMLElement>('[data-composer-input]')?.focus()
       },
       collapseSidebar,
     }),

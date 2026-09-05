@@ -20,7 +20,7 @@ export interface ConversationFace {
   input: {
     for(actx: ClientContext): {
       setDraft(text: string): void
-      state: { getSnapshot(): { queue: readonly QueueMessageView[] } }
+      state: { getSnapshot(): { queue: readonly QueueMessageView[]; draft?: string } }
     }
   }
   updateQueue(itemId: string, action: { kind: 'edit'; content: readonly { type: string; text?: string }[] }): Promise<void>
@@ -51,6 +51,14 @@ export function resolveConversation(ctx: ClientContext, sessionId: SessionId | u
 export interface ConversationAccess {
   /** Write the current session's composer draft. */
   writeDraft: (text: string) => void
+  /**
+   * Append a suffix to the current session's draft (a copy reference), or
+   * replace it when the draft is empty. The existing draft is read from the
+   * input state's plain text — the composer surface is a contenteditable div,
+   * not a <textarea>, so reading a DOM `.value` would always be empty and
+   * silently replace an existing draft instead of appending.
+   */
+  appendDraft: (suffix: string) => void
   /** Read the current session's still-queued messages (queued placement only). */
   readQueue: () => readonly QueueMessageView[]
   /** Apply an edit mutation to one queued message's full content. */
@@ -68,6 +76,13 @@ export function conversationAccess(ctx: ClientContext, sessionId: () => SessionI
       const scoped = resolveConversation(ctx, sessionId())
       if (scoped === undefined) return
       scoped.conversation.input.for(scoped.actx).setDraft(text)
+    },
+    appendDraft: (suffix) => {
+      const scoped = resolveConversation(ctx, sessionId())
+      if (scoped === undefined) return
+      const input = scoped.conversation.input.for(scoped.actx)
+      const current = input.state.getSnapshot().draft ?? ''
+      input.setDraft(current === '' ? suffix : `${current} ${suffix}`)
     },
     readQueue: () => {
       const scoped = resolveConversation(ctx, sessionId())

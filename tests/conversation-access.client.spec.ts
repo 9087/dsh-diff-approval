@@ -18,6 +18,7 @@ function makeHarness(options?: {
   sessionId?: () => SessionId | undefined
   scopeMissing?: boolean
   conversationMissing?: boolean
+  draft?: string
 }) {
   const setDraft = vi.fn()
   const updateQueue = vi.fn(async () => {})
@@ -26,7 +27,7 @@ function makeHarness(options?: {
     { id: 'q2', placement: 'steering', content: [{ type: 'text', text: 'steer' }] },
     { id: 'q3', placement: 'queued', content: [{ type: 'text', text: 'yo' }, { type: 'image' }] },
   ]
-  const input = { for: () => ({ setDraft, state: { getSnapshot: () => ({ queue }) } }) }
+  const input = { for: () => ({ setDraft, state: { getSnapshot: () => ({ queue, draft: options?.draft ?? '' }) } }) }
   const conversation = { input, updateQueue }
 
   const actx = {
@@ -70,6 +71,24 @@ describe('conversationAccess', () => {
     const { access, setDraft } = makeHarness()
     access.writeDraft('新的草稿')
     expect(setDraft).toHaveBeenCalledWith('新的草稿')
+  })
+
+  it('appends a reference to a non-empty draft (preserving existing text)', () => {
+    const { access, setDraft } = makeHarness({ draft: '已有内容' })
+    access.appendDraft('(a.txt:1)')
+    expect(setDraft).toHaveBeenCalledWith('已有内容 (a.txt:1)')
+  })
+
+  it('replaces an empty draft with just the reference', () => {
+    const { access, setDraft } = makeHarness()
+    access.appendDraft('(a.txt:1)')
+    expect(setDraft).toHaveBeenCalledWith('(a.txt:1)')
+  })
+
+  it('no-ops appendDraft without a current session', () => {
+    const { access, setDraft } = makeHarness({ sessionId: () => undefined })
+    access.appendDraft('(a.txt:1)')
+    expect(setDraft).not.toHaveBeenCalled()
   })
 
   it('reads only queued rows (steering excluded)', () => {
