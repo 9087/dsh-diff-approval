@@ -115,6 +115,7 @@ describe('conversationAccess', () => {
     for (const opts of [{ scopeMissing: true }, { conversationMissing: true }] as const) {
       const { access, setDraft, updateQueue } = makeHarness(opts)
       expect(() => access.writeDraft('草稿')).not.toThrow()
+      expect(() => access.appendDraft('(a.txt:1)')).not.toThrow()
       expect(() => access.writeQueue('q1', [{ type: 'text', text: 'x' }])).not.toThrow()
       expect(access.readQueue()).toEqual([])
       expect(setDraft).not.toHaveBeenCalled()

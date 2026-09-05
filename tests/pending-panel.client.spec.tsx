@@ -1850,6 +1850,42 @@ describe('PendingPanel', () => {
     })
   })
 
+  it('clears the selection after reverting a covered block too', async () => {
+    // Revert goes through the same handleSelectionAction as keep, but confirm it
+    // also clears the stale row-range selection once the block leaves the diff.
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    expect(rows.length).toBe(2)
+    const code0 = rows[0]!.querySelector('[data-diff-code]') ?? rows[0]!
+    const code1 = rows[1]!.querySelector('[data-diff-code]') ?? rows[1]!
+    const selection = {
+      isCollapsed: false,
+      anchorNode: code0.firstChild ?? code0,
+      focusNode: code1.firstChild ?? code1,
+      rangeCount: 1,
+      getRangeAt: () => ({
+        startContainer: code0.firstChild ?? code0,
+        startOffset: 0,
+        endContainer: code1.firstChild ?? code1,
+        endOffset: 1,
+      }),
+    } as unknown as Selection
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    expect(document.querySelector('[data-diff-selection-actions]')).not.toBeNull()
+    fireEvent.click(document.querySelector('[data-diff-selection-revert]') as HTMLButtonElement)
+    expect(props.onBlockRevert).toHaveBeenCalledWith(S1, 'entry-1', { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 })
+
+    await waitFor(() => {
+      expect(document.querySelector('[data-diff-selection-actions]')).toBeNull()
+    })
+  })
+
   it('does not offer a reference for a selection of only removed lines', () => {
     // 'a\nb\n' -> 'b\n' removes line 1; the removed row has no current-file
     // number, so selecting it alone must not produce a copyable reference.
@@ -1953,6 +1989,25 @@ describe('PendingPanel', () => {
     await vi.waitFor(() => { expect(writeText).toHaveBeenCalledWith('(/repo/a.txt:1)') })
     // The status bar button and the toast both carry the copied label.
     await vi.waitFor(() => { expect(screen.getAllByText('action.copied').length).toBeGreaterThanOrEqual(1) })
+  })
+
+  it('copies the reference on Enter from the role=button span', async () => {
+    // The copy-reference control is a non-native role=button span (to dodge
+    // dsh-pocket's mobile file guard), so it must keep keyboard activation:
+    // Enter (and Space) should copy, not just pointer click.
+    localStorage.setItem('diff-approval:paste-on-copy', '0')
+    const writeText = vi.fn(async () => {})
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    selectFirstRows(view)
+
+    const copy = document.querySelector('[data-diff-copy]') as HTMLElement
+    expect(copy).not.toBeNull()
+    fireEvent.keyDown(copy, { key: 'Enter' })
+    await vi.waitFor(() => { expect(writeText).toHaveBeenCalledWith('(/repo/a.txt:1)') })
   })
 
   /** Select the first two diff rows so a reference becomes copyable. */
@@ -2279,6 +2334,7 @@ describe('PendingPanel', () => {
     expect(actions).not.toBeNull()
     const position = actions.querySelector('[data-diff-block-position]') as HTMLElement
     const next = actions.querySelector('[data-diff-block-next]') as HTMLElement
+    const prev = actions.querySelector('[data-diff-block-prev]') as HTMLElement
     expect(position.textContent).toContain('1')
 
     // Next steps the frame (and focus) to block 1.
@@ -2288,6 +2344,13 @@ describe('PendingPanel', () => {
     // One more next wraps straight back to the first, exactly like the
     // single-column frame — no boundary toast pin, no second press needed.
     fireEvent.click(next)
+    expect(position.textContent).toContain('1')
+
+    // Prev mirrors it: from the first block it wraps straight to the last...
+    fireEvent.click(prev)
+    expect(position.textContent).toContain('2')
+    // ...and again returns to the first, with no first-block toast pin either.
+    fireEvent.click(prev)
     expect(position.textContent).toContain('1')
   })
 
