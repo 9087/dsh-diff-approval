@@ -567,8 +567,8 @@ const DiffRow = memo(function DiffRow(props: {
       data-diff-search={searchHit ? (searchCurrent ? 'current' : 'hit') : undefined}
       onMouseEnter={() => { onRowHover(index) }}
     >
-      <span className={css.gutter}>{row.oldLine ?? ''}</span>
-      <span className={css.gutter}>{row.newLine ?? ''}</span>
+      <span className={css.gutter} data-diff-gutter>{row.oldLine ?? ''}</span>
+      <span className={css.gutter} data-diff-gutter>{row.newLine ?? ''}</span>
       <span className={css.code} data-diff-code>{code}</span>
     </div>
   )
@@ -730,7 +730,7 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
       data-diff-search={searchHit ? (searchCurrent ? 'current' : 'hit') : undefined}
       onMouseEnter={onHover}
     >
-      <span className={css.gutter}>{side?.line ?? ''}</span>
+      <span className={css.gutter} data-diff-gutter>{side?.line ?? ''}</span>
       <span className={`${css.code} ${tint}`} data-diff-code>{splitSideContent(side, wrapped, runs, intra, searchQuery, searchCurrent)}</span>
     </div>
   )
@@ -1457,6 +1457,8 @@ export function selectedPlainText(): string | undefined {
     if (node.nodeType === Node.TEXT_NODE) { push(node.textContent ?? ''); return }
     if (!(node instanceof Element)) return
     const el = node as HTMLElement
+    // The line-number gutter cells are not diff content — drop their digits.
+    if (el.dataset.diffGutter !== undefined) return
     // A diff row (unified or split) is a logical line: precede it with a
     // newline unless we are already at a line start. A wrapped `.subline` is
     // a segment of that same line, so it is intentionally NOT a boundary.

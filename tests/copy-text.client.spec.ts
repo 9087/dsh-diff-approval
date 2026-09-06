@@ -36,6 +36,20 @@ describe('selectedPlainText', () => {
     expect(selectedPlainText()).toBe('aaa\nbbb')
   })
 
+  it('excludes the line-number gutter cells when the selection spans the gutter', () => {
+    // Selecting across the rows (including their line-number gutters) must drop
+    // the gutter digits: only the code cells are the diff content.
+    document.body.innerHTML = '<div data-diff-row="0"><span class="gutter" data-diff-gutter>10</span><span class="gutter" data-diff-gutter>10</span><span data-diff-code>aaa</span></div><div data-diff-row="1"><span class="gutter" data-diff-gutter>11</span><span class="gutter" data-diff-gutter>11</span><span data-diff-code>bbb</span></div>'
+    const rows = document.querySelectorAll('[data-diff-row]')
+    const range = document.createRange()
+    range.setStart(rows[0]!, 0)
+    range.setEnd(rows[1]!, rows[1]!.childNodes.length)
+    const sel = window.getSelection()!
+    sel.removeAllRanges()
+    sel.addRange(range)
+    expect(selectedPlainText()).toBe('aaa\nbbb')
+  })
+
   it('returns undefined for a collapsed selection', () => {
     const sel = window.getSelection()!
     sel.removeAllRanges()
