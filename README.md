@@ -9,20 +9,24 @@ A DeepSeek Harness (DSH) plugin for pending-change review: it automatically trac
 
 ![Pending changes panel](docs/images/pending-panel.png)
 
-The numbered markers (① – ⑧) in the screenshot point to the matching details described below.
+The panel also collapses its file list into a floating card and expands to fullscreen:
+
+| Collapsed file list | Fullscreen |
+| --- | --- |
+| ![Collapsed file list](docs/images/file-list-collapsed.png) | ![Fullscreen](docs/images/fullscreen.png) |
 
 ## ✨ Features
 
-- **Diff view**: syntax-highlighted whole-file diff ⑤ with +/− counts, an overview ruler ④ on the scrollbar showing where changes sit, and an in-file search (`Ctrl+F`, step with `F3` / `Shift+F3`) that highlights matched words. Rows are virtualized, so huge files stay smooth.
-- **Block navigation & decisions**: jump between change blocks with `Ctrl+↑/↓` (or the previous/next buttons) — the focused block flashes, and navigation is anchored to the scroll position. Hover a block to **Keep** or **Revert** just that block from a small actions frame ③ that also shows its position (e.g. "2/5"); after a single-block decision, focus advances to the next block. The lead rows left above the jumped-to block are configurable in settings.
+- **Diff view**: syntax-highlighted whole-file diff with +/− counts, an overview ruler on the scrollbar showing where changes sit, and an in-file search (`Ctrl+F`, step with `F3` / `Shift+F3`) that highlights matched words. Rows are virtualized, so huge files stay smooth.
+- **Block navigation & decisions**: jump between change blocks with `Ctrl+↑/↓` (or the previous/next buttons) — the focused block flashes, and navigation is anchored to the scroll position. Hover a block to **Keep** or **Revert** just that block from a small actions frame that also shows its position (e.g. "2/5"); after a single-block decision, focus advances to the next block. The lead rows left above the jumped-to block are configurable in settings.
 - **Selection frame**: drag to select a range of lines and a frame appears to **Keep** / **Revert** exactly that range.
-- **Per-file and bulk decisions**: the files in the file list ② can be kept / reverted one at a time, or **Keep all** / **Revert all** from its footer ⑦.
+- **Per-file and bulk decisions**: the files in the file list can be kept / reverted one at a time, or **Keep all** / **Revert all** from its footer.
 - **Resolved files stay listed**: once every change in a file has been kept/reverted, the entry remains in the list and the panel asks whether to remove it or keep it for later.
 - **Undo / Redo**: every keep, revert, and import is undoable with `Ctrl+Z` / `Ctrl+Y` (active while the panel is open; text inputs keep their own editing).
 - **Quick summon & file cycling**: `Ctrl+D` (configurable in settings) toggles the review panel from anywhere and `Esc` closes it; `Ctrl+Tab` / `Ctrl+Shift+Tab` cycle through the pending files.
-- **Line references**: select text in the diff — the status bar shows its `(file:line)` / `(file:start-end)` reference; click it (or press `Ctrl+L`) to copy, and with the setting on it auto-pastes into the composer ⑥ and focuses it. References in the composer and queued messages are **auto-aligned** when the referenced file changes: surviving lines re-map to their new range, and a fully-removed line becomes `(file:LINE_MISSING)`.
-- **Highlight language**: auto-detected from the file extension, or overridden from a dropdown ⑧.
-- **Auto-wrap**: a "Wrap lines" toggle beside the language selector ⑧ wraps long lines for that language (CJK breaks between characters, Latin words stay whole), remembered per language.
+- **Line references**: select text in the diff — the status bar shows its `(file:line)` / `(file:start-end)` reference; click it (or press `Ctrl+L`) to copy, and with the setting on it auto-pastes into the composer and focuses it. References in the composer and queued messages are **auto-aligned** when the referenced file changes: surviving lines re-map to their new range, and a fully-removed line becomes `(file:LINE_MISSING)`.
+- **Highlight language**: auto-detected from the file extension, or overridden from a dropdown.
+- **Auto-wrap**: a "Wrap lines" toggle beside the language selector wraps long lines for that language (CJK breaks between characters, Latin words stay whole), remembered per language.
 - **Side-by-side split view**: an opt-in two-column diff (left "before" | right "current"), line-aligned with per-side horizontal scrolling and a shared vertical scrollbar. Toggle it from the toolbar or in settings (default: single-column unified view). In split view, changed blocks are aligned by content similarity and changed lines show intra-line word diffs — whole words for Latin text, per-character for CJK.
 - **External changes**: files already in the pending list are monitored — if one is later modified outside the reviewed edits (another tool, an editor), the panel adopts the new content and flags the divergence.
 - **Open / Reveal**: while reviewing a file's diff, open it in its default app or reveal it in the system file manager with one click.
@@ -61,7 +65,7 @@ Then restart `dsh web`.
 ## 🚀 Usage
 
 1. Work with the agent as usual — successful `edit` / `write` / editor (`str_replace_editor`) calls are recorded automatically.
-2. Click the **Pending changes** action ① at the sidebar footer, review each file's diff, and **Keep** / **Revert**.
+2. Click the **Pending changes** action at the sidebar footer, review each file's diff, and **Keep** / **Revert**.
 3. When the list is empty, **Import workspace changes** pulls in the workspace's local Git/SVN/Perforce changes.
 
 ## 📝 Notes
