@@ -18,7 +18,7 @@ import type { SplitPair, SplitSide } from './split-diff.ts'
 import { HIGHLIGHT_LANGS, highlightLines, languageDisplayName } from './highlight.ts'
 import type { HighlightSpan } from './highlight.ts'
 import { langFromPath } from './lang.ts'
-import { referenceOf } from './reference.ts'
+import { referenceLabelOf } from './reference.ts'
 import { OPEN_FILE_EVENT } from './produced-diff.ts'
 import { includeUntrackedEnabled, keybindingOf, matchesShortcut, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled } from './settings.ts'
 import css from './PendingPanel.module.css'
@@ -2266,11 +2266,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     return () => { document.removeEventListener('copy', onCopy) }
   }, [])
 
-  // The reference text for the current selection, shown in the status bar and
-  // copied on click; undefined when no lines are selected. In split mode the
-  // reference uses the side the selection is on: the left column references the
-  // old file's lines, the right column the new (current) file's lines.
-  const selectionReference = (() => {
+  // The reference for the current selection. The `(path:range)` payload is what
+  // actually gets copied / pasted (parens keep the rematch precise); the status
+  // bar copy control shows the same reference without the wrapping parens.
+  const selectionReferenceLabel = (() => {
     if (selection === undefined) return undefined
     if (splitView) {
       if (selection.side === undefined || splitPairs === null) return undefined
@@ -2282,7 +2281,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
         if (line !== undefined) lineNumbers.push(line)
       }
       if (lineNumbers.length === 0) return undefined
-      return referenceOf(file.path, workspacePath, Math.min(...lineNumbers), Math.max(...lineNumbers))
+      return referenceLabelOf(file.path, workspacePath, Math.min(...lineNumbers), Math.max(...lineNumbers))
     }
     const rows = model.diff.rows.slice(selection.start, selection.end + 1)
     // Only the new (current) file's lines are referenceable: removed lines
@@ -2291,8 +2290,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       .map(row => row.newLine)
       .filter((number): number is number => number !== undefined)
     if (lineNumbers.length === 0) return undefined
-    return referenceOf(file.path, workspacePath, Math.min(...lineNumbers), Math.max(...lineNumbers))
+    return referenceLabelOf(file.path, workspacePath, Math.min(...lineNumbers), Math.max(...lineNumbers))
   })()
+  const selectionReference = selectionReferenceLabel === undefined ? undefined : `(${selectionReferenceLabel})`
 
   const copySelection = useCallback(async () => {
     if (selectionReference === undefined) return
@@ -2784,7 +2784,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
              * bridge hijacks any button/link whose text *looks like a file path*
              * (its fileGuard looksLikeFilePath heuristic matches a `path/file.ext`
              * substring anywhere in the text). This control's text is a copy
-             * reference `(path:line)` like `(Source/foo.cpp:42)`, which that
+             * reference `path:range` like `Source/foo.cpp:42`, which that
              * heuristic false-positives on — so on phones dsh-pocket would
              * (1) swallow the click and show "手机上无法直接打开电脑上的文件"
              *     instead of copying the reference, and
@@ -2813,7 +2813,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 }
               }}
             >
-              {copied ? t('action.copied') : selectionReference}
+              {copied ? t('action.copied') : selectionReferenceLabel}
             </span>
           </Tooltip>
         )}

@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from 'vitest'
 import {
-  basenameOf, lineRangeLabel, referenceOf, referencePathOf, remapReferenceRange, remapReferences,
+  basenameOf, lineRangeLabel, referenceLabelOf, referenceOf, referencePathOf, remapReferenceRange, remapReferences,
 } from '../src/client/reference.ts'
 
 describe('basenameOf', () => {
@@ -48,6 +48,17 @@ describe('referenceOf', () => {
 
   it('uses the absolute path and the range for files outside the workspace', () => {
     expect(referenceOf('/elsewhere/a.ts', '/repo', 3, 7)).toBe('(/elsewhere/a.ts:3-7)')
+  })
+})
+
+describe('referenceLabelOf', () => {
+  it('is the same reference without the wrapping parentheses (for display)', () => {
+    expect(referenceLabelOf('/repo/src/a.txt', '/repo', 12, 34)).toBe('src/a.txt:12-34')
+    expect(referenceLabelOf('/repo/src/a.txt', '/repo', 12, 12)).toBe('src/a.txt:12')
+  })
+
+  it('uses the absolute path for files outside the workspace', () => {
+    expect(referenceLabelOf('/elsewhere/a.ts', '/repo', 3, 7)).toBe('/elsewhere/a.ts:3-7')
   })
 })
 

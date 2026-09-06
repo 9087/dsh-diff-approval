@@ -1721,9 +1721,11 @@ describe('PendingPanel', () => {
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
 
     // The status bar shows the line-range reference once lines are selected.
-    // No workspace is known, so the reference carries the absolute path.
+    // No workspace is known, so the reference carries the absolute path. The
+    // button displays the reference without the token-wrapping parentheses
+    // (the copied/pasted payload keeps them).
     expect(document.querySelector('[data-diff-status-bar]')).not.toBeNull()
-    expect(screen.getByText('(/repo/a.txt:1)')).toBeDefined()
+    expect(screen.getByText('/repo/a.txt:1')).toBeDefined()
     expect(document.querySelector('[data-diff-copy]')).not.toBeNull()
   })
 
@@ -1752,7 +1754,7 @@ describe('PendingPanel', () => {
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
 
     // Inside the workspace the reference drops the root and stays relative.
-    expect(screen.getByText('(a.txt:1)')).toBeDefined()
+    expect(screen.getByText('a.txt:1')).toBeDefined()
   })
 
   it('shows the reference when a selection starts in the line-number gutter', () => {
@@ -1788,7 +1790,7 @@ describe('PendingPanel', () => {
 
     // The gutter-start selection still yields a copyable reference for the row.
     expect(document.querySelector('[data-diff-status-bar]')).not.toBeNull()
-    expect(screen.getByText('(/repo/a.txt:1)')).toBeDefined()
+    expect(screen.getByText('/repo/a.txt:1')).toBeDefined()
   })
 
   it('shows a keep/revert frame for a selection spanning multiple blocks', async () => {
@@ -2007,7 +2009,7 @@ describe('PendingPanel', () => {
     } as unknown as Selection
     vi.spyOn(window, 'getSelection').mockReturnValue(selection)
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
-    expect(screen.getByText('(/repo/a.txt:1)')).toBeDefined()
+    expect(screen.getByText('/repo/a.txt:1')).toBeDefined()
 
     fireEvent.keyDown(document, { key: 'l', ctrlKey: true })
     await vi.waitFor(() => { expect(writeText).toHaveBeenCalledWith('(/repo/a.txt:1)') })

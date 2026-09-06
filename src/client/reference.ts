@@ -54,6 +54,20 @@ export function lineRangeLabel(start: number, end: number): string {
 }
 
 /**
+ * Build the bare reference label for a selected line range — `path:range` with
+ * no surrounding parentheses. Used for display (the status-bar copy control
+ * shows the reference without the token-wrapping parens).
+ * @param path - the selected file's path.
+ * @param workspacePath - the current workspace root, or `undefined`.
+ * @param start - first selected line number.
+ * @param end - last selected line number.
+ * @returns the `path:range` reference label.
+ */
+export function referenceLabelOf(path: string, workspacePath: string | undefined, start: number, end: number): string {
+  return `${referencePathOf(path, workspacePath)}:${lineRangeLabel(start, end)}`
+}
+
+/**
  * Build the clipboard text for a selected line range, wrapped in parentheses so
  * the reference reads as one unambiguous token (and can be matched precisely).
  * @param path - the selected file's path.
@@ -63,7 +77,7 @@ export function lineRangeLabel(start: number, end: number): string {
  * @returns the `(path:range)` reference text.
  */
 export function referenceOf(path: string, workspacePath: string | undefined, start: number, end: number): string {
-  return `(${referencePathOf(path, workspacePath)}:${lineRangeLabel(start, end)})`
+  return `(${referenceLabelOf(path, workspacePath, start, end)})`
 }
 
 /**
