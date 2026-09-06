@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.17.0](https://github.com/9087/dsh-diff-approval/compare/v0.16.0...v0.17.0) (2026-09-06)
+
+### Features
+
+* add a view-diff action on produced files ([d0f58da](https://github.com/9087/dsh-diff-approval/commit/d0f58dae06ae7205fe0eb461bd8786c3d60db543))
+* add diff search with word highlight, cursor-anchored start, and Esc layering ([17d3869](https://github.com/9087/dsh-diff-approval/commit/17d3869cd71a7d7bee805a7ea863f5cbbcdd51e1))
+* add F3 / Shift+F3 search step and tooltips on the search buttons ([b39a624](https://github.com/9087/dsh-diff-approval/commit/b39a6241518d48e3fdf4ac1a12da42b0718092c4))
+* expose a collapsed keybindings group in the settings ([d48b4f4](https://github.com/9087/dsh-diff-approval/commit/d48b4f499f69fd136748d479cae0604d3af20a9b))
+* toast + shake the block at the keyboard wrap boundary ([e6a38f6](https://github.com/9087/dsh-diff-approval/commit/e6a38f61802ec40d2a962dc12ce53154f89be129))
+
+### Bug Fixes
+
+* append the copied reference to the composer draft instead of replacing it ([9005760](https://github.com/9087/dsh-diff-approval/commit/9005760c871d4dae67397da19a3be7cb2d6e74ad))
+* apply the block-wrap boundary guard to toolbar and file re-click jumps ([abccbc9](https://github.com/9087/dsh-diff-approval/commit/abccbc9a8160ef3173afa7fb19acbdc65e342c8a))
+* center the settings stepper +/− glyph and thin it ([129e313](https://github.com/9087/dsh-diff-approval/commit/129e313769e2bcd27c0261427ee961b085802ff4))
+* clamp the current-block re-anchor at the scroller edges ([0e50138](https://github.com/9087/dsh-diff-approval/commit/0e501380bf69efd647f05490c37ecb49671bd8ae))
+* clear the selection after a multi-block keep or revert ([c5e9986](https://github.com/9087/dsh-diff-approval/commit/c5e998629a9d1dd96e64b0650396dd5c8e2e0849))
+* exclude diff line-number gutters from copied text ([016b483](https://github.com/9087/dsh-diff-approval/commit/016b4836f15e3118eff2e7a2317ce7cfc432779d))
+* keep the copy-reference control out of the mobile file-guard heuristic ([914f989](https://github.com/9087/dsh-diff-approval/commit/914f989897964a22d70ffbef080d39f48e67f53f))
+* normalize a change run to del-block then add-block ([9a37c9c](https://github.com/9087/dsh-diff-approval/commit/9a37c9cbccc199a782488d6497ef2c54167addc2))
+* raise the block approval frame 2px so a slow hover doesn't drop it ([fd8f08f](https://github.com/9087/dsh-diff-approval/commit/fd8f08fe43e317872bee1a6eacb5967490c19c91))
+* show copy-reference without wrapping parentheses in the status bar ([7ebc753](https://github.com/9087/dsh-diff-approval/commit/7ebc7532d44be0730b02e98d6da569fd773e43a7))
+* show the single-column diff on switching back from split view ([9905763](https://github.com/9087/dsh-diff-approval/commit/9905763114b712e2229ec86d624f488b11f7a014))
+* surface the just-resolved remove prompt reliably and consume its latch ([b018bab](https://github.com/9087/dsh-diff-approval/commit/b018bab90a6441b33750d4f4b22ec5c662035f39))
+* unify the split approval frame step with the single-column wrap ([2f3290b](https://github.com/9087/dsh-diff-approval/commit/2f3290bc287b59b2d9751a14d7c750993a5027e3))
+
+### Performance Improvements
+
+* make the whole-file diff fast on large edited files ([3490c25](https://github.com/9087/dsh-diff-approval/commit/3490c25b09c7cc0d0137707fce6ef5505268d33a))
+
 ## [0.16.0](https://github.com/9087/dsh-diff-approval/compare/v0.15.0...v0.16.0) (2026-09-03)
 
 ### Features
