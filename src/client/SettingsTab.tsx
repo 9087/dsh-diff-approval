@@ -4,7 +4,7 @@ import { useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
-import { includeUntrackedEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setIncludeUntrackedEnabled, setNavLeadRows, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
+import { DEFAULT_KEYBINDINGS, includeUntrackedEnabled, keybindingOf, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setIncludeUntrackedEnabled, setKeybinding, setNavLeadRows, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import css from './PendingPanel.module.css'
 
@@ -265,6 +265,16 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const [split, setSplitState] = useState(splitMode)
   const [lead, setLeadState] = useState(navLeadRows)
   const [summon, setSummonState] = useState(quickSummonKey)
+  const [keysOpen, setKeysOpen] = useState(false)
+  const [keybindings, setKeybindingsState] = useState<Record<string, string>>(() => {
+    const initial: Record<string, string> = {}
+    for (const action of Object.keys(DEFAULT_KEYBINDINGS)) initial[action] = keybindingOf(action)
+    return initial
+  })
+  const setKB = (action: string, chord: string): void => {
+    setKeybindingsState(prev => ({ ...prev, [action]: chord }))
+    setKeybinding(action, chord)
+  }
   const setSummon = (value: string): void => {
     setSummonState(value)
     setQuickSummonKey(value)
@@ -291,6 +301,40 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   }
   return (
     <div className={css.settingsPage} data-diff-settings>
+      <div className={css.settingsGroup} data-open={keysOpen || undefined}>
+        <button
+          type="button"
+          className={css.settingsGroupHeader}
+          onClick={() => { setKeysOpen(open => !open) }}
+          data-diff-keybindings-toggle
+        >
+          <span className={css.settingsGroupTitle}>{t('settings.keybindings')}</span>
+          <IconChevronDownOutline14 className={css.settingsGroupChevron} />
+        </button>
+        {keysOpen && (
+          <div className={css.settingsGroupBody}>
+            <ShortcutRow
+              title={t('panel.quickSummon')}
+              description={t('panel.quickSummonDesc')}
+              value={summon}
+              onChange={setSummon}
+              dataAttribute="data-diff-quick-summon-key"
+              placeholder={t('panel.recordShortcut')}
+            />
+            {Object.keys(DEFAULT_KEYBINDINGS).map(action => (
+              <ShortcutRow
+                key={action}
+                title={t(`panel.key.${action}` as DiffApprovalKey)}
+                description={t('panel.keyDesc')}
+                value={keybindings[action] ?? DEFAULT_KEYBINDINGS[action] ?? ''}
+                onChange={(chord) => { setKB(action, chord) }}
+                dataAttribute={`data-diff-key-${action}`}
+                placeholder={t('panel.recordShortcut')}
+              />
+            ))}
+          </div>
+        )}
+      </div>
       <PreferenceRow
         title={t('panel.pasteOnCopy')}
         description={t('panel.pasteOnCopyDesc')}
@@ -333,14 +377,6 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
         max={NAV_LEAD_ROWS_MAX}
         dataAttribute="data-diff-nav-lead-rows"
         t={t}
-      />
-      <ShortcutRow
-        title={t('panel.quickSummon')}
-        description={t('panel.quickSummonDesc')}
-        value={summon}
-        onChange={setSummon}
-        dataAttribute="data-diff-quick-summon-key"
-        placeholder={t('panel.recordShortcut')}
       />
     </div>
   )

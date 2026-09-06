@@ -2155,6 +2155,33 @@ describe('PendingPanel', () => {
     expect((document.querySelector('[data-diff-stepper-up]') as HTMLButtonElement).disabled).toBe(true)
   })
 
+  it('the DSH Settings tab exposes a collapsed keybindings group that persists chords', () => {
+    // Reset any stored chords so the defaults apply.
+    localStorage.removeItem('diff-approval:key:jumpDown')
+    const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
+    render(<DiffApprovalSettingsTab {...props} />)
+
+    // The group is collapsed by default: no per-action recorder rows yet.
+    expect(document.querySelector('[data-diff-key-jumpdown]')).toBeNull()
+
+    // Expand the group.
+    fireEvent.click(document.querySelector('[data-diff-keybindings-toggle]') as HTMLButtonElement)
+    const rec = document.querySelector('[data-diff-key-jumpdown]') as HTMLButtonElement
+    expect(rec).not.toBeNull()
+    expect(rec.textContent).toContain('Ctrl+ArrowDown')
+
+    // Record a new chord for the jump-down action; it persists to localStorage.
+    fireEvent.click(rec)
+    fireEvent.keyDown(rec, { key: 'k', ctrlKey: true })
+    expect(localStorage.getItem('diff-approval:key:jumpDown')).toBe('Ctrl+K')
+    // The row re-renders with the new chord.
+    expect((document.querySelector('[data-diff-key-jumpdown]') as HTMLButtonElement).textContent).toContain('Ctrl+K')
+
+    // Collapse again.
+    fireEvent.click(document.querySelector('[data-diff-keybindings-toggle]') as HTMLButtonElement)
+    expect(document.querySelector('[data-diff-key-jumpdown]')).toBeNull()
+  })
+
   it('lets the status bar pick the highlight language', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     const view = render(<PendingPanel {...props} />)

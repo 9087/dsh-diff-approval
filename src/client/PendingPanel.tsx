@@ -20,7 +20,7 @@ import type { HighlightSpan } from './highlight.ts'
 import { langFromPath } from './lang.ts'
 import { referenceOf } from './reference.ts'
 import { OPEN_FILE_EVENT } from './produced-diff.ts'
-import { includeUntrackedEnabled, matchesShortcut, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled } from './settings.ts'
+import { includeUntrackedEnabled, keybindingOf, matchesShortcut, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled } from './settings.ts'
 import css from './PendingPanel.module.css'
 
 /**
@@ -2319,8 +2319,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // Ctrl+L, revisit this global interception.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return
-      if (event.key.toLowerCase() !== 'l') return
+      if (!matchesShortcut(event, keybindingOf('copyRef'))) return
       if (selectionReference === undefined) return
       event.preventDefault()
       void copySelection()
@@ -2343,8 +2342,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // native find is available again elsewhere in the harness.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return
-      if (event.key.toLowerCase() !== 'f') return
+      if (!matchesShortcut(event, keybindingOf('openSearch'))) return
       event.preventDefault()
       // In split mode the single-column search bar isn't mounted; route to the
       // split view's own search bar instead.
@@ -2360,8 +2358,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // to the split view's search when split mode is active.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'F3') return
-      const direction = event.shiftKey ? -1 : 1
+      let direction: -1 | 1 | 0 = 0
+      if (matchesShortcut(event, keybindingOf('searchNext'))) direction = 1
+      else if (matchesShortcut(event, keybindingOf('searchPrev'))) direction = -1
+      if (direction === 0) return
       if (splitView) {
         if (splitDiffRef.current?.searchNext(direction)) event.preventDefault()
         return
@@ -2390,13 +2390,14 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   jumpRef.current = jumpBlock
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return
-      const key = event.key.toLowerCase()
-      if (key !== 'arrowup' && key !== 'arrowdown') return
+      let direction: -1 | 1 | 0 = 0
+      if (matchesShortcut(event, keybindingOf('jumpUp'))) direction = -1
+      else if (matchesShortcut(event, keybindingOf('jumpDown'))) direction = 1
+      if (direction === 0) return
       const target = event.target as Node | null
       if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null) return
       event.preventDefault()
-      jumpRef.current(key === 'arrowup' ? -1 : 1, true)
+      jumpRef.current(direction, true)
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
@@ -3291,17 +3292,11 @@ export function PendingPanel({
     if (!open || current === undefined) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.altKey) return
-      const key = event.key.toLowerCase()
-      if (key !== 'z' && key !== 'y') return
       const target = event.target as Node | null
       if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null) return
-      event.preventDefault()
-      if (key === 'z') {
-        if (event.shiftKey) void handleRedo(current)
-        else void handleUndo(current)
-      } else {
-        void handleRedo(current)
-      }
+      if (matchesShortcut(event, keybindingOf('undo'))) { event.preventDefault(); void handleUndo(current); return }
+      // Ctrl+Y stays a redo alias alongside the configurable redo chord.
+      if (matchesShortcut(event, keybindingOf('redo')) || matchesShortcut(event, 'Ctrl+Y')) { event.preventDefault(); void handleRedo(current) }
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
@@ -3314,14 +3309,15 @@ export function PendingPanel({
   useEffect(() => {
     if (!open || current === undefined) return
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey) return
-      if (event.key.toLowerCase() !== 'tab') return
+      let direction = 0
+      if (matchesShortcut(event, keybindingOf('cycleNext'))) direction = 1
+      else if (matchesShortcut(event, keybindingOf('cyclePrev'))) direction = -1
+      if (direction === 0) return
       const target = event.target as Node | null
       if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null) return
       if (files.length === 0) return
       event.preventDefault()
       const index = files.findIndex(file => file.id === selected)
-      const direction = event.shiftKey ? -1 : 1
       const next = files[(index + direction + files.length) % files.length]
       if (next !== undefined) setSelected(next.id)
     }

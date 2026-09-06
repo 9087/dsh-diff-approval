@@ -190,6 +190,59 @@
   padding: 8px 12px;
 }
 
+/* A collapsible subgroup of settings rows (e.g. keybindings), collapsed by
+   default; the header toggles it and flips its chevron. A bottom border only:
+   the previous/preference rows each carry their own bottom border, so the group
+   does not also need a top one (which would double up). */
+.settingsGroup {
+  margin-top: 8px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+.settingsGroupHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 0;
+  border: none;
+  background: none;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  cursor: pointer;
+}
+.settingsGroupTitle {
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 22px;
+}
+.settingsGroupChevron {
+  margin-left: auto;
+  transition: transform .15s ease;
+}
+.settingsGroup[data-open] .settingsGroupChevron {
+  transform: rotate(180deg);
+}
+/* A line between the header and the expanded body reads as a section break. */
+.settingsGroup[data-open] .settingsGroupHeader {
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+.settingsGroupBody {
+  display: grid;
+}
+/* Nudge the group's rows right so they read as nested under the group header,
+   and drop the last row's own bottom border (the group's bottom border is the
+   separator to whatever follows). */
+.settingsGroupBody .settingsRow {
+  padding-left: 16px;
+}
+.settingsGroupBody .settingsRow:last-child {
+  border-bottom: none;
+}
+/* The final preference row is the page's last line: no trailing border. */
+.settingsPage > .settingsRow:last-child {
+  border-bottom: none;
+}
+
 /* Preference row mirroring the harness's Agent-preset row: title and
    description on the left, a pill picker on the right. */
 .settingsRow {

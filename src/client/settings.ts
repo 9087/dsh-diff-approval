@@ -124,6 +124,33 @@ export function setQuickSummonKey(value: string): void {
   localStorage.setItem(QUICK_SUMMON_KEY, value)
 }
 
+const KEY_PREFIX = 'diff-approval:key:'
+
+/** Default chord for each configurable action (every supported key except the
+ *  panel's own ESC-to-close, which is intentionally not remapped). */
+export const DEFAULT_KEYBINDINGS: Record<string, string> = {
+  jumpUp: 'Ctrl+ArrowUp',
+  jumpDown: 'Ctrl+ArrowDown',
+  copyRef: 'Ctrl+L',
+  openSearch: 'Ctrl+F',
+  searchNext: 'F3',
+  searchPrev: 'Shift+F3',
+  undo: 'Ctrl+Z',
+  redo: 'Ctrl+Shift+Z',
+  cycleNext: 'Ctrl+Tab',
+  cyclePrev: 'Ctrl+Shift+Tab',
+}
+
+/** The currently configured chord for one action; falls back to its default. */
+export function keybindingOf(action: string): string {
+  return localStorage.getItem(`${KEY_PREFIX}${action}`) ?? DEFAULT_KEYBINDINGS[action] ?? ''
+}
+
+/** Persist one action's chord. */
+export function setKeybinding(action: string, chord: string): void {
+  localStorage.setItem(`${KEY_PREFIX}${action}`, chord)
+}
+
 /**
  * Whether a keyboard event matches a chord string like `Ctrl+D`. Modifier
  * names are matched case-insensitively (`Ctrl`/`Control`, `Alt`/`Option`,
