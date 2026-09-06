@@ -580,6 +580,30 @@ describe('PendingPanel', () => {
     expect(props.onOpen).toHaveBeenCalledWith(FILE.sessionId, FILE.id, 'reveal')
   })
 
+  it('opens the panel and selects the file from a produced-file open event', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    // The panel is closed before the event, so no diff is mounted yet.
+    expect(document.querySelector('[data-diff-approval-diff]')).toBeNull()
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:open-file', { detail: { path: '/repo/a.txt' } }))
+    })
+    await waitFor(() => { expect(document.querySelector('[data-diff-approval-diff]')).not.toBeNull() })
+  })
+
+  it('toasts when a produced-file open event names a file no longer pending', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:open-file', { detail: { path: '/repo/gone.ts' } }))
+    })
+    await waitFor(() => {
+      expect(screen.getAllByText('panel.fileNotPending').length).toBeGreaterThanOrEqual(1)
+    })
+  })
+
   it('auto-selects the first pending file and advances to the next after handling', () => {
     const second = entry({ id: 'entry-2', path: '/repo/b.txt' })
     const props = panelProps({ read: true, files: [FILE, second], busy: new Set() })

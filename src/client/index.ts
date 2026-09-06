@@ -12,6 +12,7 @@ import { createDiffApprovalPort } from './port.ts'
 import { createPendingDiffStore } from './store.ts'
 import { attachReferenceRemap } from './remap-sync.ts'
 import { conversationAccess } from './conversation-access.ts'
+import { OPEN_FILE_EVENT, startProducedDiffInjection } from './produced-diff.ts'
 import type { PendingPanelFace } from './slots.ts'
 import { en, NS, zh } from './locales.ts'
 
@@ -177,6 +178,18 @@ export function apply(ctx: ClientContext): void {
       collapseSidebar,
     }),
   }, PendingPanel))
+
+  // Inject a "查看差异" button beside every DSH produced-file chip so the panel
+  // can be opened on that file directly from the turn's deliverables. This is a
+  // DOM-injection bridge (the harness's ProducedFiles component is untouched):
+  // clicking dispatches a window event the panel listens for, which opens and
+  // selects the file when it is still pending, or toasts otherwise.
+  if (typeof window !== 'undefined') {
+    ctx.effect(() => startProducedDiffInjection(
+      t('panel.viewDiff'),
+      (path) => window.dispatchEvent(new CustomEvent(OPEN_FILE_EVENT, { detail: { path } })),
+    ), 'diff-approval: produced-files diff buttons')
+  }
 
   // Contribute this plugin's page as a top-level DSH Settings section.
   ctx.slots.inject('settings.section', () => ctx.slots.register({

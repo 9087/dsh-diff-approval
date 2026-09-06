@@ -19,6 +19,7 @@ import { HIGHLIGHT_LANGS, highlightLines, languageDisplayName } from './highligh
 import type { HighlightSpan } from './highlight.ts'
 import { langFromPath } from './lang.ts'
 import { referenceOf } from './reference.ts'
+import { OPEN_FILE_EVENT } from './produced-diff.ts'
 import { includeUntrackedEnabled, matchesShortcut, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled } from './settings.ts'
 import css from './PendingPanel.module.css'
 
@@ -2896,6 +2897,29 @@ export function PendingPanel({
   const showCopyToast = (text: string): void => {
     setCopyToast(prev => ({ text, n: (prev?.n ?? 0) + 1 }))
   }
+  // "查看差异" bridge from a produced-file chip (see produced-diff.ts): the
+  // injected button dispatches OPEN_FILE_EVENT with a path. Open the panel and
+  // select the file when it is still pending; otherwise toast. The ref defers to
+  // the latest render's snapshot so this stays accurate without re-subscribing.
+  const handleOpenFileRef = useRef<(path: string) => void>()
+  handleOpenFileRef.current = (path) => {
+    const entry = snapshot.files.find(file => file.path === path)
+    if (entry === undefined) {
+      showCopyToast(t('panel.fileNotPending'))
+      return
+    }
+    setOpen(true)
+    setSelected(entry.id)
+  }
+  useEffect(() => {
+    const onOpenFile = (event: Event): void => {
+      const path = (event as CustomEvent<{ path?: string }>).detail?.path
+      if (typeof path !== 'string') return
+      handleOpenFileRef.current?.(path)
+    }
+    window.addEventListener(OPEN_FILE_EVENT, onOpenFile)
+    return () => { window.removeEventListener(OPEN_FILE_EVENT, onOpenFile) }
+  }, [])
   /** Whether the redo-cleared notice is showing (bottom-right, OK to dismiss). */
   const [redoClearedNotice, setRedoClearedNotice] = useState(false)
   /** A file whose last block just resolved, pending a remove-or-keep choice. */
