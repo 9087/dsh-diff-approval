@@ -53,6 +53,36 @@ const MIN_LIST_WIDTH_PX = 160
 const MAX_LIST_WIDTH_PX = 560
 /** Inset of the floating file-list card from the code scroll box, in px. */
 const FLOAT_LIST_MARGIN_PX = 12
+/** Normalize a path for comparison: forward slashes, no trailing slash. */
+export function normalizeDiffPath(p: string): string {
+  return p.replaceAll('\\', '/').replace(/\/+$/, '')
+}
+
+/** Whether a produced-file chip path and a pending file path refer to the same
+ *  file, tolerant of separator style (\\ vs /) and of a workspace-relative vs
+ *  absolute form. `chipPath` is typically the harness's workspace-relative
+ *  forward-slash path; `filePath` is the host's absolute native-separator path.
+ *  Matching is case-insensitive so a Windows drive/segment case difference does
+ *  not miss the file the user clicked. */
+export function diffPathsMatch(chipPath: string, filePath: string, workspacePath: string | undefined): boolean {
+  const toAbsolute = (p: string): string => {
+    const norm = normalizeDiffPath(p)
+    // Already absolute on this platform (drive letter or a leading /).
+    if (/^[A-Za-z]:\//.test(norm) || norm.startsWith('/')) return norm
+    // Workspace-relative: resolve against the workspace root when it is known.
+    if (workspacePath !== undefined && workspacePath !== '') {
+      return `${normalizeDiffPath(workspacePath).replace(/\/+$/, '')}/${norm}`
+    }
+    return norm
+  }
+  const absolute = toAbsolute(chipPath).toLowerCase()
+  const file = toAbsolute(filePath).toLowerCase()
+  if (absolute === file) return true
+  // Fallback (no usable workspace root): the relative chip path as a normalized
+  // suffix of the absolute pending path.
+  const rel = normalizeDiffPath(chipPath).toLowerCase()
+  return file === rel || file.endsWith(`/${rel}`)
+}
 /** The diff view-mode toggle glyph: the whole file as one column of text lines
  *  (unified) or two side-by-side columns of text lines (split). Hand-drawn
  *  because the icon library has no single/double-column glyph. Rendered 1:1
@@ -2940,7 +2970,10 @@ export function PendingPanel({
   // the latest render's snapshot so this stays accurate without re-subscribing.
   const handleOpenFileRef = useRef<(path: string) => void>()
   handleOpenFileRef.current = (path) => {
-    const entry = snapshot.files.find(file => file.path === path)
+    // The produced-file chip's path is workspace-relative and forward-slashed,
+    // while a pending file's path is absolute and native-separated — match
+    // tolerant of both (see diffPathsMatch).
+    const entry = snapshot.files.find(file => diffPathsMatch(path, file.path, snapshot.workspacePath))
     if (entry === undefined) {
       showCopyToast(t('panel.fileNotPending'))
       return
