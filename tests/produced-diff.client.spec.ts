@@ -99,14 +99,28 @@ describe('startProducedDiffInjection', () => {
     stop()
   })
 
-  it('always shows the injected button even when its chip is hidden', async () => {
+  it('mirrors the chip visibility: hides the button when the chip is hidden', async () => {
     // The harness's narrow-screen container queries hide some `.file` chips with
-    // `display: none`; we deliberately do NOT hide the button alongside them —
-    // that aggressive mirroring made the button vanish and read as "gone". The
-    // button is the affordance to open the diff, so it must stay visible.
+    // `display: none`. The injected span button is not subject to that query, so
+    // it must mirror the chip's computed display — a hidden chip must not leave a
+    // visible 查看差异 button floating beside it.
     const row = mountRow()
     const a = chip(row, '/repo/a.txt')
     a.style.display = 'none'
+    const openPath = vi.fn()
+    const stop = startProducedDiffInjection('查看差异', openPath)
+    await Promise.resolve()
+    const btn = row.querySelector('[data-diff-approval-produced-diff-btn]') as HTMLElement
+    expect(btn).not.toBeNull()
+    expect(btn.style.display).toBe('none')
+    stop()
+  })
+
+  it('keeps the button shown when its chip is visible', async () => {
+    const row = mountRow()
+    const a = chip(row, '/repo/a.txt')
+    // A visible chip (emulated computed display) must keep the button visible.
+    a.style.display = 'inline-flex'
     const openPath = vi.fn()
     const stop = startProducedDiffInjection('查看差异', openPath)
     await Promise.resolve()

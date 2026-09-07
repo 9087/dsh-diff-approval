@@ -135,12 +135,19 @@ export function startProducedDiffInjection(
       })
       chip.insertAdjacentElement('afterend', btn)
     }
-    // Ensure the button is always rendered: a React re-render can shift/remove
-    // the chip, and aggressively hiding (a previous "keep it beside a hidden
-    // chip" guess) turned out to hide the button even when the chip is visible,
-    // which read as "the button is gone". Keep it simple and always show it.
+    // Mirror each button's visibility to its chip. The harness's container
+    // queries hide `:nth-of-type(n)` file chips on narrow screens, and an
+    // injected span button is not subject to that query — so a hidden chip would
+    // otherwise still show its 查看差异 button. The chip is the button's previous
+    // sibling (we insert `afterend`); read its computed display and mirror it,
+    // but only hide when the chip is explicitly `display:none` (never guess
+    // visible from a missing/odd chip, which is how a previous attempt read as
+    // "the button is gone"). `inject` runs on DOM changes and on window resize,
+    // so a width-driven hide re-syncs.
     for (const btn of document.querySelectorAll<HTMLElement>(`[${BUTTON_ATTR}]`)) {
-      btn.style.display = 'inline-flex'
+      const chip = btn.previousElementSibling as HTMLElement | null
+      const chipHidden = chip !== null && getComputedStyle(chip).display === 'none'
+      btn.style.display = chipHidden ? 'none' : 'inline-flex'
     }
   }
 
