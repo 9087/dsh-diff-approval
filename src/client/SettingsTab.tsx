@@ -530,7 +530,10 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
           onClick={() => { setKeysOpen(open => !open) }}
           data-diff-keybindings-toggle
         >
-          <span className={css.settingsGroupTitle}>{t('settings.keybindings')}</span>
+          <span className={css.settingsGroupText}>
+            <span className={css.settingsGroupTitle}>{t('settings.keybindings')}</span>
+            <span className={css.settingsGroupDesc}>{t('settings.keybindingsDesc')}</span>
+          </span>
           <IconChevronDownOutline14 className={css.settingsGroupChevron} />
         </button>
         {keysOpen && (
