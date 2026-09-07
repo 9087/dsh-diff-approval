@@ -1,10 +1,19 @@
 // Client settings: the diff tab-width preference.
 
 import { beforeEach, describe, expect, it } from 'vitest'
-import { DEFAULT_QUICK_SUMMON, matchesShortcut, quickSummonKey, setQuickSummonKey, setTabWidth, tabWidth } from '../src/client/settings.ts'
+import {
+  DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_LINE_HEIGHT_DEFAULT, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN,
+  currentDiffAddColor, currentDiffDelColor,
+  diffAddColor, diffDelColor, diffFontScale, diffLineHeight, matchesShortcut, quickSummonKey,
+  setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setQuickSummonKey, setTabWidth, tabWidth,
+} from '../src/client/settings.ts'
 
 const TAB_WIDTH_KEY = 'diff-approval:tab-size'
 const QUICK_SUMMON_KEY = 'diff-approval:quick-summon-key'
+const DIFF_FONT_SCALE_KEY = 'diff-approval:diff-font-scale'
+const DIFF_LINE_HEIGHT_KEY = 'diff-approval:diff-line-height'
+const DIFF_ADD_COLOR_KEY = 'diff-approval:diff-add-color'
+const DIFF_DEL_COLOR_KEY = 'diff-approval:diff-del-color'
 
 describe('settings.tabWidth', () => {
   beforeEach(() => localStorage.clear())
@@ -37,6 +46,74 @@ describe('settings.quickSummon', () => {
     setQuickSummonKey('Ctrl+Shift+P')
     expect(localStorage.getItem(QUICK_SUMMON_KEY)).toBe('Ctrl+Shift+P')
     expect(quickSummonKey()).toBe('Ctrl+Shift+P')
+  })
+})
+
+describe('settings.diffFontScale', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('defaults to 100% (current size)', () => {
+    expect(diffFontScale()).toBe(100)
+  })
+
+  it('persists a chosen scale and reads it back', () => {
+    setDiffFontScale(110)
+    expect(localStorage.getItem(DIFF_FONT_SCALE_KEY)).toBe('110')
+    expect(diffFontScale()).toBe(110)
+  })
+
+  it('clamps to the allowed range', () => {
+    setDiffFontScale(DIFF_FONT_SCALE_MAX + 10)
+    expect(diffFontScale()).toBe(DIFF_FONT_SCALE_MAX)
+  })
+})
+
+describe('settings.diffLineHeight', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('defaults to the current row height (22)', () => {
+    expect(diffLineHeight()).toBe(DIFF_LINE_HEIGHT_DEFAULT)
+    expect(DIFF_LINE_HEIGHT_DEFAULT).toBe(22)
+  })
+
+  it('persists a chosen height and reads it back', () => {
+    setDiffLineHeight(28)
+    expect(localStorage.getItem(DIFF_LINE_HEIGHT_KEY)).toBe('28')
+    expect(diffLineHeight()).toBe(28)
+  })
+
+  it('clamps to the allowed range', () => {
+    setDiffLineHeight(DIFF_LINE_HEIGHT_MAX + 10)
+    expect(diffLineHeight()).toBe(DIFF_LINE_HEIGHT_MAX)
+    setDiffLineHeight(DIFF_LINE_HEIGHT_MIN - 10)
+    expect(diffLineHeight()).toBe(DIFF_LINE_HEIGHT_MIN)
+  })
+})
+
+describe('settings.diffColors', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('defaults to undefined (theme colors) when unset', () => {
+    expect(diffAddColor()).toBeUndefined()
+    expect(diffDelColor()).toBeUndefined()
+  })
+
+  it('persists a chosen base color and reads it back', () => {
+    setDiffAddColor('#00ff00')
+    setDiffDelColor('#ff0000')
+    expect(localStorage.getItem(DIFF_ADD_COLOR_KEY)).toBe('#00ff00')
+    expect(localStorage.getItem(DIFF_DEL_COLOR_KEY)).toBe('#ff0000')
+    expect(diffAddColor()).toBe('#00ff00')
+    expect(diffDelColor()).toBe('#ff0000')
+  })
+})
+
+describe('settings.current color defaults', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('falls back to sane colors when the theme token is unavailable', () => {
+    expect(currentDiffAddColor()).toMatch(/^#[0-9a-f]{6}$/i)
+    expect(currentDiffDelColor()).toMatch(/^#[0-9a-f]{6}$/i)
   })
 })
 

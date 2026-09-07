@@ -2140,28 +2140,32 @@ describe('PendingPanel', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)
     const value = () => document.querySelector('[data-diff-nav-lead-rows]') as HTMLElement
+    // The page now has several stepper rows (font size, line height, lead rows);
+    // target the ± buttons of the lead-rows row specifically.
+    const up = () => (value() as HTMLElement & { parentElement: HTMLElement }).parentElement.querySelector('[data-diff-stepper-up]') as HTMLButtonElement
+    const down = () => (value() as HTMLElement & { parentElement: HTMLElement }).parentElement.querySelector('[data-diff-stepper-down]') as HTMLButtonElement
     expect(value().textContent).toBe('2')
 
     // Step up to 3 and persist.
-    fireEvent.click(document.querySelector('[data-diff-stepper-up]') as HTMLElement)
+    fireEvent.click(up())
     expect(value().textContent).toBe('3')
     expect(localStorage.getItem('diff-approval:nav-lead-rows')).toBe('3')
 
     // Step down back to 2.
-    fireEvent.click(document.querySelector('[data-diff-stepper-down]') as HTMLElement)
+    fireEvent.click(down())
     expect(value().textContent).toBe('2')
     expect(localStorage.getItem('diff-approval:nav-lead-rows')).toBe('2')
 
     // Clamp at 0 (the min): the down button disables.
-    for (let i = 0; i < 5; i++) fireEvent.click(document.querySelector('[data-diff-stepper-down]') as HTMLElement)
+    for (let i = 0; i < 5; i++) fireEvent.click(down())
     expect(value().textContent).toBe('0')
-    expect((document.querySelector('[data-diff-stepper-down]') as HTMLButtonElement).disabled).toBe(true)
+    expect(down().disabled).toBe(true)
 
     // Clamp at 10 (the max): the up button disables.
-    fireEvent.click(document.querySelector('[data-diff-stepper-up]') as HTMLElement)
-    for (let i = 0; i < 15; i++) fireEvent.click(document.querySelector('[data-diff-stepper-up]') as HTMLElement)
+    fireEvent.click(up())
+    for (let i = 0; i < 15; i++) fireEvent.click(up())
     expect(value().textContent).toBe('10')
-    expect((document.querySelector('[data-diff-stepper-up]') as HTMLButtonElement).disabled).toBe(true)
+    expect(up().disabled).toBe(true)
   })
 
   it('the DSH Settings tab exposes a collapsed keybindings group that persists chords', () => {
@@ -2189,6 +2193,40 @@ describe('PendingPanel', () => {
     // Collapse again.
     fireEvent.click(document.querySelector('[data-diff-keybindings-toggle]') as HTMLButtonElement)
     expect(document.querySelector('[data-diff-key-jumpdown]')).toBeNull()
+  })
+
+  it('the DSH Settings tab exposes an expanded diff-view group with editable appearance', () => {
+    const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
+    render(<DiffApprovalSettingsTab {...props} />)
+
+    // The diff-view group is expanded by default: a live preview plus the
+    // font/line-height/color and the moved layout rows are all visible.
+    expect(document.querySelector('[data-diff-view-preview]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-font-size]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-line-height]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-add-color]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-del-color]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-tab-width-select]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-split-mode-select]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-paste-on-copy-select]')).not.toBeNull()
+
+    // Opening a color trigger shows the HSV dial; typing an RGB value and
+    // committing persists to localStorage.
+    fireEvent.click(document.querySelector('[data-diff-add-color]') as HTMLElement)
+    const addInput = document.querySelector('[data-diff-color-input]') as HTMLInputElement
+    fireEvent.change(addInput, { target: { value: 'rgb(17, 34, 51)' } })
+    fireEvent.blur(addInput)
+    expect(localStorage.getItem('diff-approval:diff-add-color')).toBe('#112233')
+
+    fireEvent.click(document.querySelector('[data-diff-del-color]') as HTMLElement)
+    const delInput = document.querySelector('[data-diff-color-input]') as HTMLInputElement
+    fireEvent.change(delInput, { target: { value: '#aa0055' } })
+    fireEvent.blur(delInput)
+    expect(localStorage.getItem('diff-approval:diff-del-color')).toBe('#aa0055')
+
+    // Collapse the group: the controls hide.
+    fireEvent.click(document.querySelector('[data-diff-view-toggle]') as HTMLButtonElement)
+    expect(document.querySelector('[data-diff-font-size]')).toBeNull()
   })
 
   it('lets the status bar pick the highlight language', () => {

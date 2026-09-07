@@ -2,7 +2,7 @@
 
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react'
+import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from 'react'
 import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
@@ -20,7 +20,7 @@ import type { HighlightSpan } from './highlight.ts'
 import { langFromPath } from './lang.ts'
 import { referenceLabelOf } from './reference.ts'
 import { OPEN_FILE_EVENT } from './produced-diff.ts'
-import { includeUntrackedEnabled, keybindingOf, matchesShortcut, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled } from './settings.ts'
+import { includeUntrackedEnabled, keybindingOf, matchesShortcut, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import css from './PendingPanel.module.css'
 
 /**
@@ -53,12 +53,6 @@ const MIN_LIST_WIDTH_PX = 160
 const MAX_LIST_WIDTH_PX = 560
 /** Inset of the floating file-list card from the code scroll box, in px. */
 const FLOAT_LIST_MARGIN_PX = 12
-/** Fixed diff-row height in px; the virtual window and jump math are built on it. */
-const ROW_HEIGHT_PX = 22
-/** Tolerance absorbed when comparing a block's offset to the navigation anchor,
- *  so a sub-pixel float error (wrapped row heights, fractional scrollTop) never
- *  mis-classifies the block the view is sitting on. Half a row height. */
-const NAV_ANCHOR_TOLERANCE_PX = ROW_HEIGHT_PX / 4
 /** The diff view-mode toggle glyph: the whole file as one column of text lines
  *  (unified) or two side-by-side columns of text lines (split). Hand-drawn
  *  because the icon library has no single/double-column glyph. Rendered 1:1
@@ -765,6 +759,12 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   /** Notify the parent to toast a block-wrap boundary / single-block (Ctrl+Up/Down). */
   onWrapToast: (text: string) => void
 }>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert, onWrapToast }, ref) {
+  // Use the configured line height for the split virtual window and jump math
+  // (the rendered split rows already size to the same value).
+  // eslint-disable-next-line @typescript-eslint/no-shadow
+  const ROW_HEIGHT_PX = diffLineHeight()
+  // eslint-disable-next-line @typescript-eslint/no-shadow
+  const NAV_ANCHOR_TOLERANCE_PX = ROW_HEIGHT_PX / 4
   const { pairs, pairOfRow } = useMemo(
     () => computeSideBySideDiff(model.diff.rows, true),
     [model],
@@ -1568,6 +1568,27 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const [splitView, setSplitView] = useState(() => splitMode())
   // Rows of lead left above a jumped-to diff block (configurable in Settings).
   const leadRows = navLeadRows()
+  // Diff-view customization (font/line-height scale, add/del base colors) read
+  // on mount and applied as CSS variables on the diff card; a change in DSH
+  // Settings applies on the next panel open. Font-size and line-height are
+  // relative scales (100% = current), so the default is the current appearance.
+  const diffFontScaleValue = diffFontScale()
+  const diffLineHeightValue = diffLineHeight()
+  const diffAddColorPx = diffAddColor()
+  const diffDelColorPx = diffDelColor()
+  // CSS variables for the diff card: line height always; colors only when
+  // customized (unset keeps the theme, so the default is the current look).
+  const diffViewVars: Record<string, string> = {}
+  diffViewVars['--dsh-diff-font-scale'] = String(diffFontScaleValue / 100)
+  diffViewVars['--dsh-diff-line-height'] = `${diffLineHeightValue}px`
+  if (diffAddColorPx !== undefined) diffViewVars['--dsh-diff-add-color'] = diffAddColorPx
+  if (diffDelColorPx !== undefined) diffViewVars['--dsh-diff-del-color'] = diffDelColorPx
+  // Shadow the module defaults so the virtual window and jump math follow the
+  // configured line height (the CSS `.line`/`.subline` use the same value).
+  // eslint-disable-next-line @typescript-eslint/no-shadow
+  const ROW_HEIGHT_PX = diffLineHeightValue
+  // eslint-disable-next-line @typescript-eslint/no-shadow
+  const NAV_ANCHOR_TOLERANCE_PX = ROW_HEIGHT_PX / 4
   // Quick toolbar toggle between the single-column (unified) and side-by-side
   // (split) views. Persists the choice through the same setting the Settings
   // tab uses, so the two stay in sync and the view survives a reopen.
@@ -2440,7 +2461,11 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const flashHeight = Math.max(0, flashBottom - flashTop)
 
   return (
-    <div className={css.diff} data-diff-approval-diff>
+    <div
+      className={css.diff}
+      data-diff-approval-diff
+      style={diffViewVars as unknown as CSSProperties}
+    >
       <div className={css.diffHeader}>
         <span className={css.diffPath}>{file.path}</span>
         <Tooltip label={t('action.openFile')} side="bottom" delayMs={500}>

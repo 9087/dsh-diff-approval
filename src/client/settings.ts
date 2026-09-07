@@ -5,12 +5,27 @@ const IMPORT_UNTRACKED_KEY = 'diff-approval:import-untracked'
 const TAB_WIDTH_KEY = 'diff-approval:tab-size'
 const SPLIT_MODE_KEY = 'diff-approval:split-mode'
 const NAV_LEAD_KEY = 'diff-approval:nav-lead-rows'
+const DIFF_FONT_SCALE_KEY = 'diff-approval:diff-font-scale'
+const DIFF_LINE_HEIGHT_KEY = 'diff-approval:diff-line-height'
+const DIFF_ADD_COLOR_KEY = 'diff-approval:diff-add-color'
+const DIFF_DEL_COLOR_KEY = 'diff-approval:diff-del-color'
 const WRAP_PREFIX = 'diff-approval:wrap:'
 
 /** Default lead rows above a jumped-to diff block (kept small and bounded). */
 export const NAV_LEAD_ROWS_DEFAULT = 2
 export const NAV_LEAD_ROWS_MIN = 0
 export const NAV_LEAD_ROWS_MAX = 10
+
+/** The code block's fixed row height used by the virtual window and jump math.
+ *  A hardcoded px base; the settings UI offers 10–36 (a low floor would clip the
+ *  code text, so the range is loose but never degenerate). */
+export const DIFF_LINE_HEIGHT_DEFAULT = 22
+export const DIFF_LINE_HEIGHT_MIN = 10
+export const DIFF_LINE_HEIGHT_MAX = 36
+/** Font-size scale range: a percentage of the current value, stepped by 10. */
+export const DIFF_FONT_SCALE_DEFAULT = 100
+export const DIFF_FONT_SCALE_MIN = 50
+export const DIFF_FONT_SCALE_MAX = 200
 
 /**
  * Whether copying a reference should also paste it into the chat input and
@@ -72,6 +87,79 @@ export function tabWidth(): number {
 /** Persist the diff's tab width (in spaces). */
 export function setTabWidth(value: number): void {
   localStorage.setItem(TAB_WIDTH_KEY, String(value))
+}
+
+/**
+ * The diff code font size as a percentage of the current (theme) size. Defaults
+ * to 100 (the current look); the settings UI steps it by ±10.
+ * @returns the font-size scale, as a percentage (e.g. 100, 110, 90).
+ */
+export function diffFontScale(): number {
+  const raw = Number.parseInt(localStorage.getItem(DIFF_FONT_SCALE_KEY) ?? '', 10)
+  if (!Number.isFinite(raw)) return DIFF_FONT_SCALE_DEFAULT
+  return Math.max(DIFF_FONT_SCALE_MIN, Math.min(DIFF_FONT_SCALE_MAX, raw))
+}
+
+/** Persist the diff's code font-size scale (a percentage). */
+export function setDiffFontScale(value: number): void {
+  localStorage.setItem(DIFF_FONT_SCALE_KEY, String(Math.max(DIFF_FONT_SCALE_MIN, Math.min(DIFF_FONT_SCALE_MAX, value))))
+}
+
+/**
+ * The diff code line height in px (the fixed row height the virtual window and
+ * jump math are keyed to). Defaults to 22 (the pre-customization value).
+ * @returns the line height in px.
+ */
+export function diffLineHeight(): number {
+  const raw = Number.parseInt(localStorage.getItem(DIFF_LINE_HEIGHT_KEY) ?? '', 10)
+  if (!Number.isFinite(raw)) return DIFF_LINE_HEIGHT_DEFAULT
+  return Math.max(DIFF_LINE_HEIGHT_MIN, Math.min(DIFF_LINE_HEIGHT_MAX, raw))
+}
+
+/** Persist the diff's code line height (px). */
+export function setDiffLineHeight(value: number): void {
+  localStorage.setItem(DIFF_LINE_HEIGHT_KEY, String(Math.max(DIFF_LINE_HEIGHT_MIN, Math.min(DIFF_LINE_HEIGHT_MAX, value))))
+}
+
+/** Read a theme CSS custom property, with a fallback when it is unavailable. */
+function themeColor(name: string, fallback: string): string {
+  if (typeof document !== 'undefined') {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+    if (/^#[0-9a-f]{6}$/i.test(v)) return v
+  }
+  return fallback
+}
+
+/** The added-line base color the user chose, or `undefined` (theme color). */
+export function diffAddColor(): string | undefined {
+  const v = localStorage.getItem(DIFF_ADD_COLOR_KEY)
+  return v !== null && v.length > 0 ? v : undefined
+}
+
+/** Persist the added-line base color (a hex like `#22c55e`). */
+export function setDiffAddColor(value: string): void {
+  localStorage.setItem(DIFF_ADD_COLOR_KEY, value)
+}
+
+/** The removed-line base color the user chose, or `undefined` (theme color). */
+export function diffDelColor(): string | undefined {
+  const v = localStorage.getItem(DIFF_DEL_COLOR_KEY)
+  return v !== null && v.length > 0 ? v : undefined
+}
+
+/** Persist the removed-line base color (a hex like `#ef4444`). */
+export function setDiffDelColor(value: string): void {
+  localStorage.setItem(DIFF_DEL_COLOR_KEY, value)
+}
+
+/** The theme's added-line base color, for the settings swatch default. */
+export function currentDiffAddColor(): string {
+  return themeColor('--dsw-alias-state-success-primary', '#22c55e')
+}
+
+/** The theme's removed-line base color, for the settings swatch default. */
+export function currentDiffDelColor(): string {
+  return themeColor('--dsw-alias-state-error-primary', '#ef4444')
 }
 
 /**

@@ -209,11 +209,29 @@
   color: var(--dsw-alias-label-primary);
   font: inherit;
   cursor: pointer;
+  /* A <button> centers its text by default; keep group labels left-aligned. */
+  text-align: left;
+}
+/* Stacked title + description on the header's left, both vertically centered;
+   text stays left-aligned while the chevron is pinned to the right. */
+.settingsGroupText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
 }
 .settingsGroupTitle {
   font-size: 14px;
   font-weight: 400;
   line-height: 22px;
+}
+.settingsGroupDesc {
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
 }
 .settingsGroupChevron {
   margin-left: auto;
@@ -227,7 +245,8 @@
   border-bottom: 1px solid var(--dsw-alias-border-l2);
 }
 .settingsGroupBody {
-  display: grid;
+  display: flex;
+  flex-direction: column;
 }
 /* Nudge the group's rows right so they read as nested under the group header,
    and drop the last row's own bottom border (the group's bottom border is the
@@ -299,6 +318,166 @@
 
 .settingsSelectorChevron {
   flex: none;
+}
+
+/* Color picker row control: a fixed-width DSH pill trigger (current swatch + hex)
+   that opens a small HSV dialog (saturation/value square, hue bar, hex/RGB input)
+   built on DSH tokens instead of the browser's native color dialog. */
+.colorPicker {
+  position: relative;
+}
+.colorPickerTrigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 120px;
+  height: 36px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 18px;
+  background: var(--dsw-alias-bg-module-platform);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+.colorPickerTrigger:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.colorSwatch {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 50%;
+}
+.colorValue {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.colorPickerChevron {
+  flex: none;
+}
+.colorBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+.colorPickerPopover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 41;
+  padding: 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-base);
+  box-shadow: var(--dsw-shadow-lv2);
+}
+.colorPickerPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.colorPickerInputRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.colorPickerPreview {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+}
+.colorPickerInput {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-module-platform);
+  font: inherit;
+  font-size: 12px;
+  line-height: 28px;
+  color: var(--dsw-alias-label-primary);
+}
+.colorPickerInput:focus {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: -1px;
+}
+.colorSv {
+  position: relative;
+  height: 140px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  cursor: crosshair;
+  touch-action: none;
+}
+.colorSvCursor {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+.colorHue {
+  position: relative;
+  height: 14px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 7px;
+  cursor: pointer;
+  touch-action: none;
+}
+.colorHueCursor {
+  position: absolute;
+  top: 50%;
+  width: 16px;
+  height: 16px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+
+/* Live diff preview inside the diff-view settings group: reuses the real diff
+   row/gutter/code/color classes, so it shows the actual look at current values.
+   The code-block font is set here so `.lines` 1em scales from the real code size. */
+.diffPreview {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin-bottom: 8px;
+  padding: 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  overflow: hidden;
+  font: var(--dsw-font-markdown-code-block);
+  background: var(--dsw-alias-markdown-code-block);
+}
+.diffPreviewTitle {
+  margin-bottom: 6px;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+/* A fixed-height vertical viewport so the preview scrolls instead of growing
+   the settings page when the line height is increased. */
+.diffPreviewScroll {
+  overflow-y: auto;
+  height: 132px;
 }
 
 /* On/off toggle switch (replaces the dropdown pill picker in the settings).
@@ -741,11 +920,11 @@
 /* Per-row change counts share the hue of the diff kind backgrounds, blended
    toward the primary label color to soften the saturation. */
 .addCount {
-  color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 60%, var(--dsw-alias-label-primary));
+  color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 60%, var(--dsw-alias-label-primary));
 }
 
 .delCount {
-  color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 60%, var(--dsw-alias-label-primary));
+  color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 60%, var(--dsw-alias-label-primary));
 }
 
 .diff {
@@ -1149,13 +1328,16 @@
   width: max-content;
   min-width: 100%;
   border-spacing: 0;
+  /* Optional code font-size scale (100% = the theme's code-block font); both
+     gutter and code cells scale together. */
+  font-size: calc(1em * var(--dsh-diff-font-scale, 1));
 }
 
 .line {
   display: table-row;
   /* Fixed height: the virtual window and jump math are keyed to this value. */
-  height: 22px;
-  line-height: 22px;
+  height: var(--dsh-diff-line-height, 22px);
+  line-height: var(--dsh-diff-line-height, 22px);
   /* Only the code column is selectable. The row opts out so a drag spanning
      the whole row never includes the line-number gutters, which would otherwise
      make the copy-reference range miss (the reference button hides). */
@@ -1203,11 +1385,11 @@
    (12% / 10%). Both keep the semantic hue token-driven, so a theme change
    stays consistent; only the per-line presentation is this package's own. */
 .del {
-  background-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent);
+  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
 }
 
 .add {
-  background-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent);
+  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 10%, transparent);
 }
 
 /* Selection status bar: a slim footer under the diff. It carries no own
@@ -1330,14 +1512,14 @@
    `overflow: hidden` clips any sub-pixel font-metric overshoot. */
 .wrap .line {
   height: auto;
-  min-height: 22px;
+  min-height: var(--dsh-diff-line-height, 22px);
 }
 
-/* One visual line of a wrapped row: pre (no re-wrap) at a fixed 22px height. */
+/* One visual line of a wrapped row: pre (no re-wrap) at a fixed height. */
 .subline {
   display: block;
-  height: 22px;
-  line-height: 22px;
+  height: var(--dsh-diff-line-height, 22px);
+  line-height: var(--dsh-diff-line-height, 22px);
   white-space: pre;
   overflow: hidden;
 }
@@ -1448,18 +1630,18 @@
 
 /* One side of a split pair: tinted by its own semantics (left deletion red,
    right addition green), independent of the other column. */
-.splitLdel { background-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); }
-.splitLadd { background-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent); }
-.splitRdel { background-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); }
-.splitRadd { background-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent); }
+.splitLdel { background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent); }
+.splitLadd { background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 10%, transparent); }
+.splitRdel { background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent); }
+.splitRadd { background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 10%, transparent); }
 
 /* Intra-line (inline) diff chips: the removed characters of a del line and the
    added characters of its paired add line. A stronger tint than the row's own
    line-level background, so the changed span reads as a distinct chip. */
 .intraDel {
-  background-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 26%, transparent);
+  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 26%, transparent);
   text-decoration: line-through;
 }
 .intraAdd {
-  background-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 24%, transparent);
+  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 24%, transparent);
 }

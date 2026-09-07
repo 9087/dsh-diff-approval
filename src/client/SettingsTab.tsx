@@ -1,11 +1,12 @@
 /** DSH Settings top-level section for this plugin's preferences. */
 
 import { useState } from 'react'
-import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
-import { DEFAULT_KEYBINDINGS, includeUntrackedEnabled, keybindingOf, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setIncludeUntrackedEnabled, setKeybinding, setNavLeadRows, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
+import { DEFAULT_KEYBINDINGS, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, includeUntrackedEnabled, keybindingOf, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setIncludeUntrackedEnabled, setKeybinding, setNavLeadRows, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
 import type { DiffApprovalKey } from './locales.ts'
+import { ColorPicker } from './ColorPicker.tsx'
 import css from './PendingPanel.module.css'
 
 /** Full component props assembled by the Settings slot renderer. */
@@ -136,9 +137,11 @@ function TabWidthRow({
   )
 }
 
-/** A +/- number stepper for an integer preference, clamped to [min, max]. */
+/** A +/- number stepper for an integer preference, clamped to [min, max]. The
+ *  optional `step` changes the increment (default 1) and `unit` is appended to
+ *  the shown value (e.g. '%'). */
 function StepperRow({
-  title, description, value, onChange, min, max, dataAttribute, t,
+  title, description, value, onChange, min, max, dataAttribute, t, step = 1, unit = '',
 }: {
   title: string
   description: string
@@ -148,6 +151,8 @@ function StepperRow({
   max: number
   dataAttribute: string
   t: Translator
+  step?: number
+  unit?: string
 }) {
   return (
     <div className={css.settingsRow}>
@@ -162,16 +167,16 @@ function StepperRow({
           data-diff-stepper-down
           aria-label={t('action.decrease')}
           disabled={value <= min}
-          onClick={() => { onChange(Math.max(min, value - 1)) }}
+          onClick={() => { onChange(Math.max(min, value - step)) }}
         />
-        <span className={css.stepperValue} {...{ [dataAttribute]: true }}>{value}</span>
+        <span className={css.stepperValue} {...{ [dataAttribute]: true }}>{value}{unit}</span>
         <button
           type="button"
           className={`${css.stepperButton} ${css.stepperButtonUp}`}
           data-diff-stepper-up
           aria-label={t('action.increase')}
           disabled={value >= max}
-          onClick={() => { onChange(Math.min(max, value + 1)) }}
+          onClick={() => { onChange(Math.min(max, value + step)) }}
         />
       </div>
     </div>
@@ -250,6 +255,100 @@ function ShortcutRow({
   )
 }
 
+/** One color-picker row: title + description left, a DSH pill trigger that opens
+ *  a small HSV dial (a real color picker, not preset swatches) with a hex/RGB
+ *  input. The native color dialog is browser-styled and is avoided. */
+function ColorRow({
+  title, description, value, onChange, dataAttribute,
+}: {
+  title: string
+  description: string
+  value: string
+  onChange: (value: string) => void
+  dataAttribute: string
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className={css.settingsRow}>
+      <div className={css.settingsRowText}>
+        <div className={css.settingsRowTitle}>{title}</div>
+        <div className={css.settingsRowDesc}>{description}</div>
+      </div>
+      <div className={css.colorPicker}>
+        <button
+          type="button"
+          className={css.colorPickerTrigger}
+          {...{ [dataAttribute]: true }}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          data-diff-color-trigger
+          onClick={() => { setOpen(value => !value) }}
+        >
+          <span className={css.colorSwatch} style={{ background: value }} aria-hidden="true" />
+          <span className={css.colorValue}>{value.toUpperCase()}</span>
+          <IconChevronDownOutline14 className={css.colorPickerChevron} />
+        </button>
+        {open && (
+          <>
+            <div className={css.colorBackdrop} onClick={() => { setOpen(false) }} />
+            <div className={css.colorPickerPopover}>
+              <ColorPicker
+                value={value}
+                onChange={onChange}
+                onClose={() => { setOpen(false) }}
+                ariaLabel={title}
+              />
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** A live single-column diff preview driven by the current diff-view settings.
+ *  It reuses the real diff's CSS (`.line`/`.gutter`/`.code`/`.del`/`.add`/intra)
+ *  and applies the same CSS variables, so it reflects the actual look. */
+function DiffViewPreview({ fontScale, lineHeight, addColor, delColor, tabSize, t }: {
+  fontScale: number
+  lineHeight: number
+  addColor: string
+  delColor: string
+  tabSize: number
+  t: Translator
+}) {
+  const vars: Record<string, string> = {
+    '--dsh-diff-font-scale': String(fontScale / 100),
+    '--dsh-diff-line-height': `${lineHeight}px`,
+    '--dsh-diff-add-color': addColor,
+    '--dsh-diff-del-color': delColor,
+  }
+  const rows = [
+    { kind: css.context, old: '1', next: '1', code: 'export function review(file) {' },
+    { kind: css.context, old: '2', next: '2', code: '  // 旧实现：保留当前改动' },
+    { kind: css.del, old: '3', next: '', code: <>{'  return '}<span className={css.intraDel}>keep</span>{'(file)'}</> },
+    { kind: css.context, old: '3', next: '3', code: '  // 新实现：回退该改动' },
+    { kind: css.add, old: '', next: '3', code: <>{'  return '}<span className={css.intraAdd}>revert</span>{'(file)'}</> },
+    { kind: css.context, old: '4', next: '4', code: '\u007d' },
+  ]
+  return (
+    <div className={css.diffPreview} style={{ ...(vars as unknown as CSSProperties), tabSize }} data-diff-view-preview>
+      <div className={css.diffPreviewTitle}>{t('settings.diffPreview')}</div>
+      <div className={css.diffPreviewScroll}>
+        <div className={css.lines}>
+          {rows.map((row, index) => (
+            <div key={index} className={`${css.line} ${row.kind}`}>
+              <span className={css.gutter}>{row.old}</span>
+              <span className={css.gutter}>{row.next}</span>
+              <span className={css.code}>{row.code}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /**
  * The plugin's preferences: auto-paste a copied reference into the input,
  * whether importing workspace VCS changes includes untracked files, and the
@@ -264,6 +363,16 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const [tabOpen, setTabOpen] = useState(false)
   const [split, setSplitState] = useState(splitMode)
   const [lead, setLeadState] = useState(navLeadRows)
+  // Diff-view customization defaults to the current values (100% font size =
+  // current; line height defaults to the fixed 22px).
+  const [fontScale, setFontScaleState] = useState(diffFontScale)
+  const [lineHeight, setLineHeightState] = useState(diffLineHeight)
+  const [addColor, setAddColorState] = useState(() => diffAddColor() ?? currentDiffAddColor())
+  const [delColor, setDelColorState] = useState(() => diffDelColor() ?? currentDiffDelColor())
+  // The theme's current added/removed base colors, shown as the palette default.
+  const addDefault = currentDiffAddColor()
+  const delDefault = currentDiffDelColor()
+  const [diffOpen, setDiffOpen] = useState(true)
   const [summon, setSummonState] = useState(quickSummonKey)
   const [keysOpen, setKeysOpen] = useState(false)
   const [keybindings, setKeybindingsState] = useState<Record<string, string>>(() => {
@@ -299,8 +408,121 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
     setLeadState(value)
     setNavLeadRows(value)
   }
+  const setFontScale = (value: number): void => {
+    setFontScaleState(value)
+    setDiffFontScale(value)
+  }
+  const setLineHeight = (value: number): void => {
+    setLineHeightState(value)
+    setDiffLineHeight(value)
+  }
+  const setAddColor = (value: string): void => {
+    setAddColorState(value)
+    setDiffAddColor(value)
+  }
+  const setDelColor = (value: string): void => {
+    setDelColorState(value)
+    setDiffDelColor(value)
+  }
   return (
     <div className={css.settingsPage} data-diff-settings>
+      <div className={css.settingsGroup} data-open={diffOpen || undefined}>
+        <button
+          type="button"
+          className={css.settingsGroupHeader}
+          onClick={() => { setDiffOpen(open => !open) }}
+          data-diff-view-toggle
+        >
+          <span className={css.settingsGroupText}>
+            <span className={css.settingsGroupTitle}>{t('settings.diffView')}</span>
+            <span className={css.settingsGroupDesc}>{t('settings.diffViewDesc')}</span>
+          </span>
+          <IconChevronDownOutline14 className={css.settingsGroupChevron} />
+        </button>
+        {diffOpen && (
+          <div className={css.settingsGroupBody}>
+            <DiffViewPreview
+              fontScale={fontScale}
+              lineHeight={lineHeight}
+              addColor={addColor}
+              delColor={delColor}
+              tabSize={tab}
+              t={t}
+            />
+            <StepperRow
+              title={t('panel.diffFontSize')}
+              description={t('panel.diffFontSizeDesc')}
+              value={fontScale}
+              onChange={setFontScale}
+              min={DIFF_FONT_SCALE_MIN}
+              max={DIFF_FONT_SCALE_MAX}
+              step={10}
+              unit="%"
+              dataAttribute="data-diff-font-size"
+              t={t}
+            />
+            <StepperRow
+              title={t('panel.diffLineHeight')}
+              description={t('panel.diffLineHeightDesc')}
+              value={lineHeight}
+              onChange={setLineHeight}
+              min={DIFF_LINE_HEIGHT_MIN}
+              max={DIFF_LINE_HEIGHT_MAX}
+              dataAttribute="data-diff-line-height"
+              t={t}
+            />
+            <ColorRow
+              title={t('panel.diffAddColor')}
+              description={t('panel.diffAddColorDesc', { default: addDefault.toUpperCase() })}
+              value={addColor}
+              onChange={setAddColor}
+              dataAttribute="data-diff-add-color"
+            />
+            <ColorRow
+              title={t('panel.diffDelColor')}
+              description={t('panel.diffDelColorDesc', { default: delDefault.toUpperCase() })}
+              value={delColor}
+              onChange={setDelColor}
+              dataAttribute="data-diff-del-color"
+            />
+            <TabWidthRow
+              title={t('panel.tabWidth')}
+              description={t('panel.tabWidthDesc')}
+              value={tab}
+              open={tabOpen}
+              onOpenChange={setTabOpen}
+              onSelect={setTab}
+              dataAttribute="data-diff-tab-width-select"
+            />
+            <PreferenceRow
+              title={t('panel.splitMode')}
+              description={t('panel.splitModeDesc')}
+              value={split}
+              onSelect={setSplit}
+              dataAttribute="data-diff-split-mode-select"
+              t={t}
+            />
+            <StepperRow
+              title={t('panel.navLeadRows')}
+              description={t('panel.navLeadRowsDesc')}
+              value={lead}
+              onChange={setLead}
+              min={NAV_LEAD_ROWS_MIN}
+              max={NAV_LEAD_ROWS_MAX}
+              dataAttribute="data-diff-nav-lead-rows"
+              t={t}
+            />
+            <PreferenceRow
+              title={t('panel.pasteOnCopy')}
+              description={t('panel.pasteOnCopyDesc')}
+              value={pasteOnCopy}
+              onSelect={setPasteOnCopy}
+              dataAttribute="data-diff-paste-on-copy-select"
+              t={t}
+            />
+          </div>
+        )}
+      </div>
       <div className={css.settingsGroup} data-open={keysOpen || undefined}>
         <button
           type="button"
@@ -336,46 +558,11 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
         )}
       </div>
       <PreferenceRow
-        title={t('panel.pasteOnCopy')}
-        description={t('panel.pasteOnCopyDesc')}
-        value={pasteOnCopy}
-        onSelect={setPasteOnCopy}
-        dataAttribute="data-diff-paste-on-copy-select"
-        t={t}
-      />
-      <PreferenceRow
         title={t('panel.importUntracked')}
         description={t('panel.importUntrackedDesc')}
         value={includeUntracked}
         onSelect={setIncludeUntracked}
         dataAttribute="data-diff-import-untracked-select"
-        t={t}
-      />
-      <TabWidthRow
-        title={t('panel.tabWidth')}
-        description={t('panel.tabWidthDesc')}
-        value={tab}
-        open={tabOpen}
-        onOpenChange={setTabOpen}
-        onSelect={setTab}
-        dataAttribute="data-diff-tab-width-select"
-      />
-      <PreferenceRow
-        title={t('panel.splitMode')}
-        description={t('panel.splitModeDesc')}
-        value={split}
-        onSelect={setSplit}
-        dataAttribute="data-diff-split-mode-select"
-        t={t}
-      />
-      <StepperRow
-        title={t('panel.navLeadRows')}
-        description={t('panel.navLeadRowsDesc')}
-        value={lead}
-        onChange={setLead}
-        min={NAV_LEAD_ROWS_MIN}
-        max={NAV_LEAD_ROWS_MAX}
-        dataAttribute="data-diff-nav-lead-rows"
         t={t}
       />
     </div>
