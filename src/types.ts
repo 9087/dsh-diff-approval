@@ -97,6 +97,11 @@ export interface DiffApprovalBlockTarget {
   sessionId: SessionId
   id: string
   block: DiffApprovalBlockRange
+  /** When true and this action clears the entry's last remaining change, remove
+   *  the entry from the pending list as part of the same request. When false or
+   *  absent, a fully-resolved entry stays listed (the panel's remove-and-keep
+   *  prompt sets this from the user's choice). */
+  removeWhenResolved?: boolean | undefined
 }
 
 /** Outcome of one keep/revert/undo/redo request. */

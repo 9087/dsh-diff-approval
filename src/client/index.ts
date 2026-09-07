@@ -158,14 +158,13 @@ export function apply(ctx: ClientContext): void {
           }
         })
       },
-      onBlockKeep: (sessionId, id, block) => store.blockKeep(sessionId, id, block),
-      onBlockRevert: (sessionId, id, block) => store.blockRevert(sessionId, id, block),
+      onBlockKeep: (sessionId, id, block, removeWhenResolved) => store.blockKeep(sessionId, id, block, removeWhenResolved),
+      onBlockRevert: (sessionId, id, block, removeWhenResolved) => store.blockRevert(sessionId, id, block, removeWhenResolved),
       onOpen: (sessionId, id, action) => store.open(sessionId, id, action),
       onUndo: (sessionId) => store.undo(sessionId),
       onRedo: (sessionId) => store.redo(sessionId),
       onImportVcs: (sessionId, includeUntracked) => store.importVcs(sessionId, includeUntracked),
       onAckRedoCleared: () => store.clearRedoCleared(),
-      onAckJustResolved: () => store.clearJustResolved(),
       onPasteReference: (sessionId, reference) => {
         // Append the reference to the session's composer draft (replace only
         // when empty), addressed explicitly to the copied reference's session

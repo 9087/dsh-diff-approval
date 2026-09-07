@@ -54,7 +54,6 @@ function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
     onRedo: vi.fn(),
     onImportVcs: vi.fn(async () => ({ imported: 0, detected: false })),
     onAckRedoCleared: vi.fn(),
-    onAckJustResolved: vi.fn(),
     collapseSidebar: vi.fn(),
     t: (key: string, params?: Record<string, unknown>) => params === undefined ? key : `${key} ${JSON.stringify(params)}`,
   } as unknown as PanelProps
@@ -681,38 +680,41 @@ describe('PendingPanel', () => {
     expect(screen.getAllByText('row.removed {"removed":0}')).toHaveLength(1)
   })
 
-  it('asks whether to remove a file whose last block just resolved', () => {
-    const props = panelProps({ read: true, files: [FILE], busy: new Set(), justResolved: FILE.id })
-    vi.useFakeTimers()
+  it('asks whether to remove a file when its last block is kept or reverted', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
 
-    // The prompt pops from the latched id.
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    fireEvent.mouseEnter(rows[0]!)
+    fireEvent.click(document.querySelector('[data-diff-block-keep]') as HTMLElement)
+
+    // The single-block action prompts rather than resolving silently, and the
+    // block RPC has not fired yet (its `removeWhenResolved` rides the choice).
     expect(document.querySelector('[data-diff-confirm]')).not.toBeNull()
     expect(screen.getByText('panel.resolvedAsk {"file":"a.txt"}')).toBeDefined()
+    expect(props.onBlockKeep).not.toHaveBeenCalled()
 
-    // The latch is consumed on the next tick (after the prompt commits), so it
-    // does not linger and re-prompt on a later reopen — no matter whether the
-    // user clicks anything.
-    act(() => { vi.advanceTimersByTime(0) })
-    expect(props.onAckJustResolved).toHaveBeenCalledTimes(1)
-
-    // "Keep in list" closes the dialog without removing the file.
+    // "Keep in list" runs the action without removing the file.
     fireEvent.click(document.querySelector('[data-diff-confirm-keep]') as HTMLButtonElement)
     expect(document.querySelector('[data-diff-confirm]')).toBeNull()
-
-    vi.useRealTimers()
+    expect(props.onBlockKeep).toHaveBeenCalledWith(S1, FILE.id, { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 }, false)
   })
 
   it('removes the file when the confirm dialog is accepted', () => {
-    const keep = vi.fn(async () => {})
-    const props = panelProps({ read: true, files: [FILE], busy: new Set(), justResolved: FILE.id })
-    props.onKeep = keep
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    fireEvent.mouseEnter(rows[0]!)
+    fireEvent.click(document.querySelector('[data-diff-block-keep]') as HTMLElement)
+    expect(document.querySelector('[data-diff-confirm]')).not.toBeNull()
 
     fireEvent.click(document.querySelector('[data-diff-confirm-remove]') as HTMLButtonElement)
-    expect(keep).toHaveBeenCalledWith(S1, FILE.id)
+    expect(props.onBlockKeep).toHaveBeenCalledWith(S1, FILE.id, { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 }, true)
     expect(document.querySelector('[data-diff-confirm]')).toBeNull()
   })
 
@@ -1868,7 +1870,10 @@ describe('PendingPanel', () => {
 
     expect(document.querySelector('[data-diff-selection-actions]')).not.toBeNull()
     fireEvent.click(document.querySelector('[data-diff-selection-keep]') as HTMLButtonElement)
-    expect(props.onBlockKeep).toHaveBeenCalledWith(S1, 'entry-1', { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 })
+    // A single covered block is the file's last change: the action prompts for
+    // remove-or-keep instead of firing the block RPC directly.
+    expect(document.querySelector('[data-diff-confirm]')).not.toBeNull()
+    expect(props.onBlockKeep).not.toHaveBeenCalled()
 
     // The operated block leaves the diff, so the selection is cleared too.
     await waitFor(() => {
@@ -1905,7 +1910,9 @@ describe('PendingPanel', () => {
 
     expect(document.querySelector('[data-diff-selection-actions]')).not.toBeNull()
     fireEvent.click(document.querySelector('[data-diff-selection-revert]') as HTMLButtonElement)
-    expect(props.onBlockRevert).toHaveBeenCalledWith(S1, 'entry-1', { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 })
+    // Single block: the revert prompts for remove-or-keep rather than firing.
+    expect(document.querySelector('[data-diff-confirm]')).not.toBeNull()
+    expect(props.onBlockRevert).not.toHaveBeenCalled()
 
     await waitFor(() => {
       expect(document.querySelector('[data-diff-selection-actions]')).toBeNull()

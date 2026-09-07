@@ -164,16 +164,16 @@ describe('block actions', () => {
     expect(store.getSnapshot().busy).toEqual(new Set())
   })
 
-  it('latches justResolved when the last block resolves, then clears it', async () => {
-    const seam = port({ blockKeep: vi.fn(async () => ({ outcome: 'kept', resolved: true })) })
+  it('passes removeWhenResolved through to the port when the caller asks to remove', async () => {
+    const seam = port()
     const store = createPendingDiffStore(seam.port)
     await store.refresh(S1)
 
-    await store.blockKeep(S1, FILE.id, BLOCK)
-    expect(store.getSnapshot().justResolved).toBe(FILE.id)
-
-    store.clearJustResolved()
-    expect(store.getSnapshot().justResolved).toBeUndefined()
+    await store.blockKeep(S1, FILE.id, BLOCK, true)
+    expect(seam.blockKeep).toHaveBeenCalledWith(S1, FILE.id, BLOCK, true)
+    // A default (no flag) block action still runs the port with just 3 args.
+    await store.blockRevert(S1, FILE.id, BLOCK)
+    expect(seam.blockRevert).toHaveBeenCalledWith(S1, FILE.id, BLOCK)
   })
 })
 

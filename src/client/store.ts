@@ -8,7 +8,7 @@
 
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
-import type { DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalOpenAction, VcsImportValue } from '../types.ts'
+import type { DiffApprovalBlockRange, DiffApprovalOpenAction, VcsImportValue } from '../types.ts'
 import type { PendingDiffSnapshot } from './slots.ts'
 import type { DiffApprovalPort } from './port.ts'
 
@@ -21,9 +21,9 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   /** Revert one operation. */
   revert: (sessionId: SessionId, id: string) => Promise<void>
   /** Keep one diff block, then refresh so the entry's diff reflects the accept. */
-  blockKeep: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
+  blockKeep: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange, removeWhenResolved?: boolean) => Promise<void>
   /** Revert one diff block, then refresh so the entry's diff reflects the undo. */
-  blockRevert: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
+  blockRevert: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange, removeWhenResolved?: boolean) => Promise<void>
   /** Undo the session's last keep/revert, then refresh; resolves to the affected entry id when it is still pending. */
   undo: (sessionId: SessionId) => Promise<string | undefined>
   /** Redo the session's last undone keep/revert, then refresh; resolves to the affected entry id when it is still pending. */
@@ -36,8 +36,6 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   reset: () => void
   /** Acknowledge a redo-cleared notice so the panel surfaces it only once. */
   clearRedoCleared: () => void
-  /** Acknowledge the just-resolved prompt so it is only surfaced once. */
-  clearJustResolved: () => void
 }
 
 /** An empty busy set reused as the snapshot's canonical absent value. */
@@ -58,16 +56,11 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
   // Latched until the panel acknowledges it: a detected external change that
   // superseded the redo history must surface even when the panel is closed.
   let redoCleared = false
-  // Latched file id whose last block just resolved; the panel acknowledges it
-  // (remove-or-keep) to clear the latch.
-  let justResolved: string | undefined
 
   const publish = (next: PendingDiffSnapshot): void => {
-    // Carry the latched flags so they survive an ordinary snapshot; a normal
-    // publish is byte-for-byte the shape older consumers expect.
+    // Carry the latched flag so it survives an ordinary snapshot.
     let result = next
     if (redoCleared) result = { ...result, redoCleared: true }
-    if (justResolved !== undefined) result = { ...result, justResolved }
     snapshot = result
     for (const listener of [...listeners]) listener()
   }
@@ -153,36 +146,32 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
     },
     // A block op keeps the entry: mark the file busy, run the port call, then
     // refresh so the entry's diff updates (the poll alone would lag a second).
-    // When the port reports the last block resolved, latch `justResolved` so
-    // the panel prompts once (remove-or-keep) — the entry itself stays listed.
-    async blockKeep(sessionId, id, block) {
+    async blockKeep(sessionId, id, block, removeWhenResolved) {
       const { error: _cleared, ...base } = snapshot
       publish({ ...base, busy: new Set([...snapshot.busy, id]) })
-      let value: DiffApprovalActionValue
       try {
-        value = await port.blockKeep(sessionId, id, block)
+        if (removeWhenResolved === undefined) await port.blockKeep(sessionId, id, block)
+        else await port.blockKeep(sessionId, id, block, removeWhenResolved)
       } catch (error: unknown) {
         markFailed(id, error instanceof Error ? error.message : String(error))
         publish({ ...snapshot, busy: new Set([...snapshot.busy].filter(busy => busy !== id)) })
         return
       }
       clearFailed(id)
-      if (value.resolved === true) justResolved = id
       await this.refresh(sessionId)
     },
-    async blockRevert(sessionId, id, block) {
+    async blockRevert(sessionId, id, block, removeWhenResolved) {
       const { error: _cleared, ...base } = snapshot
       publish({ ...base, busy: new Set([...snapshot.busy, id]) })
-      let value: DiffApprovalActionValue
       try {
-        value = await port.blockRevert(sessionId, id, block)
+        if (removeWhenResolved === undefined) await port.blockRevert(sessionId, id, block)
+        else await port.blockRevert(sessionId, id, block, removeWhenResolved)
       } catch (error: unknown) {
         markFailed(id, error instanceof Error ? error.message : String(error))
         publish({ ...snapshot, busy: new Set([...snapshot.busy].filter(busy => busy !== id)) })
         return
       }
       clearFailed(id)
-      if (value.resolved === true) justResolved = id
       await this.refresh(sessionId)
     },
     // Undo/redo restores a pending entry (undo) or removes one (redo); only an
@@ -225,17 +214,11 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
       }
     },
     reset() {
-      justResolved = undefined
       publish({ read: false, files: [], busy: EMPTY_BUSY })
     },
     clearRedoCleared() {
       redoCleared = false
       const { redoCleared: _omit, ...rest } = snapshot
-      publish(rest)
-    },
-    clearJustResolved() {
-      justResolved = undefined
-      const { justResolved: _omit, ...rest } = snapshot
       publish(rest)
     },
   }

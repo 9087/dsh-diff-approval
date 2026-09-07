@@ -22,9 +22,9 @@ export interface DiffApprovalPort {
   /** Revert one operation. */
   revert(sessionId: SessionId, id: string): Promise<DiffApprovalActionValue>
   /** Keep one diff block (accept its change into the tracked baseline). */
-  blockKeep(sessionId: SessionId, id: string, block: DiffApprovalBlockRange): Promise<DiffApprovalActionValue>
+  blockKeep(sessionId: SessionId, id: string, block: DiffApprovalBlockRange, removeWhenResolved?: boolean): Promise<DiffApprovalActionValue>
   /** Revert one diff block (restore its old lines in the file). */
-  blockRevert(sessionId: SessionId, id: string, block: DiffApprovalBlockRange): Promise<DiffApprovalActionValue>
+  blockRevert(sessionId: SessionId, id: string, block: DiffApprovalBlockRange, removeWhenResolved?: boolean): Promise<DiffApprovalActionValue>
   /** Undo the session's last keep/revert (restore the before state). */
   undo(sessionId: SessionId): Promise<DiffApprovalActionValue>
   /** Redo the session's last undone keep/revert (re-apply the after state). */
@@ -50,11 +50,11 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
     async revert(sessionId, id) {
       return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'revert', { sessionId, id }))
     },
-    async blockKeep(sessionId, id, block) {
-      return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'block-keep', { sessionId, id, block }))
+    async blockKeep(sessionId, id, block, removeWhenResolved) {
+      return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'block-keep', { sessionId, id, block, removeWhenResolved }))
     },
-    async blockRevert(sessionId, id, block) {
-      return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'block-revert', { sessionId, id, block }))
+    async blockRevert(sessionId, id, block, removeWhenResolved) {
+      return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'block-revert', { sessionId, id, block, removeWhenResolved }))
     },
     async undo(sessionId) {
       return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'undo', { sessionId }))

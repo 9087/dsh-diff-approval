@@ -392,6 +392,18 @@ describe('block keep/revert', () => {
     expect(kept!.newText).toBe('A\nb\nC\nd\n')
   })
 
+  it('removes the entry when the last keep is requested with removeWhenResolved', async () => {
+    const { ctx, fs, handle } = await harness()
+    const entry = await twoBlocks({ ctx, fs, handle })
+    await handle('block-keep', { sessionId: 'session-1', id: entry.id, block: { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 } }, signal())
+    await expect(handle('block-keep', { sessionId: 'session-1', id: entry.id, block: { oldStart: 3, oldEnd: 3, newStart: 3, newEnd: 3 }, removeWhenResolved: true }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'kept', resolved: true } })
+    expect(fs.writeText).not.toHaveBeenCalled()
+    const files = await listEntries(handle, 'session-1')
+    // The caller's choice removed the fully-resolved entry from the list.
+    expect(files).toEqual([])
+  })
+
   it('keeps the entry with no pending diff when the last block is reverted', async () => {
     const { ctx, fs, handle } = await harness()
     const entry = await twoBlocks({ ctx, fs, handle })

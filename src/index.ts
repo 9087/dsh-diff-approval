@@ -725,9 +725,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         }
         // Accept this block: fold its new side into the tracked baseline so
         // the entry's diff no longer shows it. The file already holds the
-        // accepted content, so nothing is written. The entry stays even when
-        // now fully kept (oldText === newText): the file stays listed with no
-        // pending diff and its whole-file keep/revert removes it later.
+        // accepted content, so nothing is written. When this clears the file's
+        // last change and the caller asked to remove it, the entry leaves the
+        // list now (the panel's prompt rides this same request); otherwise it
+        // stays listed with no pending diff, removed by a later keep/revert.
         const accepted = contentRangeOf(entry.newText, blockTarget.block.newStart, blockTarget.block.newEnd)
         const updatedOld = replaceContentLines(entry.oldText, blockTarget.block.oldStart, blockTarget.block.oldEnd, accepted)
         store.update(blockTarget.id, { oldText: updatedOld })
@@ -737,6 +738,13 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           { id: entry.id, path: entry.path, entry: afterEntry, fileText: undefined })
         persistSession()
         const fullyResolved = updatedOld === entry.newText
+        if (fullyResolved && blockTarget.removeWhenResolved === true) {
+          store.remove(blockTarget.id)
+          pushUndo(blockTarget.sessionId,
+            { id: entry.id, path: entry.path, entry: afterEntry, fileText: undefined },
+            { id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
+          persistSession(true)
+        }
         const kept: DiffApprovalActionValue = fullyResolved ? { outcome: 'kept', resolved: true } : { outcome: 'kept' }
         return { ok: true, value: kept }
       }
@@ -781,6 +789,13 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         if (undo !== undefined) pushUndo(blockTarget.sessionId, undo.before, undo.after)
         persistSession()
         const fullyResolved = normalizeEol(updatedNew) === normalizeEol(entry.oldText)
+        if (fullyResolved && blockTarget.removeWhenResolved === true) {
+          store.remove(blockTarget.id)
+          pushUndo(blockTarget.sessionId,
+            { id: entry.id, path: entry.path, entry: afterEntry, fileText: undefined },
+            { id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
+          persistSession(true)
+        }
         const reverted: DiffApprovalActionValue = fullyResolved ? { outcome: 'reverted', resolved: true } : { outcome: 'reverted' }
         return { ok: true, value: reverted }
       }
@@ -1003,7 +1018,12 @@ function blockTargetOf(payload: unknown): DiffApprovalBlockTarget | undefined {
   const { oldStart, oldEnd, newStart, newEnd } = block as Record<string, unknown>
   const numbers = [oldStart, oldEnd, newStart, newEnd]
   if (!numbers.every((value) => typeof value === 'number' && Number.isFinite(value))) return undefined
-  return { ...target, block: { oldStart, oldEnd, newStart, newEnd } as DiffApprovalBlockTarget['block'] }
+  const removeWhenResolved = (payload as Record<string, unknown>).removeWhenResolved
+  return {
+    ...target,
+    block: { oldStart, oldEnd, newStart, newEnd } as DiffApprovalBlockTarget['block'],
+    removeWhenResolved: typeof removeWhenResolved === 'boolean' ? removeWhenResolved : undefined,
+  }
 }
 
 /** Narrow a wire payload to one keep/revert target. */
