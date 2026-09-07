@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.18.0](https://github.com/9087/dsh-diff-approval/compare/v0.17.0...v0.18.0) (2026-09-07)
+
+### Features
+
+* diff-view customization with live preview and an HSV color picker ([27278f8](https://github.com/9087/dsh-diff-approval/commit/27278f87374ad3416d4b4390619068a51603fc6b))
+* rename the keybindings settings group to Shortcuts and add a description ([a8c51c5](https://github.com/9087/dsh-diff-approval/commit/a8c51c5128f4dc2f02a39d4e37aca33c6aef87df))
+
+### Bug Fixes
+
+* hide the produced-file view-diff button when its chip is hidden ([21c890b](https://github.com/9087/dsh-diff-approval/commit/21c890bfb310d746941d9670ce4ba10da3cdd5d0))
+* match produced-file chip path to pending path tolerantly (rel/abs, seps, case) ([03aa099](https://github.com/9087/dsh-diff-approval/commit/03aa099867622f3984ca947f3aa1958ccc23b0b1))
+* prompt remove-or-keep on the last block and ride it on the keep/revert RPC ([6d6a8a4](https://github.com/9087/dsh-diff-approval/commit/6d6a8a4334a1af2b251d0a79e945f09983cdf67c))
+
 ## [0.17.0](https://github.com/9087/dsh-diff-approval/compare/v0.16.0...v0.17.0) (2026-09-06)
 
 ### Features
