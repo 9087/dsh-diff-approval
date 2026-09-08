@@ -35,7 +35,7 @@
  */
 
 import { readFile, rm } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { isAbsolute, relative, resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { expandHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
@@ -54,7 +54,7 @@ import { detectVcsRoot, listVcsChanges } from './vcs.ts'
 import type { VcsChange, VcsImportInput, ShellExecutorLike } from './vcs.ts'
 import type {
   DiffApprovalActionValue, DiffApprovalBlockTarget, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue,
-  PendingEntry, PendingEntryKind, PendingFileDiff, VcsImportValue,
+  DiffApprovalPreviewImageValue, PendingEntry, PendingEntryKind, PendingFileDiff, VcsImportValue,
 } from './types.ts'
 
 export type {
@@ -222,6 +222,27 @@ function sessionOfAgent(agent: unknown): SessionId | undefined {
   if (typeof agent !== 'object' || agent === null) return undefined
   const id = (agent as Record<string, unknown>).id
   return typeof id === 'string' && id.length > 0 ? SessionId(id) : undefined
+}
+
+/**
+ * The MIME type for an image path by its lowercased extension. An unknown or
+ * non-image extension falls back to the generic binary type, which browsers
+ * still render when the bytes decode; the common Markdown image formats are
+ * covered so a preview inlines as the right content type.
+ * @param path - the image's OS path.
+ * @returns the MIME type.
+ */
+function imageMimeOf(path: string): string {
+  const lower = path.toLowerCase()
+  if (lower.endsWith('.png')) return 'image/png'
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
+  if (lower.endsWith('.gif')) return 'image/gif'
+  if (lower.endsWith('.webp')) return 'image/webp'
+  if (lower.endsWith('.svg')) return 'image/svg+xml'
+  if (lower.endsWith('.avif')) return 'image/avif'
+  if (lower.endsWith('.bmp')) return 'image/bmp'
+  if (lower.endsWith('.ico')) return 'image/x-icon'
+  return 'application/octet-stream'
 }
 
 /**
@@ -929,6 +950,33 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const value: DiffApprovalOpenValue = { outcome: 'opened' }
         return { ok: true, value }
       }
+      case 'preview-image': {
+        const image = previewImageTargetOf(payload)
+        if (image === undefined) return rpcError('sessionId and path must be valid')
+        await ensureLoaded()
+        // Inline one workspace image for the Markdown preview. Reads are confined
+        // to the session's workspace: a reference that resolves outside it (a
+        // `..` escape, an absolute path elsewhere, or a different workspace) is
+        // refused, and an absent/unreadable file answers with no data URI.
+        const workspace = workspaceOf(image.sessionId)
+        if (workspace === undefined) return rpcError('image unavailable: the session has no workspace')
+        let dataUri: string | undefined
+        try {
+          const target = await ctx.fs.resolve(image.path, { signal })
+          const workspaceTarget = await ctx.fs.resolve(workspace.path, {})
+          const osPath = ctx.fs.processPath(target)
+          const workspaceOs = ctx.fs.processPath(workspaceTarget)
+          const inside = relative(workspaceOs, osPath)
+          if (inside !== '' && !inside.startsWith('..') && !isAbsolute(inside)) {
+            const bytes = await readFile(osPath)
+            if (bytes.length > 0) dataUri = `data:${imageMimeOf(osPath)};base64,${bytes.toString('base64')}`
+          }
+        } catch {
+          // Unresolvable, outside the workspace, or unreadable: leave it undefined.
+        }
+        const value: DiffApprovalPreviewImageValue = { dataUri }
+        return { ok: true, value }
+      }
       default:
         return rpcError(`unknown endpoint ${JSON.stringify(endpoint)}`)
     }
@@ -1034,6 +1082,16 @@ function targetOf(payload: unknown): { sessionId: SessionId; id: string } | unde
   const id = (payload as Record<string, unknown>).id
   if (typeof id !== 'string' || id.length === 0) return undefined
   return { sessionId, id }
+}
+
+/** Narrow a wire payload to one preview-image target. */
+function previewImageTargetOf(payload: unknown): { sessionId: SessionId; path: string } | undefined {
+  const sessionId = sessionOf(payload)
+  if (sessionId === undefined) return undefined
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
+  const path = (payload as Record<string, unknown>).path
+  if (typeof path !== 'string' || path.length === 0) return undefined
+  return { sessionId, path }
 }
 
 /** Narrow a wire payload to one open target: the keep/revert pair plus the action. */

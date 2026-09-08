@@ -329,7 +329,7 @@ function lineSimilarity(oldText: string, newText: string): number {
  * @param newText - the added side's line text.
  * @returns the del-side and add-side runs, or `undefined` to skip annotation.
  */
-function intraRunsOf(
+export function intraRunsOf(
   oldText: string,
   newText: string,
 ): { del: IntraRun[]; add: IntraRun[] } | undefined {

@@ -49,6 +49,7 @@ function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
     onBlockKeep: vi.fn(async () => {}),
     onBlockRevert: vi.fn(async () => {}),
     onOpen: vi.fn(async () => {}),
+    onPreviewImage: vi.fn(async (_sessionId: SessionId, _path: string) => undefined),
     onPasteReference: vi.fn(),
     onUndo: vi.fn(),
     onRedo: vi.fn(),
@@ -2473,5 +2474,71 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('action.viewUnified'))
     expect(document.querySelector('[data-diff-hscroll]')).toBeNull()
     expect(localStorage.getItem('diff-approval:split-mode')).toBe('0')
+  })
+
+  it('offers a rendered Markdown preview that toggles for a Markdown file', () => {
+    const file = entry({ id: 'entry-md', path: '/repo/README.md', oldText: '# Title\nOld line\n', newText: '# Title\nNew line\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+
+    const toggle = document.querySelector('[data-diff-md-preview]') as HTMLButtonElement
+    expect(toggle).not.toBeNull()
+    // Starts on the source-line diff.
+    expect(document.querySelector('[data-diff-md-preview-body]')).toBeNull()
+
+    // Toggle to the rendered Markdown preview: single-column by default.
+    fireEvent.click(toggle)
+    const body = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
+    expect(body).not.toBeNull()
+    expect(body.dataset.diffMdMode).toBe('single')
+    expect(body.querySelector('.mdBlock, .mdAdd')).not.toBeNull()
+    // Single-column mirrors the source unified diff: whole-block tint only,
+    // no word-level highlight.
+    expect(body.querySelector('.mdWordDel')).toBeNull()
+    expect(body.querySelector('.mdWordAdd')).toBeNull()
+    // Single-column preview shows the diff ruler beside the scrollbar.
+    expect(document.querySelector('[data-diff-approval-ruler]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-ruler-marker]')).not.toBeNull()
+    // The language dropdown and word-wrap toggle are source-diff only.
+    expect(document.querySelector('[data-diff-lang]')).toBeNull()
+    expect(document.querySelector('[data-diff-wrap]')).toBeNull()
+
+    // The existing view toggle drives the before/after double-column layout.
+    fireEvent.click(document.querySelector('[data-diff-toggle-view]') as HTMLButtonElement)
+    const dbl = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
+    expect(dbl.dataset.diffMdMode).toBe('double')
+    expect(dbl.querySelectorAll('.mdDouble, .mdDoubleCol').length).toBeGreaterThan(0)
+    // Deleted lines render in the before column, added lines in the after column.
+    expect(dbl.querySelectorAll('.mdDoubleCol .mdDel').length).toBeGreaterThan(0)
+    expect(dbl.querySelectorAll('.mdDoubleCol .mdAdd').length).toBeGreaterThan(0)
+    // Word-level highlights survive in each column.
+    expect(dbl.querySelectorAll('.mdDoubleCol .mdWordDel').length).toBeGreaterThan(0)
+    expect(dbl.querySelectorAll('.mdDoubleCol .mdWordAdd').length).toBeGreaterThan(0)
+    // The ruler is single-column only.
+    expect(document.querySelector('[data-diff-approval-ruler]')).toBeNull()
+
+    // Toggle back to the source diff.
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLButtonElement)
+    expect(document.querySelector('[data-diff-md-preview-body]')).toBeNull()
+  })
+
+  it('does not offer the Markdown preview toggle for a non-Markdown file', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    expect(document.querySelector('[data-diff-md-preview]')).toBeNull()
+  })
+
+  it('starts in the Markdown preview when the setting is enabled', () => {
+    localStorage.setItem('diff-approval:md-preview', '1')
+    const file = entry({ id: 'entry-md', path: '/repo/README.md', oldText: '# T\n', newText: '# T\n\nNew\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    expect(document.querySelector('[data-diff-md-preview-body]')).not.toBeNull()
   })
 })

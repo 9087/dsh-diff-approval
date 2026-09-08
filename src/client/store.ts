@@ -32,6 +32,8 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   importVcs: (sessionId: SessionId, includeUntracked: boolean) => Promise<VcsImportValue>
   /** Open one file with its default application or reveal it in the folder. */
   open: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
+  /** Inline one workspace image as a base64 data URI (empty when unreadable). */
+  previewImage: (sessionId: SessionId, path: string) => Promise<string | undefined>
   /** Drop every local fact (used on connection reset). */
   reset: () => void
   /** Acknowledge a redo-cleared notice so the panel surfaces it only once. */
@@ -211,6 +213,14 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
           ...snapshot,
           error: error instanceof Error ? error.message : String(error),
         })
+      }
+    },
+    async previewImage(sessionId, path) {
+      try {
+        const value = await port.previewImage(sessionId, path)
+        return value.dataUri
+      } catch {
+        return undefined
       }
     },
     reset() {

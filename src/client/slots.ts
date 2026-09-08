@@ -42,6 +42,9 @@ export interface PendingPanelFace {
   onBlockRevert: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange, removeWhenResolved?: boolean) => Promise<void>
   /** Open one file with its default application or reveal it in the folder. */
   onOpen: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
+  /** Inline one workspace image as a base64 data URI for the Markdown preview
+   * (empty when the host cannot read it). */
+  onPreviewImage: (sessionId: SessionId, path: string) => Promise<string | undefined>
   /** Paste a copied reference into the session's chat input and focus it. */
   onPasteReference: (sessionId: SessionId, reference: string) => void
   /** Undo the session's last keep/revert, then refresh the list; resolves to the affected entry id when it is still pending. */

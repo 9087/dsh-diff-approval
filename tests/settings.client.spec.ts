@@ -4,8 +4,8 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import {
   DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_LINE_HEIGHT_DEFAULT, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN,
   currentDiffAddColor, currentDiffDelColor,
-  diffAddColor, diffDelColor, diffFontScale, diffLineHeight, matchesShortcut, quickSummonKey,
-  setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setQuickSummonKey, setTabWidth, tabWidth,
+  diffAddColor, diffDelColor, diffFontScale, diffLineHeight, matchesShortcut, mdPreviewEnabled, quickSummonKey,
+  setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setMdPreviewEnabled, setQuickSummonKey, setTabWidth, tabWidth,
 } from '../src/client/settings.ts'
 
 const TAB_WIDTH_KEY = 'diff-approval:tab-size'
@@ -14,6 +14,7 @@ const DIFF_FONT_SCALE_KEY = 'diff-approval:diff-font-scale'
 const DIFF_LINE_HEIGHT_KEY = 'diff-approval:diff-line-height'
 const DIFF_ADD_COLOR_KEY = 'diff-approval:diff-add-color'
 const DIFF_DEL_COLOR_KEY = 'diff-approval:diff-del-color'
+const MD_PREVIEW_KEY = 'diff-approval:md-preview'
 
 describe('settings.tabWidth', () => {
   beforeEach(() => localStorage.clear())
@@ -46,6 +47,20 @@ describe('settings.quickSummon', () => {
     setQuickSummonKey('Ctrl+Shift+P')
     expect(localStorage.getItem(QUICK_SUMMON_KEY)).toBe('Ctrl+Shift+P')
     expect(quickSummonKey()).toBe('Ctrl+Shift+P')
+  })
+})
+
+describe('settings.mdPreview', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('defaults to off (source diff shown)', () => {
+    expect(mdPreviewEnabled()).toBe(false)
+  })
+
+  it('persists a chosen default and reads it back', () => {
+    setMdPreviewEnabled(true)
+    expect(localStorage.getItem(MD_PREVIEW_KEY)).toBe('1')
+    expect(mdPreviewEnabled()).toBe(true)
   })
 })
 

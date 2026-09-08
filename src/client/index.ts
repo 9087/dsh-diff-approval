@@ -161,6 +161,7 @@ export function apply(ctx: ClientContext): void {
       onBlockKeep: (sessionId, id, block, removeWhenResolved) => store.blockKeep(sessionId, id, block, removeWhenResolved),
       onBlockRevert: (sessionId, id, block, removeWhenResolved) => store.blockRevert(sessionId, id, block, removeWhenResolved),
       onOpen: (sessionId, id, action) => store.open(sessionId, id, action),
+      onPreviewImage: (sessionId, path) => store.previewImage(sessionId, path),
       onUndo: (sessionId) => store.undo(sessionId),
       onRedo: (sessionId) => store.redo(sessionId),
       onImportVcs: (sessionId, includeUntracked) => store.importVcs(sessionId, includeUntracked),

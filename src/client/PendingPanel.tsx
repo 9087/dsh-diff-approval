@@ -1,6 +1,6 @@
 /** Sidebar-foot pending-edit review action and the split review panel it opens. */
 
-import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Component, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from 'react'
 import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -12,6 +12,8 @@ import type { DiffApprovalBlockRange, DiffApprovalOpenAction, PendingFileDiff } 
 import type { PendingPanelFace } from './slots.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import { computeIntraLineDiff, computeWholeFileDiff } from './whole-file-diff.ts'
+import { renderMarkdownPreview } from './markdown-preview.ts'
+import { resolvePreviewImages } from './markdown-images.ts'
 import type { IntraRun, WholeFileDiffRow } from './whole-file-diff.ts'
 import { computeSideBySideDiff, searchPairs } from './split-diff.ts'
 import type { SplitPair, SplitSide } from './split-diff.ts'
@@ -20,7 +22,7 @@ import type { HighlightSpan } from './highlight.ts'
 import { langFromPath } from './lang.ts'
 import { referenceLabelOf } from './reference.ts'
 import { OPEN_FILE_EVENT } from './produced-diff.ts'
-import { includeUntrackedEnabled, keybindingOf, matchesShortcut, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
+import { includeUntrackedEnabled, keybindingOf, matchesShortcut, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setMdPreviewEnabled, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import css from './PendingPanel.module.css'
 
 /**
@@ -89,20 +91,46 @@ export function diffPathsMatch(chipPath: string, filePath: string, workspacePath
  *  (viewBox matches the size) with integer bar geometry, so every thin line
  *  lands on whole pixels and stays crisp on any display scale. */
 function ViewModeIcon({ split, size = 14 }: { split: boolean; size?: number }) {
-  // Integer-aligned thin "text line" bars: 5 lines, 1px tall, 2px apart (1px top
-  // margin), square corners, so every edge is on a whole pixel and reads crisp.
-  const lineY = [1, 4, 7, 10, 13]
-  const lineH = 1
+  // VSCode Codicon "split-horizontal" (a rounded window split by a vertical rule
+  // into two side-by-side panes) for the double-column (split) view; its
+  // single-pane counterpart for the single-column (unified) view. Scaled from
+  // the codicon 16px grid, so it matches the design those tools ship.
+  const box = 'M12.5 1h-9A2.503 2.503 0 0 0 1 3.5v9C1 13.878 2.122 15 3.5 15h9c1.378 0 2.5-1.122 2.5-2.5v-9C15 2.122 13.878 1 12.5 1Z'
+  const leftPane = 'M2 12.5v-9C2 2.673 2.673 2 3.5 2h4v12h-4c-.827 0-1.5-.673-1.5-1.5Z'
+  const rightPane = 'm12 0c0 .827-.673 1.5-1.5 1.5h-4V2h4c.827 0 1.5.673 1.5 1.5z'
+  const singlePane = 'M2 12.5v-9C2 2.673 2.673 2 3.5 2h9c.827 0 1.5.673 1.5 1.5v9c0 .827-.673 1.5-1.5 1.5h-9c-.827 0-1.5-.673-1.5-1.5Z'
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path fill="currentColor" d={split ? `${box}${leftPane}${rightPane}` : `${box}${singlePane}`} />
+    </svg>
+  )
+}
+
+/** Markdown source/preview toggle glyph: a document sheet whose interior shows
+ *  source angle brackets when the diff is in source mode, and a heading bar with
+ *  text lines when the rendered preview is shown. Custom SVG (the icon library
+ *  has no source/rendered pair), following ViewModeIcon's 14-grid so it reads
+ *  crisp at 14px. */
+function MarkdownModeIcon({ preview, size = 14 }: { preview: boolean; size?: number }) {
+  // Fill the same 12×12 footprint as ViewModeIcon (content x=1..13, y=1..13) so
+  // this sparse outline glyph does not read smaller than the neighboring
+  // source/split icons; the sheet is drawn on half-pixel edges to stay crisp.
   return (
     <svg width={size} height={size} viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
-      {split
+      <rect x="1" y="1" width="12" height="12" rx="1.25" stroke="currentColor" strokeWidth="1" />
+      {preview
         ? (
           <>
-            {lineY.map(y => <rect key={`l${y}`} x="1" y={y} width="5" height={lineH} fill="currentColor" />)}
-            {lineY.map(y => <rect key={`r${y}`} x="8" y={y} width="5" height={lineH} fill="currentColor" />)}
+            <rect x="3.5" y="3.5" width="7" height="1.5" fill="currentColor" />
+            <rect x="3.5" y="6.5" width="7" height="1" fill="currentColor" />
+            <rect x="3.5" y="8.5" width="5" height="1" fill="currentColor" />
           </>
-        ) : (
-          lineY.map(y => <rect key={`u${y}`} x="1" y={y} width="12" height={lineH} fill="currentColor" />)
+        )
+        : (
+          <>
+            <path d="M5.2 4.2 L3.2 7 L5.2 9.8" stroke="currentColor" strokeWidth="1.2" fill="none" />
+            <path d="M8.8 4.2 L10.8 7 L8.8 9.8" stroke="currentColor" strokeWidth="1.2" fill="none" />
+          </>
         )}
     </svg>
   )
@@ -335,6 +363,19 @@ function compareFileNames(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0
 }
 
+/** A tiny React error boundary for the best-effort Markdown preview. DSH's
+ *  `MarkdownText` is built for the conversation message stream; if it throws in
+ *  this standalone panel context, degrade to a note rather than let the error
+ *  unmount the whole panel (which reads as "the plugin disappeared"). */
+class MarkdownPreviewBoundary extends Component<{ children: ReactNode; fallback: ReactNode }, { failed: boolean }> {
+  override state = { failed: false }
+  static getDerivedStateFromError(): { failed: boolean } { return { failed: true } }
+  override componentDidCatch(): void { /* best-effort preview: swallow the render error. */ }
+  override render(): ReactNode {
+    return this.state.failed ? this.props.fallback : this.props.children
+  }
+}
+
 /**
  * Open the DSH settings dialog and switch to this plugin's section. The
  * settings shell keeps its open state and the active section id as
@@ -390,6 +431,8 @@ interface PendingDiffProps {
   onBlockKeep: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
   onBlockRevert: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
   onOpen: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
+  /** Inline one workspace image as a base64 data URI for the Markdown preview. */
+  onPreviewImage: (sessionId: SessionId, path: string) => Promise<string | undefined>
   /** The file list is collapsed to a floating button (its width would exceed a
    * third of the panel); the diff then takes the full width. */
   floatMode: boolean
@@ -1529,6 +1572,37 @@ function rowRangeOf(selection: Selection | null): RowRange | undefined {
   return { start, end }
 }
 
+/** One ruler marker for the rendered Markdown preview. */
+interface PreviewRulerMarker {
+  top: number
+  height: number
+  kind: 'del' | 'add'
+}
+
+/**
+ * Measure the single-column preview's change blocks to position its ruler
+ * markers by RENDERED height, so a tall block (an inline image, a large code
+ * fence) is not miscounted by source-line fractions. `offsetTop`/`offsetHeight`
+ * are relative to `.mdPreviewBody` (which is the blocks' positioned parent);
+ * each change block was rendered as one run, so one marker per block. A floor
+ * keeps a thin block visible on a long document.
+ * @param container - the rendered preview body.
+ * @returns markers positioned as fractions of the content's scroll height.
+ */
+function markdownPreviewMarkers(container: HTMLElement): PreviewRulerMarker[] {
+  const total = container.scrollHeight
+  if (total === 0) return []
+  const markers: PreviewRulerMarker[] = []
+  for (const el of Array.from(container.querySelectorAll<HTMLElement>('.mdBlock.mdAdd, .mdBlock.mdDel'))) {
+    markers.push({
+      top: (el.offsetTop / total) * 100,
+      height: Math.max((el.offsetHeight / total) * 100, 0.5),
+      kind: el.classList.contains('mdDel') ? 'del' : 'add',
+    })
+  }
+  return markers
+}
+
 /** One row of the file list: the clickable head in the left pane. */
 function PendingFileRow({ file, selected, failedMessage, t, onSelect }: PendingFileRowProps) {
   const stats = useMemo(
@@ -1561,7 +1635,7 @@ function PendingFileRow({ file, selected, failedMessage, t, onSelect }: PendingF
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedMessage, onPasteReference, onToast, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, floatMode, floatOpen, onToggleFileList }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedMessage, onPasteReference, onToast, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, floatMode, floatOpen, onToggleFileList }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -1596,6 +1670,19 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // toggle can switch the view live (and persist the choice); a change in DSH
   // Settings still applies on the next panel open.
   const [splitView, setSplitView] = useState(() => splitMode())
+  // Rendered-Markdown preview on/off (only offered for Markdown files). When on,
+  // the diff body shows the rendered Markdown instead of the source-line diff;
+  // the existing single/side-by-side view toggle (`splitView`) drives whether it
+  // is single-column (merged, unified-like) or double-column (before | after).
+  // The default comes from the persisted setting (settable in DSH Settings).
+  const [mdPreview, setMdPreview] = useState(() => mdPreviewEnabled())
+  // The preview body element, for the post-render local-image resolution pass.
+  const mdPreviewBodyRef = useRef<HTMLDivElement>(null)
+  // The single-column preview's diff-ruler markers, measured from the rendered
+  // blocks (height-aware) after each render and again once local images inline.
+  const [mdRulerMarkers, setMdRulerMarkers] = useState<PreviewRulerMarker[]>([])
+  // Bumped after local images inline so the ruler re-measures their true height.
+  const [mdImageTick, setMdImageTick] = useState(0)
   // Rows of lead left above a jumped-to diff block (configurable in Settings).
   const leadRows = navLeadRows()
   // Diff-view customization (font/line-height scale, add/del base colors) read
@@ -1652,6 +1739,20 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     splitView ? computeSideBySideDiff(model.diff.rows, true).pairs : null
   ), [splitView, model])
 
+  // Inline local Markdown images after the preview body renders. The preview is
+  // injected as innerHTML, so `<img src="details/x.png">` keeps its relative
+  // path; rewrite it (via the host RPC) to a data URI so it actually renders.
+  // Runs whenever the preview mounts, the layout toggles, or the file changes.
+  // After inlining, bump the tick so the ruler re-measures the images' true
+  // heights (a data URI gives the <img> a real size).
+  useEffect(() => {
+    if (!mdPreview) return
+    const body = mdPreviewBodyRef.current
+    if (body === null) return
+    void resolvePreviewImages(body, file.path, workspacePath, (path) => onPreviewImage(file.sessionId, path))
+      .then(() => setMdImageTick(tick => tick + 1))
+  }, [mdPreview, splitView, file.path, file.sessionId, workspacePath, onPreviewImage])
+
   // Overview-ruler markers: one per maximal run of same-kind changed rows,
   // positioned as a fraction of the whole file so the scrollbar strip mirrors
   // where each added/deleted run sits. Percentage positioning keeps the strip
@@ -1684,6 +1785,19 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     if (runStart !== -1) flush(rows.length - 1)
     return markers
   }, [model])
+
+  // Measure the single-column preview's change blocks into ruler markers once
+  // the preview is shown and after each re-render/image-inline. Falls back to
+  // the source-line `rulerMarkers` when the blocks cannot be laid out (jsdom),
+  // so the ruler still appears while keeping height-aware positions in a
+  // real browser.
+  useLayoutEffect(() => {
+    if (!mdPreview || splitView) return
+    const body = mdPreviewBodyRef.current
+    if (body === null) return
+    const measured = markdownPreviewMarkers(body)
+    setMdRulerMarkers(measured.length > 0 ? measured : rulerMarkers)
+  }, [mdPreview, splitView, file.oldText, file.newText, mdImageTick, rulerMarkers])
 
   // Syntax highlight arrives a tick after selection so clicking a file never
   // blocks the diff paint on tokenization; the plain-text diff shows first.
@@ -2590,6 +2704,23 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
             <ViewModeIcon split={splitView} />
           </button>
         </Tooltip>
+        {lang === 'markdown' && (
+          <Tooltip label={t(mdPreview ? 'action.viewSource' : 'action.viewPreview')} side="bottom" delayMs={500}>
+            <button
+              type="button"
+              className={`${css.action} ${css.iconAction}`}
+              data-diff-md-preview
+              aria-label={t(mdPreview ? 'action.viewSource' : 'action.viewPreview')}
+              onClick={() => {
+                const next = !mdPreview
+                setMdPreview(next)
+                setMdPreviewEnabled(next)
+              }}
+            >
+              <MarkdownModeIcon preview={mdPreview} />
+            </button>
+          </Tooltip>
+        )}
         <span className={css.flexSpacer} />
         <button
           type="button"
@@ -2612,7 +2743,31 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       </div>
       {failedMessage !== undefined && <p className={css.actionError} data-diff-action-error>{failedMessage}</p>}
       {file.missing && <p className={css.missingHint}>{t('panel.missingHint')}</p>}
-      {splitView ? (
+      {mdPreview ? (
+        <MarkdownPreviewBoundary fallback={<div className={css.mdPreviewFallback} data-diff-md-preview-fallback>{t('panel.mdPreviewFailed')}</div>}>
+          <div className={css.mdPreviewWrap}>
+            <div
+              className={`${css.mdPreviewBody} ${splitView ? css.mdPreviewDouble : css.mdPreviewSingle}`}
+              data-diff-md-preview-body
+              data-diff-md-mode={splitView ? 'double' : 'single'}
+              ref={mdPreviewBodyRef}
+              dangerouslySetInnerHTML={{ __html: renderMarkdownPreview(file.oldText, file.newText, splitView ? 'double' : 'single') }}
+            />
+            {!splitView && mdRulerMarkers.length > 0 && (
+              <div className={css.overviewRuler} data-diff-approval-ruler aria-hidden="true">
+                {mdRulerMarkers.map((marker, index) => (
+                  <div
+                    key={index}
+                    className={`${css.overviewMarker} ${marker.kind === 'del' ? css.markerDel : css.markerAdd}`}
+                    data-diff-ruler-marker={marker.kind}
+                    style={{ top: `${marker.top}%`, height: `${marker.height}%` }}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        </MarkdownPreviewBoundary>
+      ) : splitView ? (
         <SplitDiff
           ref={splitDiffRef}
           file={file}
@@ -2883,42 +3038,46 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
           </Tooltip>
         )}
         <span className={css.flexSpacer} />
-        <Menu
-          open={langMenuOpen}
-          portal
-          compact
-          align="end"
-          items={langMenuItems}
-          selectedId={langOverride ?? ''}
-          onSelect={(id) => { setLangOverride(id === '' ? undefined : id); setLangMenuOpen(false) }}
-          onClose={() => { setLangMenuOpen(false) }}
-          anchor={(
-            <Tooltip label={t('action.langSelect')} side="top" delayMs={500}>
+        {!mdPreview && (
+          <>
+            <Menu
+              open={langMenuOpen}
+              portal
+              compact
+              align="end"
+              items={langMenuItems}
+              selectedId={langOverride ?? ''}
+              onSelect={(id) => { setLangOverride(id === '' ? undefined : id); setLangMenuOpen(false) }}
+              onClose={() => { setLangMenuOpen(false) }}
+              anchor={(
+                <Tooltip label={t('action.langSelect')} side="top" delayMs={500}>
+                  <button
+                    type="button"
+                    className={css.langSelect}
+                    data-diff-lang
+                    aria-label={t('action.langSelect')}
+                    onClick={() => { setLangMenuOpen(value => !value) }}
+                  >
+                    <span className={css.langLabel}>{langLabel}</span>
+                    <IconChevronDownOutline14 size={12} />
+                  </button>
+                </Tooltip>
+              )}
+            />
+            <Tooltip label={langWrap ? t('action.toggleOff') : t('action.toggleOn')} side="top" delayMs={500}>
               <button
                 type="button"
-                className={css.langSelect}
-                data-diff-lang
-                aria-label={t('action.langSelect')}
-                onClick={() => { setLangMenuOpen(value => !value) }}
+                className={`${css.langSelect}${langWrap ? ' ' + css.wrapActive : ''}`}
+                data-diff-wrap
+                aria-label={langWrap ? t('action.toggleOff') : t('action.toggleOn')}
+                aria-pressed={langWrap}
+                onClick={toggleLangWrap}
               >
-                <span className={css.langLabel}>{langLabel}</span>
-                <IconChevronDownOutline14 size={12} />
+                <span className={css.langLabel}>{t('action.wrap')}</span>
               </button>
             </Tooltip>
-          )}
-        />
-        <Tooltip label={langWrap ? t('action.toggleOff') : t('action.toggleOn')} side="top" delayMs={500}>
-          <button
-            type="button"
-            className={`${css.langSelect}${langWrap ? ' ' + css.wrapActive : ''}`}
-            data-diff-wrap
-            aria-label={langWrap ? t('action.toggleOff') : t('action.toggleOn')}
-            aria-pressed={langWrap}
-            onClick={toggleLangWrap}
-          >
-            <span className={css.langLabel}>{t('action.wrap')}</span>
-          </button>
-        </Tooltip>
+          </>
+        )}
       </div>
     </div>
   )
@@ -2926,7 +3085,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPasteReference, onUndo, onRedo, onImportVcs, onAckRedoCleared, collapseSidebar, t,
+  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onUndo, onRedo, onImportVcs, onAckRedoCleared, collapseSidebar, t,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
   // A newly created session is selected but still blank (no messages yet); it
@@ -3587,6 +3746,7 @@ export function PendingPanel({
                     onBlockKeep={blockKeepWithPrompt}
                     onBlockRevert={blockRevertWithPrompt}
                     onOpen={onOpen}
+                    onPreviewImage={onPreviewImage}
                     floatMode={floatMode}
                     floatOpen={floatOpen}
                     onToggleFileList={toggleFileList}

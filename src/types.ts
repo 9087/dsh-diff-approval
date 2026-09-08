@@ -118,6 +118,21 @@ export interface VcsImportValue {
   detected: boolean
 }
 
+/** Target of one preview-image read. */
+export interface DiffApprovalPreviewImageTarget {
+  sessionId: SessionId
+  /** The backend resolution path of the image (workspace-relative or absolute display path). */
+  path: string
+}
+
+/** Value returned by the channel's preview-image endpoint. */
+export interface DiffApprovalPreviewImageValue {
+  /** The image's base64 data URI (MIME from the file's extension), or `undefined`
+   * when the host could not read the file (absent, outside the workspace, or
+   * unreadable) — a missing value leaves the image unresolved in the preview. */
+  dataUri?: string | undefined
+}
+
 /** Value returned by the channel's keep and revert endpoints. */
 export interface DiffApprovalActionValue {
   /** What the request did; `missing` means no pending entry existed. */

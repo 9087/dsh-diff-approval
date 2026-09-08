@@ -4,6 +4,7 @@ const PASTE_ON_COPY_KEY = 'diff-approval:paste-on-copy'
 const IMPORT_UNTRACKED_KEY = 'diff-approval:import-untracked'
 const TAB_WIDTH_KEY = 'diff-approval:tab-size'
 const SPLIT_MODE_KEY = 'diff-approval:split-mode'
+const MD_PREVIEW_KEY = 'diff-approval:md-preview'
 const NAV_LEAD_KEY = 'diff-approval:nav-lead-rows'
 const DIFF_FONT_SCALE_KEY = 'diff-approval:diff-font-scale'
 const DIFF_LINE_HEIGHT_KEY = 'diff-approval:diff-line-height'
@@ -175,6 +176,21 @@ export function splitMode(): boolean {
 /** Persist the split-view preference. */
 export function setSplitMode(value: boolean): void {
   localStorage.setItem(SPLIT_MODE_KEY, value ? '1' : '0')
+}
+
+/**
+ * Whether the rendered Markdown preview is shown by default (for Markdown files).
+ * Default off: the source diff is shown unless the panel toggle is used. Only an
+ * explicit `'1'` enables the preview default.
+ * @returns whether the Markdown preview default is enabled.
+ */
+export function mdPreviewEnabled(): boolean {
+  return localStorage.getItem(MD_PREVIEW_KEY) === '1'
+}
+
+/** Persist the Markdown-preview default preference. */
+export function setMdPreviewEnabled(value: boolean): void {
+  localStorage.setItem(MD_PREVIEW_KEY, value ? '1' : '0')
 }
 
 /**

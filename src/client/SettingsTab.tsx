@@ -4,7 +4,7 @@ import { useState } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
-import { DEFAULT_KEYBINDINGS, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, includeUntrackedEnabled, keybindingOf, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setIncludeUntrackedEnabled, setKeybinding, setNavLeadRows, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
+import { DEFAULT_KEYBINDINGS, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, includeUntrackedEnabled, keybindingOf, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setIncludeUntrackedEnabled, setKeybinding, setMdPreviewEnabled, setNavLeadRows, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import { ColorPicker } from './ColorPicker.tsx'
 import css from './PendingPanel.module.css'
@@ -362,6 +362,7 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const [tab, setTabState] = useState(tabWidth)
   const [tabOpen, setTabOpen] = useState(false)
   const [split, setSplitState] = useState(splitMode)
+  const [mdPreview, setMdPreviewState] = useState(mdPreviewEnabled)
   const [lead, setLeadState] = useState(navLeadRows)
   // Diff-view customization defaults to the current values (100% font size =
   // current; line height defaults to the fixed 22px).
@@ -403,6 +404,10 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const setSplit = (value: boolean): void => {
     setSplitState(value)
     setSplitMode(value)
+  }
+  const setMdPreview = (value: boolean): void => {
+    setMdPreviewState(value)
+    setMdPreviewEnabled(value)
   }
   const setLead = (value: number): void => {
     setLeadState(value)
@@ -500,6 +505,14 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
               value={split}
               onSelect={setSplit}
               dataAttribute="data-diff-split-mode-select"
+              t={t}
+            />
+            <PreferenceRow
+              title={t('panel.mdPreview')}
+              description={t('panel.mdPreviewDesc')}
+              value={mdPreview}
+              onSelect={setMdPreview}
+              dataAttribute="data-diff-md-preview-select"
               t={t}
             />
             <StepperRow

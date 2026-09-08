@@ -7,7 +7,7 @@
 
 import type { ClientConnectionRpc, SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type {
-  DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, PendingFileDiff, VcsImportValue,
+  DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, PendingFileDiff, VcsImportValue,
 } from '../types.ts'
 
 /** The channel the host half registers and this port calls. */
@@ -33,6 +33,8 @@ export interface DiffApprovalPort {
   importVcs(sessionId: SessionId, includeUntracked: boolean): Promise<VcsImportValue>
   /** Open one file with its default application or reveal it in the folder. */
   open(sessionId: SessionId, id: string, action: DiffApprovalOpenAction): Promise<DiffApprovalOpenValue>
+  /** Read one workspace image and inline it as a base64 data URI (for the Markdown preview). */
+  previewImage(sessionId: SessionId, path: string): Promise<DiffApprovalPreviewImageValue>
 }
 
 /** Build the port over one generic RPC caller.
@@ -67,6 +69,9 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
     },
     async open(sessionId, id, action) {
       return openOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'open', { sessionId, id, action }))
+    },
+    async previewImage(sessionId, path) {
+      return previewImageOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'preview-image', { sessionId, path }))
     },
   }
 }
@@ -158,4 +163,13 @@ function openOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffA
     throw new Error('the action returned a malformed outcome')
   }
   return { outcome }
+}
+
+/** Narrow the preview-image endpoint's value; a malformed wire value is a failure. */
+function previewImageOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffApprovalPreviewImageValue {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+  const value: unknown = result.value
+  if (typeof value !== 'object' || value === null) throw new Error('the preview image returned a malformed value')
+  const dataUri = (value as Record<string, unknown>).dataUri
+  return typeof dataUri === 'string' && dataUri.length > 0 ? { dataUri } : {}
 }

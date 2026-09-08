@@ -480,6 +480,186 @@
   height: 132px;
 }
 
+/* Rendered-Markdown preview (Markdown files). Single column merges the
+   add/remove/context runs (unified-like) with diff colors; double column shows
+   the before/after renderings side by side. */
+.mdPreviewWrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+}
+.mdPreviewBody {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  padding: 12px 16px;
+  color: var(--dsw-alias-label-primary);
+}
+.mdPreviewSingle {
+  display: block;
+}
+.mdPreviewDouble {
+  display: flex;
+}
+/* One diff run's rendered block, tinted by its run kind. These class names are
+   emitted as raw strings by renderMarkdownPreview via dangerouslySetInnerHTML,
+   so they must stay global (not CSS-module-scoped). */
+.mdPreviewBody :global(.mdBlock) {
+  margin-bottom: 12px;
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+.mdPreviewBody :global(.mdAdd) {
+  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 10%, transparent);
+}
+.mdPreviewBody :global(.mdDel) {
+  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
+}
+/* Word-level highlight inside a changed block: the specific changed words,
+   deeper than the whole-block tint so they read as the actual edit. */
+.mdPreviewBody :global(.mdWordDel) {
+  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.mdPreviewBody :global(.mdWordAdd) {
+  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+/* Double column: before | after, aligned row by row (a deletion and its
+   replacement addition share one row, context sits on both sides), so the two
+   sides stay on the same horizontal line. The per-row divider stretches the
+   row's height, forming a contiguous rule. */
+.mdPreviewBody :global(.mdDouble) {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+}
+.mdPreviewBody :global(.mdDoubleRow) {
+  display: flex;
+  align-items: flex-start;
+  width: 100%;
+  min-width: 0;
+}
+.mdPreviewBody :global(.mdDoubleCol) {
+  flex: 1;
+  min-width: 0;
+}
+.mdPreviewBody :global(.mdDoubleRule) {
+  align-self: stretch;
+  flex: none;
+  width: 1px;
+  margin: 0 12px;
+  background: var(--dsw-alias-border-l2);
+}
+.mdPreviewFallback {
+  padding: 12px 16px;
+  font-family: var(--dsw-font-markdown-code-block);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* Rendered-Markdown preview styles, aligned with DSH via the same theme tokens:
+   body text, borders, and the code-block surface the rest of the app uses. */
+.mdPreviewBody {
+  font-size: 13px;
+  line-height: 20px;
+  word-break: break-word;
+}
+.mdPreviewBody > :first-child {
+  margin-top: 0;
+}
+.mdPreviewBody > :last-child {
+  margin-bottom: 0;
+}
+.mdPreviewBody h1,
+.mdPreviewBody h2,
+.mdPreviewBody h3,
+.mdPreviewBody h4,
+.mdPreviewBody h5,
+.mdPreviewBody h6 {
+  margin: 16px 0 8px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.mdPreviewBody h1 { font-size: 22px; }
+.mdPreviewBody h2 { font-size: 19px; }
+.mdPreviewBody h3 { font-size: 16px; }
+.mdPreviewBody h4 { font-size: 15px; }
+.mdPreviewBody h5 { font-size: 14px; }
+.mdPreviewBody h6 { font-size: 13px; }
+.mdPreviewBody p {
+  margin: 8px 0;
+}
+.mdPreviewBody ul,
+.mdPreviewBody ol {
+  margin: 8px 0;
+  padding-left: 22px;
+}
+.mdPreviewBody li {
+  margin: 2px 0;
+}
+.mdPreviewBody a {
+  color: var(--dsw-alias-state-business-primary);
+  text-decoration: none;
+}
+.mdPreviewBody a:hover {
+  text-decoration: underline;
+}
+.mdPreviewBody code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: var(--dsw-font-markdown-code-block);
+  font-size: 12.5px;
+  background: var(--dsw-alias-markdown-code-block);
+}
+.mdPreviewBody pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  overflow: auto;
+  font-family: var(--dsw-font-markdown-code-block);
+  font-size: 12.5px;
+  line-height: 18px;
+  background: var(--dsw-alias-markdown-code-block);
+}
+.mdPreviewBody pre code {
+  padding: 0;
+  background: none;
+}
+.mdPreviewBody blockquote {
+  margin: 8px 0;
+  padding: 0 12px;
+  border-left: 3px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-secondary);
+}
+.mdPreviewBody hr {
+  height: 1px;
+  margin: 16px 0;
+  border: none;
+  background: var(--dsw-alias-border-l1);
+}
+.mdPreviewBody table {
+  margin: 8px 0;
+  border-collapse: collapse;
+}
+.mdPreviewBody th,
+.mdPreviewBody td {
+  padding: 4px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+}
+.mdPreviewBody img {
+  max-width: 100%;
+}
+
 /* On/off toggle switch (replaces the dropdown pill picker in the settings).
    A track pill with a sliding thumb; sized to match the pill picker's 36px
    height. Off is a bordered empty track; on is a translucent brand-blue fill,
