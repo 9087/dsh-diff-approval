@@ -3567,12 +3567,12 @@ export function PendingPanel({
   // Quick-summon chord (default Ctrl+D): toggles the panel open/closed from
   // anywhere, matching the chord stored in Settings. The panel is always mounted
   // (its badge lives in the sidebar footer), so this handler stays live whether
-  // the modal is open or closed. Text inputs keep their own keys.
+  // the modal is open or closed. It is deliberately NOT gated on focus being
+  // outside an input: the user wants the chord to work even while the cursor is
+  // in the composer, and Ctrl+D is not a common editing combo there.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!matchesShortcut(event, quickSummonKey())) return
-      const target = event.target as Node | null
-      if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null) return
       event.preventDefault()
       // Same open path as the badge: collapse the narrow sidebar first so it
       // can't overlap the modal, then toggle.

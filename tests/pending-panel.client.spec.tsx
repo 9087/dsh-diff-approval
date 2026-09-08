@@ -660,6 +660,27 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
   })
 
+  it('quick-summons even when focus is in an input or the composer', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+
+    // Ctrl+D works with the cursor in a text input.
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    fireEvent.keyDown(input, { key: 'd', ctrlKey: true })
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+    input.remove()
+
+    // And with the cursor in the composer (a contenteditable surface).
+    const composer = document.createElement('div')
+    composer.setAttribute('contenteditable', 'true')
+    document.body.appendChild(composer)
+    fireEvent.keyDown(composer, { key: 'd', ctrlKey: true })
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+    composer.remove()
+  })
+
   it('cannot be deselected by clicking the selected row again', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     const view = render(<PendingPanel {...props} />)
