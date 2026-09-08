@@ -669,6 +669,30 @@
 .mdPreviewBody img {
   max-width: 100%;
 }
+/* A Markdown image the preview could not inline (outside the workspace, missing,
+   or unreadable): a gray placeholder box with the original path centred, so the
+   reference stays visible instead of a broken-image glyph. Block-level and
+   centered like a paragraph image, filling the content column; the class is
+   injected by the image resolver, so it stays global (not CSS-module-scoped). */
+.mdPreviewBody :global(.mdImageFallback) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto;
+  width: 100%;
+  min-height: 120px;
+  padding: 8px 12px;
+  border: 1px dashed var(--dsw-alias-border-l2);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--dsw-alias-markdown-code-block) 45%, transparent);
+  color: var(--dsw-alias-label-secondary);
+  font-family: var(--dsw-font-markdown-code-block);
+  font-size: 12px;
+  line-height: 16px;
+  text-align: center;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 
 /* On/off toggle switch (replaces the dropdown pill picker in the settings).
    A track pill with a sliding thumb; sized to match the pill picker's 36px

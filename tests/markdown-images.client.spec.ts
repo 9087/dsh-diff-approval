@@ -37,18 +37,24 @@ describe('resolvePreviewImages', () => {
     expect(imgs[1]!.getAttribute('src')).toBe('data:image/png;base64,AAA')
   })
 
-  it('keeps the original src when the host cannot read the image', async () => {
+  it('degrades to a gray placeholder with the original path when the host cannot read the image', async () => {
     const body = container('<img src="details/photo.png">')
     const resolve = vi.fn(async () => undefined)
     await resolvePreviewImages(body, '/repo/README.md', '/repo', resolve)
-    expect(body.querySelector('img')!.getAttribute('src')).toBe('details/photo.png')
+    expect(body.querySelector('img')).toBeNull()
+    const fallback = body.querySelector('[data-diff-md-image-fallback]') as HTMLElement
+    expect(fallback).not.toBeNull()
+    expect(fallback.textContent).toBe('details/photo.png')
   })
 
-  it('keeps the original src when the host call throws', async () => {
+  it('degrades to a placeholder when the host call throws', async () => {
     const body = container('<img src="details/photo.png">')
     const resolve = vi.fn(async () => { throw new Error('boom') })
     await resolvePreviewImages(body, '/repo/README.md', '/repo', resolve)
-    expect(body.querySelector('img')!.getAttribute('src')).toBe('details/photo.png')
+    expect(body.querySelector('img')).toBeNull()
+    const fallback = body.querySelector('[data-diff-md-image-fallback]') as HTMLElement
+    expect(fallback).not.toBeNull()
+    expect(fallback.textContent).toBe('details/photo.png')
   })
 
   it('ignores a fragment-only src', async () => {

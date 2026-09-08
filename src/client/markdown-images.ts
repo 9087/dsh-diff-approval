@@ -68,11 +68,24 @@ export async function resolvePreviewImages(
     if (isExternalSrc(src) || dataUriOf(src) !== undefined) continue
     const candidate = resolveImageRef(src, markdownPath, workspacePath)
     if (candidate === undefined) continue
+    let dataUri: string | undefined
     try {
-      const dataUri = await resolveImage(candidate)
-      if (typeof dataUri === 'string' && dataUri.length > 0) img.setAttribute('src', dataUri)
+      dataUri = await resolveImage(candidate)
     } catch {
-      // A host error leaves the image unresolved rather than breaking the render.
+      dataUri = undefined
+    }
+    if (typeof dataUri === 'string' && dataUri.length > 0) {
+      img.setAttribute('src', dataUri)
+    } else {
+      // The host could not inline it (outside the workspace, missing, unreadable):
+      // degrade to a gray placeholder showing the original path instead of a
+      // broken-image glyph. The img is replaced in place, so surrounding markdown
+      // keeps flowing.
+      const fallback = document.createElement('span')
+      fallback.className = 'mdImageFallback'
+      fallback.setAttribute('data-diff-md-image-fallback', src)
+      fallback.textContent = src
+      img.replaceWith(fallback)
     }
   }
 }
