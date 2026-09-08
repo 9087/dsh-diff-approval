@@ -2743,7 +2743,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       </div>
       {failedMessage !== undefined && <p className={css.actionError} data-diff-action-error>{failedMessage}</p>}
       {file.missing && <p className={css.missingHint}>{t('panel.missingHint')}</p>}
-      {mdPreview ? (
+      {mdPreview && lang === 'markdown' ? (
         <MarkdownPreviewBoundary fallback={<div className={css.mdPreviewFallback} data-diff-md-preview-fallback>{t('panel.mdPreviewFailed')}</div>}>
           <div className={css.mdPreviewWrap}>
             <div

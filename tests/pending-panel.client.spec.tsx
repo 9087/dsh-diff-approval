@@ -2562,4 +2562,14 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByText('README.md'))
     expect(document.querySelector('[data-diff-md-preview-body]')).not.toBeNull()
   })
+
+  it('shows source code (not the Markdown preview) for a non-Markdown file even when the preview setting is on', () => {
+    localStorage.setItem('diff-approval:md-preview', '1')
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    expect(document.querySelector('[data-diff-md-preview-body]')).toBeNull()
+    expect(document.querySelector('[data-diff-body]')).not.toBeNull()
+  })
 })
