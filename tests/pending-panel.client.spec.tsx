@@ -1853,9 +1853,13 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-selection-actions] [data-diff-block-prev]')).toBeNull()
     expect(document.querySelector('[data-diff-selection-actions] [data-diff-block-next]')).toBeNull()
 
-    // Keep applies the combined range in a single call.
+    // Keep applies the combined range in a single call, but since this covers
+    // the file's last change it must prompt for remove-or-keep first.
     fireEvent.click(document.querySelector('[data-diff-selection-keep]') as HTMLButtonElement)
-    expect(props.onBlockKeep).toHaveBeenCalledWith(S1, 'entry-multi', { oldStart: 1, oldEnd: 3, newStart: 1, newEnd: 3 })
+    expect(document.querySelector('[data-diff-confirm]')).not.toBeNull()
+    expect(props.onBlockKeep).not.toHaveBeenCalled()
+    fireEvent.click(document.querySelector('[data-diff-confirm-remove]') as HTMLButtonElement)
+    expect(props.onBlockKeep).toHaveBeenCalledWith(S1, 'entry-multi', { oldStart: 1, oldEnd: 3, newStart: 1, newEnd: 3 }, true)
 
     // The operated blocks leave the diff, so the selection is cleared and the
     // multi-block frame hides — the old row-range must not linger offset.
@@ -1939,6 +1943,40 @@ describe('PendingPanel', () => {
     await waitFor(() => {
       expect(document.querySelector('[data-diff-selection-actions]')).toBeNull()
     })
+  })
+
+  it('prompts for remove-or-keep when a bulk selection resolves the file\'s last block', async () => {
+    // Two change blocks ('a'->'A' and 'c'->'C'); selecting the whole file covers
+    // both, so the bulk keep resolves the file's last block and must prompt.
+    const twoBlocks = entry({ id: 'entry-blocks', oldText: 'a\nb\nc\n', newText: 'A\nb\nC\n' })
+    const props = panelProps({ read: true, files: [twoBlocks], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const code0 = rows[0]!.querySelector('[data-diff-code]') ?? rows[0]!
+    const codeLast = rows[rows.length - 1]!.querySelector('[data-diff-code]') ?? rows[rows.length - 1]!
+    const selection = {
+      isCollapsed: false,
+      anchorNode: code0.firstChild ?? code0,
+      focusNode: codeLast.firstChild ?? codeLast,
+      rangeCount: 1,
+      getRangeAt: () => ({
+        startContainer: code0.firstChild ?? code0,
+        startOffset: 0,
+        endContainer: codeLast.firstChild ?? codeLast,
+        endOffset: 1,
+      }),
+    } as unknown as Selection
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    expect(document.querySelector('[data-diff-selection-actions]')).not.toBeNull()
+    fireEvent.click(document.querySelector('[data-diff-selection-keep]') as HTMLButtonElement)
+    // Covers the file's last change too: must prompt, not fire the block RPC.
+    expect(document.querySelector('[data-diff-confirm]')).not.toBeNull()
+    expect(props.onBlockKeep).not.toHaveBeenCalled()
   })
 
   it('does not offer a reference for a selection of only removed lines', () => {

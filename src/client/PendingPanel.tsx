@@ -734,6 +734,29 @@ function changeBlocksOf(diff: ReturnType<typeof computeWholeFileDiff>): ChangeBl
   return blocks
 }
 
+/** Whether a block keep/revert range covers the file's entire change region, so
+ *  applying it leaves the file with no pending diff — the "remove or keep in
+ *  list" prompt applies. This generalises the single-block case to a selection
+ *  that spans the file's last change (a bulk block keep/revert). */
+function blockResolvesWholeFile(file: PendingFileDiff, block: DiffApprovalBlockRange): boolean {
+  const diff = computeWholeFileDiff(file.oldText, file.newText)
+  const blocks = changeBlocksOf(diff)
+  if (blocks.length === 0) return false
+  let oldMin = Number.POSITIVE_INFINITY
+  let oldMax = Number.NEGATIVE_INFINITY
+  let newMin = Number.POSITIVE_INFINITY
+  let newMax = Number.NEGATIVE_INFINITY
+  for (const cb of blocks) {
+    const range = blockRangesOf(diff.rows, cb)
+    oldMin = Math.min(oldMin, range.oldStart)
+    oldMax = Math.max(oldMax, range.oldEnd)
+    newMin = Math.min(newMin, range.newStart)
+    newMax = Math.max(newMax, range.newEnd)
+  }
+  return block.oldStart <= oldMin && block.oldEnd >= oldMax
+    && block.newStart <= newMin && block.newEnd >= newMax
+}
+
 /** Row indices whose text contains `query` (case-insensitive); empty for ''. */
 function matchingRows(rows: readonly WholeFileDiffRow[], query: string): number[] {
   if (query === '') return []
@@ -3341,8 +3364,7 @@ export function PendingPanel({
   // each file's text) keeps one interception point for both view modes.
   const blockKeepWithPrompt: PendingPanelFace['onBlockKeep'] = (sessionId, id, block, removeWhenResolved) => {
     const file = files.find(entry => entry.id === id)
-    if (removeWhenResolved === undefined && file !== undefined
-      && changeBlocksOf(computeWholeFileDiff(file.oldText, file.newText)).length === 1) {
+    if (removeWhenResolved === undefined && file !== undefined && blockResolvesWholeFile(file, block)) {
       setBlockPrompt({ action: 'keep', sessionId, id, block })
       return Promise.resolve()
     }
@@ -3350,8 +3372,7 @@ export function PendingPanel({
   }
   const blockRevertWithPrompt: PendingPanelFace['onBlockRevert'] = (sessionId, id, block, removeWhenResolved) => {
     const file = files.find(entry => entry.id === id)
-    if (removeWhenResolved === undefined && file !== undefined
-      && changeBlocksOf(computeWholeFileDiff(file.oldText, file.newText)).length === 1) {
+    if (removeWhenResolved === undefined && file !== undefined && blockResolvesWholeFile(file, block)) {
       setBlockPrompt({ action: 'revert', sessionId, id, block })
       return Promise.resolve()
     }
