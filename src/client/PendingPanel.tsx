@@ -771,7 +771,7 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
 
 /** Imperative surface the parent uses to drive block navigation from the
  *  shared toolbar/keyboard in split mode (its own `focus` is private here). */
-export interface SplitDiffHandle { jump: (direction: -1 | 1, wrapGuard?: boolean) => void; openSearch: () => void; searchNext: (direction: -1 | 1) => boolean }
+export interface SplitDiffHandle { jump: (direction: -1 | 1, wrapGuard?: boolean, singleToast?: boolean) => void; openSearch: () => void; searchNext: (direction: -1 | 1) => boolean }
 
 /** The two-column (side-by-side) whole-file diff view. */
 export const SplitDiff = forwardRef<SplitDiffHandle, {
@@ -1091,12 +1091,12 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   // (keyboard or toolbar) only toasts; the next press in the same direction
   // wraps. Armed direction = 0.
   const wrapArmedRef = useRef<0 | -1 | 1>(0)
-  const jump = (direction: -1 | 1, wrapGuard = false): void => {
+  const jump = (direction: -1 | 1, wrapGuard = false, singleToast = wrapGuard): void => {
     const count = blockOfPair.length
     if (count === 0) return
     if (wrapGuard) {
       if (count === 1) {
-        onWrapToast(t('panel.blockSingle'))
+        if (singleToast) onWrapToast(t('panel.blockSingle'))
       } else {
         const atBoundary = (direction === 1 && focus === count - 1)
           || (direction === -1 && focus === 0)
@@ -2107,7 +2107,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // (keyboard or toolbar) only toasts; the next press in the same direction
   // wraps. Armed direction = 0.
   const wrapArmedRef = useRef<0 | -1 | 1>(0)
-  const jump = (direction: -1 | 1, wrapGuard = false) => {
+  const jump = (direction: -1 | 1, wrapGuard = false, singleToast = wrapGuard) => {
     if (rowCount === 0) return
     const count = model.blocks.length
     if (count === 0) return
@@ -2116,7 +2116,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     // same direction wraps.
     if (wrapGuard) {
       if (count === 1) {
-        onToast(t('panel.blockSingle'))
+        if (singleToast) onToast(t('panel.blockSingle'))
       } else {
         const atBoundary = (direction === 1 && focus === count - 1)
           || (direction === -1 && focus === 0)
@@ -2163,12 +2163,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // delegate to the split view's own imperative jump; otherwise use the
   // single-column one. Kept in a ref so the capture-phase keydown listener
   // always sees the current closure.
-  const jumpBlock = (direction: -1 | 1, wrapGuard = false): void => {
+  const jumpBlock = (direction: -1 | 1, wrapGuard = false, singleToast = wrapGuard): void => {
     if (splitView) {
-      splitDiffRef.current?.jump(direction, wrapGuard)
+      splitDiffRef.current?.jump(direction, wrapGuard, singleToast)
       return
     }
-    jump(direction, wrapGuard)
+    jump(direction, wrapGuard, singleToast)
   }
   const jumpBlockRef = useRef(jumpBlock)
   jumpBlockRef.current = jumpBlock
@@ -2230,11 +2230,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // Re-clicking the already-open file in the list jumps to the next change
   // block; the panel bumps `jumpSignal` to trigger it. A fresh signal while
   // on the same file re-runs this, wrapping to the first block when needed.
-  // Pass the wrap guard so a re-click at the last block shows the boundary
-  // toast + shake too, exactly like the toolbar next button.
+  // This is a mouse "jog the highlight" gesture: keep the multi-block boundary
+  // toast/wrap, but a single-block file must NOT toast "仅有一个差异块" (which
+  // would fire on what reads as a plain open) — it just re-flashes the block.
   useEffect(() => {
     if (jumpSignal === 0) return
-    jumpBlock(1, true)
+    jumpBlock(1, true, false)
   }, [jumpSignal])
 
   const onScroll = () => {
