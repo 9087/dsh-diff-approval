@@ -101,12 +101,12 @@ export function startProducedDiffInjection(
       // counting buttons, so a real <button> sibling would shift that count and
       // make the harness hide the wrong file. The span stays out of `:nth-of-type`.
       if (chip.getAttribute(INJECTED_ATTR) === '1') continue
-      // Dedupe by path: a React re-render can hand the row a fresh chip element
-      // (losing INJECTED_ATTR) while a button for that path is already present,
-      // which would otherwise inject a second button after the one chip.
-      const already = [...document.querySelectorAll<HTMLElement>(`[${BUTTON_ATTR}]`)]
-        .some(btn => btn.getAttribute('data-path') === path)
-      if (already) {
+      // Give each chip its own button: deduping by path collapsed several chips
+      // that share a `title` (a harness that renders the same tooltip text for
+      // every produced file) to a single button. Checking the chip's own next
+      // sibling keeps distinct chips distinct while still skipping a
+      // re-rendered chip that already owns its button.
+      if (chip.nextElementSibling?.getAttribute(BUTTON_ATTR) === '1') {
         chip.setAttribute(INJECTED_ATTR, '1')
         continue
       }
@@ -134,6 +134,13 @@ export function startProducedDiffInjection(
         }
       })
       chip.insertAdjacentElement('afterend', btn)
+    }
+    // Clean up orphaned buttons: a chip React removed/replaced leaves its button
+    // behind as a sibling (its `previousElementSibling` is no longer a chip), so
+    // drop those — a re-render must not leave a stale, duplicated button.
+    for (const btn of document.querySelectorAll<HTMLElement>(`[${BUTTON_ATTR}]`)) {
+      const chip = btn.previousElementSibling
+      if (chip === null || !chip.matches(CHIP_SELECTOR)) btn.remove()
     }
     // Mirror each button's visibility to its chip. The harness's container
     // queries hide `:nth-of-type(n)` file chips on narrow screens, and an

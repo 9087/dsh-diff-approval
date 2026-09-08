@@ -82,7 +82,26 @@ describe('startProducedDiffInjection', () => {
     stop()
   })
 
-  it('does not inject a second button when a chip is re-rendered for the same path', async () => {
+  it('gives each chip its own button even when they share a title', async () => {
+    // Several chips can carry the same tooltip text (a harness that renders the
+    // same label for every produced file). Each distinct chip must still get its
+    // own button — the old per-path dedupe collapsed them to a single button.
+    const row = mountRow()
+    const openPath = vi.fn()
+    const stop = startProducedDiffInjection('查看差异', openPath)
+    const a = chip(row, '/repo/a.txt')
+    const b = chip(row, '/repo/a.txt')
+    await Promise.resolve()
+    expect(row.querySelectorAll('[data-diff-approval-produced-diff-btn]').length).toBe(2)
+    expect(a.nextElementSibling?.getAttribute('data-diff-approval-produced-diff-btn')).toBe('1')
+    expect(b.nextElementSibling?.getAttribute('data-diff-approval-produced-diff-btn')).toBe('1')
+    stop()
+  })
+
+  it('cleans up an orphaned button and re-injects for a chip replaced on re-render', async () => {
+    // A React re-render replaces the chip element (removing the old one); the
+    // stale button it leaves behind is dropped and a fresh one is injected for
+    // the new chip, so a re-render never doubles the button.
     const row = mountRow()
     const openPath = vi.fn()
     const stop = startProducedDiffInjection('查看差异', openPath)
@@ -90,12 +109,11 @@ describe('startProducedDiffInjection', () => {
     await Promise.resolve()
     expect(row.querySelectorAll('[data-diff-approval-produced-diff-btn]').length).toBe(1)
 
-    // A React re-render hands the row a fresh chip without the marker, but a
-    // button for the same path already exists — must not add a second one.
-    chip(row, '/repo/a.txt')
+    a.remove()
+    const fresh = chip(row, '/repo/a.txt')
     await Promise.resolve()
     expect(row.querySelectorAll('[data-diff-approval-produced-diff-btn]').length).toBe(1)
-
+    expect(fresh.nextElementSibling?.getAttribute('data-diff-approval-produced-diff-btn')).toBe('1')
     stop()
   })
 
