@@ -7,7 +7,7 @@
 
 import type { ClientConnectionRpc, SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type {
-  DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, PendingFileDiff, VcsImportValue,
+  DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalBulkValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, PendingFileDiff, VcsImportValue,
 } from '../types.ts'
 
 /** The channel the host half registers and this port calls. */
@@ -33,6 +33,10 @@ export interface DiffApprovalPort {
   importVcs(sessionId: SessionId, includeUntracked: boolean): Promise<VcsImportValue>
   /** Open one file with its default application or reveal it in the folder. */
   open(sessionId: SessionId, id: string, action: DiffApprovalOpenAction): Promise<DiffApprovalOpenValue>
+  /** Keep every pending entry of one session in a single host call (one batch). */
+  keepAll(sessionId: SessionId): Promise<DiffApprovalBulkValue>
+  /** Revert every pending entry of one session in a single host call (one batch). */
+  revertAll(sessionId: SessionId): Promise<DiffApprovalBulkValue>
   /** Read one workspace image and inline it as a base64 data URI (for the Markdown preview). */
   previewImage(sessionId: SessionId, path: string): Promise<DiffApprovalPreviewImageValue>
 }
@@ -72,6 +76,12 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
     },
     async previewImage(sessionId, path) {
       return previewImageOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'preview-image', { sessionId, path }))
+    },
+    async keepAll(sessionId) {
+      return bulkOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'keep-all', { sessionId }))
+    },
+    async revertAll(sessionId) {
+      return bulkOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'revert-all', { sessionId }))
     },
   }
 }
@@ -172,4 +182,16 @@ function previewImageOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>
   if (typeof value !== 'object' || value === null) throw new Error('the preview image returned a malformed value')
   const dataUri = (value as Record<string, unknown>).dataUri
   return typeof dataUri === 'string' && dataUri.length > 0 ? { dataUri } : {}
+}
+
+/** Narrow the keep-all/revert-all endpoint's value; a malformed wire value is a failure. */
+function bulkOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffApprovalBulkValue {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+  const value: unknown = result.value
+  if (typeof value !== 'object' || value === null) throw new Error('the bulk action returned a malformed value')
+  const affected = (value as Record<string, unknown>).affected
+  if (typeof affected !== 'number' || !Number.isFinite(affected)) {
+    throw new Error('the bulk action returned a malformed value')
+  }
+  return { affected }
 }

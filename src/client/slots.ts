@@ -53,6 +53,10 @@ export interface PendingPanelFace {
   onRedo: (sessionId: SessionId) => Promise<string | undefined>
   /** Import the workspace's local VCS changes as pending entries (detection included). */
   onImportVcs: (sessionId: SessionId, includeUntracked: boolean) => Promise<VcsImportValue>
+  /** Keep every pending entry of one session in a single host call (bulk). */
+  onKeepAll: (sessionId: SessionId) => Promise<void>
+  /** Revert every pending entry of one session in a single host call (bulk). */
+  onRevertAll: (sessionId: SessionId) => Promise<void>
   /** Acknowledge the redo-cleared notice so it is only surfaced once. */
   onAckRedoCleared: () => void
   /** Collapse the DSH sidebar (no-op when already collapsed) before the modal

@@ -32,6 +32,10 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   importVcs: (sessionId: SessionId, includeUntracked: boolean) => Promise<VcsImportValue>
   /** Open one file with its default application or reveal it in the folder. */
   open: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
+  /** Keep every pending entry of one session in a single host call, then refresh. */
+  keepAll: (sessionId: SessionId) => Promise<void>
+  /** Revert every pending entry of one session in a single host call, then refresh. */
+  revertAll: (sessionId: SessionId) => Promise<void>
   /** Inline one workspace image as a base64 data URI (empty when unreadable). */
   previewImage: (sessionId: SessionId, path: string) => Promise<string | undefined>
   /** Drop every local fact (used on connection reset). */
@@ -222,6 +226,14 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
       } catch {
         return undefined
       }
+    },
+    async keepAll(sessionId) {
+      await port.keepAll(sessionId)
+      await this.refresh(sessionId)
+    },
+    async revertAll(sessionId) {
+      await port.revertAll(sessionId)
+      await this.refresh(sessionId)
     },
     reset() {
       publish({ read: false, files: [], busy: EMPTY_BUSY })

@@ -53,7 +53,7 @@ import type { OpenAction } from './open.ts'
 import { detectVcsRoot, listVcsChanges } from './vcs.ts'
 import type { VcsChange, VcsImportInput, ShellExecutorLike } from './vcs.ts'
 import type {
-  DiffApprovalActionValue, DiffApprovalBlockTarget, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue,
+  DiffApprovalActionValue, DiffApprovalBlockTarget, DiffApprovalBulkValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue,
   DiffApprovalPreviewImageValue, PendingEntry, PendingEntryKind, PendingFileDiff, VcsImportValue,
 } from './types.ts'
 
@@ -538,6 +538,31 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       : ctx.fs.writeText(target, content, undefined, signal, policy)
   }
 
+  /**
+   * Revert one entry's file back to its baseline (the shared per-entry logic
+   * behind both the single `revert` endpoint and the bulk `revert-all`). A
+   * created file's revert deletes it (not undoable: the file is gone), an edit
+   * writes the baseline back and yields the before/after undo snapshot.
+   * @param entry - the entry to revert.
+   * @param sessionId - the entry's session (for the per-session write policy).
+   * @param signal - aborts before atomic publication takes effect.
+   * @returns the undo snapshot, or `undefined` when the revert is not undoable.
+   */
+  async function revertEntryContent(entry: PendingEntry, sessionId: SessionId, signal: AbortSignal): Promise<{ before: DiffApprovalUndoState; after: DiffApprovalUndoState } | undefined> {
+    const resolved = await ctx.fs.resolve(entry.path, { signal })
+    if (entry.kind === 'create') {
+      await rm(ctx.fs.processPath(resolved), { force: true })
+      return undefined
+    }
+    const preWrite = await ctx.fs.readText(resolved, undefined) ?? entry.newText
+    const content = reencodeEol(entry.oldText, detectEol(entry.newText))
+    await writeRevert(resolved, content, sessionId, signal)
+    return {
+      before: { id: entry.id, path: entry.path, entry, fileText: preWrite },
+      after: { id: entry.id, path: entry.path, entry: undefined, fileText: content },
+    }
+  }
+
   // Per-session undo/redo stacks, in memory only (lost on restart). Every
   // undoable keep/revert/block action pushes its before/after pair; undo
   // restores `before`, redo re-applies `after`. Actions that delete a file
@@ -715,24 +740,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // gone); a revert that writes keeps a snapshot for Ctrl+Z.
         let undo: { before: DiffApprovalUndoState; after: DiffApprovalUndoState } | undefined
         try {
-          const resolved = await ctx.fs.resolve(entry.path, { signal })
-          if (entry.kind === 'create') {
-            // The fs seam has no delete; `processPath` exists to hand a path
-            // to OS-level code, so the revert of a created file removes it
-            // through the backend's own execution-world path.
-            await rm(ctx.fs.processPath(resolved), { force: true })
-          } else {
-            const preWrite = await ctx.fs.readText(resolved, undefined) ?? entry.newText
-            // Always write the baseline re-encoded to the file's current EOL:
-            // a revert restores content while keeping the file's line-ending
-            // style (the diff is about approved content, not EOL noise).
-            const content = reencodeEol(entry.oldText, detectEol(entry.newText))
-            await writeRevert(resolved, content, target.sessionId, signal)
-            undo = {
-              before: { id: entry.path, path: entry.path, entry, fileText: preWrite },
-              after: { id: entry.path, path: entry.path, entry: undefined, fileText: content },
-            }
-          }
+          undo = await revertEntryContent(entry, target.sessionId, signal)
         } catch (error: unknown) {
           return rpcError(`revert failed: ${errorMessage(error)}`)
         }
@@ -740,6 +748,55 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         if (undo !== undefined) pushUndo(target.sessionId, undo.before, undo.after)
         persistSession(true)
         const value: DiffApprovalActionValue = { outcome: 'reverted' }
+        return { ok: true, value }
+      }
+      case 'keep-all': {
+        const sessionId = sessionOf(payload)
+        if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
+        await ensureLoaded()
+        const entries = store.list(sessionId)
+        const before: DiffApprovalUndoState[] = []
+        const after: DiffApprovalUndoState[] = []
+        for (const entry of entries) {
+          before.push({ id: entry.id, path: entry.path, entry, fileText: undefined })
+          after.push({ id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
+          store.remove(entry.id)
+        }
+        if (before.length > 0) {
+          pushUndo(sessionId,
+            { id: before[0]!.id, path: before[0]!.path, entry: undefined, fileText: undefined, batch: before },
+            { id: after[0]!.id, path: after[0]!.path, entry: undefined, fileText: undefined, batch: after })
+        }
+        persistSession(true)
+        const value: DiffApprovalBulkValue = { affected: before.length }
+        return { ok: true, value }
+      }
+      case 'revert-all': {
+        const sessionId = sessionOf(payload)
+        if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
+        await ensureLoaded()
+        const entries = store.list(sessionId)
+        const batchBefore: DiffApprovalUndoState[] = []
+        const batchAfter: DiffApprovalUndoState[] = []
+        for (const entry of entries) {
+          let undo: { before: DiffApprovalUndoState; after: DiffApprovalUndoState } | undefined
+          try {
+            undo = await revertEntryContent(entry, sessionId, signal)
+          } catch {
+            // An unreadable file is left listed (the caller sees it as a failed
+            // entry) rather than silently dropped; stop the bulk here.
+            return rpcError(`revert-all failed for ${entry.path}`)
+          }
+          if (undo !== undefined) { batchBefore.push(undo.before); batchAfter.push(undo.after) }
+          store.remove(entry.id)
+        }
+        if (batchBefore.length > 0) {
+          pushUndo(sessionId,
+            { id: batchBefore[0]!.id, path: batchBefore[0]!.path, entry: undefined, fileText: undefined, batch: batchBefore },
+            { id: batchAfter[0]!.id, path: batchAfter[0]!.path, entry: undefined, fileText: undefined, batch: batchAfter })
+        }
+        persistSession(true)
+        const value: DiffApprovalBulkValue = { affected: entries.length }
         return { ok: true, value }
       }
       case 'block-keep': {

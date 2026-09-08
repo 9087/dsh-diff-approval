@@ -54,6 +54,8 @@ function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
     onUndo: vi.fn(),
     onRedo: vi.fn(),
     onImportVcs: vi.fn(async () => ({ imported: 0, detected: false })),
+    onKeepAll: vi.fn(async () => {}),
+    onRevertAll: vi.fn(async () => {}),
     onAckRedoCleared: vi.fn(),
     collapseSidebar: vi.fn(),
     t: (key: string, params?: Record<string, unknown>) => params === undefined ? key : `${key} ${JSON.stringify(params)}`,
@@ -315,21 +317,24 @@ describe('PendingPanel', () => {
     expect(screen.getAllByText('b.txt')).toHaveLength(1)
   })
 
-  it('keeps or reverts every current-session file from the list footer', async () => {
+  it('keeps or reverts every current-session file in a single bulk call from the list footer', async () => {
     const second = entry({ id: 'entry-2', path: '/repo/b.txt' })
     const props = panelProps({ read: true, files: [FILE, second], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
+    // The bulk footer drives one batched keep-all (not one call per file).
     fireEvent.click(screen.getByText('action.keepAll'))
-    const keepMock = props.onKeep as unknown as { mock: { calls: unknown[][] } }
-    await waitFor(() => { expect(keepMock.mock.calls).toHaveLength(2) })
-    expect(keepMock.mock.calls.map(call => call[1])).toEqual([FILE.id, 'entry-2'])
+    const keepAllMock = props.onKeepAll as unknown as { mock: { calls: unknown[][] } }
+    await waitFor(() => { expect(keepAllMock.mock.calls).toHaveLength(1) })
+    expect(keepAllMock.mock.calls[0]).toEqual([S1])
+    expect(props.onKeep).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByText('action.revertAll'))
-    const revertMock = props.onRevert as unknown as { mock: { calls: unknown[][] } }
-    await waitFor(() => { expect(revertMock.mock.calls).toHaveLength(2) })
-    expect(revertMock.mock.calls.map(call => call[1])).toEqual([FILE.id, 'entry-2'])
+    const revertAllMock = props.onRevertAll as unknown as { mock: { calls: unknown[][] } }
+    await waitFor(() => { expect(revertAllMock.mock.calls).toHaveLength(1) })
+    expect(revertAllMock.mock.calls[0]).toEqual([S1])
+    expect(props.onRevert).not.toHaveBeenCalled()
   })
 
   it('shows a keep/revert failure inline on the row and detail instead of hiding the list', () => {

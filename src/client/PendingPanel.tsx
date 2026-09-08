@@ -3116,7 +3116,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onUndo, onRedo, onImportVcs, onAckRedoCleared, collapseSidebar, t,
+  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onUndo, onRedo, onImportVcs, onKeepAll, onRevertAll, onAckRedoCleared, collapseSidebar, t,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
   // A newly created session is selected but still blank (no messages yet); it
@@ -3460,12 +3460,11 @@ export function PendingPanel({
 
   /** Run the same decision over every current-session file, sequentially. */
   const runBulk = async (kind: 'keep' | 'revert') => {
+    if (current === undefined) return
     setBulkBusy(kind)
     try {
-      for (const file of files) {
-        if (kind === 'keep') await onKeep(file.sessionId, file.id)
-        else await onRevert(file.sessionId, file.id)
-      }
+      if (kind === 'keep') await onKeepAll(current)
+      else await onRevertAll(current)
     } finally {
       setBulkBusy(null)
     }

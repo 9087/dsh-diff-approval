@@ -133,6 +133,12 @@ export interface DiffApprovalPreviewImageValue {
   dataUri?: string | undefined
 }
 
+/** Value returned by the channel's keep-all/revert-all endpoints. */
+export interface DiffApprovalBulkValue {
+  /** How many pending entries were kept/reverted (0 when the session had none). */
+  affected: number
+}
+
 /** Value returned by the channel's keep and revert endpoints. */
 export interface DiffApprovalActionValue {
   /** What the request did; `missing` means no pending entry existed. */

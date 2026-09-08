@@ -453,6 +453,52 @@ describe('block keep/revert', () => {
   })
 })
 
+describe('bulk keep-all / revert-all', () => {
+  function twoEditEntries(ctx: Parameters<typeof emitResult>[0], write: typeof editSuccess) {
+    emitResult(ctx, editExec(), write('/repo/a.txt', 'a\n', 'A\n'))
+    emitResult(ctx, editExec(), write('/repo/b.txt', 'b\n', 'B\n'))
+  }
+
+  it('keeps every session entry in one call and returns the affected count', async () => {
+    const { ctx, handle } = await harness()
+    twoEditEntries(ctx, editSuccess)
+    expect(await listEntries(handle, 'session-1')).toHaveLength(2)
+
+    const answer = await handle('keep-all', { sessionId: 'session-1' }, signal())
+    expect(answer).toEqual({ ok: true, value: { affected: 2 } })
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+  })
+
+  it('undoes a bulk keep-all as one batch (restores every entry)', async () => {
+    const { ctx, handle } = await harness()
+    twoEditEntries(ctx, editSuccess)
+    await handle('keep-all', { sessionId: 'session-1' }, signal())
+
+    const answer = await handle('undo', { sessionId: 'session-1' }, signal())
+    expect(answer).toMatchObject({ ok: true, value: { outcome: 'undone' } })
+    const files = await listEntries(handle, 'session-1')
+    expect(files).toHaveLength(2)
+    expect(files.map(f => f.path)).toEqual(['/repo/a.txt', '/repo/b.txt'])
+  })
+
+  it('reverts every session entry in one call', async () => {
+    const { ctx, fs, handle } = await harness()
+    twoEditEntries(ctx, editSuccess)
+    expect(await listEntries(handle, 'session-1')).toHaveLength(2)
+
+    const answer = await handle('revert-all', { sessionId: 'session-1' }, signal())
+    expect(answer).toEqual({ ok: true, value: { affected: 2 } })
+    expect(fs.writeText).toHaveBeenCalledTimes(2)
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+  })
+
+  it('handles a session with no entries', async () => {
+    const { handle } = await harness()
+    const answer = await handle('keep-all', { sessionId: 'session-1' }, signal())
+    expect(answer).toEqual({ ok: true, value: { affected: 0 } })
+  })
+})
+
 describe('str_replace_editor capture', () => {
   it('captures a str_replace mutation through the edit-intent and result seams', async () => {
     const { ctx, fs, handle } = await harness()
