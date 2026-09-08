@@ -15,23 +15,29 @@ The panel also collapses its file list into a floating card and expands to fulls
 | --- | --- |
 | ![Collapsed file list](docs/images/file-list-collapsed.png) | ![Fullscreen](docs/images/fullscreen.png) |
 
+For Markdown files, the source-line diff can also be shown as a rendered before/after preview:
+
+![Markdown preview](docs/images/markdown.png)
+
 ## ✨ Features
 
 - **Diff view**: syntax-highlighted whole-file diff with +/− counts, an overview ruler on the scrollbar showing where changes sit, and an in-file search (`Ctrl+F`, step with `F3` / `Shift+F3`) that highlights matched words. Rows are virtualized, so huge files stay smooth.
-- **Block navigation & decisions**: jump between change blocks with `Ctrl+↑/↓` (or the previous/next buttons) — the focused block flashes, and navigation is anchored to the scroll position. Hover a block to **Keep** or **Revert** just that block from a small actions frame that also shows its position (e.g. "2/5"); after a single-block decision, focus advances to the next block. The lead rows left above the jumped-to block are configurable in settings.
+- **Block navigation & decisions**: jump between change blocks with `Ctrl+↑/↓` (or the previous/next buttons) — the focused block flashes, navigation is anchored to the scroll position and wraps at the top/bottom. Hover a block to **Keep** or **Revert** just that block from a small actions frame that also shows its position (e.g. "2/5"); after a single-block decision, focus advances to the next block. The lead rows left above the jumped-to block are configurable in settings.
 - **Selection frame**: drag to select a range of lines and a frame appears to **Keep** / **Revert** exactly that range.
 - **Per-file and bulk decisions**: the files in the file list can be kept / reverted one at a time, or **Keep all** / **Revert all** from its footer.
 - **Resolved files stay listed**: once every change in a file has been kept/reverted, the entry remains in the list and the panel asks whether to remove it or keep it for later.
-- **Undo / Redo**: every keep, revert, and import is undoable with `Ctrl+Z` / `Ctrl+Y` (active while the panel is open; text inputs keep their own editing).
+- **Undo / Redo**: every keep, revert, and import is undoable with `Ctrl+Z` / `Ctrl+Shift+Z` (rebindable in Shortcuts; `Ctrl+Y` remains an alias), active while the panel is open — text inputs keep their own editing.
 - **Quick summon & file cycling**: `Ctrl+D` (configurable in settings) toggles the review panel from anywhere and `Esc` closes it; `Ctrl+Tab` / `Ctrl+Shift+Tab` cycle through the pending files.
 - **Line references**: select text in the diff — the status bar shows its `(file:line)` / `(file:start-end)` reference; click it (or press `Ctrl+L`) to copy, and with the setting on it auto-pastes into the composer and focuses it. References in the composer and queued messages are **auto-aligned** when the referenced file changes: surviving lines re-map to their new range, and a fully-removed line becomes `(file:LINE_MISSING)`.
 - **Highlight language**: auto-detected from the file extension, or overridden from a dropdown.
 - **Auto-wrap**: a "Wrap lines" toggle beside the language selector wraps long lines for that language (CJK breaks between characters, Latin words stay whole), remembered per language.
 - **Side-by-side split view**: an opt-in two-column diff (left "before" | right "current"), line-aligned with per-side horizontal scrolling and a shared vertical scrollbar. Toggle it from the toolbar or in settings (default: single-column unified view). In split view, changed blocks are aligned by content similarity and changed lines show intra-line word diffs — whole words for Latin text, per-character for CJK.
+- **Markdown preview**: for Markdown files, toggle between the source-line diff and a rendered before/after preview (`Preview` / `Source`). The preview content max width is configurable.
+- **Customizable appearance**: from the "Diff view" settings group, adjust the diff's code font size (%), line height (px), and the added / removed line colors, with a live preview.
 - **External changes**: files already in the pending list are monitored — if one is later modified outside the reviewed edits (another tool, an editor), the panel adopts the new content and flags the divergence.
 - **Open / Reveal**: while reviewing a file's diff, open it in its default app or reveal it in the system file manager with one click.
 - **Import workspace changes**: when the list is empty, click the button to import the workspace's local changes from **Git / SVN / Perforce** — modified, deleted, and (opt-in) untracked files. The VCS root is found by walking up from the workspace, so a workspace inside a subdirectory works too.
-- **Settings**: a "Diff Approval" section in DeepSeek Harness settings with preferences for auto-paste on copy, whether untracked files are included when importing, the diff's tab width (2 / 4 / 8 spaces), the side-by-side split view, the block-jump lead rows, and the quick-summon chord.
+- **Settings**: a "Diff Approval" section in DeepSeek Harness settings, grouped into **Diff view** (code font size, line height, added / removed colors) and **Shortcuts** (rebind the panel's keyboard chords) plus preferences for auto-paste on copy, whether untracked files are included when importing, the diff's tab width (2 / 4 / 8 spaces), the side-by-side split view, the block-jump lead rows, the Markdown preview default and width, and the quick-summon chord.
 - **Persistence**: pending state is stored per workspace at `<dshHome>/diff-approval/workspaces/<workspaceId>.json` and survives restarts — unhandled changes are still there when you come back, even in a fresh session.
 
 ## 📦 Install
