@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.19.0](https://github.com/9087/dsh-diff-approval/compare/v0.18.0...v0.19.0) (2026-09-08)
+
+### Features
+
+* bulk keep-all / revert-all as a single host call (one batch undo, no per-file churn) ([161909e](https://github.com/9087/dsh-diff-approval/commit/161909e072434a0870f7541ab60fcf4b7da7410e))
+* gray placeholder block for Markdown preview images that cannot be inlined ([e0d53e4](https://github.com/9087/dsh-diff-approval/commit/e0d53e497123c846aec6fcf59d7656d6057cac66))
+* limit Markdown preview content width to a configurable max (single=X, double=2X, default 800px) ([b671081](https://github.com/9087/dsh-diff-approval/commit/b671081521a8ab33ba6e74840bf2a5ff09f8f42b))
+* markdown preview + word highlight + settings + icon ([d0bee7f](https://github.com/9087/dsh-diff-approval/commit/d0bee7f233de3db07f2755def4e952ade0facfbb))
+* prompt remove-or-keep when a block keep/revert resolves the file's last change ([8be5419](https://github.com/9087/dsh-diff-approval/commit/8be54190fde81951f6b52598645c186ee64eaf17))
+* quick-summon chord works even when focus is in an input or the composer ([5c9de9c](https://github.com/9087/dsh-diff-approval/commit/5c9de9c3a240b1fa3839e0c17edd39cb47f91ac4))
+
+### Bug Fixes
+
+* give each produced-file chip its own view-diff button ([9824c85](https://github.com/9087/dsh-diff-approval/commit/9824c8503bc139f6e15d707ef2697d638aef7a18))
+* neutral-gray semi-transparent inline code chip in the Markdown preview ([fc373a1](https://github.com/9087/dsh-diff-approval/commit/fc373a16d7965c3dbeebf25fe98fea10f409eb25))
+* remove a fully-resolved entry despite a line-ending-only difference (matches the diff view) ([d3cd1b9](https://github.com/9087/dsh-diff-approval/commit/d3cd1b9f18cfbb2fe3e4065f29b5c4dd8eea50c2))
+* show the floating file list when the panel opens in Markdown preview ([75ba50f](https://github.com/9087/dsh-diff-approval/commit/75ba50feef63dbf627396b507e789e79be628e6a))
+* suppress single-block toast on file open (re-click) ([172d418](https://github.com/9087/dsh-diff-approval/commit/172d418c513f2ef73b22328f1c4abac14ffc2e11))
+* use the Markdown preview only for Markdown files ([963d71f](https://github.com/9087/dsh-diff-approval/commit/963d71ff43e214e4073d38515f1e00e387d35900))
+
 ## [0.18.0](https://github.com/9087/dsh-diff-approval/compare/v0.17.0...v0.18.0) (2026-09-07)
 
 ### Features
