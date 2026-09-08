@@ -3258,7 +3258,7 @@ export function PendingPanel({
   useEffect(() => {
     if (!floatMode || !floatOpen) return
     const split = splitRef.current
-    const body = panelRef.current?.querySelector<HTMLElement>('[data-diff-body]')
+    const body = panelRef.current?.querySelector<HTMLElement>('[data-diff-body],[data-diff-md-preview-body]')
     if (split === null || body == null) return
     const s = split.getBoundingClientRect()
     const b = body.getBoundingClientRect()

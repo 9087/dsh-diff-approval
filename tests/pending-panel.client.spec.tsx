@@ -865,6 +865,30 @@ describe('PendingPanel', () => {
     }
   })
 
+  it('shows the floating file list when the panel opens in Markdown preview', () => {
+    const originalWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth')
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 600 })
+    try {
+      localStorage.setItem('diff-approval:md-preview', '1')
+      const file = entry({ id: 'entry-md-float', path: '/repo/README.md', oldText: '# T\n', newText: '# T\n\nNew\n' })
+      const props = panelProps({ read: true, files: [file], busy: new Set() })
+      render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+
+      // The Markdown preview is showing (no source diff body), yet the floating
+      // list still works on the narrow breakpoint.
+      expect(document.querySelector('[data-diff-md-preview-body]')).not.toBeNull()
+      expect(document.querySelector('[data-diff-body]')).toBeNull()
+      const toggle = document.querySelector('[data-diff-file-list-toggle]') as HTMLElement
+      expect(toggle).not.toBeNull()
+      fireEvent.click(toggle)
+      expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
+    } finally {
+      if (originalWidth !== undefined) Object.defineProperty(window, 'innerWidth', originalWidth)
+      else delete (window as { innerWidth?: unknown }).innerWidth
+    }
+  })
+
   it('anchors the block frame to the block bottom and clamps it inside the viewport', () => {
     // Last row of the file is the changed row, so the floating frame would be
     // pushed off the viewport bottom unless clamped up to fit. The frame lives
