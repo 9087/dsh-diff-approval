@@ -163,6 +163,13 @@ function normalizeEol(text: string): string {
   return text.replace(/\r\n?/g, '\n')
 }
 
+/** Whether two contents are equal ignoring line endings and a trailing-newline
+ *  difference — the same tolerance the whole-file diff uses, so a file that the
+ *  diff view shows as "no pending diff" is treated as fully resolved here too. */
+function contentEqual(a: string, b: string): boolean {
+  return contentLinesOf(normalizeEol(a)).join('\n') === contentLinesOf(normalizeEol(b)).join('\n')
+}
+
 /** Re-encode `text`'s line endings to `eol` (its content is unchanged). */
 function reencodeEol(text: string, eol: '\r\n' | '\n'): string {
   const normalized = normalizeEol(text)
@@ -758,7 +765,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           { id: entry.id, path: entry.path, entry, fileText: undefined },
           { id: entry.id, path: entry.path, entry: afterEntry, fileText: undefined })
         persistSession()
-        const fullyResolved = updatedOld === entry.newText
+        const fullyResolved = contentEqual(updatedOld, entry.newText)
         if (fullyResolved && blockTarget.removeWhenResolved === true) {
           store.remove(blockTarget.id)
           pushUndo(blockTarget.sessionId,
@@ -809,7 +816,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         }
         if (undo !== undefined) pushUndo(blockTarget.sessionId, undo.before, undo.after)
         persistSession()
-        const fullyResolved = normalizeEol(updatedNew) === normalizeEol(entry.oldText)
+        const fullyResolved = contentEqual(updatedNew, entry.oldText)
         if (fullyResolved && blockTarget.removeWhenResolved === true) {
           store.remove(blockTarget.id)
           pushUndo(blockTarget.sessionId,

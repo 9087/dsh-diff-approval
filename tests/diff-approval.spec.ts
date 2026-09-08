@@ -404,6 +404,19 @@ describe('block keep/revert', () => {
     expect(files).toEqual([])
   })
 
+  it('removes the entry when a keep resolves a trailing-newline / EOL-only difference (matches the diff view)', async () => {
+    // The baseline has no trailing newline, the new content has one: the diff
+    // view treats these as identical (no pending diff), so a full-resolve keep
+    // must remove the entry too. A strict string compare would leave it listed.
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b\n'))
+    const [entry] = await listEntries(handle, 'session-1')
+    await expect(handle('block-keep', { sessionId: 'session-1', id: entry.id, block: { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 }, removeWhenResolved: true }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'kept', resolved: true } })
+    const files = await listEntries(handle, 'session-1')
+    expect(files).toEqual([])
+  })
+
   it('keeps the entry with no pending diff when the last block is reverted', async () => {
     const { ctx, fs, handle } = await harness()
     const entry = await twoBlocks({ ctx, fs, handle })
