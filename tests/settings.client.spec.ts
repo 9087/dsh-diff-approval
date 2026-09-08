@@ -3,9 +3,10 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_LINE_HEIGHT_DEFAULT, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN,
+  MD_MAX_WIDTH_DEFAULT, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN,
   currentDiffAddColor, currentDiffDelColor,
-  diffAddColor, diffDelColor, diffFontScale, diffLineHeight, matchesShortcut, mdPreviewEnabled, quickSummonKey,
-  setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setMdPreviewEnabled, setQuickSummonKey, setTabWidth, tabWidth,
+  diffAddColor, diffDelColor, diffFontScale, diffLineHeight, matchesShortcut, mdMaxWidth, mdPreviewEnabled, quickSummonKey,
+  setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setMdMaxWidth, setMdPreviewEnabled, setQuickSummonKey, setTabWidth, tabWidth,
 } from '../src/client/settings.ts'
 
 const TAB_WIDTH_KEY = 'diff-approval:tab-size'
@@ -15,6 +16,7 @@ const DIFF_LINE_HEIGHT_KEY = 'diff-approval:diff-line-height'
 const DIFF_ADD_COLOR_KEY = 'diff-approval:diff-add-color'
 const DIFF_DEL_COLOR_KEY = 'diff-approval:diff-del-color'
 const MD_PREVIEW_KEY = 'diff-approval:md-preview'
+const MD_MAX_WIDTH_KEY = 'diff-approval:md-max-width'
 
 describe('settings.tabWidth', () => {
   beforeEach(() => localStorage.clear())
@@ -61,6 +63,28 @@ describe('settings.mdPreview', () => {
     setMdPreviewEnabled(true)
     expect(localStorage.getItem(MD_PREVIEW_KEY)).toBe('1')
     expect(mdPreviewEnabled()).toBe(true)
+  })
+})
+
+describe('settings.mdMaxWidth', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('defaults to 800px (single column)', () => {
+    expect(mdMaxWidth()).toBe(MD_MAX_WIDTH_DEFAULT)
+    expect(MD_MAX_WIDTH_DEFAULT).toBe(800)
+  })
+
+  it('persists a chosen width and reads it back', () => {
+    setMdMaxWidth(1200)
+    expect(localStorage.getItem(MD_MAX_WIDTH_KEY)).toBe('1200')
+    expect(mdMaxWidth()).toBe(1200)
+  })
+
+  it('clamps to the allowed range', () => {
+    setMdMaxWidth(MD_MAX_WIDTH_MAX + 100)
+    expect(mdMaxWidth()).toBe(MD_MAX_WIDTH_MAX)
+    setMdMaxWidth(MD_MAX_WIDTH_MIN - 100)
+    expect(mdMaxWidth()).toBe(MD_MAX_WIDTH_MIN)
   })
 })
 

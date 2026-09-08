@@ -22,7 +22,7 @@ import type { HighlightSpan } from './highlight.ts'
 import { langFromPath } from './lang.ts'
 import { referenceLabelOf } from './reference.ts'
 import { OPEN_FILE_EVENT } from './produced-diff.ts'
-import { includeUntrackedEnabled, keybindingOf, matchesShortcut, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setMdPreviewEnabled, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
+import { includeUntrackedEnabled, keybindingOf, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setMdPreviewEnabled, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import css from './PendingPanel.module.css'
 
 /**
@@ -1693,6 +1693,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const diffLineHeightValue = diffLineHeight()
   const diffAddColorPx = diffAddColor()
   const diffDelColorPx = diffDelColor()
+  // Markdown-preview content max width (single column), read on mount; the
+  // double-column view uses twice this (each column the same single width).
+  const mdPreviewMaxWidthPx = mdMaxWidth()
   // CSS variables for the diff card: line height always; colors only when
   // customized (unset keeps the theme, so the default is the current look).
   const diffViewVars: Record<string, string> = {}
@@ -2751,8 +2754,13 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
               data-diff-md-preview-body
               data-diff-md-mode={splitView ? 'double' : 'single'}
               ref={mdPreviewBodyRef}
-              dangerouslySetInnerHTML={{ __html: renderMarkdownPreview(file.oldText, file.newText, splitView ? 'double' : 'single') }}
-            />
+            >
+              <div
+                className={css.mdPreviewContent}
+                style={{ maxWidth: splitView ? mdPreviewMaxWidthPx * 2 : mdPreviewMaxWidthPx }}
+                dangerouslySetInnerHTML={{ __html: renderMarkdownPreview(file.oldText, file.newText, splitView ? 'double' : 'single') }}
+              />
+            </div>
             {!splitView && mdRulerMarkers.length > 0 && (
               <div className={css.overviewRuler} data-diff-approval-ruler aria-hidden="true">
                 {mdRulerMarkers.map((marker, index) => (

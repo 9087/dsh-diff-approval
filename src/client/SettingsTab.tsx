@@ -4,7 +4,7 @@ import { useState } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
-import { DEFAULT_KEYBINDINGS, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, includeUntrackedEnabled, keybindingOf, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setIncludeUntrackedEnabled, setKeybinding, setMdPreviewEnabled, setNavLeadRows, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
+import { DEFAULT_KEYBINDINGS, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import { ColorPicker } from './ColorPicker.tsx'
 import css from './PendingPanel.module.css'
@@ -363,6 +363,7 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const [tabOpen, setTabOpen] = useState(false)
   const [split, setSplitState] = useState(splitMode)
   const [mdPreview, setMdPreviewState] = useState(mdPreviewEnabled)
+  const [mdWidth, setMdWidthState] = useState(mdMaxWidth)
   const [lead, setLeadState] = useState(navLeadRows)
   // Diff-view customization defaults to the current values (100% font size =
   // current; line height defaults to the fixed 22px).
@@ -408,6 +409,10 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const setMdPreview = (value: boolean): void => {
     setMdPreviewState(value)
     setMdPreviewEnabled(value)
+  }
+  const setMdWidth = (value: number): void => {
+    setMdWidthState(value)
+    setMdMaxWidth(value)
   }
   const setLead = (value: number): void => {
     setLeadState(value)
@@ -513,6 +518,18 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
               value={mdPreview}
               onSelect={setMdPreview}
               dataAttribute="data-diff-md-preview-select"
+              t={t}
+            />
+            <StepperRow
+              title={t('panel.mdMaxWidth')}
+              description={t('panel.mdMaxWidthDesc')}
+              value={mdWidth}
+              onChange={setMdWidth}
+              min={MD_MAX_WIDTH_MIN}
+              max={MD_MAX_WIDTH_MAX}
+              step={80}
+              unit="px"
+              dataAttribute="data-diff-md-max-width"
               t={t}
             />
             <StepperRow

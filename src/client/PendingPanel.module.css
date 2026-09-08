@@ -499,6 +499,14 @@
   padding: 12px 16px;
   color: var(--dsw-alias-label-primary);
 }
+/* The capped/centered content column: the max width is set inline (single =
+   the configured width; double = twice it, since each column is that width).
+   Centering keeps a narrow panel edge-to-edge while a wide one is readable. */
+.mdPreviewContent {
+  width: 100%;
+  min-width: 0;
+  margin: 0 auto;
+}
 .mdPreviewSingle {
   display: block;
 }

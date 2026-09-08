@@ -5,6 +5,7 @@ const IMPORT_UNTRACKED_KEY = 'diff-approval:import-untracked'
 const TAB_WIDTH_KEY = 'diff-approval:tab-size'
 const SPLIT_MODE_KEY = 'diff-approval:split-mode'
 const MD_PREVIEW_KEY = 'diff-approval:md-preview'
+const MD_MAX_WIDTH_KEY = 'diff-approval:md-max-width'
 const NAV_LEAD_KEY = 'diff-approval:nav-lead-rows'
 const DIFF_FONT_SCALE_KEY = 'diff-approval:diff-font-scale'
 const DIFF_LINE_HEIGHT_KEY = 'diff-approval:diff-line-height'
@@ -27,6 +28,12 @@ export const DIFF_LINE_HEIGHT_MAX = 36
 export const DIFF_FONT_SCALE_DEFAULT = 100
 export const DIFF_FONT_SCALE_MIN = 50
 export const DIFF_FONT_SCALE_MAX = 200
+
+/** Markdown-preview content max width (single column): a comfortable reading
+ *  width for mainstream 1080p+ displays. The double-column view is 2x this. */
+export const MD_MAX_WIDTH_DEFAULT = 800
+export const MD_MAX_WIDTH_MIN = 480
+export const MD_MAX_WIDTH_MAX = 1600
 
 /**
  * Whether copying a reference should also paste it into the chat input and
@@ -191,6 +198,23 @@ export function mdPreviewEnabled(): boolean {
 /** Persist the Markdown-preview default preference. */
 export function setMdPreviewEnabled(value: boolean): void {
   localStorage.setItem(MD_PREVIEW_KEY, value ? '1' : '0')
+}
+
+/**
+ * The Markdown-preview content max width, in pixels (single column). Defaults to
+ * 800; the double-column view totals 2x this. An out-of-range or non-integer
+ * value falls back to the default.
+ * @returns the max width in pixels.
+ */
+export function mdMaxWidth(): number {
+  const raw = Number.parseInt(localStorage.getItem(MD_MAX_WIDTH_KEY) ?? '', 10)
+  if (!Number.isInteger(raw)) return MD_MAX_WIDTH_DEFAULT
+  return Math.max(MD_MAX_WIDTH_MIN, Math.min(MD_MAX_WIDTH_MAX, raw))
+}
+
+/** Persist the Markdown-preview content max width. */
+export function setMdMaxWidth(value: number): void {
+  localStorage.setItem(MD_MAX_WIDTH_KEY, String(Math.max(MD_MAX_WIDTH_MIN, Math.min(MD_MAX_WIDTH_MAX, value))))
 }
 
 /**
