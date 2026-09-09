@@ -645,7 +645,7 @@ const DiffRow = memo(function DiffRow(props: {
     >
       <span className={css.gutter} data-diff-gutter>{row.oldLine ?? ''}</span>
       <span className={css.gutter} data-diff-gutter>{row.newLine ?? ''}</span>
-      <span className={css.code} data-diff-code>{code}</span>
+      <span className={css.code} data-diff-code data-diff-code-line={row.kind}>{code}</span>
     </div>
   )
 })
@@ -830,7 +830,7 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
       onMouseEnter={onHover}
     >
       <span className={css.gutter} data-diff-gutter>{side?.line ?? ''}</span>
-      <span className={`${css.code} ${tint}`} data-diff-code>{splitSideContent(side, wrapped, runs, intra, searchQuery, searchCurrent)}</span>
+      <span className={`${css.code} ${tint}`} data-diff-code data-diff-code-side={isLeft ? 'left' : 'right'}>{splitSideContent(side, wrapped, runs, intra, searchQuery, searchCurrent)}</span>
     </div>
   )
 }
@@ -1559,11 +1559,28 @@ export function selectedPlainText(): string | undefined {
     atLineStart = text.endsWith('\n')
   }
   const walk = (node: Node): void => {
-    if (node.nodeType === Node.TEXT_NODE) { push(node.textContent ?? ''); return }
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = node.textContent ?? ''
+      // An empty wrapped segment is rendered as a non-breaking space purely to
+      // keep its row height; that is layout-only, not file content — drop it.
+      // Mark the line as consumed so a following row still starts a new line.
+      if (/^\u00a0+$/.test(text)) { atLineStart = false; return }
+      push(text)
+      return
+    }
     if (!(node instanceof Element)) return
     const el = node as HTMLElement
     // The line-number gutter cells are not diff content — drop their digits.
     if (el.dataset.diffGutter !== undefined) return
+    // A deleted (old) line is not part of the current file: copying a selection
+    // should give the real current code, so skip del rows entirely. Context and
+    // added rows are the current file's lines.
+    if (el.dataset.diffLine === 'del') return
+    if (el.dataset.diffCodeLine === 'del') return
+    // Split view's left column (or a left code cell) is the old revision, so
+    // skip it — copy is the current (right) code.
+    if (el.dataset.diffSplitSide === 'left') return
+    if (el.dataset.diffCodeSide === 'left') return
     // A diff row (unified or split) is a logical line: precede it with a
     // newline unless we are already at a line start. A wrapped `.subline` is
     // a segment of that same line, so it is intentionally NOT a boundary.
