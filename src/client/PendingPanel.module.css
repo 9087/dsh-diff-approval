@@ -639,7 +639,9 @@
   font-family: var(--dsw-font-markdown-code-block);
   font-size: 12.5px;
   line-height: 18px;
-  background: var(--dsw-alias-markdown-code-block);
+  /* Same neutral-gray chip as inline code, so fenced blocks and inline ``code``
+     read consistently (and don't sit as a hard box over a diff tint). */
+  background: color-mix(in srgb, #9e9e9e 25%, transparent);
 }
 .mdPreviewBody pre code {
   padding: 0;
