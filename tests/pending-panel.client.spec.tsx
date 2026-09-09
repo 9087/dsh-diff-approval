@@ -2610,6 +2610,10 @@ describe('PendingPanel', () => {
     // Toggle back to the source diff.
     fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLButtonElement)
     expect(document.querySelector('[data-diff-md-preview-body]')).toBeNull()
+    // The source diff renders again (its virtualization re-measures the fresh
+    // body after the preview took over it, so the rows are not blank until a
+    // scroll). The view toggle left split view on, so either row type is fine.
+    expect(document.querySelectorAll('[data-diff-row], [data-diff-split-row]').length).toBeGreaterThan(0)
   })
 
   it('does not offer the Markdown preview toggle for a non-Markdown file', () => {

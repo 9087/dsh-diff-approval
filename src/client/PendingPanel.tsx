@@ -2178,9 +2178,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   }, [model])
 
   // Measure the scroller's viewport once it mounts and on resize, so the
-  // render window tracks the visible area. `splitView` is a dep so toggling to
-  // the single-column view re-measures the fresh body (otherwise the stale
-  // viewportHeight would leave the window wrong until a scroll).
+  // render window tracks the visible area. `splitView` and `mdPreview` are deps
+  // so toggling off the split view or the Markdown preview re-measures the fresh
+  // body (otherwise the stale viewportHeight would leave the window wrong until
+  // a scroll).
   useEffect(() => {
     const body = bodyRef.current
     if (body === null) return
@@ -2189,7 +2190,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
     observer?.observe(body)
     return () => { observer?.disconnect() }
-  }, [file.id, splitView])
+  }, [file.id, splitView, mdPreview])
 
   // Measure the code scroll box's width so wrapped line heights can be computed.
   // Re-measure immediately on resize so a drag re-wraps live. ResizeObserver
@@ -2207,7 +2208,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
     observer?.observe(body)
     return () => { observer?.disconnect() }
-  }, [file.id, langWrap])
+  }, [file.id, langWrap, mdPreview])
 
   // Scroll the focused change block into view after focus, content changes, or
   // a jump. The block's top edge lands two rows below the viewport top so a
@@ -2241,7 +2242,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     // recenters the focused block.
     // NOTE: `model`/`rowCount` are deliberately NOT deps — a content refresh
     // would otherwise re-center the view and lose the user's scroll position.
-  }, [scrollTick, rowOffsets === null])
+  }, [scrollTick, rowOffsets === null, mdPreview])
 
   // At the wrap boundary (last block + down, first block + up) a guarded press
   // (keyboard or toolbar) only toasts; the next press in the same direction
