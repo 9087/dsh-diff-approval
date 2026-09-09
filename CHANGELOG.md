@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.19.1](https://github.com/9087/dsh-diff-approval/compare/v0.19.0...v0.19.1) (2026-09-09)
+
+### Bug Fixes
+
+* copy the current file content, not the diff ([c35523f](https://github.com/9087/dsh-diff-approval/commit/c35523fd185c5fd32a62fec8aed0be9336a69cbc))
+* match the fenced code-block background to the inline-code neutral gray ([b095fc0](https://github.com/9087/dsh-diff-approval/commit/b095fc01a08cd1c7596cdb555df2426e0dd0ef86))
+* re-measure and re-center the source diff when leaving the Markdown preview ([0b92dd8](https://github.com/9087/dsh-diff-approval/commit/0b92dd8da484132870bb452701a5301b2ebc78ef))
+* rename the source-view toggle to Switch to source in the Markdown preview ([da40a2b](https://github.com/9087/dsh-diff-approval/commit/da40a2ba505294d31caf56ae16b59b4276c35b9b))
+
 ## [0.19.0](https://github.com/9087/dsh-diff-approval/compare/v0.18.0...v0.19.0) (2026-09-08)
 
 ### Features
