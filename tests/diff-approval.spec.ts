@@ -64,6 +64,8 @@ async function harness(options: {
   ctx.provide('fs', fs as unknown as FileSystem)
   const handle = vi.fn<(channel: string, handler: ConnectionRpcHandler, options: ConnectionRpcHandlerOptions) => () => void>(() => () => {})
   ctx.provide('connection', { rpc: { handle } } as unknown as HostConnectionHandle)
+  // The plugin injects `webServer` so its channel owner can resolve it.
+  ctx.provide('webServer', { register: vi.fn(() => () => {}) } as never)
   const workspaces: Workspace[] = (options.sessionIds ?? []).length === 0 ? [] : [{
     id: WorkspaceId('workspace-1'),
     sessionIds: [...options.sessionIds!],
@@ -1138,3 +1140,77 @@ describe('persistence throttling', () => {
     expect(entry).toMatchObject({ oldText: 'v0\n', newText: 'v6\n', kind: 'edit' })
   })
 })
+
+describe('review channel mounting', () => {
+  /**
+   * Mount the plugin against two connection shapes:
+   * - `'0.1.5'`: `register` exists and `rpc.handle` registers under the
+   *   *service's* own context, which cannot resolve `webServer`, so it throws.
+   * - `'published'`: no `register`; `rpc.handle` is the working published path.
+   * @param shape - which connection surface to provide.
+   * @returns the channels each path mounted, and any `rpc.handle` failure.
+   */
+  async function mount(shape: '0.1.5' | 'published'): Promise<{
+    viaRegister: { channel: string; ownerResolvedWebServer: boolean }[]
+    viaHandle: string[]
+    handleError: string | undefined
+  }> {
+    const ctx = new Context()
+    contexts.push(ctx)
+    const viaRegister: { channel: string; ownerResolvedWebServer: boolean }[] = []
+    const viaHandle: string[] = []
+    let handleError: string | undefined
+    const fs: FsDouble = {
+      resolve: vi.fn(async (path: string) => ({ displayPath: path, targetKey: `key:${path}` })),
+      readText: vi.fn(async () => undefined),
+      writeText: vi.fn(async () => ({ version: 1 })),
+      stat: vi.fn(async () => ({ version: 'v1', type: 'file' })),
+      processPath: vi.fn((target: { targetKey: string }) => target.targetKey),
+    }
+    ctx.provide('fs', fs as unknown as FileSystem)
+    ctx.provide('workspaceRegistry', { list: () => [] } as unknown as WorkspaceRegistry)
+    ctx.provide('webServer', { register: vi.fn(() => () => {}) } as never)
+    const rpc = {
+      handle: (channel: string): (() => void) => {
+        if (shape === '0.1.5') {
+          handleError = 'cannot get property "webServer" without inject'
+          throw new Error(handleError)
+        }
+        viaHandle.push(channel)
+        return () => {}
+      },
+    }
+    const service = shape === '0.1.5'
+      ? {
+          rpc,
+          register: (owner: Context, channel: string): (() => void) => {
+            viaRegister.push({
+              channel,
+              ownerResolvedWebServer: typeof (owner as unknown as { webServer?: unknown }).webServer === 'object',
+            })
+            return () => {}
+          },
+        }
+      : { rpc }
+    ctx.provide('connection', service as unknown as HostConnectionHandle)
+    await ctx.plugin(apply, { storageDir: await mkdtemp(join(tmpdir(), 'dsh-diff-approval-')) })
+    return { viaRegister, viaHandle, handleError }
+  }
+
+  it('mounts through register() when rpc.handle cannot resolve webServer', async () => {
+    // A release whose connection service cannot resolve `webServer` from the
+    // owner it registers under. Mounting via `register` with our own
+    // webServer-injecting context avoids that path — and must NOT touch it, or
+    // the whole plugin tree fails to load at boot.
+    const { viaRegister, handleError } = await mount('0.1.5')
+    expect(handleError).toBeUndefined()
+    expect(viaRegister).toEqual([{ channel: DIFF_APPROVAL_CHANNEL, ownerResolvedWebServer: true }])
+  })
+
+  it('falls back to rpc.handle when the connection service exposes no register', async () => {
+    const { viaRegister, viaHandle } = await mount('published')
+    expect(viaRegister).toEqual([])
+    expect(viaHandle).toEqual([DIFF_APPROVAL_CHANNEL])
+  })
+})
+

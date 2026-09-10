@@ -68,8 +68,13 @@ export { defaultOpenPath } from './open.ts'
 /** Stable Cordis plugin name. */
 export const name = 'diff-approval'
 
-/** Services required before the review surface activates. */
-export const inject = ['fs', 'connection', 'workspaceRegistry', 'sessions']
+/**
+ * Services required before the review surface activates. `webServer` rides with
+ * `connection` (both come from the web bundle), and is named explicitly because
+ * the channel's owner context must be able to resolve it — see
+ * `ConnectionServiceSurface`.
+ */
+export const inject = ['fs', 'connection', 'webServer', 'workspaceRegistry', 'sessions']
 
 /** The connection RPC channel this plugin serves. */
 export const DIFF_APPROVAL_CHANNEL = '/diff-approval'
@@ -260,6 +265,45 @@ function imageMimeOf(path: string): string {
  */
 function rpcError(message: string): RpcResult<unknown> {
   return { ok: false, error: { code: 'internal', message, details: {} } }
+}
+
+/**
+ * The slice of the Host connection service this plugin mounts its channel with.
+ *
+ * `rpc.handle` is the published surface, but it hardcodes the *service's* own
+ * context as the registration owner, and the method it delegates to reads
+ * `owner.webServer` from that context. dsh-client-connection moved `webServer`
+ * out of that plugin's `inject` into a nested scope, so `handle` throws
+ * `cannot get property "webServer" without inject` there and takes the whole
+ * plugin tree down at boot. Declaring `webServer` on the *caller* does not help:
+ * the owner is the provider's context, so `handle` fails no matter what this
+ * plugin injects. `register` takes the owner as a parameter, so naming our own
+ * `webServer`-injecting context restores the documented intent — "channel
+ * registrations belong to the caller fiber" — and mounts regardless. Upstream
+ * report: https://github.com/deepseek-ai/deepseek-harness/discussions/5926 ;
+ * drop this once `connection`'s own inject lists `webServer` again. The
+ * published types mark `register` private, hence this local declaration.
+ */
+interface ConnectionServiceSurface {
+  /** Published channel registry, kept as the fallback path. */
+  readonly rpc: {
+    handle: (
+      channel: string,
+      handler: ConnectionRpcHandler,
+      options?: { readonly authority: 'trusted-host' | 'loopback' },
+    ) => () => Promise<void>
+  }
+  /**
+   * Mount one channel for an explicit owner; absent on some builds. The trailing
+   * options carry the channel's trust policy: releases in the 0.1.0 line read
+   * `options.authority` unconditionally, so it must be passed.
+   */
+  register?: (
+    owner: Context,
+    channel: string,
+    handler: ConnectionRpcHandler,
+    options?: { readonly authority: 'trusted-host' | 'loopback' },
+  ) => () => Promise<void>
 }
 
 /**
@@ -1046,10 +1090,17 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     }
   }
 
-  ctx.effect(
-    () => ctx.connection.rpc.handle(DIFF_APPROVAL_CHANNEL, handle, { authority: 'trusted-host' }),
-    'diff-approval: review channel',
-  )
+  // Mount the review channel. `register` is preferred so the registration owner
+  // is this plugin's own context — the one that injects `webServer` (see
+  // `ConnectionServiceSurface`). `rpc.handle` stays as the fallback for a build
+  // that no longer exposes `register`. The trust policy rides along because the
+  // 0.1.0 line reads it from the options argument.
+  ctx.effect(() => {
+    const service = ctx.connection as unknown as ConnectionServiceSurface
+    return typeof service.register === 'function'
+      ? service.register(ctx, DIFF_APPROVAL_CHANNEL, handle, { authority: 'trusted-host' })
+      : service.rpc.handle(DIFF_APPROVAL_CHANNEL, handle, { authority: 'trusted-host' })
+  }, 'diff-approval: review channel')
 
   // Observe the mutation intent seams without owning the decision: capture
   // the pre-write basis, then hand the chain on untouched so policy plugins

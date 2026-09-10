@@ -71,6 +71,8 @@ async function harness(): Promise<Harness> {
   ctx.provide('fs', fs as unknown as FileSystem)
   const handle = vi.fn<(channel: string, handler: ConnectionRpcHandler, options: ConnectionRpcHandlerOptions) => () => void>(() => () => {})
   ctx.provide('connection', { rpc: { handle } } as unknown as HostConnectionHandle)
+  // The plugin injects `webServer` so its channel owner can resolve it.
+  ctx.provide('webServer', { register: vi.fn(() => () => {}) } as never)
   const workspace: Workspace = {
     id: WorkspaceId('workspace-1'),
     sessionIds: [SessionId('session-1')],
