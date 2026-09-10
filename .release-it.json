@@ -1,4 +1,7 @@
 {
+  "hooks": {
+    "before:bump": "pnpm run build && pnpm run compat"
+  },
   "plugins": {
     "@release-it/conventional-changelog": {
       "infile": "CHANGELOG.md",
