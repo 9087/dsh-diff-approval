@@ -3,12 +3,12 @@
 import { Component, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from 'react'
-import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import type { DiffApprovalBlockRange, DiffApprovalOpenAction, PendingFileDiff } from '../types.ts'
+import type { DiffApprovalBlockRange, DiffApprovalOpenAction, DiffApprovalRefreshOutcome, PendingFileDiff } from '../types.ts'
 import type { PendingPanelFace } from './slots.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import { computeIntraLineDiff, computeWholeFileDiff } from './whole-file-diff.ts'
@@ -436,6 +436,8 @@ interface PendingDiffProps {
   t: Translator
   onKeep: (sessionId: SessionId, id: string) => Promise<void>
   onRevert: (sessionId: SessionId, id: string) => Promise<void>
+  /** Replace this file's diff with its current local VCS change. */
+  onRefreshVcs: (file: PendingFileDiff) => void
   onBlockKeep: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
   onBlockRevert: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
   onOpen: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
@@ -1683,7 +1685,7 @@ function PendingFileRow({ file, selected, failedMessage, t, onSelect }: PendingF
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedMessage, onPasteReference, onToast, t, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, floatMode, floatOpen, onToggleFileList }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedMessage, onPasteReference, onToast, t, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, floatMode, floatOpen, onToggleFileList }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -2773,6 +2775,18 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
             </button>
           </Tooltip>
         )}
+        <Tooltip label={t('action.refreshVcs')} side="bottom" delayMs={500}>
+          <button
+            type="button"
+            className={`${css.action} ${css.iconAction}`}
+            data-diff-refresh-vcs
+            disabled={busy}
+            aria-label={t('action.refreshVcs')}
+            onClick={() => { onRefreshVcs(file) }}
+          >
+            <IconRefreshOutline16 size={14} />
+          </button>
+        </Tooltip>
         <span className={css.flexSpacer} />
         <button
           type="button"
@@ -3142,7 +3156,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onUndo, onRedo, onImportVcs, onKeepAll, onRevertAll, onAckRedoCleared, collapseSidebar, t,
+  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onUndo, onRedo, onImportVcs, onRefreshVcs, onKeepAll, onRevertAll, onAckRedoCleared, collapseSidebar, t,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
   // A newly created session is selected but still blank (no messages yet); it
@@ -3516,6 +3530,46 @@ export function PendingPanel({
     }
   }
 
+  /**
+   * Replace one file's diff with its current local VCS change, then report what
+   * the scan found. A scan that sees no change leaves the entry alone, so the
+   * message names the file rather than silently blanking a review in progress.
+   */
+  const runRefreshVcs = async (entry: PendingFileDiff): Promise<void> => {
+    if (current === undefined) return
+    const includeUntracked = includeUntrackedEnabled()
+    let outcome: DiffApprovalRefreshOutcome
+    try {
+      const value = await onRefreshVcs(current, entry.id, includeUntracked)
+      outcome = value.outcome
+    } catch (error: unknown) {
+      showCopyToast(t('panel.refreshFailed', { message: error instanceof Error ? error.message : String(error) }))
+      return
+    }
+    // The refresh came from the open file's own toolbar, so no message needs a
+    // file name to be unambiguous.
+    if (outcome === 'refreshed') {
+      showCopyToast(t('panel.refreshDone'))
+      return
+    }
+    if (outcome === 'unchanged') {
+      showCopyToast(t('panel.refreshUnchanged'))
+      return
+    }
+    if (outcome === 'no-change') {
+      // Untracked files are only visible to the scan while untracked imports are
+      // on, so say so instead of implying the file is clean.
+      const hint = includeUntracked ? '' : ` ${t('panel.refreshUntrackedHint')}`
+      showCopyToast(`${t('panel.refreshNone')}${hint}`)
+      return
+    }
+    if (outcome === 'no-vcs') {
+      showCopyToast(t('panel.importNoVcs'))
+      return
+    }
+    showCopyToast(t('panel.fileNotPending'))
+  }
+
   const renderEntry = (entry: PendingFileDiff) => (
     <PendingFileRow
       key={entry.id}
@@ -3819,6 +3873,7 @@ export function PendingPanel({
                     t={t}
                     onKeep={keepWithPrompt}
                     onRevert={revertWithPrompt}
+                    onRefreshVcs={(entry) => { void runRefreshVcs(entry) }}
                     onBlockKeep={blockKeepWithPrompt}
                     onBlockRevert={blockRevertWithPrompt}
                     onOpen={onOpen}

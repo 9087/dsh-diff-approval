@@ -122,6 +122,12 @@ export const zh = {
   'panel.fileRevertedAsk': '「{file}」的改动已全部回退，是否从列表移除？',
   'panel.confirmFileRemove': '处理整文件后询问是否移出列表',
   'panel.confirmFileRemoveDesc': '对单个文件执行整文件 Keep/Revert 后，弹窗询问是否把该文件移出列表。关闭后直接移出（不影响批量 Keep All / Revert All）。',
+  'action.refreshVcs': '刷新差异',
+  'panel.refreshDone': '差异已更新',
+  'panel.refreshUnchanged': '差异已是最新',
+  'panel.refreshNone': '未检测到本地 VCS 差异',
+  'panel.refreshUntrackedHint': '（新建/未跟踪文件需要开启「导入未跟踪的文件改动」）',
+  'panel.refreshFailed': '刷新失败：{message}',
 } satisfies Record<string, string>
 
 /** Translation keys owned by the pending-edit review namespace. */
@@ -254,4 +260,10 @@ export const en = {
   'panel.fileRevertedAsk': 'All changes in "{file}" are reverted. Remove it from the list?',
   'panel.confirmFileRemove': 'Ask after a whole-file keep/revert',
   'panel.confirmFileRemoveDesc': 'After a whole-file keep/revert on a single file, ask whether to remove that file from the list. When off, it is removed straight away (Keep All / Revert All are unaffected).',
+  'action.refreshVcs': 'Refresh diff',
+  'panel.refreshDone': 'Diff updated',
+  'panel.refreshUnchanged': 'Already up to date',
+  'panel.refreshNone': 'No local VCS change found',
+  'panel.refreshUntrackedHint': '(new or untracked files need "Import changes to untracked files")',
+  'panel.refreshFailed': 'Refresh failed: {message}',
 } satisfies Record<DiffApprovalKey, string>

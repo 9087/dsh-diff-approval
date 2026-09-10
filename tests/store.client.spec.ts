@@ -2,7 +2,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
-import type { DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalListValue, PendingFileDiff } from '../src/types.ts'
+import type { DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalListValue, DiffApprovalRefreshValue, PendingFileDiff } from '../src/types.ts'
 import type { DiffApprovalPort } from '../src/client/port.ts'
 import { createPendingDiffStore } from '../src/client/store.ts'
 
@@ -24,18 +24,20 @@ interface PortSeam {
   revert: ActionMock
   blockKeep: BlockActionMock
   blockRevert: BlockActionMock
+  refreshVcs: ReturnType<typeof vi.fn<(sessionId: SessionId, id: string, includeUntracked: boolean) => Promise<DiffApprovalRefreshValue>>>
 }
 
 /** Build one seam whose answers the test controls through typed mocks. */
-function port(overrides: Partial<Pick<PortSeam, 'list' | 'keep' | 'revert' | 'blockKeep' | 'blockRevert'>> = {}): PortSeam {
+function port(overrides: Partial<Pick<PortSeam, 'list' | 'keep' | 'revert' | 'blockKeep' | 'blockRevert' | 'refreshVcs'>> = {}): PortSeam {
   const list = vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>(async () => ({ files: [FILE] }))
   const keep = vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'kept' }))
   const revert = vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'reverted' }))
   const blockKeep = vi.fn<(sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'kept' }))
   const blockRevert = vi.fn<(sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'reverted' }))
+  const refreshVcs = vi.fn<(sessionId: SessionId, id: string, includeUntracked: boolean) => Promise<DiffApprovalRefreshValue>>(async () => ({ outcome: 'refreshed' }))
   return {
-    port: { list, keep, revert, blockKeep, blockRevert, ...overrides },
-    list, keep, revert, blockKeep, blockRevert,
+    port: { list, keep, revert, blockKeep, blockRevert, refreshVcs, ...overrides },
+    list, keep, revert, blockKeep, blockRevert, refreshVcs,
   }
 }
 
@@ -132,6 +134,28 @@ describe('actions', () => {
     expect(failing).toHaveBeenCalledWith(S1, FILE.id, true)
     expect(store.getSnapshot().files).toEqual([FILE])
     expect(store.getSnapshot().failed?.get(FILE.id)).toBe('busy elsewhere')
+  })
+
+  it('refreshes one entry through the port and re-reads the list', async () => {
+    const seam = port()
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+    const value = await store.refreshVcs(S1, FILE.id, false)
+    expect(value).toEqual({ outcome: 'refreshed' })
+    expect(seam.refreshVcs).toHaveBeenCalledWith(S1, FILE.id, false)
+    // The entry's diff changed, so the list is re-read rather than edited locally.
+    expect(seam.list).toHaveBeenCalledTimes(2)
+    expect(store.getSnapshot().busy).toEqual(new Set())
+  })
+
+  it('clears the busy mark even when a refresh fails', async () => {
+    const failing = vi.fn(async () => { throw new Error('no shell') })
+    const seam = port({ refreshVcs: failing as unknown as PortSeam['refreshVcs'] })
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+    await expect(store.refreshVcs(S1, FILE.id, false)).rejects.toThrow('no shell')
+    expect(store.getSnapshot().busy).toEqual(new Set())
+    expect(store.getSnapshot().files).toEqual([FILE])
   })
 
   it('keeps the file and marks it failed when an action fails, without a read error', async () => {

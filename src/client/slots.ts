@@ -2,7 +2,7 @@
 
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
-import type { DiffApprovalBlockRange, DiffApprovalOpenAction, PendingFileDiff, VcsImportValue } from '../types.ts'
+import type { DiffApprovalBlockRange, DiffApprovalOpenAction, DiffApprovalRefreshValue, PendingFileDiff, VcsImportValue } from '../types.ts'
 
 /** What the panel reads and drives: the pending list plus in-flight entries. */
 export interface PendingDiffSnapshot {
@@ -54,6 +54,9 @@ export interface PendingPanelFace {
   onRedo: (sessionId: SessionId) => Promise<string | undefined>
   /** Import the workspace's local VCS changes as pending entries (detection included). */
   onImportVcs: (sessionId: SessionId, includeUntracked: boolean) => Promise<VcsImportValue>
+  /** Replace one entry's diff with the file's current local VCS change, then
+   *  refresh the list; resolves to what the scan found. */
+  onRefreshVcs: (sessionId: SessionId, id: string, includeUntracked: boolean) => Promise<DiffApprovalRefreshValue>
   /** Keep every pending entry of one session in a single host call (bulk). */
   onKeepAll: (sessionId: SessionId) => Promise<void>
   /** Revert every pending entry of one session in a single host call (bulk). */

@@ -54,6 +54,7 @@ function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
     onUndo: vi.fn(),
     onRedo: vi.fn(),
     onImportVcs: vi.fn(async () => ({ imported: 0, detected: false })),
+    onRefreshVcs: vi.fn(async () => ({ outcome: 'refreshed' })),
     onKeepAll: vi.fn(async () => {}),
     onRevertAll: vi.fn(async () => {}),
     onAckRedoCleared: vi.fn(),
@@ -550,6 +551,72 @@ describe('PendingPanel', () => {
     fireEvent.click(document.querySelector('[data-diff-import-vcs]') as HTMLElement)
     // The DSH Toast renders portaled into the body.
     await waitFor(() => { expect(screen.getByText('panel.importNone')).toBeDefined() })
+  })
+
+  it('refreshes the open file from its toolbar button and reports the updated diff', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const refresh = props.onRefreshVcs as unknown as { mock: { calls: unknown[][] } }
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    fireEvent.click(document.querySelector('[data-diff-refresh-vcs]') as HTMLElement)
+
+    await waitFor(() => { expect(refresh.mock.calls.length).toBe(1) })
+    expect(refresh.mock.calls[0]?.slice(0, 2)).toEqual([S1, FILE.id])
+    await waitFor(() => { expect(screen.getByText('panel.refreshDone')).toBeDefined() })
+  })
+
+  it('disables the refresh button while the file is busy', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set([FILE.id]) })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const button = document.querySelector('[data-diff-refresh-vcs]') as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+    fireEvent.click(button)
+    expect(props.onRefreshVcs).not.toHaveBeenCalled()
+  })
+
+  it('says why a refresh found nothing instead of blanking the diff', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    ;(props.onRefreshVcs as unknown as { mockResolvedValueOnce: (v: unknown) => void })
+      .mockResolvedValueOnce({ outcome: 'no-change' })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    fireEvent.click(document.querySelector('[data-diff-refresh-vcs]') as HTMLElement)
+
+    // Untracked imports are off by default, so the message names that setting:
+    // the entry was left exactly as it was.
+    await waitFor(() => {
+      expect(screen.getByText('panel.refreshNone panel.refreshUntrackedHint')).toBeDefined()
+    })
+  })
+
+  it('reports a refresh that found no VCS at all', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    ;(props.onRefreshVcs as unknown as { mockResolvedValueOnce: (v: unknown) => void })
+      .mockResolvedValueOnce({ outcome: 'no-vcs' })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    fireEvent.click(document.querySelector('[data-diff-refresh-vcs]') as HTMLElement)
+
+    await waitFor(() => { expect(screen.getByText('panel.importNoVcs')).toBeDefined() })
+  })
+
+  it('surfaces a failed refresh rather than silently doing nothing', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    ;(props.onRefreshVcs as unknown as { mockRejectedValueOnce: (e: unknown) => void })
+      .mockRejectedValueOnce(new Error('nope'))
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    fireEvent.click(document.querySelector('[data-diff-refresh-vcs]') as HTMLElement)
+
+    await waitFor(() => { expect(screen.getByText('panel.refreshFailed {"message":"nope"}')).toBeDefined() })
   })
 
   it('keeps an emptied list open instead of auto-closing', () => {

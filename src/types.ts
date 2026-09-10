@@ -139,6 +139,24 @@ export interface DiffApprovalBulkValue {
   affected: number
 }
 
+/** What one file's VCS refresh found. */
+export type DiffApprovalRefreshOutcome =
+  /** The tracked diff was replaced with the file's current VCS change. */
+  | 'refreshed'
+  /** A VCS change exists but matches what the entry already tracks. */
+  | 'unchanged'
+  /** The file has no local VCS change (untracked-and-excluded, or already clean). */
+  | 'no-change'
+  /** No pending entry existed for the id. */
+  | 'missing'
+  /** The workspace is not inside a git/svn/p4 checkout. */
+  | 'no-vcs'
+
+/** Value returned by the channel's vcs-refresh endpoint. */
+export interface DiffApprovalRefreshValue {
+  outcome: DiffApprovalRefreshOutcome
+}
+
 /** Value returned by the channel's keep and revert endpoints. */
 export interface DiffApprovalActionValue {
   /** What the request did; `missing` means no pending entry existed. */

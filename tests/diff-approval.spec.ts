@@ -1169,6 +1169,102 @@ describe('vcs detection and import', () => {
   })
 })
 
+describe('per-file VCS refresh', () => {
+  /** A git repo at `dir/repo` whose working tree is the workspace `dir/repo/sub`. */
+  async function gitRepo(): Promise<{ repo: string; workspace: string }> {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-vcs-refresh-'))
+    tempDirs.push(dir)
+    const repo = join(dir, 'repo')
+    const workspace = join(repo, 'sub')
+    await mkdir(join(repo, '.git'), { recursive: true })
+    await mkdir(workspace, { recursive: true })
+    return { repo, workspace }
+  }
+
+  /** A repo with one tracked file already imported as a pending entry. */
+  async function imported(): Promise<{
+    handle: ConnectionRpcHandler
+    entryId: string
+    file: string
+    routes: Record<string, string>
+  }> {
+    const { workspace } = await gitRepo()
+    const file = join(workspace, 'a.txt')
+    await writeFile(file, 'work v1\n')
+    const routes: Record<string, string> = {
+      'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all': ' M sub/a.txt\u0000',
+      'git cat-file -s :0:sub/a.txt': '9',
+      'git show :0:sub/a.txt': 'base v1\n',
+    }
+    const { handle } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (ctx) => { ctx.provide('shell', fakeShell(routes)) },
+    })
+    await handle('vcs-import', { sessionId: 'session-1', includeUntracked: false }, signal())
+    const [entry] = await listEntries(handle, 'session-1')
+    expect(entry).toMatchObject({ oldText: 'base v1\n', newText: 'work v1\n' })
+    return { handle, entryId: entry!.id, file, routes }
+  }
+
+  it('replaces the tracked diff with the file current VCS change, and undoes it', async () => {
+    const { handle, entryId, file, routes } = await imported()
+    // The file AND its baseline moved on since the review captured it.
+    await writeFile(file, 'work v2\n')
+    routes['git show :0:sub/a.txt'] = 'base v2\n'
+
+    await expect(handle('vcs-refresh', { sessionId: 'session-1', id: entryId, includeUntracked: false }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'refreshed' } })
+    const [refreshed] = await listEntries(handle, 'session-1')
+    expect(refreshed).toMatchObject({ oldText: 'base v2\n', newText: 'work v2\n' })
+
+    // One Ctrl+Z puts the originally captured diff back.
+    await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: entryId } })
+    const [restored] = await listEntries(handle, 'session-1')
+    expect(restored).toMatchObject({ oldText: 'base v1\n', newText: 'work v1\n' })
+  })
+
+  it('leaves the entry untouched when the scan finds no change', async () => {
+    const { handle, entryId, routes } = await imported()
+    routes['git -c status.renames=false status --porcelain=v1 -z --untracked-files=all'] = ''
+
+    await expect(handle('vcs-refresh', { sessionId: 'session-1', id: entryId, includeUntracked: false }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'no-change' } })
+    const [kept] = await listEntries(handle, 'session-1')
+    expect(kept).toMatchObject({ oldText: 'base v1\n', newText: 'work v1\n' })
+    // The refresh recorded no step of its own, so the only thing left to undo is
+    // still the import that created the entry.
+    await handle('undo', { sessionId: 'session-1' }, signal())
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+  })
+
+  it('reports an unchanged entry without a second undo step', async () => {
+    const { handle, entryId } = await imported()
+    await expect(handle('vcs-refresh', { sessionId: 'session-1', id: entryId, includeUntracked: false }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'unchanged' } })
+    // Again nothing new to undo: the import's pair is still on top.
+    await handle('undo', { sessionId: 'session-1' }, signal())
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+  })
+
+  it('reports a workspace outside any checkout, and a missing entry', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-vcs-none-'))
+    tempDirs.push(dir)
+    const { ctx, handle } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: dir,
+      prepare: (prepared) => { prepared.provide('shell', fakeShell({})) },
+    })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const [entry] = await listEntries(handle, 'session-1')
+    await expect(handle('vcs-refresh', { sessionId: 'session-1', id: entry!.id, includeUntracked: false }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'no-vcs' } })
+    await expect(handle('vcs-refresh', { sessionId: 'session-1', id: 'nope', includeUntracked: false }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+  })
+})
+
 describe('persistence throttling', () => {
   it('coalesces a rapid burst of captures into a bounded number of durable writes', async () => {
     const save = vi.spyOn(PendingPersistence.prototype, 'save')

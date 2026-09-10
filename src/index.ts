@@ -54,12 +54,13 @@ import { detectVcsRoot, listVcsChanges } from './vcs.ts'
 import type { VcsChange, VcsImportInput, ShellExecutorLike } from './vcs.ts'
 import type {
   DiffApprovalActionValue, DiffApprovalBlockTarget, DiffApprovalBulkValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue,
-  DiffApprovalPreviewImageValue, PendingEntry, PendingEntryKind, PendingFileDiff, VcsImportValue,
+  DiffApprovalPreviewImageValue, DiffApprovalRefreshValue, PendingEntry, PendingEntryKind, PendingFileDiff, VcsImportValue,
 } from './types.ts'
 
 export type {
   DiffApprovalActionOutcome, DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalBlockTarget,
-  DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, PendingEntry, PendingEntryKind, PendingFileDiff,
+  DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalRefreshOutcome, DiffApprovalRefreshValue,
+  PendingEntry, PendingEntryKind, PendingFileDiff,
 } from './types.ts'
 export { PendingDiffStore } from './pending.ts'
 export { PendingPersistence, defaultStorageDir } from './persist.ts'
@@ -1068,6 +1069,72 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           }
         }
         const value: VcsImportValue = { imported, detected: true }
+        return { ok: true, value }
+      }
+      case 'vcs-refresh': {
+        const target = targetOf(payload)
+        if (target === undefined) return rpcError('sessionId and id must be non-empty strings')
+        await ensureLoaded()
+        const entry = store.get(target.id)
+        if (entry === undefined) {
+          const value: DiffApprovalRefreshValue = { outcome: 'missing' }
+          return { ok: true, value }
+        }
+        const workspace = workspaceOf(target.sessionId)
+        if (workspace === undefined) return rpcError('refresh unavailable: the session has no workspace')
+        const root = detectVcsRoot(workspace.path)
+        if (root === undefined) {
+          const value: DiffApprovalRefreshValue = { outcome: 'no-vcs' }
+          return { ok: true, value }
+        }
+        const shell = ctx.get('shell') as ShellExecutorLike | undefined
+        if (shell === undefined) return rpcError('refresh unavailable: the deployment has no shell executor')
+        // Scope the scan to this one file: a full workspace sweep would make a
+        // per-file refresh as slow as an import on a large tree.
+        let changes: VcsChange[]
+        try {
+          changes = await listVcsChanges({
+            kind: root.kind,
+            root: root.root,
+            workspaceRoot: workspace.path,
+            includeUntracked: (payload as Record<string, unknown>).includeUntracked === true,
+            scope: entry.path,
+            shell,
+            readText: (path) => readFile(path, 'utf8').catch(() => undefined),
+            signal,
+          })
+        } catch (error: unknown) {
+          return rpcError(`refresh failed: ${errorMessage(error)}`)
+        }
+        const folded = (value: string) => process.platform === 'win32' ? resolve(value).toLowerCase() : resolve(value)
+        const change = changes.find(candidate => folded(candidate.path) === folded(entry.path))
+        // Nothing to replace it with: leave the entry exactly as the review found
+        // it and let the panel say so. Silently blanking the diff here would
+        // discard a review in progress over a scan that simply saw no change
+        // (an untracked new file, for instance, when untracked imports are off).
+        if (change === undefined) {
+          const value: DiffApprovalRefreshValue = { outcome: 'no-change' }
+          return { ok: true, value }
+        }
+        if (change.kind === entry.kind && change.oldText === entry.oldText && change.newText === entry.newText) {
+          const value: DiffApprovalRefreshValue = { outcome: 'unchanged' }
+          return { ok: true, value }
+        }
+        const refreshed: PendingEntry = {
+          ...entry,
+          kind: change.kind,
+          oldText: change.oldText,
+          newText: change.newText,
+          updatedAt: Date.now(),
+        }
+        store.restore(refreshed)
+        // The refresh is undoable as one action: the entry's tracked diff moves
+        // from what the review captured to what the VCS reports now.
+        pushUndo(target.sessionId,
+          { id: entry.path, path: entry.path, entry, fileText: undefined },
+          { id: entry.path, path: entry.path, entry: refreshed, fileText: undefined })
+        persistSession(true)
+        const value: DiffApprovalRefreshValue = { outcome: 'refreshed' }
         return { ok: true, value }
       }
       case 'open': {

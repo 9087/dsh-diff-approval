@@ -7,7 +7,7 @@
 
 import type { ClientConnectionRpc, SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type {
-  DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalBulkValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, PendingFileDiff, VcsImportValue,
+  DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalBulkValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue, PendingFileDiff, VcsImportValue,
 } from '../types.ts'
 
 /** The channel the host half registers and this port calls. */
@@ -31,6 +31,8 @@ export interface DiffApprovalPort {
   redo(sessionId: SessionId): Promise<DiffApprovalActionValue>
   /** Import the workspace's local VCS changes as pending entries. */
   importVcs(sessionId: SessionId, includeUntracked: boolean): Promise<VcsImportValue>
+  /** Replace one entry's diff with the file's current local VCS change. */
+  refreshVcs(sessionId: SessionId, id: string, includeUntracked: boolean): Promise<DiffApprovalRefreshValue>
   /** Open one file with its default application or reveal it in the folder. */
   open(sessionId: SessionId, id: string, action: DiffApprovalOpenAction): Promise<DiffApprovalOpenValue>
   /** Keep every pending entry of one session in a single host call (one batch). */
@@ -73,6 +75,9 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
     },
     async importVcs(sessionId, includeUntracked) {
       return importValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'vcs-import', { sessionId, includeUntracked }))
+    },
+    async refreshVcs(sessionId, id, includeUntracked) {
+      return refreshValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'vcs-refresh', { sessionId, id, includeUntracked }))
     },
     async open(sessionId, id, action) {
       return openOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'open', { sessionId, id, action }))
@@ -164,6 +169,19 @@ function importValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>)
     throw new Error('the import returned a malformed value')
   }
   return { imported, detected }
+}
+
+/** Narrow the vcs-refresh endpoint's value; a malformed wire value is a failure. */
+function refreshValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffApprovalRefreshValue {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+  const value: unknown = result.value
+  if (typeof value !== 'object' || value === null) throw new Error('the refresh returned a malformed value')
+  const outcome = (value as Record<string, unknown>).outcome
+  if (outcome !== 'refreshed' && outcome !== 'unchanged' && outcome !== 'no-change'
+    && outcome !== 'missing' && outcome !== 'no-vcs') {
+    throw new Error('the refresh returned a malformed outcome')
+  }
+  return { outcome }
 }
 
 /** Narrow the open endpoint's value; a malformed wire value is an open failure. */

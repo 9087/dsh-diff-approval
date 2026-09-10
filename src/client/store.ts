@@ -8,7 +8,7 @@
 
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
-import type { DiffApprovalBlockRange, DiffApprovalOpenAction, VcsImportValue } from '../types.ts'
+import type { DiffApprovalBlockRange, DiffApprovalOpenAction, DiffApprovalRefreshValue, VcsImportValue } from '../types.ts'
 import type { PendingDiffSnapshot } from './slots.ts'
 import type { DiffApprovalPort } from './port.ts'
 
@@ -30,6 +30,9 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   redo: (sessionId: SessionId) => Promise<string | undefined>
   /** Import the workspace's local VCS changes as pending entries, then refresh. */
   importVcs: (sessionId: SessionId, includeUntracked: boolean) => Promise<VcsImportValue>
+  /** Replace one entry's diff with the file's current local VCS change, then
+   *  refresh; resolves to what the scan found. */
+  refreshVcs: (sessionId: SessionId, id: string, includeUntracked: boolean) => Promise<DiffApprovalRefreshValue>
   /** Open one file with its default application or reveal it in the folder. */
   open: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
   /** Keep every pending entry of one session in a single host call, then refresh. */
@@ -238,6 +241,20 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
       const value = await port.importVcs(sessionId, includeUntracked)
       await this.refresh(sessionId)
       return value
+    },
+    // A refresh replaces the entry's tracked diff in place, so the entry is
+    // marked busy, the host call runs, and the list is re-read. A scan that found
+    // nothing leaves the entry untouched (the panel reports the outcome).
+    async refreshVcs(sessionId, id, includeUntracked) {
+      const { error: _cleared, ...base } = snapshot
+      publish({ ...base, busy: new Set([...snapshot.busy, id]) })
+      try {
+        const value = await port.refreshVcs(sessionId, id, includeUntracked)
+        await this.refresh(sessionId)
+        return value
+      } finally {
+        publish({ ...snapshot, busy: new Set([...snapshot.busy].filter(busy => busy !== id)) })
+      }
     },
     async open(sessionId, id, action) {
       try {

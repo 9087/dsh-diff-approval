@@ -69,6 +69,12 @@ export interface VcsImportInput {
   workspaceRoot: string
   /** Whether new/untracked files are imported (git `??`, svn `?`). */
   includeUntracked: boolean
+  /**
+   * Restrict the scan to one absolute path (a file, or a directory's subtree).
+   * Absent scans the whole workspace, which is what an import does; the review
+   * panel's per-file refresh passes the file so a large tree is not rescanned.
+   */
+  scope?: string | undefined
   shell: ShellExecutorLike
   /** Reads working-file content (the host passes a node fs reader). */
   readText: VcsFileReader
@@ -96,6 +102,19 @@ function isPathInside(absolutePath: string, root: string): boolean {
   const base = folded(resolve(root))
   if (path === base) return true
   return path.startsWith(base + sep)
+}
+
+/**
+ * Whether one changed path belongs to the scan: inside the workspace, and inside
+ * the narrowed `scope` when the caller set one.
+ * @param absolutePath - the changed file's absolute path.
+ * @param workspaceRoot - the session's workspace root.
+ * @param scope - one path to restrict the scan to, or undefined for all of it.
+ * @returns whether the change is in scope.
+ */
+function inScanScope(absolutePath: string, workspaceRoot: string, scope: string | undefined): boolean {
+  if (!isPathInside(absolutePath, workspaceRoot)) return false
+  return scope === undefined || isPathInside(absolutePath, scope)
 }
 
 /** The VCS marker of one directory, or undefined when it holds none. */
@@ -169,7 +188,7 @@ function parseGitPorcelainZ(output: string): { xy: string; rel: string }[] {
 
 /** Enumerate the workspace's local changes in a git checkout. */
 async function gitChanges(input: VcsImportInput): Promise<VcsChange[]> {
-  const { root, workspaceRoot, includeUntracked, shell, readText, signal } = input
+  const { root, workspaceRoot, includeUntracked, scope, shell, readText, signal } = input
   const stdout = await runShell(
     shell,
     'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all',
@@ -179,7 +198,7 @@ async function gitChanges(input: VcsImportInput): Promise<VcsChange[]> {
   const changes: VcsChange[] = []
   for (const { xy, rel } of parseGitPorcelainZ(stdout)) {
     const absolute = resolve(root, rel)
-    if (!isPathInside(absolute, workspaceRoot)) continue
+    if (!inScanScope(absolute, workspaceRoot, scope)) continue
     if (xy === '??') {
       if (!includeUntracked) continue
       const newText = await readText(absolute) ?? ''
@@ -229,7 +248,7 @@ function xmlUnescape(value: string): string {
 
 /** Enumerate the workspace's local changes in an svn working copy. */
 async function svnChanges(input: VcsImportInput): Promise<VcsChange[]> {
-  const { root, workspaceRoot, includeUntracked, shell, readText, signal } = input
+  const { root, workspaceRoot, includeUntracked, scope, shell, readText, signal } = input
   const stdout = await runShell(shell, 'svn status --xml', root, signal)
   const changes: VcsChange[] = []
   const entryPattern = /<entry[^>]*path="([^"]*)"[^>]*>\s*<wc-status[^>]*item="([^"]*)"/g
@@ -238,7 +257,7 @@ async function svnChanges(input: VcsImportInput): Promise<VcsChange[]> {
     const rel = xmlUnescape(match[1]!)
     const item = match[2]!
     const absolute = resolve(root, rel)
-    if (!isPathInside(absolute, workspaceRoot)) continue
+    if (!inScanScope(absolute, workspaceRoot, scope)) continue
     if (item === 'modified' || item === 'deleted') {
       let oldText = ''
       try {
@@ -277,7 +296,7 @@ function p4ChangeOf(line: string): { depot: string; action: string } | undefined
  * not yet opened for add; off keeps to already-opened files (`p4 opened`) so
  * the scan — which can be slow — is skipped. */
 async function p4Changes(input: VcsImportInput): Promise<VcsChange[]> {
-  const { root, workspaceRoot, includeUntracked, shell, readText, signal } = input
+  const { root, workspaceRoot, includeUntracked, scope, shell, readText, signal } = input
   const command = includeUntracked ? 'p4 status' : 'p4 opened'
   const stdout = await runShell(shell, command, root, signal)
   const changes: VcsChange[] = []
@@ -289,7 +308,7 @@ async function p4Changes(input: VcsImportInput): Promise<VcsChange[]> {
     const local = where.trim().split(/\s+/).pop()
     if (local === undefined || local.length === 0) continue
     const absolute = resolve(local)
-    if (!isPathInside(absolute, workspaceRoot)) continue
+    if (!inScanScope(absolute, workspaceRoot, scope)) continue
     const deleted = opened.action === 'delete' || opened.action === 'move/delete'
     const created = opened.action === 'add' || opened.action === 'move/add'
     const newText = deleted ? '' : (await readText(absolute) ?? '')
