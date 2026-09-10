@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.19.2](https://github.com/9087/dsh-diff-approval/compare/v0.19.1...v0.19.2) (2026-09-10)
+
+### Bug Fixes
+
+* mount the review channel when connection cannot resolve webServer ([0f4f530](https://github.com/9087/dsh-diff-approval/commit/0f4f53093c8c38790e411576d21c559d4dbbdf5d))
+
 ## [0.19.1](https://github.com/9087/dsh-diff-approval/compare/v0.19.0...v0.19.1) (2026-09-09)
 
 ### Bug Fixes
