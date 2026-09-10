@@ -52,6 +52,7 @@
     "typecheck": "tsc -b tsconfig.json",
     "build": "tsc -b tsconfig.json && tsdown --env.DSH_BUILD_FACE client",
     "test": "vitest run",
+    "compat": "node scripts/dsh-compat.mjs",
     "prepare": "tsc -b tsconfig.json && tsdown --env.DSH_BUILD_FACE client",
     "release": "release-it"
   },
