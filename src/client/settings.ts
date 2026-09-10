@@ -2,6 +2,7 @@
 
 const PASTE_ON_COPY_KEY = 'diff-approval:paste-on-copy'
 const IMPORT_UNTRACKED_KEY = 'diff-approval:import-untracked'
+const CONFIRM_FILE_REMOVE_KEY = 'diff-approval:confirm-file-remove'
 const TAB_WIDTH_KEY = 'diff-approval:tab-size'
 const SPLIT_MODE_KEY = 'diff-approval:split-mode'
 const MD_PREVIEW_KEY = 'diff-approval:md-preview'
@@ -63,6 +64,21 @@ export function includeUntrackedEnabled(): boolean {
 /** Persist the import-untracked preference. */
 export function setIncludeUntrackedEnabled(value: boolean): void {
   localStorage.setItem(IMPORT_UNTRACKED_KEY, value ? '1' : '0')
+}
+
+/**
+ * Whether a whole-file keep/revert asks before dropping the resolved file from
+ * the list. Defaults to on; only an explicit `'0'` disables it, which then
+ * removes the file straight away.
+ * @returns whether the remove prompt is enabled.
+ */
+export function confirmFileRemoveEnabled(): boolean {
+  return localStorage.getItem(CONFIRM_FILE_REMOVE_KEY) !== '0'
+}
+
+/** Persist the whole-file remove-prompt preference. */
+export function setConfirmFileRemoveEnabled(value: boolean): void {
+  localStorage.setItem(CONFIRM_FILE_REMOVE_KEY, value ? '1' : '0')
 }
 
 /**

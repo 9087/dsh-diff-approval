@@ -760,6 +760,19 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             return { ok: true, value }
           }
         }
+        // The file already holds the accepted content, so nothing is written:
+        // folding `newText` into the baseline clears the diff. The panel asks
+        // whether to also drop the resolved entry, and rides the answer here.
+        if ((payload as Record<string, unknown>).keepListed === true) {
+          store.update(target.id, { oldText: entry.newText })
+          const afterEntry: PendingEntry = { ...entry, oldText: entry.newText, updatedAt: Date.now() }
+          pushUndo(target.sessionId,
+            { id: entry.path, path: entry.path, entry, fileText: undefined },
+            { id: entry.path, path: entry.path, entry: afterEntry, fileText: undefined })
+          persistSession(true)
+          const value: DiffApprovalActionValue = { outcome: 'kept', resolved: true }
+          return { ok: true, value }
+        }
         store.remove(target.id)
         pushUndo(target.sessionId,
           { id: entry.path, path: entry.path, entry, fileText: undefined },
@@ -787,6 +800,23 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           undo = await revertEntryContent(entry, target.sessionId, signal)
         } catch (error: unknown) {
           return rpcError(`revert failed: ${errorMessage(error)}`)
+        }
+        // The file now holds its old content; folding that into `newText` clears
+        // the diff while the entry stays listed (the panel asked to keep it).
+        // A deleted created file folds to empty, exactly as a block revert that
+        // empties one does.
+        if ((payload as Record<string, unknown>).keepListed === true) {
+          const content = undo?.after.fileText ?? ''
+          store.update(target.id, { newText: content })
+          const afterEntry: PendingEntry = { ...entry, newText: content, updatedAt: Date.now() }
+          if (undo !== undefined) {
+            pushUndo(target.sessionId,
+              { id: entry.path, path: entry.path, entry, fileText: undo.before.fileText },
+              { id: entry.path, path: entry.path, entry: afterEntry, fileText: content })
+          }
+          persistSession(true)
+          const value: DiffApprovalActionValue = { outcome: 'reverted', resolved: true }
+          return { ok: true, value }
         }
         store.remove(target.id)
         if (undo !== undefined) pushUndo(target.sessionId, undo.before, undo.after)

@@ -144,13 +144,13 @@ export function apply(ctx: ClientContext): void {
     inject: (): PendingPanelFace => ({
       hooks: { pending: store },
       onRefresh: (sessionId) => { currentSessionId = sessionId; void store.refresh(sessionId) },
-      onKeep: (sessionId, path) => store.keep(sessionId, path),
-      onRevert: (sessionId, path) => {
+      onKeep: (sessionId, path, keepListed) => store.keep(sessionId, path, keepListed),
+      onRevert: (sessionId, path, keepListed) => {
         const entry = store.getSnapshot().files.find(file => file.id === path)
         const before = entry?.newText
         const after = entry?.oldText
         const filePath = entry?.path
-        return store.revert(sessionId, path).then(() => {
+        return store.revert(sessionId, path, keepListed).then(() => {
           // A whole-file revert writes the old text back, so references to the
           // file shift from `newText` to `oldText`.
           if (filePath !== undefined && before !== undefined && after !== undefined) {

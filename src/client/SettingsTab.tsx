@@ -4,7 +4,7 @@ import { useState } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
-import { DEFAULT_KEYBINDINGS, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
+import { DEFAULT_KEYBINDINGS, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import { ColorPicker } from './ColorPicker.tsx'
 import css from './PendingPanel.module.css'
@@ -359,6 +359,7 @@ function DiffViewPreview({ fontScale, lineHeight, addColor, delColor, tabSize, t
 export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const [pasteOnCopy, setPasteOnCopyState] = useState(pasteOnCopyEnabled)
   const [includeUntracked, setIncludeUntrackedState] = useState(includeUntrackedEnabled)
+  const [confirmFileRemove, setConfirmFileRemoveState] = useState(confirmFileRemoveEnabled)
   const [tab, setTabState] = useState(tabWidth)
   const [tabOpen, setTabOpen] = useState(false)
   const [split, setSplitState] = useState(splitMode)
@@ -397,6 +398,10 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const setIncludeUntracked = (value: boolean): void => {
     setIncludeUntrackedState(value)
     setIncludeUntrackedEnabled(value)
+  }
+  const setConfirmFileRemove = (value: boolean): void => {
+    setConfirmFileRemoveState(value)
+    setConfirmFileRemoveEnabled(value)
   }
   const setTab = (value: number): void => {
     setTabState(value)
@@ -596,6 +601,14 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
         value={includeUntracked}
         onSelect={setIncludeUntracked}
         dataAttribute="data-diff-import-untracked-select"
+        t={t}
+      />
+      <PreferenceRow
+        title={t('panel.confirmFileRemove')}
+        description={t('panel.confirmFileRemoveDesc')}
+        value={confirmFileRemove}
+        onSelect={setConfirmFileRemove}
+        dataAttribute="data-diff-confirm-file-remove-select"
         t={t}
       />
     </div>

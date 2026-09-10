@@ -16,10 +16,10 @@ import type { DiffApprovalPort } from './port.ts'
 export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   /** Re-read one session's pending list (an absent session empties the view). */
   refresh: (sessionId: SessionId | undefined) => Promise<void>
-  /** Keep one operation. */
-  keep: (sessionId: SessionId, id: string) => Promise<void>
-  /** Revert one operation. */
-  revert: (sessionId: SessionId, id: string) => Promise<void>
+  /** Keep one operation. `keepListed` leaves the resolved entry in the list. */
+  keep: (sessionId: SessionId, id: string, keepListed?: boolean) => Promise<void>
+  /** Revert one operation. `keepListed` leaves the resolved entry in the list. */
+  revert: (sessionId: SessionId, id: string, keepListed?: boolean) => Promise<void>
   /** Keep one diff block, then refresh so the entry's diff reflects the accept. */
   blockKeep: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange, removeWhenResolved?: boolean) => Promise<void>
   /** Revert one diff block, then refresh so the entry's diff reflects the undo. */
@@ -116,6 +116,30 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
     })
   }
 
+  /**
+   * Run a whole-file action whose entry STAYS listed (the panel chose "keep in
+   * list"). The local list must not drop it optimistically — that made a kept
+   * file blink out and come back on the next poll — so this takes the block
+   * actions' shape instead: mark busy, run, then re-read so the entry's now-empty
+   * diff shows at once.
+   * @param id - the entry being acted on.
+   * @param refresh - the store's refresh, awaited after a successful action.
+   * @param action - the port call to run.
+   */
+  const withKeptEntry = async (id: string, refresh: () => Promise<void>, action: () => Promise<void>): Promise<void> => {
+    const { error: _cleared, ...base } = snapshot
+    publish({ ...base, failed: failedOf(snapshot), busy: new Set([...snapshot.busy, id]) })
+    try {
+      await action()
+    } catch (error: unknown) {
+      markFailed(id, error instanceof Error ? error.message : String(error))
+      publish({ ...snapshot, busy: new Set([...snapshot.busy].filter(busy => busy !== id)) })
+      return
+    }
+    clearFailed(id)
+    await refresh()
+  }
+
   return {
     getSnapshot: () => snapshot,
     subscribe(listener) {
@@ -144,10 +168,16 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
         })
       }
     },
-    keep(sessionId, id) {
+    keep(sessionId, id, keepListed) {
+      if (keepListed === true) {
+        return withKeptEntry(id, () => this.refresh(sessionId), async () => { await port.keep(sessionId, id, true) })
+      }
       return withBusy(id, async () => { await port.keep(sessionId, id) })
     },
-    revert(sessionId, id) {
+    revert(sessionId, id, keepListed) {
+      if (keepListed === true) {
+        return withKeptEntry(id, () => this.refresh(sessionId), async () => { await port.revert(sessionId, id, true) })
+      }
       return withBusy(id, async () => { await port.revert(sessionId, id) })
     },
     // A block op keeps the entry: mark the file busy, run the port call, then

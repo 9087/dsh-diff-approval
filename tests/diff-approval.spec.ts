@@ -345,6 +345,57 @@ describe('revert', () => {
       { displayPath: '/repo/a.txt', targetKey: 'key:/repo/a.txt' }, 'l1\r\nl2\r\nl3\r\n', undefined, expect.anything() as AbortSignal,
     )
   })
+
+  it('keeps a whole-file keep in the list when asked, and undoes back to the pending entry', async () => {
+    // The panel's "keep in list" choice rides the same keep request; the entry
+    // stays with both sides equal (no pending diff) rather than disappearing.
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    await expect(handle('keep', { sessionId: 'session-1', id: entry!.id, keepListed: true }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'kept', resolved: true } })
+    const [kept] = await listEntries(handle, 'session-1')
+    expect(kept).toMatchObject({ id: entry!.id, oldText: 'b', newText: 'b' })
+
+    // The choice is undoable: the entry returns to its pending diff.
+    await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: entry!.id } })
+    const [restored] = await listEntries(handle, 'session-1')
+    expect(restored).toMatchObject({ oldText: 'a', newText: 'b' })
+  })
+
+  it('keeps a whole-file revert in the list when asked, with the file written back', async () => {
+    const { ctx, handle, fs } = await harness()
+    let diskContent = 'b'
+    fs.readText.mockImplementation(async () => diskContent)
+    fs.writeText.mockImplementation(async (_target: unknown, content: string) => { diskContent = content; return { version: 1 } })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    await expect(handle('revert', { sessionId: 'session-1', id: entry!.id, keepListed: true }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'reverted', resolved: true } })
+    // The file was restored, and the entry stays listed with no pending diff.
+    expect(diskContent).toBe('a')
+    const [reverted] = await listEntries(handle, 'session-1')
+    expect(reverted).toMatchObject({ id: entry!.id, oldText: 'a', newText: 'a' })
+
+    await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: entry!.id } })
+    expect(diskContent).toBe('b')
+    const [restored] = await listEntries(handle, 'session-1')
+    expect(restored).toMatchObject({ oldText: 'a', newText: 'b' })
+  })
+
+  it('still removes the entry when keepListed is not requested', async () => {
+    // The host default is unchanged: the panel decides, the host obeys.
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const [entry] = await listEntries(handle, 'session-1')
+    await expect(handle('keep', { sessionId: 'session-1', id: entry!.id }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'kept' } })
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+  })
 })
 
 describe('block keep/revert', () => {

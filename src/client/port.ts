@@ -17,10 +17,10 @@ export const DIFF_APPROVAL_CHANNEL = '/diff-approval'
 export interface DiffApprovalPort {
   /** Read one session's pending entries (plus its workspace root), oldest capture first. */
   list(sessionId: SessionId): Promise<DiffApprovalListValue>
-  /** Keep one operation. */
-  keep(sessionId: SessionId, id: string): Promise<DiffApprovalActionValue>
-  /** Revert one operation. */
-  revert(sessionId: SessionId, id: string): Promise<DiffApprovalActionValue>
+  /** Keep one operation. `keepListed` leaves the resolved entry in the list. */
+  keep(sessionId: SessionId, id: string, keepListed?: boolean): Promise<DiffApprovalActionValue>
+  /** Revert one operation. `keepListed` leaves the resolved entry in the list. */
+  revert(sessionId: SessionId, id: string, keepListed?: boolean): Promise<DiffApprovalActionValue>
   /** Keep one diff block (accept its change into the tracked baseline). */
   blockKeep(sessionId: SessionId, id: string, block: DiffApprovalBlockRange, removeWhenResolved?: boolean): Promise<DiffApprovalActionValue>
   /** Revert one diff block (restore its old lines in the file). */
@@ -50,11 +50,14 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
     async list(sessionId) {
       return listValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'list', { sessionId }))
     },
-    async keep(sessionId, id) {
-      return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'keep', { sessionId, id }))
+    async keep(sessionId, id, keepListed) {
+      // Omit the field entirely when unset, so the wire payload keeps its shape.
+      return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'keep',
+        keepListed === undefined ? { sessionId, id } : { sessionId, id, keepListed }))
     },
-    async revert(sessionId, id) {
-      return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'revert', { sessionId, id }))
+    async revert(sessionId, id, keepListed) {
+      return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'revert',
+        keepListed === undefined ? { sessionId, id } : { sessionId, id, keepListed }))
     },
     async blockKeep(sessionId, id, block, removeWhenResolved) {
       return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'block-keep', { sessionId, id, block, removeWhenResolved }))

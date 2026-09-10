@@ -99,6 +99,41 @@ describe('actions', () => {
     expect(store.getSnapshot().files).toEqual([])
   })
 
+  it('never drops a kept entry locally, and re-reads it so its diff updates at once', async () => {
+    // "Keep in list" leaves the entry pending in the host. Dropping it locally
+    // would make the row blink out and reappear on the next poll, so the kept
+    // path marks it busy, runs the call, and re-reads instead.
+    const seam = port()
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+    let release: ((value: DiffApprovalActionValue) => void) | undefined
+    seam.keep.mockImplementation(async () => new Promise<DiffApprovalActionValue>((resolve) => { release = resolve }))
+
+    const settled = store.keep(S1, FILE.id, true)
+    expect(store.getSnapshot().busy).toEqual(new Set([FILE.id]))
+    // Still listed while the action is in flight.
+    expect(store.getSnapshot().files).toEqual([FILE])
+
+    release?.({ outcome: 'kept', resolved: true })
+    await settled
+    expect(seam.keep).toHaveBeenCalledWith(S1, FILE.id, true)
+    expect(store.getSnapshot().files).toEqual([FILE])
+    expect(store.getSnapshot().busy).toEqual(new Set())
+    // The entry is still there: the local list was never emptied.
+    expect(seam.list).toHaveBeenCalledTimes(2)
+  })
+
+  it('leaves a kept-but-failed entry listed and marked', async () => {
+    const failing = vi.fn(async () => { throw new Error('busy elsewhere') })
+    const seam = port({ revert: failing })
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+    await store.revert(S1, FILE.id, true)
+    expect(failing).toHaveBeenCalledWith(S1, FILE.id, true)
+    expect(store.getSnapshot().files).toEqual([FILE])
+    expect(store.getSnapshot().failed?.get(FILE.id)).toBe('busy elsewhere')
+  })
+
   it('keeps the file and marks it failed when an action fails, without a read error', async () => {
     const seam = port({ keep: vi.fn(async () => { throw new Error('busy elsewhere') }) })
     const store = createPendingDiffStore(seam.port)

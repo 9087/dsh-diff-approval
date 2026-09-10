@@ -22,7 +22,7 @@ import type { HighlightSpan } from './highlight.ts'
 import { langFromPath } from './lang.ts'
 import { referenceLabelOf } from './reference.ts'
 import { OPEN_FILE_EVENT } from './produced-diff.ts'
-import { includeUntrackedEnabled, keybindingOf, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setMdPreviewEnabled, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
+import { confirmFileRemoveEnabled, includeUntrackedEnabled, keybindingOf, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setMdPreviewEnabled, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import css from './PendingPanel.module.css'
 
 /**
@@ -335,6 +335,14 @@ interface ResolvedBlockPrompt {
   sessionId: SessionId
   id: string
   block: DiffApprovalBlockRange
+}
+
+/** A whole-file keep/revert awaiting the user's remove-or-keep choice; the
+ *  choice rides the same keep/revert RPC as its `keepListed` flag. */
+interface FileActionPrompt {
+  action: 'keep' | 'revert'
+  sessionId: SessionId
+  id: string
 }
 
 /** Locale translator used by the panel and its rows. */
@@ -3204,6 +3212,7 @@ export function PendingPanel({
   /** A last-block keep/revert awaiting the user's remove-or-keep choice; the
    *  choice rides the same block RPC as its `removeWhenResolved` flag. */
   const [blockPrompt, setBlockPrompt] = useState<ResolvedBlockPrompt | null>(null)
+  const [filePrompt, setFilePrompt] = useState<FileActionPrompt | null>(null)
   /** Bottom offset tracking the chat composer's top edge so the input stays visible. */
   const [bottomPx, setBottomPx] = useState(FALLBACK_BOTTOM_PX)
   /** Fullscreen expanded: the panel bottom pins to the window edge, ignoring the composer offset. */
@@ -3396,6 +3405,25 @@ export function PendingPanel({
     }
     return removeWhenResolved === undefined ? onBlockRevert(sessionId, id, block) : onBlockRevert(sessionId, id, block, removeWhenResolved)
   }
+
+  // A whole-file keep/revert always resolves the file outright, so — while the
+  // preference is on — ask whether to drop it from the list rather than removing
+  // it silently. An explicit `keepListed` (the prompt's own answer) runs straight
+  // through, so the prompt cannot re-enter itself.
+  const keepWithPrompt: PendingPanelFace['onKeep'] = (sessionId, id, keepListed) => {
+    if (keepListed === undefined && confirmFileRemoveEnabled()) {
+      setFilePrompt({ action: 'keep', sessionId, id })
+      return Promise.resolve()
+    }
+    return keepListed === undefined ? onKeep(sessionId, id) : onKeep(sessionId, id, keepListed)
+  }
+  const revertWithPrompt: PendingPanelFace['onRevert'] = (sessionId, id, keepListed) => {
+    if (keepListed === undefined && confirmFileRemoveEnabled()) {
+      setFilePrompt({ action: 'revert', sessionId, id })
+      return Promise.resolve()
+    }
+    return keepListed === undefined ? onRevert(sessionId, id) : onRevert(sessionId, id, keepListed)
+  }
   /** Per-file keep/revert failures, surfaced inline on the row and detail. */
   const failed = snapshot.failed ?? EMPTY_FAILED_MAP
 
@@ -3509,6 +3537,8 @@ export function PendingPanel({
   const selectedFile = files.find(file => file.id === selected)
   /** The file whose removal is being confirmed (a last-block action), if any. */
   const promptFile = blockPrompt === null ? undefined : files.find(file => file.id === blockPrompt.id)
+  /** The file whose removal is being confirmed (a whole-file action), if any. */
+  const promptEntry = filePrompt === null ? undefined : files.find(file => file.id === filePrompt.id)
 
   // The file list's scrollable rows plus the pinned bulk footer, shared by the
   // in-flow left pane and the floating (collapsed) overlay.
@@ -3787,8 +3817,8 @@ export function PendingPanel({
                     onPasteReference={onPasteReference}
                     onToast={showCopyToast}
                     t={t}
-                    onKeep={onKeep}
-                    onRevert={onRevert}
+                    onKeep={keepWithPrompt}
+                    onRevert={revertWithPrompt}
                     onBlockKeep={blockKeepWithPrompt}
                     onBlockRevert={blockRevertWithPrompt}
                     onOpen={onOpen}
@@ -3847,6 +3877,44 @@ export function PendingPanel({
                       void (action === 'keep'
                         ? onBlockKeep(sessionId, id, block, false)
                         : onBlockRevert(sessionId, id, block, false))
+                    }}
+                  >
+                    {t('panel.keepInList')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          {filePrompt !== null && promptEntry !== undefined && (
+            <div className={css.confirmBackdrop} data-diff-confirm-file>
+              <div className={css.confirmCard} role="dialog" aria-modal="true">
+                <p className={css.confirmText}>
+                  {t(filePrompt.action === 'keep' ? 'panel.fileKeptAsk' : 'panel.fileRevertedAsk', { file: basenameOf(promptEntry.path) })}
+                </p>
+                <div className={css.confirmActions}>
+                  <button
+                    type="button"
+                    className={`${css.action} ${css.actionPrimary}`}
+                    data-diff-file-confirm-remove
+                    onClick={() => {
+                      // Remove the resolved file: the choice rides the same
+                      // keep/revert RPC as `keepListed: false`.
+                      setFilePrompt(null)
+                      const { action, sessionId, id } = filePrompt
+                      void (action === 'keep' ? onKeep(sessionId, id, false) : onRevert(sessionId, id, false))
+                    }}
+                  >
+                    {t('row.dismiss')}
+                  </button>
+                  <button
+                    type="button"
+                    className={css.action}
+                    data-diff-file-confirm-keep
+                    onClick={() => {
+                      // Keep the resolved file listed, with no pending diff.
+                      setFilePrompt(null)
+                      const { action, sessionId, id } = filePrompt
+                      void (action === 'keep' ? onKeep(sessionId, id, true) : onRevert(sessionId, id, true))
                     }}
                   >
                     {t('panel.keepInList')}

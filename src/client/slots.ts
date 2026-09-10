@@ -32,10 +32,11 @@ export interface PendingPanelFace {
   }
   /** Read the pending list for the current session into the snapshot. */
   onRefresh: (sessionId: SessionId | undefined) => void
-  /** Keep one operation (remove it from the pending list). */
-  onKeep: (sessionId: SessionId, id: string) => Promise<void>
-  /** Revert one operation (restore its prior content, or remove a created file). */
-  onRevert: (sessionId: SessionId, id: string) => Promise<void>
+  /** Keep one operation. `keepListed` leaves the resolved entry in the list. */
+  onKeep: (sessionId: SessionId, id: string, keepListed?: boolean) => Promise<void>
+  /** Revert one operation (restore its prior content, or remove a created file).
+   *  `keepListed` leaves the resolved entry in the list. */
+  onRevert: (sessionId: SessionId, id: string, keepListed?: boolean) => Promise<void>
   /** Keep one diff block (accept its change into the tracked baseline). */
   onBlockKeep: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange, removeWhenResolved?: boolean) => Promise<void>
   /** Revert one diff block (restore its old lines in the file). */

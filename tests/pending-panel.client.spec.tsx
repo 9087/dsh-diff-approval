@@ -417,8 +417,14 @@ describe('PendingPanel', () => {
     expect(screen.getAllByText('a').length).toBeGreaterThan(0)
     expect(screen.getAllByText('b').length).toBeGreaterThan(0)
 
+    // A whole-file keep prompts (the preference is on by default) before it
+    // fires, so the file is never dropped from the list silently.
     fireEvent.click(screen.getByText('action.keep'))
-    expect(props.onKeep).toHaveBeenCalledWith(FILE.sessionId, FILE.id)
+    expect(document.querySelector('[data-diff-confirm-file]')).not.toBeNull()
+    expect(props.onKeep).not.toHaveBeenCalled()
+
+    fireEvent.click(document.querySelector('[data-diff-file-confirm-remove]') as HTMLButtonElement)
+    expect(props.onKeep).toHaveBeenCalledWith(FILE.sessionId, FILE.id, false)
   })
 
   it('reverts through the owning session by id', () => {
@@ -427,7 +433,46 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
     fireEvent.click(screen.getByText('action.revert'))
-    expect(props.onRevert).toHaveBeenCalledWith(FILE.sessionId, FILE.id)
+    fireEvent.click(document.querySelector('[data-diff-file-confirm-remove]') as HTMLButtonElement)
+    expect(props.onRevert).toHaveBeenCalledWith(FILE.sessionId, FILE.id, false)
+  })
+
+  it('keeps a whole-file action in the list when the prompt says so', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    fireEvent.click(screen.getByText('action.keep'))
+    expect(screen.getByText('panel.fileKeptAsk {"file":"a.txt"}')).toBeDefined()
+    fireEvent.click(document.querySelector('[data-diff-file-confirm-keep]') as HTMLButtonElement)
+    expect(document.querySelector('[data-diff-confirm-file]')).toBeNull()
+    expect(props.onKeep).toHaveBeenCalledWith(FILE.sessionId, FILE.id, true)
+  })
+
+  it('asks its own question when reverting a whole file', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    fireEvent.click(screen.getByText('action.revert'))
+    expect(screen.getByText('panel.fileRevertedAsk {"file":"a.txt"}')).toBeDefined()
+    fireEvent.click(document.querySelector('[data-diff-file-confirm-keep]') as HTMLButtonElement)
+    expect(props.onRevert).toHaveBeenCalledWith(FILE.sessionId, FILE.id, true)
+  })
+
+  it('runs a whole-file action straight through when the prompt is disabled', () => {
+    localStorage.setItem('diff-approval:confirm-file-remove', '0')
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    fireEvent.click(screen.getByText('action.keep'))
+    expect(document.querySelector('[data-diff-confirm-file]')).toBeNull()
+    // No `keepListed`: the host keeps its remove-the-file default.
+    expect(props.onKeep).toHaveBeenCalledWith(FILE.sessionId, FILE.id)
   })
 
   it('disables the actions while an entry is busy', () => {
@@ -2223,6 +2268,23 @@ describe('PendingPanel', () => {
     fireEvent.click(toggle())
     expect(localStorage.getItem('diff-approval:import-untracked')).toBe('0')
     expect(toggle().getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('the DSH Settings tab toggles the whole-file remove prompt in localStorage', () => {
+    const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
+    render(<DiffApprovalSettingsTab {...props} />)
+    const toggle = () => document.querySelector('[data-diff-confirm-file-remove-select]') as HTMLButtonElement
+    expect(toggle()).not.toBeNull()
+    // On by default: a whole-file action asks before dropping the file.
+    expect(toggle().getAttribute('aria-checked')).toBe('true')
+
+    fireEvent.click(toggle())
+    expect(localStorage.getItem('diff-approval:confirm-file-remove')).toBe('0')
+    expect(toggle().getAttribute('aria-checked')).toBe('false')
+
+    fireEvent.click(toggle())
+    expect(localStorage.getItem('diff-approval:confirm-file-remove')).toBe('1')
+    expect(toggle().getAttribute('aria-checked')).toBe('true')
   })
 
   it('the DSH Settings tab steps the block-jump lead rows and clamps to the bounds', () => {

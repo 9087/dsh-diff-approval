@@ -118,6 +118,10 @@ export const zh = {
   'status.missing': '该改动已不存在',
   'panel.resolvedAsk': '「{file}」的所有改动都已处理，是否从列表移除？',
   'panel.keepInList': '保留在列表',
+  'panel.fileKeptAsk': '「{file}」的改动已全部保留，是否从列表移除？',
+  'panel.fileRevertedAsk': '「{file}」的改动已全部回退，是否从列表移除？',
+  'panel.confirmFileRemove': '处理整文件后询问是否移出列表',
+  'panel.confirmFileRemoveDesc': '对单个文件执行整文件 Keep/Revert 后，弹窗询问是否把该文件移出列表。关闭后直接移出（不影响批量 Keep All / Revert All）。',
 } satisfies Record<string, string>
 
 /** Translation keys owned by the pending-edit review namespace. */
@@ -246,4 +250,8 @@ export const en = {
   'status.missing': 'This change no longer exists',
   'panel.resolvedAsk': 'All changes in "{file}" are resolved. Remove it from the list?',
   'panel.keepInList': 'Keep in list',
+  'panel.fileKeptAsk': 'All changes in "{file}" are kept. Remove it from the list?',
+  'panel.fileRevertedAsk': 'All changes in "{file}" are reverted. Remove it from the list?',
+  'panel.confirmFileRemove': 'Ask after a whole-file keep/revert',
+  'panel.confirmFileRemoveDesc': 'After a whole-file keep/revert on a single file, ask whether to remove that file from the list. When off, it is removed straight away (Keep All / Revert All are unaffected).',
 } satisfies Record<DiffApprovalKey, string>
