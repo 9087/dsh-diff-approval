@@ -634,16 +634,42 @@ function withChord(label: string, action: string): string {
 }
 
 /**
- * Whether a key event came from the panel's own search bar (the query box or
- * one of the bar's buttons). The narrowing chords are scoped this way: an open
- * bar is not enough, because the same chord must stay free for whatever else
- * happens to have focus (the chat composer above all).
+ * Whether a key event's target is one of the panel's search query boxes. The
+ * bar's own chords (step, narrow) are scoped this way: the caret has to be in
+ * the box, so an open bar is not enough — the same chord must stay free for
+ * whatever else happens to have focus (the chat composer above all), and a mouse
+ * click on a bar button hands the focus straight back to the box.
  * @param event - the keydown event.
- * @returns whether the event came from the search bar.
+ * @returns whether the event came from a search query box.
  */
-function isSearchBarEvent(event: KeyboardEvent): boolean {
+function isSearchInputEvent(event: KeyboardEvent): boolean {
   const target = event.target
-  return target instanceof HTMLElement && target.closest('[data-diff-searchbar]') !== null
+  return target instanceof HTMLInputElement && target.hasAttribute('data-diff-search-input')
+}
+
+/**
+ * Whether a key event came from inside the plugin's own panel. Esc is split along
+ * that line: a press inside the panel is the panel's to dismiss (its search bar
+ * first, otherwise the panel itself), while anything outside it — the chat
+ * composer above all — dismisses the panel and keeps its own Esc besides.
+ * @param event - the keydown event.
+ * @returns whether the event came from inside the panel.
+ */
+function isInPanelEvent(event: KeyboardEvent): boolean {
+  const target = event.target
+  return target instanceof Element && target.closest('[data-diff-approval-panel]') !== null
+}
+
+/**
+ * Whether a key event came from a text field that owns its own keys (`Esc`,
+ * cursor moves). The chat composer is the one that matters: the panel leaves it
+ * alone even while its own search bar is open.
+ * @param event - the keydown event.
+ * @returns whether the event came from a text field.
+ */
+function isTextFieldEvent(event: KeyboardEvent): boolean {
+  const target = event.target
+  return target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null
 }
 
 /**
@@ -933,7 +959,7 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
 
 /** Imperative surface the parent uses to drive block navigation from the
  *  shared toolbar/keyboard in split mode (its own `focus` is private here). */
-export interface SplitDiffHandle { jump: (direction: -1 | 1, wrapGuard?: boolean, singleToast?: boolean) => void; openSearch: () => void; toggleSearch: () => void; searchNext: (direction: -1 | 1) => boolean; toggleMatchCase: () => boolean; toggleMatchWholeWord: () => boolean }
+export interface SplitDiffHandle { jump: (direction: -1 | 1, wrapGuard?: boolean, singleToast?: boolean) => void; openSearch: () => void; toggleSearch: () => void; closeSearch: () => boolean; searchNext: (direction: -1 | 1) => boolean; toggleMatchCase: () => boolean; toggleMatchWholeWord: () => boolean }
 
 /** The two-column (side-by-side) whole-file diff view. */
 export const SplitDiff = forwardRef<SplitDiffHandle, {
@@ -1146,11 +1172,22 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   const searchHitSet = useMemo(() => new Set(searchMatches), [searchMatches])
   const currentSearchPair = searchMatches.length === 0 ? undefined : searchMatches[searchIndex % searchMatches.length]
 
-  const closeSearch = (): void => {
+  // Reports whether the bar was open, so a caller that also owns another Esc
+  // (the panel) can leave the press alone instead of swallowing it.
+  const closeSearch = (): boolean => {
+    if (!searchOpen) return false
     setSearchOpen(false)
     setSearchQuery('')
     setSearchIndex(0)
     bodyRef.current?.focus()
+    return true
+  }
+  /** Run one bar control's action, then hand the focus back to the query box:
+   *  the bar's chords are scoped to the box (its Esc to the bar), so a mouse
+   *  click on a bar button must not leave them dead on the button it landed on. */
+  const andRefocus = (action: () => void): void => {
+    action()
+    searchInputRef.current?.focus()
   }
   /** The shared toolbar's search button: the split view owns its own bar, so the
    *  button has to toggle this one rather than the single-column state. */
@@ -1331,7 +1368,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   }
   // Expose the block jump to the parent so the shared toolbar/keyboard drives
   // this split view's own (private) focus in split mode.
-  useImperativeHandle(ref, () => ({ jump, openSearch, toggleSearch, searchNext, toggleMatchCase, toggleMatchWholeWord }), [jump, openSearch, toggleSearch, searchNext, toggleMatchCase, toggleMatchWholeWord])
+  useImperativeHandle(ref, () => ({ jump, openSearch, toggleSearch, closeSearch, searchNext, toggleMatchCase, toggleMatchWholeWord }), [jump, openSearch, toggleSearch, closeSearch, searchNext, toggleMatchCase, toggleMatchWholeWord])
 
   useLayoutEffect(() => {
     if (pairCount === 0) return
@@ -1516,8 +1553,6 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
               if (event.key === 'Enter') {
                 event.preventDefault()
                 goSearch(event.shiftKey ? -1 : 1)
-              } else if (event.key === 'Escape') {
-                closeSearch()
               }
             }}
           />
@@ -1534,7 +1569,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
               data-on={search.caseSensitive ? '' : undefined}
               aria-label={t('action.matchCase')}
               aria-pressed={search.caseSensitive}
-              onClick={() => { search.toggleCase() }}
+              onClick={() => { andRefocus(() => { search.toggleCase() }) }}
             >
               <SearchOptionIcon kind="case" />
             </button>
@@ -1547,18 +1582,18 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
               data-on={search.wholeWord ? '' : undefined}
               aria-label={t('action.matchWholeWord')}
               aria-pressed={search.wholeWord}
-              onClick={() => { search.toggleWord() }}
+              onClick={() => { andRefocus(() => { search.toggleWord() }) }}
             >
               <SearchOptionIcon kind="word" />
             </button>
           </Tooltip>
           <Tooltip label={withChord(t('action.prevDiff'), 'searchPrev')} side="bottom" delayMs={500}>
-            <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-prev aria-label={t('action.prevDiff')} disabled={searchMatches.length === 0} onClick={() => { goSearch(-1) }}>
+            <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-prev aria-label={t('action.prevDiff')} disabled={searchMatches.length === 0} onClick={() => { andRefocus(() => { goSearch(-1) }) }}>
               <IconChevronUpOutline14 size={14} />
             </button>
           </Tooltip>
           <Tooltip label={withChord(t('action.nextDiff'), 'searchNext')} side="bottom" delayMs={500}>
-            <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-next aria-label={t('action.nextDiff')} disabled={searchMatches.length === 0} onClick={() => { goSearch(1) }}>
+            <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-next aria-label={t('action.nextDiff')} disabled={searchMatches.length === 0} onClick={() => { andRefocus(() => { goSearch(1) }) }}>
               <IconChevronDownOutline14 size={14} />
             </button>
           </Tooltip>
@@ -2182,6 +2217,13 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   openSearchRef.current = openSearchWithSelection
   const searchOpenRef = useRef(searchOpen)
   searchOpenRef.current = searchOpen
+  /** Run one bar control's action, then hand the focus back to the query box:
+   *  the bar's chords are scoped to the box (its Esc to the bar), so a mouse
+   *  click on a bar button must not leave them dead on the button it landed on. */
+  const andRefocus = (action: () => void): void => {
+    action()
+    searchInputRef.current?.focus()
+  }
   const toggleSearch = () => {
     // In split mode the single-column bar is not mounted, so the shared button
     // must drive the split view's own bar instead of this component's state.
@@ -2729,11 +2771,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
   }, [searchOpen, splitView])
 
-  // F3 / Shift+F3 step the search to the next/previous match while the plugin's
-  // own search bar is open (leaving F3 to the browser's find otherwise). Routed
-  // to the split view's search when split mode is active.
+  // F3 / Shift+F3 step the search to the next/previous match while the caret is
+  // in the plugin's own search box (leaving F3 to the browser's find — and to the
+  // composer — anywhere else). Routed to the split view's search in split mode.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (!isSearchInputEvent(event)) return
       let direction: -1 | 1 | 0 = 0
       if (matchesShortcut(event, keybindingOf('searchNext'))) direction = 1
       else if (matchesShortcut(event, keybindingOf('searchPrev'))) direction = -1
@@ -2752,14 +2795,13 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   }, [searchOpen, searchMatches, splitView])
 
   // Alt+C / Alt+W toggle the two search narrowing options — the chords VS Code's
-  // find widget uses. Scoped to the search bar: the event has to come from the
-  // bar (its query box or one of its buttons), so with the bar merely open the
-  // chord stays free for whatever else has focus. Each bar owns its own state,
-  // so this routes to the split view's bar in split mode; only an actually-open
-  // bar consumes the chord.
+  // find widget uses. Scoped to the query box, like the step chords: only the
+  // box's own caret turns them on, so the chord stays free for whatever else has
+  // focus. Each bar owns its own state, so this routes to the split view's bar in
+  // split mode; only an actually-open bar consumes the chord.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!isSearchBarEvent(event)) return
+      if (!isSearchInputEvent(event)) return
       const option = matchesShortcut(event, keybindingOf('matchCase')) ? 'case'
         : matchesShortcut(event, keybindingOf('matchWholeWord')) ? 'word'
           : undefined
@@ -2778,6 +2820,31 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     window.addEventListener('keydown', onKeyDown, true)
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
   }, [searchOpen, splitView, search])
+
+  // Esc closes the open search bar — the innermost thing to dismiss — for a press
+  // from inside the panel, wherever the focus sits there (the query box, one of
+  // the bar's buttons, the diff around it). A press from outside the panel is not
+  // the bar's to take: it belongs to the panel's own Esc, which dismisses the
+  // panel outright (the chat composer above all, which also keeps its own Esc).
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || !isInPanelEvent(event)) return
+      // The Markdown preview replaces the whole code view (bar included), so an
+      // open bar's state can outlive its element: no bar, no press to claim.
+      if (mdPreview && lang === 'markdown') return
+      if (splitView) {
+        // Report whether the bar was actually open, so a closed one leaves the
+        // press to the panel's own Esc instead of swallowing it.
+        if (splitDiffRef.current?.closeSearch() === true) event.preventDefault()
+        return
+      }
+      if (!searchOpen) return
+      event.preventDefault()
+      closeSearch()
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true) }
+  }, [searchOpen, splitView, mdPreview, lang])
 
   // Ctrl+Up/Down jumps between change blocks. The detail pane is mounted only
   // while a file is open, so this intercepts globally while the diff is shown
@@ -2798,8 +2865,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       if (matchesShortcut(event, keybindingOf('jumpUp'))) direction = -1
       else if (matchesShortcut(event, keybindingOf('jumpDown'))) direction = 1
       if (direction === 0) return
-      const target = event.target as Node | null
-      if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null) return
+      if (isTextFieldEvent(event)) return
       event.preventDefault()
       jumpRef.current(direction, true)
     }
@@ -3177,8 +3243,6 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 if (event.key === 'Enter') {
                   event.preventDefault()
                   goSearch(event.shiftKey ? -1 : 1)
-                } else if (event.key === 'Escape') {
-                  closeSearch()
                 }
               }}
             />
@@ -3195,7 +3259,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 data-on={search.caseSensitive ? '' : undefined}
                 aria-label={t('action.matchCase')}
                 aria-pressed={search.caseSensitive}
-                onClick={() => { search.toggleCase() }}
+                onClick={() => { andRefocus(() => { search.toggleCase() }) }}
               >
                 <SearchOptionIcon kind="case" />
               </button>
@@ -3208,7 +3272,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 data-on={search.wholeWord ? '' : undefined}
                 aria-label={t('action.matchWholeWord')}
                 aria-pressed={search.wholeWord}
-                onClick={() => { search.toggleWord() }}
+                onClick={() => { andRefocus(() => { search.toggleWord() }) }}
               >
                 <SearchOptionIcon kind="word" />
               </button>
@@ -3220,7 +3284,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 data-diff-search-prev
                 aria-label={t('action.prevDiff')}
                 disabled={searchMatches.length === 0}
-                onClick={() => { goSearch(-1) }}
+                onClick={() => { andRefocus(() => { goSearch(-1) }) }}
               >
                 <IconChevronUpOutline14 size={14} />
               </button>
@@ -3232,7 +3296,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 data-diff-search-next
                 aria-label={t('action.nextDiff')}
                 disabled={searchMatches.length === 0}
-                onClick={() => { goSearch(1) }}
+                onClick={() => { andRefocus(() => { goSearch(1) }) }}
               >
                 <IconChevronDownOutline14 size={14} />
               </button>
@@ -3912,14 +3976,18 @@ export function PendingPanel({
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
   }, [open, collapseSidebar])
 
-  // Escape closes the open panel (a modal-close convention), ignoring text
-  // inputs so the composer keeps its own Esc behavior.
+  // Escape dismisses the panel (a modal-close convention). A press inside the
+  // panel while a search bar is on screen is the bar's instead: the bar is the
+  // innermost dismissible and its own handler closes it, so the panel yields and
+  // one press never fires both. Everywhere else — the chat composer included,
+  // which keeps its own Esc too — the panel closes.
   useEffect(() => {
     if (!open) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
-      const target = event.target as Node | null
-      if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null) return
+      const target = event.target
+      const inPanel = target instanceof Node && panelRef.current?.contains(target) === true
+      if (inPanel && document.querySelector('[data-diff-searchbar]') !== null) return
       event.preventDefault()
       setOpen(false)
     }

@@ -1369,7 +1369,7 @@ describe('PendingPanel', () => {
     expect(count()).toBe('1/2')
 
     // Alt+C / Alt+W are the chords VS Code's find widget uses; they apply while
-    // the search bar has focus.
+    // the caret is in the query box.
     fireEvent.keyDown(input(), { key: 'c', altKey: true })
     expect(caseToggle().getAttribute('aria-pressed')).toBe('true')
     expect(count()).toBe('0/0')
@@ -1381,26 +1381,37 @@ describe('PendingPanel', () => {
     expect(wordToggle().getAttribute('aria-pressed')).toBe('true')
   })
 
-  it('leaves the narrowing chords alone unless the search bar has focus', () => {
+  it('leaves the chords alone unless the caret is in the query box', () => {
     const file = entry({ id: 'entry-search-keys-blur', oldText: 'foo\nbar\n', newText: 'foo\nbaz\n' })
     const props = panelProps({ read: true, files: [file], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByLabelText('action.search'))
 
+    const input = () => document.querySelector('[data-diff-search-input]') as HTMLInputElement
+    const caseToggle = () => document.querySelector('[data-diff-search-case]') as HTMLButtonElement
+    const wordToggle = () => document.querySelector('[data-diff-search-word]') as HTMLButtonElement
+
     // The bar is open, but the chord came from somewhere else (the composer, for
     // one): it must stay free for whoever actually has the focus.
     fireEvent.keyDown(document.body, { key: 'c', altKey: true })
     fireEvent.keyDown(document.body, { key: 'w', altKey: true })
-    expect((document.querySelector('[data-diff-search-case]') as HTMLButtonElement).getAttribute('aria-pressed')).toBe('false')
-    expect((document.querySelector('[data-diff-search-word]') as HTMLButtonElement).getAttribute('aria-pressed')).toBe('false')
+    expect(caseToggle().getAttribute('aria-pressed')).toBe('false')
+    expect(wordToggle().getAttribute('aria-pressed')).toBe('false')
     expect(localStorage.getItem('diff-approval:search-case')).toBeNull()
     expect(localStorage.getItem('diff-approval:search-word')).toBeNull()
 
-    // Anywhere inside the bar counts — including its step buttons, so a mouse
-    // step does not silently disarm the chords.
-    fireEvent.keyDown(document.querySelector('[data-diff-search-next]') as HTMLButtonElement, { key: 'c', altKey: true })
-    expect((document.querySelector('[data-diff-search-case]') as HTMLButtonElement).getAttribute('aria-pressed')).toBe('true')
+    // A bar button is not the query box either…
+    fireEvent.keyDown(caseToggle(), { key: 'c', altKey: true })
+    expect(caseToggle().getAttribute('aria-pressed')).toBe('false')
+
+    // …but clicking one hands the focus straight back to the box, so the chords
+    // keep working without a second click into the box.
+    fireEvent.click(wordToggle())
+    expect(wordToggle().getAttribute('aria-pressed')).toBe('true')
+    expect(document.activeElement).toBe(input())
+    fireEvent.keyDown(input(), { key: 'c', altKey: true })
+    expect(caseToggle().getAttribute('aria-pressed')).toBe('true')
   })
 
   it('leaves the narrowing chords alone while the search bar is closed', () => {
@@ -1431,12 +1442,38 @@ describe('PendingPanel', () => {
     expect(localStorage.getItem('diff-approval:search-case')).toBe('1')
 
     // The chord reaches the split bar too (it owns its own state) — but only
-    // from that bar itself.
+    // from that bar's own query box.
     fireEvent.keyDown(document.body, { key: 'c', altKey: true })
     expect(count()).toBe('0/0')
     fireEvent.keyDown(document.querySelector('[data-diff-search-input]') as HTMLInputElement, { key: 'c', altKey: true })
     expect(count()).toBe('1/2')
     expect(localStorage.getItem('diff-approval:search-case')).toBe('0')
+  })
+
+  it('scopes the split view\'s step chords to its box and its Esc to the bar', () => {
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const file = entry({ id: 'entry-split-f3', oldText: 'foo\nbar\nbaz\n', newText: 'foo\nbar\nqux\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByLabelText('action.search'))
+
+    const input = () => document.querySelector('[data-diff-search-input]') as HTMLInputElement
+    const count = () => document.querySelector('[data-diff-search-count]')!.textContent
+    fireEvent.change(input(), { target: { value: 'A' } })
+    expect(count()).toBe('1/2')
+
+    // The split bar does not own F3 from outside its box either.
+    fireEvent.keyDown(document.body, { key: 'F3' })
+    expect(count()).toBe('1/2')
+    fireEvent.keyDown(input(), { key: 'F3' })
+    expect(count()).toBe('2/2')
+
+    // Esc belongs to the bar for a press from inside the panel, so the split
+    // column does not swallow it into the panel's own Esc.
+    fireEvent.keyDown(document.querySelector('[data-diff-body]') as HTMLElement, { key: 'Escape' })
+    expect(document.querySelector('[data-diff-searchbar]')).toBeNull()
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
   })
 
   it('opens the other view\'s search bar on the stored narrowing state', () => {
@@ -1710,7 +1747,7 @@ describe('PendingPanel', () => {
     expect(rows[0]!.getAttribute('data-diff-search')).toBe('hit')
   })
 
-  it('F3 / Shift+F3 step the search to the next / previous match', () => {
+  it('F3 / Shift+F3 step the search only from the query box', () => {
     const file = entry({ id: 'entry-search-f3', oldText: 'data\nother\ndata\nend\n', newText: 'data\nother\ndata\nend!\n' })
     const props = panelProps({ read: true, files: [file], busy: new Set() })
     render(<PendingPanel {...props} />)
@@ -1723,15 +1760,93 @@ describe('PendingPanel', () => {
     // Without a cursor the first result is the viewport-top match (row 0).
     expect(rows[0]!.getAttribute('data-diff-search')).toBe('current')
 
-    // F3 → the next match (row 2).
+    // F3 from outside the box (the composer, say) is the browser's to keep: the
+    // open bar does not make the panel the owner of the key.
     fireEvent.keyDown(document.body, { key: 'F3' })
+    expect(rows[0]!.getAttribute('data-diff-search')).toBe('current')
+
+    // F3 in the box → the next match (row 2).
+    fireEvent.keyDown(input, { key: 'F3' })
     expect(rows[2]!.getAttribute('data-diff-search')).toBe('current')
     expect(rows[0]!.getAttribute('data-diff-search')).toBe('hit')
 
     // Shift+F3 → back to the previous match (row 0).
-    fireEvent.keyDown(document.body, { key: 'F3', shiftKey: true })
+    fireEvent.keyDown(input, { key: 'F3', shiftKey: true })
     expect(rows[0]!.getAttribute('data-diff-search')).toBe('current')
     expect(rows[2]!.getAttribute('data-diff-search')).toBe('hit')
+  })
+
+  it('Escape from a search-bar button closes the bar, not the panel', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    fireEvent.click(screen.getByLabelText('action.search'))
+    // Tab can land on a bar button even though a click hands the focus back, so
+    // Esc has to belong to the whole bar rather than to its query box.
+    const caseToggle = document.querySelector('[data-diff-search-case]') as HTMLButtonElement
+    act(() => { caseToggle.focus() })
+    fireEvent.keyDown(caseToggle, { key: 'Escape' })
+    expect(document.querySelector('[data-diff-searchbar]')).toBeNull()
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+  })
+
+  it('closes an open bar with Escape from inside the panel, keeping the panel', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    fireEvent.click(screen.getByLabelText('action.search'))
+    // Anywhere inside the panel — the diff body included, which is where the
+    // focus actually sits after a panel interaction — the bar is the innermost
+    // dismissible: one press closes it and leaves the panel standing.
+    fireEvent.keyDown(document.querySelector('[data-diff-body]') as HTMLElement, { key: 'Escape' })
+    expect(document.querySelector('[data-diff-searchbar]')).toBeNull()
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+
+    // A second press from the same focus has only the panel left to dismiss.
+    fireEvent.keyDown(document.querySelector('[data-diff-body]') as HTMLElement, { key: 'Escape' })
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+  })
+
+  it('dismisses the panel with Escape from a text field outside it', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    fireEvent.click(screen.getByLabelText('action.search'))
+    // A text field outside the panel stands in for the composer: the bar is not
+    // its to take, and the panel puts itself away — which takes the open bar with
+    // it, since the panel body unmounts. The composer keeps its own Esc too: the
+    // panel does not swallow the key, it only acts on it.
+    const composer = document.createElement('textarea')
+    document.body.appendChild(composer)
+    try {
+      fireEvent.keyDown(composer, { key: 'Escape' })
+      expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+      expect(document.querySelector('[data-diff-searchbar]')).toBeNull()
+    } finally {
+      composer.remove()
+    }
+  })
+
+  it('dismisses the panel with Escape from the composer even with no bar open', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const composer = document.createElement('textarea')
+    document.body.appendChild(composer)
+    try {
+      fireEvent.keyDown(composer, { key: 'Escape' })
+      expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+    } finally {
+      composer.remove()
+    }
   })
 
   it('undoes with Ctrl+Z and redoes with Ctrl+Y globally, but not in text inputs', () => {
