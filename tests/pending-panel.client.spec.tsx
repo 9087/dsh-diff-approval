@@ -2939,9 +2939,11 @@ describe('PendingPanel', () => {
     fireEvent.blur(delInput)
     expect(localStorage.getItem('diff-approval:diff-del-color')).toBe('#aa0055')
 
-    // Collapse the group: the controls hide.
+    // Collapse the group: the controls hide — the live preview included, so the
+    // card's own margins cannot leave a gap under a collapsed header.
     fireEvent.click(document.querySelector('[data-diff-view-toggle]') as HTMLButtonElement)
     expect(document.querySelector('[data-diff-font-size]')).toBeNull()
+    expect(document.querySelector('[data-diff-view-preview]')).toBeNull()
   })
 
   it('lets the status bar pick the highlight language', () => {

@@ -203,7 +203,9 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 12px 0;
+  /* The same vertical rhythm as a preference row (`padding: 16px 0`), so a group
+     header's spacing above and below its text reads like every other row's. */
+  padding: 16px 0;
   border: none;
   background: none;
   color: var(--dsw-alias-label-primary);
@@ -453,12 +455,15 @@
 
 /* Live diff preview inside the diff-view settings group: reuses the real diff
    row/gutter/code/color classes, so it shows the actual look at current values.
-   The code-block font is set here so `.lines` 1em scales from the real code size. */
+   The code-block font is set here so `.lines` 1em scales from the real code size.
+   Top and bottom margins keep it off the group header's separator (the group body
+   has no padding of its own) and off the first preference row; the top one matches
+   the 16px vertical rhythm of the preference rows below it. */
 .diffPreview {
   position: sticky;
   top: 0;
   z-index: 2;
-  margin-bottom: 8px;
+  margin: 16px 0 8px;
   padding: 8px;
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 8px;
