@@ -9,7 +9,12 @@ import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingFileDiff } from '../src/types.ts'
 import { PendingPanel } from '../src/client/PendingPanel.tsx'
 import { DiffApprovalSettingsTab } from '../src/client/SettingsTab.tsx'
+import { renderMarkdownPreview } from '../src/client/markdown-preview.ts'
 import type { PendingDiffSnapshot } from '../src/client/slots.ts'
+
+// Spy (keeping the real renderer) so a test can prove the preview is not
+// re-rendered while its pane scrolls.
+vi.mock('../src/client/markdown-preview.ts', { spy: true })
 
 afterEach(cleanup)
 afterEach(() => { vi.restoreAllMocks() })
@@ -3082,5 +3087,185 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByText('a.txt'))
     expect(document.querySelector('[data-diff-md-preview-body]')).toBeNull()
     expect(document.querySelector('[data-diff-body]')).not.toBeNull()
+  })
+
+  it('keeps/reverts one change block from the Markdown preview', async () => {
+    // Two change blocks separated by context, so block indices are meaningful.
+    const file = entry({
+      id: 'entry-md-blocks',
+      path: '/repo/README.md',
+      oldText: '# T\nold one\nsame\nold two\n',
+      newText: '# T\nnew one\nsame\nnew two\n',
+    })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+
+    // Every changed run is tagged with its source block index; context is not.
+    expect(document.querySelectorAll('[data-md-block="0"]').length).toBeGreaterThan(0)
+    expect(document.querySelectorAll('[data-md-block="1"]').length).toBeGreaterThan(0)
+    expect(document.querySelectorAll('[data-md-block]').length).toBe(
+      document.querySelectorAll('.mdAdd, .mdDel').length,
+    )
+
+    // Hovering the second block shows the same frame the source view shows.
+    fireEvent.mouseOver(document.querySelector('[data-md-block="1"]') as HTMLElement)
+    const frame = document.querySelector('[data-diff-block-actions]') as HTMLElement
+    expect(frame).not.toBeNull()
+    expect(frame.querySelector('[data-diff-block-position]')!.textContent)
+      .toBe('panel.blockPosition {"current":2,"total":2}')
+    // Its offsets are ours: right of the content (the preview content is centred
+    // under a max width, so the pane edge would strand the frame in the margin),
+    // and at the block's bottom edge (jsdom reports every rect as 0, so that is
+    // 0 here; the inset is the constant the placement adds).
+    expect(document.querySelector('[data-diff-md-preview-content]')).not.toBeNull()
+    expect(frame.style.right).toBe('8px')
+    expect(frame.style.top).toBe('0px')
+
+    // Keep runs on that block's source range (old 4-4 / new 4-4): the third
+    // line is context, so the block is the fourth line on both sides.
+    fireEvent.click(frame!.querySelector('[data-diff-block-keep]') as HTMLElement)
+    await waitFor(() => {
+      expect((props.onBlockKeep as unknown as { mock: { calls: unknown[][] } }).mock.calls)
+        .toEqual([[S1, 'entry-md-blocks', { oldStart: 4, oldEnd: 4, newStart: 4, newEnd: 4 }]])
+    })
+  })
+
+  it('applies a keep to every block a preview selection covers', async () => {
+    const file = entry({
+      id: 'entry-md-select',
+      path: '/repo/README.md',
+      oldText: '# T\nold one\nold two\n',
+      newText: '# T\nnew one\nnew two\n',
+    })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+
+    // Two blocks (a del run and its add run each), so the range spans old 2-3 /
+    // new 2-3 and resolves the whole file.
+    const blocks = [...document.querySelectorAll('[data-md-block="0"]')]
+    expect(blocks.length).toBe(2)
+    const range = document.createRange()
+    range.setStartBefore(blocks[0]!)
+    range.setEndAfter(blocks[blocks.length - 1]!)
+    const selection = window.getSelection()
+    expect(selection).not.toBeNull()
+    selection!.removeAllRanges()
+    selection!.addRange(range)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    // The selection frame replaces the hover frame and carries the combined range.
+    const frame = document.querySelector('[data-diff-selection-actions]')
+    expect(frame).not.toBeNull()
+    expect(document.querySelector('[data-diff-block-actions]')).toBeNull()
+    fireEvent.click(frame!.querySelector('[data-diff-selection-keep]') as HTMLElement)
+
+    // Covering every block resolves the file, so the panel asks about removing it
+    // (the same prompt the source view routes a whole-file block action through).
+    await waitFor(() => { expect(document.querySelector('[data-diff-confirm]')).not.toBeNull() })
+    fireEvent.click(document.querySelector('[data-diff-confirm-remove]') as HTMLElement)
+    await waitFor(() => {
+      expect((props.onBlockKeep as unknown as { mock: { calls: unknown[][] } }).mock.calls)
+        .toEqual([[S1, 'entry-md-select', { oldStart: 2, oldEnd: 3, newStart: 2, newEnd: 3 }, true]])
+    })
+  })
+
+  it('tags the double-column preview too, and drops the hover frame on leaving', () => {
+    const file = entry({
+      id: 'entry-md-double',
+      path: '/repo/README.md',
+      oldText: '# T\nold one\n',
+      newText: '# T\nnew one\n',
+    })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+    // The view toggle drives the double-column layout, which tags both cells of
+    // the aligned change row with the same block.
+    fireEvent.click(document.querySelector('[data-diff-toggle-view]') as HTMLElement)
+    const body = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
+    expect(body.dataset.diffMdMode).toBe('double')
+    expect(document.querySelectorAll('[data-md-block="0"]').length).toBe(2)
+
+    fireEvent.mouseOver(document.querySelector('[data-md-block="0"]') as HTMLElement)
+    expect(document.querySelector('[data-diff-block-actions]')).not.toBeNull()
+    fireEvent.mouseLeave(document.querySelector('[data-md-preview-wrap]') ?? body.parentElement as HTMLElement)
+    expect(document.querySelector('[data-diff-block-actions]')).toBeNull()
+  })
+
+  it('drops the preview frame over context and keeps it over the frame itself', () => {
+    const file = entry({ id: 'entry-md-hover', path: '/repo/README.md', oldText: '# T\nold\n', newText: '# T\nnew\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+
+    fireEvent.mouseOver(document.querySelector('[data-md-block="0"]') as HTMLElement)
+    expect(document.querySelector('[data-diff-block-actions]')).not.toBeNull()
+
+    // A context block (the unchanged heading) clears it, exactly like hovering an
+    // unchanged line in the code view.
+    fireEvent.mouseOver(document.querySelector('.mdBlock:not([data-md-block])') as HTMLElement)
+    expect(document.querySelector('[data-diff-block-actions]')).toBeNull()
+
+    // Moving onto the frame's own buttons keeps it, so it stays clickable.
+    fireEvent.mouseOver(document.querySelector('[data-md-block="0"]') as HTMLElement)
+    const frame = document.querySelector('[data-diff-block-actions]') as HTMLElement
+    fireEvent.mouseOver(frame)
+    expect(document.querySelector('[data-diff-block-actions]')).not.toBeNull()
+  })
+
+  it('re-places the preview frame as the pane scrolls', async () => {
+    const file = entry({ id: 'entry-md-scroll', path: '/repo/README.md', oldText: '# T\nold\n', newText: '# T\nnew\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+
+    // jsdom has no layout: give the pane and its block rects that move with the
+    // scroll, so the placement has something real to re-measure.
+    let scrolled = 0
+    const body = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
+    Object.defineProperty(body, 'scrollTop', {
+      configurable: true,
+      get: () => scrolled,
+      set: (value: number) => { scrolled = value },
+    })
+    const rect = (top: number, bottom: number): DOMRect =>
+      ({ top, bottom, left: 0, right: 400, width: 400, height: bottom - top, x: 0, y: top, toJSON: () => ({}) }) as DOMRect
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 300 })
+    vi.spyOn(body, 'getBoundingClientRect').mockImplementation(() => rect(0, 300))
+    const block = document.querySelector('[data-md-block="0"]') as HTMLElement
+    vi.spyOn(block, 'getBoundingClientRect').mockImplementation(() => rect(100 - scrolled, 160 - scrolled))
+
+    fireEvent.mouseOver(block)
+    const frame = (): HTMLElement | null => document.querySelector('[data-diff-block-actions]')
+    await waitFor(() => { expect(frame()?.style.top).toBe('158px') })
+
+    // The pane scrolls: the block moves up under the pointer and the frame follows
+    // it in the same event — imperatively, with no re-render (re-rendering the
+    // markdown per scroll event is what made tracking feel laggy).
+    const markdownRenders = vi.mocked(renderMarkdownPreview).mock.calls.length
+    body.scrollTop = 40
+    fireEvent.scroll(body)
+    expect(frame()?.style.top).toBe('118px')
+    expect(vi.mocked(renderMarkdownPreview).mock.calls.length).toBe(markdownRenders)
+
+    // A block whose bottom edge sits past the pane's bottom keeps its frame inside,
+    // pinned to the pane's bottom edge — the code view's clamp (300 − 40).
+    vi.spyOn(block, 'getBoundingClientRect').mockImplementation(() => rect(360, 420))
+    fireEvent.mouseOver(document.querySelector('.mdBlock:not([data-md-block])') as HTMLElement)
+    expect(frame()).toBeNull()
+    fireEvent.mouseOver(block)
+    await waitFor(() => { expect(frame()?.style.top).toBe('260px') })
   })
 })

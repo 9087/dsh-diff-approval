@@ -7,6 +7,7 @@
  */
 
 import { diffArrays, structuredPatch } from 'diff'
+import type { DiffApprovalBlockRange } from '../types.ts'
 
 /** One rendered body line of the whole-file view. */
 export interface WholeFileDiffRow {
@@ -28,6 +29,69 @@ export interface WholeFileDiff {
   removed: number
   /** Number of added lines. */
   added: number
+}
+
+/** One contiguous run of changed rows, treated as a single modification. */
+export interface ChangeBlock {
+  start: number
+  end: number
+}
+
+/** Split a row list into maximal runs of non-context rows. */
+export function changeBlocksOf(diff: WholeFileDiff): ChangeBlock[] {
+  const blocks: ChangeBlock[] = []
+  let start = -1
+  diff.rows.forEach((row, index) => {
+    if (row.kind !== 'context') {
+      if (start === -1) start = index
+    } else if (start !== -1) {
+      blocks.push({ start, end: index - 1 })
+      start = -1
+    }
+  })
+  if (start !== -1) blocks.push({ start, end: diff.rows.length - 1 })
+  return blocks
+}
+
+/**
+ * One diff block's old/new line ranges, 1-based inclusive, for block-level
+ * keep/revert. A side with no lines (a pure addition or deletion) is empty; its
+ * start is that side's insertion point — the line after the surrounding context
+ * — so the host can insert there.
+ *
+ * Shared by the source view and the Markdown preview: both derive blocks from
+ * the same rows, so a preview element and a source row name the same target.
+ * @param rows - the whole-file diff rows.
+ * @param block - the block's row range.
+ * @returns the old and new line ranges.
+ */
+export function blockRangesOf(rows: readonly WholeFileDiffRow[], block: ChangeBlock): DiffApprovalBlockRange {
+  let oldStart = Infinity
+  let oldEnd = -Infinity
+  let newStart = Infinity
+  let newEnd = -Infinity
+  for (let index = block.start; index <= block.end; index++) {
+    const row = rows[index]
+    if (row === undefined) continue
+    if (row.oldLine !== undefined) {
+      oldStart = Math.min(oldStart, row.oldLine)
+      oldEnd = Math.max(oldEnd, row.oldLine)
+    }
+    if (row.newLine !== undefined) {
+      newStart = Math.min(newStart, row.newLine)
+      newEnd = Math.max(newEnd, row.newLine)
+    }
+  }
+  const before = rows[block.start - 1]
+  if (oldStart === Infinity) {
+    oldStart = (before?.oldLine ?? 0) + 1
+    oldEnd = oldStart - 1
+  }
+  if (newStart === Infinity) {
+    newStart = (before?.newLine ?? 0) + 1
+    newEnd = newStart - 1
+  }
+  return { oldStart, oldEnd, newStart, newEnd }
 }
 
 /**

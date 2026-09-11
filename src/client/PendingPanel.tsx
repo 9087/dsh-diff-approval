@@ -11,10 +11,10 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { DiffApprovalBlockRange, DiffApprovalOpenAction, DiffApprovalRefreshOutcome, PendingFileDiff } from '../types.ts'
 import type { PendingPanelFace } from './slots.ts'
 import type { DiffApprovalKey } from './locales.ts'
-import { computeIntraLineDiff, computeWholeFileDiff } from './whole-file-diff.ts'
+import { blockRangesOf, changeBlocksOf, computeIntraLineDiff, computeWholeFileDiff } from './whole-file-diff.ts'
 import { renderMarkdownPreview } from './markdown-preview.ts'
 import { resolvePreviewImages } from './markdown-images.ts'
-import type { IntraRun, WholeFileDiffRow } from './whole-file-diff.ts'
+import type { ChangeBlock, IntraRun, WholeFileDiffRow } from './whole-file-diff.ts'
 import { computeSideBySideDiff, searchPairs } from './split-diff.ts'
 import type { SplitPair, SplitSide } from './split-diff.ts'
 import { HIGHLIGHT_LANGS, highlightLines, languageDisplayName } from './highlight.ts'
@@ -325,6 +325,20 @@ const OVERSCAN_ROWS = 8
  * 5px frame padding on each side + 1px border on each side, plus a little
  * breathing room so the bottom padding never sits flush against it. */
 const BLOCK_ACTIONS_FRAME_PX = 40
+/** How far a floating block-action frame stays inside the surface it is anchored
+ *  to (the content's right edge in the Markdown preview, the pane's in the code
+ *  view). */
+const FRAME_INSET_PX = 8
+
+/** One Markdown-preview frame's measured placement. `contentBottom` is the block
+ *  group's bottom edge in content coordinates (scroll independent), `maxTop` the
+ *  lowest top the frame may take inside the pane, `right` its inset from the
+ *  pane's right edge. */
+interface PreviewFramePlacement {
+  contentBottom: number
+  maxTop: number
+  right: number
+}
 
 /** Full panel props composed by the sidebar footer-action slot. */
 export type PendingPanelProps =
@@ -783,12 +797,6 @@ interface HighlightRuns {
   newRuns: ReturnType<typeof highlightLines>
 }
 
-/** One contiguous run of changed rows, treated as a single modification. */
-interface ChangeBlock {
-  start: number
-  end: number
-}
-
 /** One selected line range in row indices, normalized low-to-high. */
 interface RowRange {
   start: number
@@ -796,60 +804,6 @@ interface RowRange {
   /** Which file's lines a split selection references: 'old' (left column), 'new'
    *  (right column); undefined in single column (always the new file). */
   side?: 'old' | 'new'
-}
-
-/**
- * One diff block's old/new line ranges, 1-based inclusive, for block-level
- * keep/revert. A side with no lines (a pure addition or deletion) is empty;
- * its start is that side's insertion point — the line after the surrounding
- * context — so the host can insert there.
- * @param rows - the whole-file diff rows.
- * @param block - the block's row range.
- * @returns the old and new line ranges.
- */
-function blockRangesOf(rows: readonly WholeFileDiffRow[], block: ChangeBlock): DiffApprovalBlockRange {
-  let oldStart = Infinity
-  let oldEnd = -Infinity
-  let newStart = Infinity
-  let newEnd = -Infinity
-  for (let index = block.start; index <= block.end; index++) {
-    const row = rows[index]
-    if (row === undefined) continue
-    if (row.oldLine !== undefined) {
-      oldStart = Math.min(oldStart, row.oldLine)
-      oldEnd = Math.max(oldEnd, row.oldLine)
-    }
-    if (row.newLine !== undefined) {
-      newStart = Math.min(newStart, row.newLine)
-      newEnd = Math.max(newEnd, row.newLine)
-    }
-  }
-  const before = rows[block.start - 1]
-  if (oldStart === Infinity) {
-    oldStart = (before?.oldLine ?? 0) + 1
-    oldEnd = oldStart - 1
-  }
-  if (newStart === Infinity) {
-    newStart = (before?.newLine ?? 0) + 1
-    newEnd = newStart - 1
-  }
-  return { oldStart, oldEnd, newStart, newEnd }
-}
-
-/** Split a row list into maximal runs of non-context rows. */
-function changeBlocksOf(diff: ReturnType<typeof computeWholeFileDiff>): ChangeBlock[] {
-  const blocks: ChangeBlock[] = []
-  let start = -1
-  diff.rows.forEach((row, index) => {
-    if (row.kind !== 'context') {
-      if (start === -1) start = index
-    } else if (start !== -1) {
-      blocks.push({ start, end: index - 1 })
-      start = -1
-    }
-  })
-  if (start !== -1) blocks.push({ start, end: diff.rows.length - 1 })
-  return blocks
 }
 
 /** Whether a block keep/revert range covers the file's entire change region, so
@@ -1681,6 +1635,23 @@ function codeCellAt(node: Node): HTMLElement | null {
   return row?.querySelector<HTMLElement>('[data-diff-code]') ?? null
 }
 
+/**
+ * The change block a rendered Markdown-preview node belongs to, or undefined (a
+ * context block, or a node outside any tagged block). The preview tags every
+ * changed run's element with `data-md-block`, carrying the same block index the
+ * source view's `changeBlocksOf` derives over the same contents — so a preview
+ * element and a source block name the same keep/revert target.
+ * @param node - the node under the pointer.
+ * @returns the block index, or undefined.
+ */
+function previewBlockAt(node: Node | null): number | undefined {
+  const element = node instanceof Element ? node : node?.parentElement ?? null
+  const raw = element?.closest('[data-md-block]')?.getAttribute('data-md-block')
+  if (raw === null || raw === undefined) return undefined
+  const index = Number(raw)
+  return Number.isInteger(index) && index >= 0 ? index : undefined
+}
+
 /** Character offset of a selection boundary within its line's code text. A
  * boundary outside the code cell (the line-number gutter) sits at the line's
  * start — offset 0, never the line's end — so it never skips the line. */
@@ -2046,6 +2017,18 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const [hScrollbarPx, setHScrollbarPx] = useState(0)
   const [hoveredBlock, setHoveredBlock] = useState<number | undefined>(undefined)
   const [selection, setSelection] = useState<RowRange | undefined>(undefined)
+  // The Markdown preview has no fixed row grid, so its block frames are placed by
+  // measuring the tagged elements and the preview content instead: the hovered
+  // block's frame, and the blocks a native selection fully covers (with their own
+  // combined frame). The measurement is scroll independent; the live scroll
+  // offset is mirrored in a ref so the scroll path can move a frame without a
+  // render (and a render for any other reason still places it correctly).
+  const [previewFrame, setPreviewFrame] = useState<PreviewFramePlacement | undefined>(undefined)
+  const [previewCovered, setPreviewCovered] = useState<number[]>([])
+  const [previewSelectionFrame, setPreviewSelectionFrame] = useState<PreviewFramePlacement | undefined>(undefined)
+  const previewScrollTopRef = useRef(0)
+  const previewHoverFrameRef = useRef<HTMLDivElement>(null)
+  const previewSelectionFrameRef = useRef<HTMLDivElement>(null)
   // The plain text of the last valid (single-line) diff selection, so opening
   // search auto-fills the query even after clicking the search button collapses
   // the native selection.
@@ -2115,6 +2098,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // covering one or more complete blocks shows its own keep/revert frame (the
   // combined range below) in place of the single-block hover frame.
   const coveredBlockIndices = useMemo(() => {
+    if (mdPreview && lang === 'markdown') return previewCovered
     if (selection === undefined || splitView) return []
     const covered: number[] = []
     for (let index = 0; index < model.blocks.length; index++) {
@@ -2122,10 +2106,11 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       if (selection.start <= block.start && block.end <= selection.end) covered.push(index)
     }
     return covered
-  }, [selection, splitView, model])
+  }, [selection, splitView, model, mdPreview, lang, previewCovered])
 
   // The combined old/new range spanning the covered blocks (first to last), so
-  // keep/revert applies to every covered block in one host call.
+  // keep/revert applies to every covered block in one host call. The preview's
+  // covered blocks feed this too, through `coveredBlockIndices`.
   const selectionRange = useMemo(() => {
     if (coveredBlockIndices.length === 0) return undefined
     const firstIndex = coveredBlockIndices[0]
@@ -2143,6 +2128,113 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const searchMatches = useMemo(() => matchingRows(model.diff.rows, searchQuery, search.options), [model, searchQuery, search.options])
   const searchHitSet = useMemo(() => new Set(searchMatches), [searchMatches])
   const currentSearchRow = searchMatches.length === 0 ? undefined : searchMatches[searchIndex % searchMatches.length]
+
+  /**
+   * Measure one frame's placement for a set of change blocks in the Markdown
+   * preview. The block's bottom is stored in *content* coordinates (scroll
+   * independent), so the scroll path can move the frame without re-measuring or
+   * re-rendering — the preview's markdown re-render is far too heavy to run per
+   * scroll event.
+   *
+   * - vertically at the block group's bottom edge, clamped into the pane exactly
+   *   like the code view (`pane height - frame height`), so a block near or past
+   *   the bottom keeps its actions visible at the pane's bottom edge;
+   * - horizontally at the *content's* right edge, because the preview content is
+   *   centred under a max width — anchoring to the pane would leave the frame
+   *   stranded in the empty margin on a wide panel.
+   * @param indices - the block indices the frame acts on.
+   * @returns the placement, or undefined when nothing is rendered.
+   */
+  const previewFrameFor = useCallback((indices: readonly number[]): PreviewFramePlacement | undefined => {
+    const body = mdPreviewBodyRef.current
+    if (body === null || indices.length === 0) return undefined
+    const bodyRect = body.getBoundingClientRect()
+    let bottom = -Infinity
+    for (const index of indices) {
+      for (const element of body.querySelectorAll(`[data-md-block="${index}"]`)) {
+        bottom = Math.max(bottom, element.getBoundingClientRect().bottom)
+      }
+    }
+    if (!Number.isFinite(bottom)) return undefined
+    const content = body.querySelector('[data-diff-md-preview-content]')
+    const contentRight = content === null ? bodyRect.right : content.getBoundingClientRect().right
+    previewScrollTopRef.current = body.scrollTop
+    return {
+      contentBottom: bottom - bodyRect.top + body.scrollTop,
+      maxTop: Math.max(0, body.clientHeight - BLOCK_ACTIONS_FRAME_PX),
+      right: Math.max(0, bodyRect.right - contentRight) + FRAME_INSET_PX,
+    }
+  }, [])
+
+  /** One placement's viewport top at a given scroll offset, clamped into the pane. */
+  const previewFrameTop = (frame: PreviewFramePlacement | undefined, scrollTop: number): number | undefined =>
+    frame === undefined ? undefined : Math.min(Math.max(0, frame.contentBottom - scrollTop - 2), frame.maxTop)
+
+  /** Write one placement onto its element right away, so a scroll tracks the pane
+   *  in the same frame as the content instead of waiting for a React render. */
+  const applyPreviewFrame = (element: HTMLDivElement | null, frame: PreviewFramePlacement | undefined): void => {
+    if (element === null || frame === undefined) return
+    const top = previewFrameTop(frame, previewScrollTopRef.current)
+    if (top === undefined) return
+    element.style.top = `${top}px`
+    element.style.right = `${frame.right}px`
+  }
+
+  // Place the preview's hover frame on the hovered block. Re-runs on a content
+  // change (a keep/revert rewrites the preview) and after images inline, since
+  // both move the block; scrolling is handled imperatively (see `onScroll`).
+  useLayoutEffect(() => {
+    if (!(mdPreview && lang === 'markdown')) return
+    setPreviewFrame(hoveredBlock === undefined ? undefined : previewFrameFor([hoveredBlock]))
+  }, [mdPreview, lang, hoveredBlock, file.oldText, file.newText, splitView, mdImageTick, previewFrameFor])
+
+  // Likewise for the selection frame: the last covered block's bottom edge.
+  useLayoutEffect(() => {
+    if (!(mdPreview && lang === 'markdown')) return
+    setPreviewSelectionFrame(previewFrameFor(previewCovered))
+  }, [mdPreview, lang, previewCovered, file.oldText, file.newText, splitView, mdImageTick, previewFrameFor])
+
+  // A mode switch starts both preview interactions clean: a hover or a selection
+  // from the other view must not carry over onto freshly rendered elements.
+  useEffect(() => {
+    setHoveredBlock(undefined)
+    setPreviewCovered([])
+  }, [mdPreview, lang])
+
+  /** The change blocks a live native selection inside the preview fully covers,
+   *  in order — the preview's counterpart of the code view's row-range rule. */
+  const coveredPreviewBlocks = (): number[] => {
+    const body = mdPreviewBodyRef.current
+    const live = window.getSelection()
+    if (body === null || live === null || live.isCollapsed || live.rangeCount === 0) return []
+    const range = live.getRangeAt(0)
+    if (!body.contains(range.commonAncestorContainer)) return []
+    const covered: number[] = []
+    for (let index = 0; index < model.blocks.length; index++) {
+      const elements = body.querySelectorAll(`[data-md-block="${index}"]`)
+      if (elements.length === 0) continue
+      let inside = true
+      for (const element of elements) {
+        const blockRange = document.createRange()
+        blockRange.selectNode(element)
+        // The selection must start at or before the block and end at or after it.
+        if (range.compareBoundaryPoints(Range.START_TO_START, blockRange) > 0
+          || range.compareBoundaryPoints(Range.END_TO_END, blockRange) < 0) {
+          inside = false
+          break
+        }
+      }
+      if (inside) covered.push(index)
+    }
+    return covered
+  }
+
+  /** Bring one preview block into view (the code view's row arithmetic has no
+   *  equivalent here); the frame's prev/next steps use it. */
+  const scrollPreviewBlockIntoView = (index: number): void => {
+    const element = mdPreviewBodyRef.current?.querySelector(`[data-md-block="${index}"]`)
+    element?.scrollIntoView?.({ block: 'nearest' })
+  }
 
   const goSearch = (direction: -1 | 1) => {
     if (searchMatches.length === 0) return
@@ -2540,6 +2632,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     setFocus(target)
     setScrollTick(tick => tick + 1)
     bumpFlash(false)
+    if (mdPreview && lang === 'markdown') scrollPreviewBlockIntoView(target)
   }
 
   // Run one block (or combined multi-block) keep/revert, then advance focus to
@@ -2579,6 +2672,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     if (firstCovered === undefined) return
     await runBlockAction(action, selectionRange, firstCovered)
     setSelection(undefined)
+    setPreviewCovered([])
     window.getSelection()?.removeAllRanges?.()
   }
 
@@ -2634,6 +2728,14 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // selection survives the click that triggers the copy.
   useEffect(() => {
     const update = () => {
+      // The preview renders Markdown, not diff rows: its selection resolves to
+      // the change blocks it fully covers (the same rule as below) rather than a
+      // row range, and only the preview owns the selection then.
+      if (mdPreview && lang === 'markdown') {
+        setPreviewCovered(coveredPreviewBlocks())
+        selectionTextRef.current = ''
+        return
+      }
       const live = window.getSelection()
       const range = splitView ? splitRowRangeOf(live) : rowRangeOf(live)
       // Only serialize the selected text when there is a real in-diff selection;
@@ -2661,7 +2763,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     document.addEventListener('selectionchange', update)
     update()
     return () => { document.removeEventListener('selectionchange', update) }
-  }, [file.id, splitView])
+  }, [file.id, splitView, mdPreview, lang])
 
   // Override copy so auto-wrap's visual line breaks never leak into the
   // clipboard: rebuild the selected plain text (join a wrapped line's sub-lines
@@ -3050,19 +3152,117 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       {file.missing && <p className={css.missingHint}>{t('panel.missingHint')}</p>}
       {mdPreview && lang === 'markdown' ? (
         <MarkdownPreviewBoundary fallback={<div className={css.mdPreviewFallback} data-diff-md-preview-fallback>{t('panel.mdPreviewFailed')}</div>}>
-          <div className={css.mdPreviewWrap}>
+          <div className={css.mdPreviewWrap} onMouseLeave={() => { setHoveredBlock(undefined) }}>
             <div
               className={`${css.mdPreviewBody} ${splitView ? css.mdPreviewDouble : css.mdPreviewSingle}`}
               data-diff-md-preview-body
               data-diff-md-mode={splitView ? 'double' : 'single'}
               ref={mdPreviewBodyRef}
+              onScroll={(event) => {
+                // Move the frames in this very frame, without a React render: the
+                // preview's markdown re-render is far too heavy to run per scroll
+                // event (that was the visible lag).
+                previewScrollTopRef.current = event.currentTarget.scrollTop
+                applyPreviewFrame(previewHoverFrameRef.current, previewFrame)
+                applyPreviewFrame(previewSelectionFrameRef.current, previewSelectionFrame)
+              }}
+              onMouseOver={(event) => {
+                // The rendered HTML is a flat blob to React: resolve the block from
+                // the event's target instead of wiring a handler per block. A
+                // pointer over the frames themselves keeps the current block (so
+                // moving onto the buttons never makes them disappear), while a
+                // pointer over context clears it — exactly like the code view,
+                // where hovering an unchanged line drops the frame.
+                const target = event.target as Node | null
+                if (target instanceof Element
+                  && target.closest('[data-diff-block-actions],[data-diff-selection-actions]') !== null) return
+                const index = previewBlockAt(target)
+                if (index !== hoveredBlock) setHoveredBlock(index)
+              }}
             >
               <div
                 className={css.mdPreviewContent}
+                data-diff-md-preview-content
                 style={{ maxWidth: splitView ? mdPreviewMaxWidthPx * 2 : mdPreviewMaxWidthPx }}
                 dangerouslySetInnerHTML={{ __html: renderMarkdownPreview(file.oldText, file.newText, splitView ? 'double' : 'single') }}
               />
             </div>
+            {previewCovered.length > 0 && selectionRange !== undefined && previewSelectionFrame !== undefined ? (
+              <div
+                ref={previewSelectionFrameRef}
+                className={css.blockActions}
+                data-diff-selection-actions
+                style={{ top: previewFrameTop(previewSelectionFrame, previewScrollTopRef.current) ?? 0, right: previewSelectionFrame.right }}
+              >
+                <button
+                  type="button"
+                  className={`${css.action} ${css.actionPrimary}`}
+                  data-diff-selection-keep
+                  disabled={busy}
+                  onClick={() => { void handleSelectionAction('keep') }}
+                >
+                  {t('action.keep')}
+                </button>
+                <button
+                  type="button"
+                  className={css.action}
+                  data-diff-selection-revert
+                  disabled={busy}
+                  onClick={() => { void handleSelectionAction('revert') }}
+                >
+                  {t('action.revert')}
+                </button>
+              </div>
+            ) : hoveredBlock !== undefined && model.blocks[hoveredBlock] !== undefined && previewFrame !== undefined ? (
+              <div
+                ref={previewHoverFrameRef}
+                className={css.blockActions}
+                data-diff-block-actions
+                style={{ top: previewFrameTop(previewFrame, previewScrollTopRef.current) ?? 0, right: previewFrame.right }}
+              >
+                <span className={css.blockPosition} data-diff-block-position>
+                  {t('panel.blockPosition', { current: hoveredBlock + 1, total: model.blocks.length })}
+                </span>
+                <button
+                  type="button"
+                  className={`${css.action} ${css.iconAction}`}
+                  data-diff-block-prev
+                  aria-label={t('action.prevDiff')}
+                  disabled={busy}
+                  onClick={() => { stepBlock(-1) }}
+                >
+                  <IconChevronUpOutline14 size={14} />
+                </button>
+                <button
+                  type="button"
+                  className={`${css.action} ${css.iconAction}`}
+                  data-diff-block-next
+                  aria-label={t('action.nextDiff')}
+                  disabled={busy}
+                  onClick={() => { stepBlock(1) }}
+                >
+                  <IconChevronDownOutline14 size={14} />
+                </button>
+                <button
+                  type="button"
+                  className={`${css.action} ${css.actionPrimary}`}
+                  data-diff-block-keep
+                  disabled={busy}
+                  onClick={() => { void handleBlockAction('keep') }}
+                >
+                  {t('action.keep')}
+                </button>
+                <button
+                  type="button"
+                  className={css.action}
+                  data-diff-block-revert
+                  disabled={busy}
+                  onClick={() => { void handleBlockAction('revert') }}
+                >
+                  {t('action.revert')}
+                </button>
+              </div>
+            ) : null}
             {!splitView && mdRulerMarkers.length > 0 && (
               <div className={css.overviewRuler} data-diff-approval-ruler aria-hidden="true">
                 {mdRulerMarkers.map((marker, index) => (

@@ -10,33 +10,43 @@
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import type { WholeFileDiff } from './whole-file-diff.ts'
-import { computeWholeFileDiff, intraRunsOf } from './whole-file-diff.ts'
+import { changeBlocksOf, computeWholeFileDiff, intraRunsOf } from './whole-file-diff.ts'
 import type { IntraRun } from './whole-file-diff.ts'
 
-/** One rendered diff run: a contiguous run of add/remove/context lines. */
+/** One rendered diff run: a contiguous run of same-kind rows, plus the change
+ *  block it belongs to (`undefined` for context). The block index is the one the
+ *  source view derives over the same contents, so a preview element and a source
+ *  block name the same keep/revert target. */
 interface DiffRun {
   kind: 'add' | 'del' | 'context'
   text: string
+  block: number | undefined
 }
 
 function computeDiffOf(oldText: string, newText: string): WholeFileDiff {
   return computeWholeFileDiff(oldText, newText)
 }
 
-/** Group the whole-file diff rows into contiguous runs of the same kind. */
+/** Group the whole-file diff rows into contiguous same-kind runs, tagged with
+ *  their change block (a run never spans two blocks: context separates them). */
 function diffRuns(oldText: string, newText: string): DiffRun[] {
   const diff = computeDiffOf(oldText, newText)
+  const blockOfRow = new Map<number, number>()
+  changeBlocksOf(diff).forEach((block, index) => {
+    for (let row = block.start; row <= block.end; row++) blockOfRow.set(row, index)
+  })
   const runs: DiffRun[] = []
   let current: DiffRun | null = null
-  for (const row of diff.rows) {
+  diff.rows.forEach((row, index) => {
     const kind = row.kind === 'add' ? 'add' : row.kind === 'del' ? 'del' : 'context'
-    if (current === null || current.kind !== kind) {
-      current = { kind, text: row.text }
+    const block = blockOfRow.get(index)
+    if (current === null || current.kind !== kind || current.block !== block) {
+      current = { kind, text: row.text, block }
       runs.push(current)
     } else {
       current.text += `\n${row.text}`
     }
-  }
+  })
   return runs
 }
 
@@ -97,10 +107,17 @@ function wordHighlight(delText: string, addText: string): { del: string; add: st
   }
 }
 
-/** One run rendered as a block carrying its diff-kind class. */
+/** The change-block attributes one block-carrying run renders with; empty for
+ *  context, which belongs to no block and takes no keep/revert action. */
+function blockAttrs(run: DiffRun): string {
+  return run.block === undefined ? '' : ` data-md-block="${run.block}" data-md-kind="${run.kind}"`
+}
+
+/** One run rendered as a block carrying its diff-kind class and, for a changed
+ *  run, the change block it belongs to. */
 function renderBlock(run: DiffRun): string {
   const cls = run.kind === 'add' ? 'mdBlock mdAdd' : run.kind === 'del' ? 'mdBlock mdDel' : 'mdBlock'
-  return `<div class="${cls}">${renderRun(run)}</div>`
+  return `<div class="${cls}"${blockAttrs(run)}>${renderRun(run)}</div>`
 }
 
 /** One aligned before/after row: the same logical section on both sides. */
@@ -157,8 +174,8 @@ function renderDoubleRow(row: AlignedDoubleRow): string {
   if (before !== undefined && after !== undefined && before.kind === 'del' && after.kind === 'add') {
     const hl = wordHighlight(before.text, after.text)
     if (hl !== undefined) {
-      beforeHtml = `<div class="mdBlock mdDel">${renderMarkdownInline(hl.del)}</div>`
-      afterHtml = `<div class="mdBlock mdAdd">${renderMarkdownInline(hl.add)}</div>`
+      beforeHtml = `<div class="mdBlock mdDel"${blockAttrs(before)}>${renderMarkdownInline(hl.del)}</div>`
+      afterHtml = `<div class="mdBlock mdAdd"${blockAttrs(after)}>${renderMarkdownInline(hl.add)}</div>`
     }
   }
   return `<div class="mdDoubleRow"><div class="mdDoubleCol">${beforeHtml}</div><div class="mdDoubleRule"></div><div class="mdDoubleCol">${afterHtml}</div></div>`
