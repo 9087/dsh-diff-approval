@@ -53,8 +53,9 @@ import type { OpenAction } from './open.ts'
 import { detectVcsRoot, listVcsChanges } from './vcs.ts'
 import type { VcsChange, VcsImportInput, ShellExecutorLike } from './vcs.ts'
 import type {
-  DiffApprovalActionValue, DiffApprovalBlockTarget, DiffApprovalBulkValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue,
-  DiffApprovalPreviewImageValue, DiffApprovalRefreshValue, PendingEntry, PendingEntryKind, PendingFileDiff, VcsImportValue,
+  DiffApprovalActionValue, DiffApprovalAddOutcome, DiffApprovalAddValue, DiffApprovalBlockTarget, DiffApprovalBrowseEntry, DiffApprovalBrowseValue,
+  DiffApprovalBulkValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue,
+  PendingEntry, PendingEntryKind, PendingFileDiff, VcsImportValue,
 } from './types.ts'
 
 export type {
@@ -221,6 +222,58 @@ function writeOutcomeOf(value: unknown): OperationOutcome | undefined {
 /** Human-readable message from an arbitrary thrown value. */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** Directories one browse level hides: VCS/build noise a review list never wants.
+ *  The path box can still reach them by typing the path outright. */
+const BROWSE_HIDDEN_NAMES = new Set(['.git', 'node_modules'])
+
+/** Cap on one browse level's children: the panel renders a list, not a dump of a
+ *  huge directory, and it reports `truncated` rather than silently cutting. */
+const BROWSE_ENTRY_CAP = 500
+
+/** Cap on the files one no-change walk reads: ticking the box on a directory
+ *  asks for "everything under here", which must not mean reading a whole tree
+ *  (every file's text) inside one call. */
+const ADD_UNCHANGED_CAP = 300
+
+/**
+ * One absolute path as a workspace-relative path with `/` separators, or
+ * `undefined` when it lies outside the root. `''` is the root itself.
+ * @param root - the workspace root.
+ * @param absolute - the path to express relative to it.
+ * @returns the relative path, or undefined when outside.
+ */
+function workspaceRelativeOf(root: string, absolute: string): string | undefined {
+  const rel = relative(resolve(root), resolve(absolute))
+  if (rel === '') return ''
+  // A different Windows drive comes back absolute; a sibling comes back as `..`.
+  if (isAbsolute(rel)) return undefined
+  const parts = rel.split(/[\\/]/)
+  if (parts[0] === '..') return undefined
+  return parts.join('/')
+}
+
+/**
+ * Resolve one caller-supplied path against the workspace root. A relative path
+ * is taken as workspace-relative; an absolute one must still land inside.
+ * @param root - the workspace root.
+ * @param input - the caller's path (absolute or workspace-relative).
+ * @returns the absolute path, or undefined when it escapes the workspace.
+ */
+function resolveInsideWorkspace(root: string, input: string): string | undefined {
+  const absolute = isAbsolute(input) ? resolve(input) : resolve(root, input)
+  return workspaceRelativeOf(root, absolute) === undefined ? undefined : absolute
+}
+
+/** The workspace-relative parent of a relative directory path (`''` at the root). */
+
+/** Fold one path for comparison: absolute, `/`-separated, case-folded on Windows.
+ *  Entries are keyed by the path spelling their capture carried (a tool's display
+ *  path or a scan's absolute one), so an equality test has to normalize first. */
+function pathIdentity(absolute: string): string {
+  const unified = resolve(absolute).split(/[\\/]/).join('/')
+  return process.platform === 'win32' ? unified.toLowerCase() : unified
 }
 
 /** Narrow a tool-execution-shaped value to its name, call id, and agent. */
@@ -528,6 +581,121 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       listed.push({ ...entry, newText: adopted, ...state })
     }
     return { files: listed, redoCleared }
+  }
+
+  /**
+   * Fold a batch of entries into one session's list as a single undoable action.
+   * Nothing touches the files, so the batch is undone by restoring each affected
+   * path's pre-fold entry (or removing it when the path was not listed), which is
+   * what the import and the hand-add path both want.
+   * @param sessionId - the session whose list gains the entries.
+   * @param entries - the entries to fold, in capture order.
+   * @param admitNoDiff - also admit entries that carry no diff at all (the
+   *        guard-free insert), which is how a hand-added clean path is listed.
+   * @returns how many entries landed; 0 leaves the store, persistence, and the
+   *          undo queue untouched.
+   */
+  async function foldBatch(sessionId: SessionId, entries: readonly PendingEntry[], admitNoDiff = false): Promise<number> {
+    await ensureLoaded()
+    const before = new Map(store.list(sessionId).map(entry => [entry.path, entry]))
+    let folded = 0
+    const changedPaths: string[] = []
+    for (const entry of entries) {
+      const applied = entry.oldText === entry.newText
+        ? admitNoDiff && store.insert(entry)
+        : store.fold(entry)
+      if (applied) {
+        folded += 1
+        changedPaths.push(entry.path)
+      }
+    }
+    if (folded === 0) return 0
+    persistSession(true)
+    const after = new Map(store.list(sessionId).map(entry => [entry.path, entry]))
+    const batchBefore: DiffApprovalUndoState[] = []
+    const batchAfter: DiffApprovalUndoState[] = []
+    for (const path of changedPaths) {
+      const final = after.get(path)
+      if (final === undefined) continue
+      const pre = before.get(path)
+      batchAfter.push({ id: final.id, path, entry: final, fileText: undefined })
+      batchBefore.push({ id: final.id, path, entry: pre, fileText: undefined })
+    }
+    if (batchBefore.length > 0) {
+      pushUndo(sessionId,
+        { id: batchBefore[0]!.id, path: batchBefore[0]!.path, entry: undefined, fileText: undefined, batch: batchBefore },
+        { id: batchAfter[0]!.id, path: batchAfter[0]!.path, entry: undefined, fileText: undefined, batch: batchAfter },
+      )
+    }
+    return folded
+  }
+
+  /**
+   * One path's text, or `undefined` when it is absent or not readable as text
+   * (a binary, an unreadable permission). An empty file reads as `''`, which is
+   * a value: a listed entry may carry no content at all.
+   * @param absolute - the path to read.
+   * @param signal - caller lifetime.
+   * @returns the text, or undefined.
+   */
+  async function readTextOrNone(absolute: string, signal: AbortSignal): Promise<string | undefined> {
+    try {
+      return await ctx.fs.readText(await ctx.fs.resolve(absolute, { signal }), signal)
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Every regular file under one directory, with its text. Breadth-first in the
+   * backend's name order, hiding the browse's noise names, skipping whatever is
+   * not readable as text, and stopping at {@link ADD_UNCHANGED_CAP} files so
+   * "include paths with no change" cannot read an unbounded tree in one call.
+   * Symlinked directories are followed once, so a cycle ends rather than loops.
+   * @param root - the resolved directory target to walk.
+   * @param rootAbsolute - that directory's absolute path.
+   * @param signal - caller lifetime.
+   * @returns the files found and whether the cap cut the walk short.
+   */
+  async function collectFilesUnder(
+    root: FsTarget,
+    rootAbsolute: string,
+    signal: AbortSignal,
+  ): Promise<{ files: { path: string; content: string | undefined }[]; truncated: boolean }> {
+    const files: { path: string; content: string | undefined }[] = []
+    const visited = new Set<string>()
+    // A backend always names its targets, but the guard must not treat two
+    // unnamed ones as the same directory.
+    if (typeof root.targetKey === 'string' && root.targetKey !== '') visited.add(root.targetKey)
+    const queue: { absolute: string; target: FsTarget }[] = [{ absolute: rootAbsolute, target: root }]
+    while (queue.length > 0) {
+      const current = queue.shift()
+      if (current === undefined) break
+      let children
+      try {
+        children = await ctx.fs.listDir(current.target, signal)
+      } catch {
+        // An unreadable subdirectory is skipped, not fatal to the whole add.
+        continue
+      }
+      for (const child of children) {
+        if (BROWSE_HIDDEN_NAMES.has(child.name)) continue
+        const absolute = resolve(current.absolute, child.name)
+        if (child.type === 'directory') {
+          const key = child.target.targetKey
+          if (typeof key === 'string' && key !== '') {
+            if (visited.has(key)) continue
+            visited.add(key)
+          }
+          queue.push({ absolute, target: child.target })
+          continue
+        }
+        if (child.type !== 'file') continue
+        if (files.length >= ADD_UNCHANGED_CAP) return { files, truncated: true }
+        files.push({ path: absolute, content: await readTextOrNone(absolute, signal) })
+      }
+    }
+    return { files, truncated: false }
   }
 
   /**
@@ -1026,48 +1194,16 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         } catch (error: unknown) {
           return rpcError(`import failed: ${errorMessage(error)}`)
         }
-        await ensureLoaded()
-        const before = new Map(store.list(sessionId).map(entry => [entry.path, entry]))
-        let imported = 0
-        const changedPaths: string[] = []
-        for (const change of changes) {
-          const entry: PendingEntry = {
-            id: change.path,
-            sessionId,
-            path: change.path,
-            kind: change.kind,
-            oldText: change.oldText,
-            newText: change.newText,
-            updatedAt: Date.now(),
-            sessionIds: [sessionId],
-          }
-          if (store.fold(entry)) {
-            imported += 1
-            changedPaths.push(change.path)
-          }
-        }
-        if (imported > 0) {
-          persistSession()
-          // The import is undoable as one action: snapshot each affected path's
-          // entry before and after, so Ctrl+Z undoes the whole import back to
-          // the pre-import list (no file writes — the import never touched files).
-          const after = new Map(store.list(sessionId).map(entry => [entry.path, entry]))
-          const batchBefore: DiffApprovalUndoState[] = []
-          const batchAfter: DiffApprovalUndoState[] = []
-          for (const path of changedPaths) {
-            const final = after.get(path)
-            if (final === undefined) continue
-            const pre = before.get(path)
-            batchAfter.push({ id: final.id, path, entry: final, fileText: undefined })
-            batchBefore.push({ id: final.id, path, entry: pre, fileText: undefined })
-          }
-          if (batchBefore.length > 0) {
-            pushUndo(sessionId,
-              { id: batchBefore[0]!.id, path: batchBefore[0]!.path, entry: undefined, fileText: undefined, batch: batchBefore },
-              { id: batchAfter[0]!.id, path: batchAfter[0]!.path, entry: undefined, fileText: undefined, batch: batchAfter },
-            )
-          }
-        }
+        const imported = await foldBatch(sessionId, changes.map(change => ({
+          id: change.path,
+          sessionId,
+          path: change.path,
+          kind: change.kind,
+          oldText: change.oldText,
+          newText: change.newText,
+          updatedAt: Date.now(),
+          sessionIds: [sessionId],
+        })))
         const value: VcsImportValue = { imported, detected: true }
         return { ok: true, value }
       }
@@ -1106,8 +1242,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         } catch (error: unknown) {
           return rpcError(`refresh failed: ${errorMessage(error)}`)
         }
-        const folded = (value: string) => process.platform === 'win32' ? resolve(value).toLowerCase() : resolve(value)
-        const change = changes.find(candidate => folded(candidate.path) === folded(entry.path))
+        const change = changes.find(candidate => pathIdentity(candidate.path) === pathIdentity(entry.path))
         // Nothing to replace it with: leave the entry exactly as the review found
         // it and let the panel say so. Silently blanking the diff here would
         // discard a review in progress over a scan that simply saw no change
@@ -1135,6 +1270,167 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           { id: entry.path, path: entry.path, entry: refreshed, fileText: undefined })
         persistSession(true)
         const value: DiffApprovalRefreshValue = { outcome: 'refreshed' }
+        return { ok: true, value }
+      }
+      case 'list-path': {
+        // One directory level for the panel's add-path browser. The level is
+        // addressed the way `add-path` is (workspace-relative, `''` for the
+        // root) so the browser and the add agree on what a row means.
+        const sessionId = sessionOf(payload)
+        if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
+        const workspace = workspaceOf(sessionId)
+        if (workspace === undefined) return rpcError('browse unavailable: the session has no workspace')
+        const requested = pathFieldOf(payload) ?? ''
+        const absolute = resolveInsideWorkspace(workspace.path, requested)
+        if (absolute === undefined) return rpcError('browse failed: the path is outside the workspace')
+        let children
+        try {
+          const target = await ctx.fs.resolve(absolute, { signal })
+          const info = await ctx.fs.stat(target, signal)
+          if (info === undefined || info.type !== 'directory') return rpcError('browse failed: not a directory')
+          children = await ctx.fs.listDir(target, signal)
+        } catch (error: unknown) {
+          return rpcError(`browse failed: ${errorMessage(error)}`)
+        }
+        const entries: DiffApprovalBrowseEntry[] = []
+        for (const child of children) {
+          if (BROWSE_HIDDEN_NAMES.has(child.name)) continue
+          const childAbsolute = resolve(absolute, child.name)
+          // Confine the level to the workspace: a symlink pointing out of it must
+          // not become a row the caller can add.
+          if (workspaceRelativeOf(workspace.path, childAbsolute) === undefined) continue
+          entries.push({
+            name: child.name,
+            type: child.type === 'directory' ? 'directory' : child.type === 'file' ? 'file' : 'other',
+            path: childAbsolute,
+            size: child.type === 'file' ? child.size : undefined,
+          })
+        }
+        // Directories first, then files, each name-sorted, so the browser reads
+        // like a file manager instead of the backend's own order.
+        entries.sort((left, right) => {
+          const rank = (value: DiffApprovalBrowseEntry): number => value.type === 'directory' ? 0 : 1
+          const byKind = rank(left) - rank(right)
+          return byKind !== 0 ? byKind : left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: 'base' })
+        })
+        const truncated = entries.length > BROWSE_ENTRY_CAP
+        const value: DiffApprovalBrowseValue = {
+          path: absolute,
+          entries: truncated ? entries.slice(0, BROWSE_ENTRY_CAP) : entries,
+          truncated,
+        }
+        return { ok: true, value }
+      }
+      case 'add-path': {
+        // Add one path the user named by hand. The path is scanned the way an
+        // import scans, restricted to that one file or directory subtree, so a
+        // directory add is recursive by construction and a single file never
+        // sweeps the workspace.
+        const target = addTargetOf(payload)
+        if (target === undefined) return rpcError('sessionId and path must be non-empty strings')
+        const workspace = workspaceOf(target.sessionId)
+        if (workspace === undefined) return rpcError('add unavailable: the session has no workspace')
+        const absolute = resolveInsideWorkspace(workspace.path, target.path)
+        if (absolute === undefined) {
+          const value: DiffApprovalAddValue = { outcome: 'outside', added: 0, duplicates: 0 }
+          return { ok: true, value }
+        }
+        await ensureLoaded()
+        // The kind comes from `stat`, not from a read: a directory and an
+        // unreadable binary file both fail `readText`, and only one of them is a
+        // subtree to scan.
+        let info
+        try {
+          const target = await ctx.fs.resolve(absolute, { signal })
+          info = await ctx.fs.stat(target, signal)
+        } catch (error: unknown) {
+          return rpcError(`add failed: ${errorMessage(error)}`)
+        }
+        if (info === undefined || info.type === 'other') {
+          const value: DiffApprovalAddValue = { outcome: 'missing', added: 0, duplicates: 0 }
+          return { ok: true, value }
+        }
+        const isDirectory = info.type === 'directory'
+        const root = detectVcsRoot(workspace.path)
+        if (root === undefined) {
+          const value: DiffApprovalAddValue = { outcome: 'no-vcs', added: 0, duplicates: 0 }
+          return { ok: true, value }
+        }
+        const shell = ctx.get('shell') as ShellExecutorLike | undefined
+        if (shell === undefined) return rpcError('add unavailable: the deployment has no shell executor')
+        let changes: VcsChange[]
+        try {
+          changes = await listVcsChanges({
+            kind: root.kind,
+            root: root.root,
+            workspaceRoot: workspace.path,
+            // Naming the path is the user's opt-in: a new file it points at is
+            // wanted even while the workspace-wide import leaves untracked files
+            // alone (that preference exists to bound a whole-tree scan).
+            includeUntracked: true,
+            scope: absolute,
+            shell,
+            readText: (path) => readFile(path, 'utf8').catch(() => undefined),
+            signal,
+          })
+        } catch (error: unknown) {
+          const value: DiffApprovalAddValue = { outcome: 'failed', added: 0, duplicates: 0, message: errorMessage(error) }
+          return { ok: true, value }
+        }
+        const now = Date.now()
+        const candidates: PendingEntry[] = changes.map(change => ({
+          id: change.path,
+          sessionId: target.sessionId,
+          path: change.path,
+          kind: change.kind,
+          oldText: change.oldText,
+          newText: change.newText,
+          updatedAt: now,
+          sessionIds: [target.sessionId],
+        }))
+        // Ticking "include paths with no change" asks for the paths the scan did
+        // not report: the named file itself, or every regular file under the named
+        // directory. Each lands as a zero-diff entry — the state a file reaches
+        // once every block is kept — and is undoable with the rest of the batch.
+        let truncated = false
+        if (target.includeUnchanged) {
+          const scanned = new Set(candidates.map(entry => pathIdentity(entry.path)))
+          const found = isDirectory
+            ? await collectFilesUnder(await ctx.fs.resolve(absolute, { signal }), absolute, signal)
+            : { files: [{ path: absolute, content: await readTextOrNone(absolute, signal) }], truncated: false }
+          truncated = found.truncated
+          for (const file of found.files) {
+            if (file.content === undefined) continue
+            if (scanned.has(pathIdentity(file.path))) continue
+            scanned.add(pathIdentity(file.path))
+            candidates.push({
+              id: file.path,
+              sessionId: target.sessionId,
+              path: file.path,
+              kind: 'edit',
+              oldText: file.content,
+              newText: file.content,
+              updatedAt: now,
+              sessionIds: [target.sessionId],
+            })
+          }
+        }
+        // Already-listed paths are left exactly as they are: the panel toasts
+        // that the path is in the list rather than silently re-baselining a
+        // review that is already in progress.
+        const listed = new Set(store.list(target.sessionId).map(entry => pathIdentity(entry.path)))
+        const fresh = candidates.filter(entry => !listed.has(pathIdentity(entry.path)))
+        const duplicates = candidates.length - fresh.length
+        const added = await foldBatch(target.sessionId, fresh, true)
+        const outcome: DiffApprovalAddOutcome = added > 0
+          ? 'added'
+          : duplicates > 0
+            ? 'duplicate'
+            // A single file that is simply clean is `unchanged` (the caller may
+            // tick the box and add it anyway); a directory that contributed
+            // nothing had nothing to contribute.
+            : isDirectory ? 'empty' : 'unchanged'
+        const value: DiffApprovalAddValue = truncated ? { outcome, added, duplicates, truncated } : { outcome, added, duplicates }
         return { ok: true, value }
       }
       case 'open': {
@@ -1304,6 +1600,22 @@ function previewImageTargetOf(payload: unknown): { sessionId: SessionId; path: s
   const path = (payload as Record<string, unknown>).path
   if (typeof path !== 'string' || path.length === 0) return undefined
   return { sessionId, path }
+}
+
+/** One payload's optional `path` field; absent (or not a string) is undefined. */
+function pathFieldOf(payload: unknown): string | undefined {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
+  const path = (payload as Record<string, unknown>).path
+  return typeof path === 'string' ? path : undefined
+}
+
+/** Narrow a wire payload to one hand-added path. */
+function addTargetOf(payload: unknown): { sessionId: SessionId; path: string; includeUnchanged: boolean } | undefined {
+  const sessionId = sessionOf(payload)
+  if (sessionId === undefined) return undefined
+  const path = pathFieldOf(payload)?.trim()
+  if (path === undefined || path === '') return undefined
+  return { sessionId, path, includeUnchanged: (payload as Record<string, unknown>).includeUnchanged === true }
 }
 
 /** Narrow a wire payload to one open target: the keep/revert pair plus the action. */

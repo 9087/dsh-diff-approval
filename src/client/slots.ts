@@ -2,7 +2,7 @@
 
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
-import type { DiffApprovalBlockRange, DiffApprovalOpenAction, DiffApprovalRefreshValue, PendingFileDiff, VcsImportValue } from '../types.ts'
+import type { DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalOpenAction, DiffApprovalRefreshValue, PendingFileDiff, VcsImportValue } from '../types.ts'
 
 /** What the panel reads and drives: the pending list plus in-flight entries. */
 export interface PendingDiffSnapshot {
@@ -57,6 +57,10 @@ export interface PendingPanelFace {
   /** Replace one entry's diff with the file's current local VCS change, then
    *  refresh the list; resolves to what the scan found. */
   onRefreshVcs: (sessionId: SessionId, id: string, includeUntracked: boolean) => Promise<DiffApprovalRefreshValue>
+  /** List one workspace directory level for the add-path dialog. */
+  onBrowse: (sessionId: SessionId, path?: string) => Promise<DiffApprovalBrowseValue>
+  /** Add one named path (a file, or a directory's whole subtree) to the list. */
+  onAddPath: (sessionId: SessionId, path: string, includeUnchanged: boolean) => Promise<DiffApprovalAddValue>
   /** Keep every pending entry of one session in a single host call (bulk). */
   onKeepAll: (sessionId: SessionId) => Promise<void>
   /** Revert every pending entry of one session in a single host call (bulk). */

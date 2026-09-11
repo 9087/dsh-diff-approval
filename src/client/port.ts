@@ -7,7 +7,8 @@
 
 import type { ClientConnectionRpc, SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type {
-  DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalBulkValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue, PendingFileDiff, VcsImportValue,
+  DiffApprovalActionValue, DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalBulkValue, DiffApprovalListValue,
+  DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue, PendingFileDiff, VcsImportValue,
 } from '../types.ts'
 
 /** The channel the host half registers and this port calls. */
@@ -33,6 +34,10 @@ export interface DiffApprovalPort {
   importVcs(sessionId: SessionId, includeUntracked: boolean): Promise<VcsImportValue>
   /** Replace one entry's diff with the file's current local VCS change. */
   refreshVcs(sessionId: SessionId, id: string, includeUntracked: boolean): Promise<DiffApprovalRefreshValue>
+  /** List one workspace directory level (workspace-relative; `''` is the root). */
+  browse(sessionId: SessionId, path?: string): Promise<DiffApprovalBrowseValue>
+  /** Add one named path (a file, or a directory's whole subtree) to the list. */
+  addPath(sessionId: SessionId, path: string, includeUnchanged: boolean): Promise<DiffApprovalAddValue>
   /** Open one file with its default application or reveal it in the folder. */
   open(sessionId: SessionId, id: string, action: DiffApprovalOpenAction): Promise<DiffApprovalOpenValue>
   /** Keep every pending entry of one session in a single host call (one batch). */
@@ -78,6 +83,14 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
     },
     async refreshVcs(sessionId, id, includeUntracked) {
       return refreshValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'vcs-refresh', { sessionId, id, includeUntracked }))
+    },
+    async browse(sessionId, path) {
+      // Omit the field entirely for the root, so the wire payload keeps its shape.
+      return browseValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'list-path',
+        path === undefined ? { sessionId } : { sessionId, path }))
+    },
+    async addPath(sessionId, path, includeUnchanged) {
+      return addValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'add-path', { sessionId, path, includeUnchanged }))
     },
     async open(sessionId, id, action) {
       return openOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'open', { sessionId, id, action }))
@@ -182,6 +195,63 @@ function refreshValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>
     throw new Error('the refresh returned a malformed outcome')
   }
   return { outcome }
+}
+
+/** Narrow the list-path endpoint's value; a malformed wire value is a browse failure. */
+function browseValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffApprovalBrowseValue {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+  const value: unknown = result.value
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('the browse returned a malformed value')
+  }
+  const record = value as Record<string, unknown>
+  const path = record.path
+  if (typeof path !== 'string') throw new Error('the browse returned a malformed value')
+  const rows = record.entries
+  if (!Array.isArray(rows)) throw new Error('the browse returned a malformed value')
+  const entries: DiffApprovalBrowseValue['entries'] = []
+  for (const row of rows) {
+    if (typeof row !== 'object' || row === null || Array.isArray(row)) continue
+    const { name, type, path: childPath, size } = row as Record<string, unknown>
+    if (typeof name !== 'string' || typeof childPath !== 'string') continue
+    if (type !== 'file' && type !== 'directory' && type !== 'other') continue
+    entries.push({
+      name,
+      type,
+      path: childPath,
+      size: typeof size === 'number' && Number.isFinite(size) ? size : undefined,
+    })
+  }
+  const truncated = record.truncated === true
+  return { path, entries, truncated }
+}
+
+/** Narrow the add-path endpoint's value; a malformed wire value is an add failure. */
+function addValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffApprovalAddValue {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+  const value: unknown = result.value
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('the add returned a malformed value')
+  }
+  const record = value as Record<string, unknown>
+  const outcome = record.outcome
+  if (outcome !== 'added' && outcome !== 'duplicate' && outcome !== 'unchanged' && outcome !== 'empty'
+    && outcome !== 'missing' && outcome !== 'outside' && outcome !== 'no-vcs' && outcome !== 'failed') {
+    throw new Error('the add returned a malformed outcome')
+  }
+  const added = record.added
+  const duplicates = record.duplicates
+  if (typeof added !== 'number' || typeof duplicates !== 'number') {
+    throw new Error('the add returned a malformed value')
+  }
+  const message = record.message
+  return {
+    outcome,
+    added,
+    duplicates,
+    truncated: record.truncated === true ? true : undefined,
+    message: typeof message === 'string' && message.length > 0 ? message : undefined,
+  }
 }
 
 /** Narrow the open endpoint's value; a malformed wire value is an open failure. */

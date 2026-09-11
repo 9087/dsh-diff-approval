@@ -167,3 +167,58 @@ export interface DiffApprovalActionValue {
    * block (the entry stays listed with no pending diff). */
   resolved?: boolean | undefined
 }
+
+/** One row of a browsed directory level. */
+export interface DiffApprovalBrowseEntry {
+  /** Base name inside the listed directory. */
+  name: string
+  /** What the child is; `other` covers anything neither file nor directory. */
+  type: 'file' | 'directory' | 'other'
+  /** Absolute host path — the same value `add-path` takes, so the panel can show
+   *  (and add) exactly what a row names. */
+  path: string
+  /** Byte size, present only for a regular file the backend reports. */
+  size?: number | undefined
+}
+
+/** Value returned by the channel's list-path endpoint: one directory level. */
+export interface DiffApprovalBrowseValue {
+  /** The listed directory's absolute path. */
+  path: string
+  /** Direct children: directories first, then files, each name-sorted. */
+  entries: DiffApprovalBrowseEntry[]
+  /** The response hit the entry cap, so children are missing from `entries`. */
+  truncated: boolean
+}
+
+/** What one hand-added path did. */
+export type DiffApprovalAddOutcome =
+  /** At least one entry landed in the list (a directory can add many). */
+  | 'added'
+  /** Everything scanned was already listed; nothing changed. */
+  | 'duplicate'
+  /** The path has no local VCS change and the caller did not ask to add those. */
+  | 'unchanged'
+  /** A directory scan found nothing to add and nothing was listed already. */
+  | 'empty'
+  /** The path does not exist (or is neither a file nor a directory). */
+  | 'missing'
+  /** The path lies outside the session's workspace. */
+  | 'outside'
+  /** The workspace is not inside a git/svn/p4 checkout. */
+  | 'no-vcs'
+  /** The scan itself failed; `message` carries the reason. */
+  | 'failed'
+
+/** Value returned by the channel's add-path endpoint. */
+export interface DiffApprovalAddValue {
+  outcome: DiffApprovalAddOutcome
+  /** How many entries the add put into the list. */
+  added: number
+  /** How many scanned paths were already listed (left untouched). */
+  duplicates: number
+  /** Whether the no-change walk hit its file cap, so some files were not added. */
+  truncated?: boolean | undefined
+  /** Failure detail for `outcome: 'failed'`. */
+  message?: string | undefined
+}

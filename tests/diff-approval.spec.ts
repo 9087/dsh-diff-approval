@@ -21,6 +21,7 @@ interface FsDouble {
   readText: ReturnType<typeof vi.fn>
   writeText: ReturnType<typeof vi.fn>
   stat: ReturnType<typeof vi.fn>
+  listDir: ReturnType<typeof vi.fn>
   processPath: ReturnType<typeof vi.fn>
 }
 
@@ -59,6 +60,7 @@ async function harness(options: {
     readText: vi.fn(async () => undefined),
     writeText: vi.fn(async () => ({ version: 1 })),
     stat: vi.fn(async () => ({ version: 'v1', type: 'file' })),
+    listDir: vi.fn(async () => []),
     processPath: vi.fn((target: { targetKey: string }) => target.targetKey),
   }
   ctx.provide('fs', fs as unknown as FileSystem)
@@ -1166,6 +1168,288 @@ describe('vcs detection and import', () => {
     const files2 = await listEntries(handle, 'session-1')
     expect(files2).toHaveLength(1)
     expect(files2[0]).toMatchObject({ kind: 'edit', oldText: 'old\n', newText: 'new\n' })
+  })
+})
+
+describe('hand-adding paths to the review list', () => {
+  /** A git repo at `dir/repo` whose working tree is the workspace `dir/repo/sub`. */
+  async function gitRepo(): Promise<{ repo: string; workspace: string }> {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-add-path-'))
+    tempDirs.push(dir)
+    const repo = join(dir, 'repo')
+    const workspace = join(repo, 'sub')
+    await mkdir(join(repo, '.git'), { recursive: true })
+    await mkdir(workspace, { recursive: true })
+    return { repo, workspace }
+  }
+
+  /** The git-status route naming `sub/…` paths, plus the baselines those files need. */
+  function gitShell(status: string, baselines: Record<string, string> = {}): unknown {
+    const routes: Record<string, string> = {
+      'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all': status,
+    }
+    for (const [path, text] of Object.entries(baselines)) {
+      routes[`git cat-file -s :0:${path}`] = String(Buffer.byteLength(text))
+      routes[`git show :0:${path}`] = text
+    }
+    return fakeShell(routes)
+  }
+
+  it('browses one level, directories first, with VCS noise hidden', async () => {
+    const { workspace } = await gitRepo()
+    const { handle, fs } = await harness({ sessionIds: [SessionId('session-1')], workspacePath: workspace })
+    fs.stat.mockResolvedValue({ version: 'v1', type: 'directory' } as never)
+    fs.listDir.mockResolvedValue([
+      { name: 'b.txt', type: 'file', target: {}, size: 12 },
+      { name: 'src', type: 'directory', target: {} },
+      { name: '.git', type: 'directory', target: {} },
+      { name: 'a.txt', type: 'file', target: {} },
+      { name: 'node_modules', type: 'directory', target: {} },
+    ] as never)
+
+    // The workspace root: children carry the absolute paths `add-path` takes.
+    await expect(handle('list-path', { sessionId: 'session-1' }, signal())).resolves.toEqual({
+      ok: true,
+      value: {
+        path: workspace,
+        entries: [
+          { name: 'src', type: 'directory', path: join(workspace, 'src'), size: undefined },
+          { name: 'a.txt', type: 'file', path: join(workspace, 'a.txt'), size: undefined },
+          { name: 'b.txt', type: 'file', path: join(workspace, 'b.txt'), size: 12 },
+        ],
+        truncated: false,
+      },
+    })
+
+    // One level down, addressed the same way the rows are (absolute).
+    fs.listDir.mockResolvedValue([{ name: 'nested', type: 'directory', target: {} }] as never)
+    await expect(handle('list-path', { sessionId: 'session-1', path: join(workspace, 'src') }, signal())).resolves.toEqual({
+      ok: true,
+      value: {
+        path: join(workspace, 'src'),
+        entries: [{ name: 'nested', type: 'directory', path: join(workspace, 'src', 'nested'), size: undefined }],
+        truncated: false,
+      },
+    })
+  })
+
+  it('refuses to browse outside the workspace or into a non-directory', async () => {
+    const { workspace } = await gitRepo()
+    const { handle } = await harness({ sessionIds: [SessionId('session-1')], workspacePath: workspace })
+    const outside = await handle('list-path', { sessionId: 'session-1', path: '../sibling' }, signal())
+    expect(outside.ok).toBe(false)
+
+    // The default stat double reports a file, so the same level is refused.
+    const notDir = await handle('list-path', { sessionId: 'session-1', path: 'a.txt' }, signal())
+    expect(notDir.ok).toBe(false)
+  })
+
+  it('adds one named file through the scoped scan, undoable as one batch', async () => {
+    const { workspace } = await gitRepo()
+    await writeFile(join(workspace, 'a.txt'), 'new content\n')
+    const shell = gitShell(
+      ' M sub/a.txt\u0000 M sub/other.txt\u0000?? sub/fresh.txt\u0000',
+      { 'sub/a.txt': 'old content\n', 'sub/other.txt': 'other old\n' },
+    )
+    const { handle, fs } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (ctx) => { ctx.provide('shell', shell) },
+    })
+    fs.stat.mockResolvedValue({ version: 'v1', type: 'file' } as never)
+
+    await expect(handle('add-path', { sessionId: 'session-1', path: 'a.txt' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'added', added: 1, duplicates: 0 } })
+    // Only the named file: the scope keeps its siblings and every untracked file out.
+    const files = await listEntries(handle, 'session-1')
+    expect(files.map(file => file.path)).toEqual([join(workspace, 'a.txt')])
+    expect(files[0]).toMatchObject({ kind: 'edit', oldText: 'old content\n', newText: 'new content\n' })
+
+    // One Ctrl+Z removes the whole add.
+    await handle('undo', { sessionId: 'session-1' }, signal())
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+  })
+
+  it('adds a named directory recursively and reports duplicates instead of re-adding', async () => {
+    const { workspace } = await gitRepo()
+    await mkdir(join(workspace, 'dir', 'nested'), { recursive: true })
+    await writeFile(join(workspace, 'dir', 'one.txt'), 'one new\n')
+    await writeFile(join(workspace, 'dir', 'nested', 'two.txt'), 'two new\n')
+    const shell = gitShell(
+      ' M sub/dir/one.txt\u0000 M sub/dir/nested/two.txt\u0000 M sub/elsewhere.txt\u0000',
+      { 'sub/dir/one.txt': 'one old\n', 'sub/dir/nested/two.txt': 'two old\n', 'sub/elsewhere.txt': 'x\n' },
+    )
+    const { handle, fs } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (ctx) => { ctx.provide('shell', shell) },
+    })
+    fs.stat.mockResolvedValue({ version: 'v1', type: 'directory' } as never)
+
+    await expect(handle('add-path', { sessionId: 'session-1', path: 'dir' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'added', added: 2, duplicates: 0 } })
+    const files = await listEntries(handle, 'session-1')
+    expect(files.map(file => file.path).sort()).toEqual([
+      join(workspace, 'dir', 'nested', 'two.txt'),
+      join(workspace, 'dir', 'one.txt'),
+    ].sort())
+
+    // Asking again leaves the list alone and says so.
+    await expect(handle('add-path', { sessionId: 'session-1', path: 'dir' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'duplicate', added: 0, duplicates: 2 } })
+    expect(await listEntries(handle, 'session-1')).toHaveLength(2)
+  })
+
+  it('lists a clean file only when the caller asks for unchanged paths', async () => {
+    const { workspace } = await gitRepo()
+    await writeFile(join(workspace, 'clean.txt'), 'same\n')
+    const shell = gitShell('')
+    const { handle, fs } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (ctx) => { ctx.provide('shell', shell) },
+    })
+    fs.stat.mockResolvedValue({ version: 'v1', type: 'file' } as never)
+    fs.readText.mockResolvedValue('same\n')
+
+    await expect(handle('add-path', { sessionId: 'session-1', path: 'clean.txt' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'unchanged', added: 0, duplicates: 0 } })
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+
+    // Ticked: the file is listed carrying no diff at all — the state a file
+    // reaches once every block has been kept — and is still undoable.
+    await expect(handle('add-path', { sessionId: 'session-1', path: 'clean.txt', includeUnchanged: true }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'added', added: 1, duplicates: 0 } })
+    const files = await listEntries(handle, 'session-1')
+    expect(files).toHaveLength(1)
+    expect(files[0]).toMatchObject({ path: join(workspace, 'clean.txt'), kind: 'edit', oldText: 'same\n', newText: 'same\n' })
+    await handle('undo', { sessionId: 'session-1' }, signal())
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+  })
+
+  it('adds a directory\'s untouched files when the box is ticked, and none when it is not', async () => {
+    const { workspace } = await gitRepo()
+    await mkdir(join(workspace, 'dir', 'nested'), { recursive: true })
+    await writeFile(join(workspace, 'dir', 'changed.txt'), 'new\n')
+    const dir = join(workspace, 'dir')
+    const shell = gitShell(' M sub/dir/changed.txt\u0000', { 'sub/dir/changed.txt': 'old\n' })
+    const { handle, fs } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (ctx) => { ctx.provide('shell', shell) },
+    })
+    fs.stat.mockImplementation(async (target: { displayPath?: string }) =>
+      ({ version: 'v1', type: target.displayPath === dir ? 'directory' : 'file' }))
+    // The walk goes through ctx.fs.listDir, one level at a time.
+    fs.listDir.mockImplementation(async (target: { targetKey?: string }) => {
+      if (target.targetKey === `key:${dir}`) {
+        return [
+          { name: 'changed.txt', type: 'file', target: { targetKey: 'key:changed' } },
+          { name: 'clean.txt', type: 'file', target: { targetKey: 'key:clean' } },
+          { name: 'nested', type: 'directory', target: { targetKey: 'key:nested' } },
+          { name: 'node_modules', type: 'directory', target: { targetKey: 'key:modules' } },
+        ]
+      }
+      if (target.targetKey === 'key:nested') {
+        return [{ name: 'deep.txt', type: 'file', target: { targetKey: 'key:deep' } }]
+      }
+      // node_modules is hidden, so it must never be walked into.
+      throw new Error(`unexpected listing of ${String(target.targetKey)}`)
+    })
+    fs.readText.mockImplementation(async (target: { displayPath?: string }) => {
+      if (target.displayPath?.endsWith('changed.txt')) return 'new\n'
+      if (target.displayPath?.endsWith('clean.txt')) return 'clean\n'
+      if (target.displayPath?.endsWith('deep.txt')) return 'deep\n'
+      throw new Error('not text')
+    })
+
+    // Without the box: only the scan's change.
+    await expect(handle('add-path', { sessionId: 'session-1', path: 'dir' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'added', added: 1, duplicates: 0 } })
+    let files = await listEntries(handle, 'session-1')
+    expect(files.map(file => file.path)).toEqual([join(dir, 'changed.txt')])
+
+    // With it: every untouched file under the directory, recursively, as a
+    // zero-diff entry — the state a file reaches once every block is kept. The
+    // already-listed change counts as a duplicate and is left alone.
+    await expect(handle('add-path', { sessionId: 'session-1', path: 'dir', includeUnchanged: true }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'added', added: 2, duplicates: 1 } })
+    files = await listEntries(handle, 'session-1')
+    expect(files.map(file => file.path).sort()).toEqual([
+      join(dir, 'changed.txt'),
+      join(dir, 'clean.txt'),
+      join(dir, 'nested', 'deep.txt'),
+    ].sort())
+    const clean = files.find(file => file.path === join(dir, 'clean.txt'))
+    expect(clean).toMatchObject({ kind: 'edit', oldText: 'clean\n', newText: 'clean\n' })
+  })
+
+  it('caps the no-change walk and reports the cut', async () => {
+    const { workspace } = await gitRepo()
+    await mkdir(join(workspace, 'many'), { recursive: true })
+    const many = join(workspace, 'many')
+    const { handle, fs } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (ctx) => { ctx.provide('shell', gitShell('')) },
+    })
+    fs.stat.mockImplementation(async (target: { displayPath?: string }) =>
+      ({ version: 'v1', type: target.displayPath === many ? 'directory' : 'file' }))
+    // One more file than the walk's cap (300).
+    fs.listDir.mockResolvedValue(
+      Array.from({ length: 301 }, (_, index) => ({ name: `f${index}.txt`, type: 'file', target: { targetKey: `key:f${index}` } })) as never,
+    )
+    fs.readText.mockResolvedValue('same\n')
+
+    const answer = await handle('add-path', { sessionId: 'session-1', path: 'many', includeUnchanged: true }, signal())
+    expect(answer).toEqual({ ok: true, value: { outcome: 'added', added: 300, duplicates: 0, truncated: true } })
+    expect(await listEntries(handle, 'session-1')).toHaveLength(300)
+    expect(many).toBeTruthy()
+  })
+
+  it('adds an untracked file the user names, whatever the import preference says', async () => {
+    const { workspace } = await gitRepo()
+    await writeFile(join(workspace, 'fresh.txt'), 'fresh\n')
+    const shell = gitShell('?? sub/fresh.txt\u0000')
+    const { handle, fs } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (ctx) => { ctx.provide('shell', shell) },
+    })
+    fs.stat.mockResolvedValue({ version: 'v1', type: 'file' } as never)
+
+    await expect(handle('add-path', { sessionId: 'session-1', path: 'fresh.txt' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'added', added: 1, duplicates: 0 } })
+    const files = await listEntries(handle, 'session-1')
+    expect(files[0]).toMatchObject({ kind: 'create', oldText: '', newText: 'fresh\n' })
+  })
+
+  it('answers outside, missing, and no-vcs without touching the list', async () => {
+    const { workspace } = await gitRepo()
+    const { handle, fs } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (ctx) => { ctx.provide('shell', gitShell('')) },
+    })
+    fs.stat.mockResolvedValue({ version: 'v1', type: 'file' } as never)
+    await expect(handle('add-path', { sessionId: 'session-1', path: '../sibling.txt' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'outside', added: 0, duplicates: 0 } })
+
+    fs.stat.mockResolvedValue(undefined as never)
+    await expect(handle('add-path', { sessionId: 'session-1', path: 'gone.txt' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'missing', added: 0, duplicates: 0 } })
+
+    // A workspace outside any checkout answers no-vcs rather than failing.
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-add-novcs-'))
+    tempDirs.push(dir)
+    const bare = await harness({ sessionIds: [SessionId('session-1')], workspacePath: dir })
+    bare.fs.stat.mockResolvedValue({ version: 'v1', type: 'file' } as never)
+    await expect(bare.handle('add-path', { sessionId: 'session-1', path: 'x.txt' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'no-vcs', added: 0, duplicates: 0 } })
+
+    // A blank path is a malformed payload, not a request.
+    const malformed = await handle('add-path', { sessionId: 'session-1', path: '  ' }, signal())
+    expect(malformed.ok).toBe(false)
   })
 })
 

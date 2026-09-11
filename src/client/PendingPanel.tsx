@@ -3,14 +3,15 @@
 import { Component, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from 'react'
-import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, IconPlusOutline16, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { DiffApprovalBlockRange, DiffApprovalOpenAction, DiffApprovalRefreshOutcome, PendingFileDiff } from '../types.ts'
 import type { PendingPanelFace } from './slots.ts'
-import type { DiffApprovalKey } from './locales.ts'
+import type { Translator } from './locales.ts'
+import { PathPicker, pathPickerOpen } from './PathPicker.tsx'
 import { blockRangesOf, changeBlocksOf, computeIntraLineDiff, computeWholeFileDiff } from './whole-file-diff.ts'
 import { renderMarkdownPreview } from './markdown-preview.ts'
 import { resolvePreviewImages } from './markdown-images.ts'
@@ -363,9 +364,6 @@ interface FileActionPrompt {
   sessionId: SessionId
   id: string
 }
-
-/** Locale translator used by the panel and its rows. */
-type Translator = (key: DiffApprovalKey, params?: Record<string, unknown>) => string
 
 /** The trailing file-name segment of a path, used for row display. */
 function basenameOf(path: string): string {
@@ -2879,6 +2877,8 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!matchesShortcut(event, keybindingOf('openSearch'))) return
+      // The add-path dialog is a modal this panel owns.
+      if (pathPickerOpen()) return
       event.preventDefault()
       // In split mode the single-column search bar isn't mounted; route to the
       // split view's own search bar instead.
@@ -2947,9 +2947,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || !isInPanelEvent(event)) return
+      // The add-path dialog is a modal this panel owns: it closes itself on
+      // Escape, so the search bar underneath must not claim the press.
+      if (pathPickerOpen()) return
       // The Markdown preview replaces the whole code view (bar included), so an
       // open bar's state can outlive its element: no bar, no press to claim.
-      if (mdPreview && lang === 'markdown') return
+      if (previewActive) return
       if (splitView) {
         // Report whether the bar was actually open, so a closed one leaves the
         // press to the panel's own Esc instead of swallowing it.
@@ -2983,6 +2986,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       if (matchesShortcut(event, keybindingOf('jumpUp'))) direction = -1
       else if (matchesShortcut(event, keybindingOf('jumpDown'))) direction = 1
       if (direction === 0) return
+      if (pathPickerOpen()) return
       if (isTextFieldEvent(event)) return
       event.preventDefault()
       jumpRef.current(direction, true)
@@ -3643,7 +3647,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onUndo, onRedo, onImportVcs, onRefreshVcs, onKeepAll, onRevertAll, onAckRedoCleared, collapseSidebar, t,
+  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onRevertAll, onAckRedoCleared, collapseSidebar, t,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
   // A newly created session is selected but still blank (no messages yet); it
@@ -3714,6 +3718,9 @@ export function PendingPanel({
    *  choice rides the same block RPC as its `removeWhenResolved` flag. */
   const [blockPrompt, setBlockPrompt] = useState<ResolvedBlockPrompt | null>(null)
   const [filePrompt, setFilePrompt] = useState<FileActionPrompt | null>(null)
+  /** Whether the add-path dialog is open. One dialog covers both shapes: what
+   *  the browser settles on decides whether a file or a directory is added. */
+  const [addOpen, setAddOpen] = useState(false)
   /** Bottom offset tracking the chat composer's top edge so the input stays visible. */
   const [bottomPx, setBottomPx] = useState(FALLBACK_BOTTOM_PX)
   /** Fullscreen expanded: the panel bottom pins to the window edge, ignoring the composer offset. */
@@ -4005,6 +4012,16 @@ export function PendingPanel({
     if (noSession) setOpen(false)
   }, [noSession])
 
+  // Every transient modal belongs to one panel session: closing the panel drops
+  // them, so reopening never resumes a dialog that was left behind. (The panel
+  // element stays mounted while closed, which is why this needs saying.)
+  useEffect(() => {
+    if (open) return
+    setAddOpen(false)
+    setBlockPrompt(null)
+    setFilePrompt(null)
+  }, [open])
+
   /** Run the same decision over every current-session file, sequentially. */
   const runBulk = async (kind: 'keep' | 'revert') => {
     if (current === undefined) return
@@ -4081,17 +4098,30 @@ export function PendingPanel({
   /** The file whose removal is being confirmed (a whole-file action), if any. */
   const promptEntry = filePrompt === null ? undefined : files.find(file => file.id === filePrompt.id)
 
-  // The file list's scrollable rows plus the pinned bulk footer, shared by the
-  // in-flow left pane and the floating (collapsed) overlay.
+  // The file list's pinned heading, its scrollable rows, and the pinned bulk
+  // footer, shared by the in-flow left pane and the floating (collapsed) overlay.
+  // Only the rows scroll: the heading (and the add button beside it) stays put.
   const fileListBody = (
     <>
-      <div className={css.listScroll}>
-        {files.length > 0 && (
-          <section>
-            <h3 className={css.group}>{t('panel.group.current')}</h3>
-            <ul className={css.rows}>{files.map(renderEntry)}</ul>
-          </section>
-        )}
+      {files.length > 0 && (
+        <div className={css.groupHead}>
+          <h3 className={css.group}>{t('panel.group.current')}</h3>
+          <span className={css.flexSpacer} />
+          <Tooltip label={t('action.addPath')} side="bottom" delayMs={500}>
+            <button
+              type="button"
+              className={`${css.action} ${css.addButton}`}
+              data-diff-add
+              aria-label={t('action.addPath')}
+              onClick={() => { setAddOpen(true) }}
+            >
+              <IconPlusOutline16 size={12} />
+            </button>
+          </Tooltip>
+        </div>
+      )}
+      <div className={css.listScroll} data-diff-list-scroll>
+        {files.length > 0 && <ul className={css.rows}>{files.map(renderEntry)}</ul>}
       </div>
       {files.length > 0 && (
         <div className={css.bulkActions}>
@@ -4147,6 +4177,8 @@ export function PendingPanel({
     if (!open || current === undefined) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.altKey) return
+      // The add-path dialog is a modal this panel owns.
+      if (pathPickerOpen()) return
       const target = event.target as Node | null
       if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null) return
       if (matchesShortcut(event, keybindingOf('undo'))) { event.preventDefault(); void handleUndo(current); return }
@@ -4168,6 +4200,8 @@ export function PendingPanel({
       if (matchesShortcut(event, keybindingOf('cycleNext'))) direction = 1
       else if (matchesShortcut(event, keybindingOf('cyclePrev'))) direction = -1
       if (direction === 0) return
+      // The add-path dialog is a modal: it owns the keyboard while it is open.
+      if (pathPickerOpen()) return
       const target = event.target as Node | null
       if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null) return
       if (files.length === 0) return
@@ -4189,6 +4223,8 @@ export function PendingPanel({
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!matchesShortcut(event, quickSummonKey())) return
+      // A modal this panel owns keeps the keyboard to itself.
+      if (pathPickerOpen()) return
       event.preventDefault()
       // Same open path as the badge: collapse the narrow sidebar first so it
       // can't overlap the modal, then toggle.
@@ -4208,6 +4244,8 @@ export function PendingPanel({
     if (!open) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
+      // The add-path modal closes itself: this press is not the panel's.
+      if (pathPickerOpen()) return
       const target = event.target
       const inPanel = target instanceof Node && panelRef.current?.contains(target) === true
       if (inPanel && document.querySelector('[data-diff-searchbar]') !== null) return
@@ -4326,15 +4364,25 @@ export function PendingPanel({
               {snapshot.read && snapshot.error === undefined && files.length === 0 && (
                 <div className={css.emptyState}>
                   <p className={`${css.note} ${css.noteCentered}`}>{t('panel.empty')}</p>
-                  <button
-                    type="button"
-                    className={css.importButton}
-                    data-diff-import-vcs
-                    disabled={importBusy}
-                    onClick={() => { void runImportVcs() }}
-                  >
-                    {importBusy ? t('action.importVcsBusy') : t('action.importVcs')}
-                  </button>
+                  <div className={css.emptyActions}>
+                    <button
+                      type="button"
+                      className={css.importButton}
+                      data-diff-import-vcs
+                      disabled={importBusy}
+                      onClick={() => { void runImportVcs() }}
+                    >
+                      {importBusy ? t('action.importVcsBusy') : t('action.importVcs')}
+                    </button>
+                    <button
+                      type="button"
+                      className={css.importButton}
+                      data-diff-add
+                      onClick={() => { setAddOpen(true) }}
+                    >
+                      {t('action.addPath')}
+                    </button>
+                  </div>
                   {importNote !== undefined && <p className={css.importNote} role={importFailed ? 'alert' : undefined}>{importNote}</p>}
                 </div>
               )}
@@ -4467,6 +4515,16 @@ export function PendingPanel({
                 </div>
               </div>
             </div>
+          )}
+          {addOpen && current !== undefined && (
+            <PathPicker
+              rootPath={snapshot.workspacePath}
+              onBrowse={(path) => onBrowse(current, path)}
+              onAdd={(path, includeUnchanged) => onAddPath(current, path, includeUnchanged)}
+              onToast={showCopyToast}
+              onClose={() => { setAddOpen(false) }}
+              t={t}
+            />
           )}
           </section>
         </>,

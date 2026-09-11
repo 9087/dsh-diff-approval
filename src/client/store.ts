@@ -8,7 +8,7 @@
 
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
-import type { DiffApprovalBlockRange, DiffApprovalOpenAction, DiffApprovalRefreshValue, VcsImportValue } from '../types.ts'
+import type { DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalOpenAction, DiffApprovalRefreshValue, VcsImportValue } from '../types.ts'
 import type { PendingDiffSnapshot } from './slots.ts'
 import type { DiffApprovalPort } from './port.ts'
 
@@ -33,6 +33,10 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   /** Replace one entry's diff with the file's current local VCS change, then
    *  refresh; resolves to what the scan found. */
   refreshVcs: (sessionId: SessionId, id: string, includeUntracked: boolean) => Promise<DiffApprovalRefreshValue>
+  /** List one workspace directory level for the add-path dialog. */
+  browse: (sessionId: SessionId, path?: string) => Promise<DiffApprovalBrowseValue>
+  /** Add one named path to the list, then refresh; resolves to what the scan did. */
+  addPath: (sessionId: SessionId, path: string, includeUnchanged: boolean) => Promise<DiffApprovalAddValue>
   /** Open one file with its default application or reveal it in the folder. */
   open: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
   /** Keep every pending entry of one session in a single host call, then refresh. */
@@ -255,6 +259,18 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
       } finally {
         publish({ ...snapshot, busy: new Set([...snapshot.busy].filter(busy => busy !== id)) })
       }
+    },
+    // The add dialog's directory listing is a plain read: no busy marker (no
+    // entry is involved) and no refresh (the list did not change).
+    browse(sessionId, path) {
+      return port.browse(sessionId, path)
+    },
+    // An add lands new entries (a directory can land many), so the list is
+    // re-read afterwards; the panel reports what the scan did.
+    async addPath(sessionId, path, includeUnchanged) {
+      const value = await port.addPath(sessionId, path, includeUnchanged)
+      await this.refresh(sessionId)
+      return value
     },
     async open(sessionId, id, action) {
       try {

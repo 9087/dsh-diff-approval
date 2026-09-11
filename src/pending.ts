@@ -155,6 +155,19 @@ export class PendingDiffStore {
   }
 
   /**
+   * Admit one entry into the list without the change guard {@link fold} applies.
+   * A listed entry may carry no diff at all: a path the user added by hand has
+   * no local change until one appears, and a fully-resolved file has already
+   * folded its diff away. This is the guard-free put {@link restore} performs,
+   * named for its other caller.
+   * @param entry - the entry to insert or replace by path.
+   * @returns whether the store changed.
+   */
+  insert(entry: PendingEntry): boolean {
+    return this.restore(entry)
+  }
+
+  /**
    * Merge persisted entries into the store, one per path after folding. A live
    * entry wins over a persisted one only when its time is newer (folders are
    * applied in capture order, so a later persisted capture is strictly newer).

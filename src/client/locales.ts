@@ -5,7 +5,7 @@ export const NS = 'diff-approval'
 /** Simplified Chinese pending-edit review messages. */
 export const zh = {
   'panel.title': '待处理改动',
-  'panel.empty': '没有待处理的改动',
+  'panel.empty': '列表中暂无文件',
   'panel.loading': '读取中…',
   'panel.readFailed': '读取待处理改动失败：{message}',
   'panel.group.current': '当前会话',
@@ -132,10 +132,34 @@ export const zh = {
   'panel.refreshNone': '未检测到本地 VCS 差异',
   'panel.refreshUntrackedHint': '（新建/未跟踪文件需要开启「导入未跟踪的文件改动」）',
   'panel.refreshFailed': '刷新失败：{message}',
+  'action.addPath': '添加文件或目录',
+  'panel.addTitle': '添加到列表',
+  'panel.addPathPlaceholder': '输入或粘贴绝对路径',
+  'panel.addPathGo': '添加',
+  'panel.addHint': '展开目录逐级浏览，选中会把完整路径填到上方输入框；点「添加」时才判断有没有本地改动',
+  'panel.addIncludeUnchanged': '包含无改动路径',
+  'panel.addRoot': '工作区根目录',
+  'panel.addTruncated': '目录内容过多，仅显示前 {count} 项',
+  'panel.addDone': '已加入 {count} 个改动',
+  'panel.addDoneTruncated': '已加入 {count} 个改动；没有改动的文件过多，其余未加入',
+  'panel.addDuplicate': '该路径已在列表中',
+  'panel.addUnchanged': '该文件没有本地差异；勾选「包含无改动路径」后再添加',
+  'panel.addEmpty': '没有找到可加入的改动',
+  'panel.addNoEntries': '此目录为空',
+  'panel.addMissing': '路径不存在',
+  'panel.addOutside': '路径不在当前工作区内',
+  'panel.addFailed': '添加失败：{message}',
+  'action.cancel': '取消',
+  'action.collapseRow': '收起',
+  'action.expandRow': '展开',
 } satisfies Record<string, string>
 
 /** Translation keys owned by the pending-edit review namespace. */
 export type DiffApprovalKey = keyof typeof zh
+
+/** Locale translator for this plugin's namespace: the panel's and the settings
+ *  section's `t`, typed against the dictionary keys. */
+export type Translator = (key: DiffApprovalKey, params?: Record<string, unknown>) => string
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -147,7 +171,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 /** English pending-edit review messages. */
 export const en = {
   'panel.title': 'Pending changes',
-  'panel.empty': 'No pending changes',
+  'panel.empty': 'No files in the list yet',
   'panel.loading': 'Reading…',
   'panel.readFailed': 'Reading pending changes failed: {message}',
   'panel.group.current': 'This session',
@@ -274,4 +298,24 @@ export const en = {
   'panel.refreshNone': 'No local VCS change found',
   'panel.refreshUntrackedHint': '(new or untracked files need "Import changes to untracked files")',
   'panel.refreshFailed': 'Refresh failed: {message}',
+  'action.addPath': 'Add file or directory',
+  'panel.addTitle': 'Add to list',
+  'panel.addPathPlaceholder': 'Type or paste an absolute path',
+  'panel.addPathGo': 'Add',
+  'panel.addHint': 'Open directories to walk the tree; a selection fills the full path above, and Add is what checks for local changes',
+  'panel.addIncludeUnchanged': 'Include unchanged paths',
+  'panel.addRoot': 'Workspace root',
+  'panel.addTruncated': 'Too many entries to show; only the first {count} are listed',
+  'panel.addDone': 'Added {count} change(s)',
+  'panel.addDoneTruncated': 'Added {count} change(s); too many unchanged files to include the rest',
+  'panel.addDuplicate': 'That path is already in the list',
+  'panel.addUnchanged': 'That file has no local change; tick "Include unchanged paths" and add again',
+  'panel.addEmpty': 'No changes found to add',
+  'panel.addNoEntries': 'This directory is empty',
+  'panel.addMissing': 'No such path',
+  'panel.addOutside': 'That path is outside the workspace',
+  'panel.addFailed': 'Add failed: {message}',
+  'action.cancel': 'Cancel',
+  'action.collapseRow': 'Collapse',
+  'action.expandRow': 'Expand',
 } satisfies Record<DiffApprovalKey, string>

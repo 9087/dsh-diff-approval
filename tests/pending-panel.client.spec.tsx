@@ -60,6 +60,8 @@ function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
     onRedo: vi.fn(),
     onImportVcs: vi.fn(async () => ({ imported: 0, detected: false })),
     onRefreshVcs: vi.fn(async () => ({ outcome: 'refreshed' })),
+    onBrowse: vi.fn(async () => ({ path: '', parent: undefined, entries: [], truncated: false })),
+    onAddPath: vi.fn(async () => ({ outcome: 'added', added: 1, duplicates: 0 })),
     onKeepAll: vi.fn(async () => {}),
     onRevertAll: vi.fn(async () => {}),
     onAckRedoCleared: vi.fn(),
@@ -556,6 +558,185 @@ describe('PendingPanel', () => {
     fireEvent.click(document.querySelector('[data-diff-import-vcs]') as HTMLElement)
     // The DSH Toast renders portaled into the body.
     await waitFor(() => { expect(screen.getByText('panel.importNone')).toBeDefined() })
+  })
+
+  it('offers one add button in both list states', async () => {
+    // Empty list: the addition sits beside the import button.
+    const empty = panelProps({ read: true, files: [], busy: new Set() })
+    const emptyView = render(<PendingPanel {...empty} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(document.querySelector('[data-diff-import-vcs]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-add]')).not.toBeNull()
+    emptyView.unmount()
+
+    // Populated list: it rides the "current session" heading.
+    const populated = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...populated} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const head = document.querySelector('[data-diff-add]')!.closest('div')!
+    expect(head.textContent).toContain('panel.group.current')
+  })
+
+  it('scrolls only the rows: the heading and its add button stay pinned', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const scroller = document.querySelector('[data-diff-list-scroll]')
+    expect(scroller).not.toBeNull()
+    // The rows scroll with the scroller; the heading (and the add button) do not.
+    expect(scroller!.textContent).toContain('a.txt')
+    expect(scroller!.querySelector('[data-diff-add]')).toBeNull()
+    expect(scroller!.textContent).not.toContain('panel.group.current')
+    expect(document.querySelector('[data-diff-add]')!.closest('[data-diff-list-scroll]')).toBeNull()
+    // …and the heading is still rendered above it.
+    expect(document.querySelector('[data-diff-approval-panel]')!.textContent).toContain('panel.group.current')
+  })
+
+  it('adds the file a browse row names, and closes with a toast', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    ;(props.onBrowse as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue({
+      path: '/repo',
+      entries: [
+        { name: 'src', type: 'directory', path: '/repo/src' },
+        { name: 'a.txt', type: 'file', path: '/repo/a.txt' },
+      ],
+      truncated: false,
+    })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-add]') as HTMLElement)
+
+    // The root level loads once and renders as the tree's children, with the
+    // file glyph on files and the folder glyph on directories.
+    await waitFor(() => { expect(document.querySelector('[data-diff-picker-select="/repo/a.txt"]')).not.toBeNull() })
+    expect((props.onBrowse as unknown as { mock: { calls: unknown[][] } }).mock.calls).toEqual([[S1, undefined]])
+    expect(document.querySelector('[data-diff-picker-row="/repo/a.txt"] [data-diff-file-icon]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-picker-row="/repo/src"] [data-diff-file-icon]')).toBeNull()
+
+    // Selecting a row only fills the path box with the FULL path: nothing is
+    // added by pointing.
+    fireEvent.click(document.querySelector('[data-diff-picker-select="/repo/a.txt"]') as HTMLElement)
+    const input = document.querySelector('[data-diff-picker-input]') as HTMLInputElement
+    expect(input.value).toBe('/repo/a.txt')
+    expect(document.querySelector('[data-diff-picker-row="/repo/a.txt"]')!.hasAttribute('data-selected')).toBe(true)
+    expect(props.onAddPath).not.toHaveBeenCalled()
+
+    // The button is the dialog's one action, with the box at its left, and a
+    // landed add closes the dialog.
+    const box = document.querySelector('[data-diff-picker-unchanged]') as HTMLInputElement
+    expect(box.closest('div')).toBe(document.querySelector('[data-diff-picker-submit]')!.closest('div'))
+    fireEvent.click(document.querySelector('[data-diff-picker-submit]') as HTMLElement)
+    await waitFor(() => {
+      expect((props.onAddPath as unknown as { mock: { calls: unknown[][] } }).mock.calls).toEqual([[S1, '/repo/a.txt', false]])
+    })
+    await waitFor(() => { expect(document.querySelector('[data-diff-path-picker]')).toBeNull() })
+    expect(screen.getByText('panel.addDone {"count":1}')).toBeDefined()
+    view.unmount()
+  })
+
+  it('expands directories lazily and keeps them open across a parent re-render', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    // The panel's face function takes (sessionId, path); the dialog's browse
+    // target is the second argument.
+    ;(props.onBrowse as unknown as { mockImplementation: (f: (sessionId: SessionId, path?: string) => Promise<unknown>) => void })
+      .mockImplementation(async (_sessionId: SessionId, path?: string) => path === '/repo/src'
+        ? { path: '/repo/src', entries: [{ name: 'a.ts', type: 'file', path: '/repo/src/a.ts' }], truncated: false }
+        : { path: '/repo', entries: [{ name: 'src', type: 'directory', path: '/repo/src' }], truncated: false })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-add]') as HTMLElement)
+    await waitFor(() => { expect(document.querySelector('[data-diff-picker-toggle="/repo/src"]')).not.toBeNull() })
+
+    // The caret opens the level (fetched on first open) without selecting it.
+    fireEvent.click(document.querySelector('[data-diff-picker-toggle="/repo/src"]') as HTMLElement)
+    await waitFor(() => { expect(document.querySelector('[data-diff-picker-select="/repo/src/a.ts"]')).not.toBeNull() })
+    expect((document.querySelector('[data-diff-picker-input]') as HTMLInputElement).value).toBe('')
+    expect(document.querySelector('[data-diff-picker-row="/repo/src"]')!.hasAttribute('data-selected')).toBe(false)
+
+    // A parent re-render hands the dialog fresh callbacks every poll: the tree
+    // must keep its levels and expansion instead of bouncing back to the root.
+    view.rerender(<PendingPanel {...props} />)
+    expect(document.querySelector('[data-diff-picker-select="/repo/src/a.ts"]')).not.toBeNull()
+    expect((props.onBrowse as unknown as { mock: { calls: unknown[][] } }).mock.calls)
+      .toEqual([[S1, undefined], [S1, '/repo/src']])
+  })
+
+  it('keeps the dialog open and toasts when the path is already listed', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    ;(props.onAddPath as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue({
+      outcome: 'duplicate',
+      added: 0,
+      duplicates: 1,
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-add]') as HTMLElement)
+    await waitFor(() => { expect(document.querySelector('[data-diff-picker-input]')).not.toBeNull() })
+
+    const input = document.querySelector('[data-diff-picker-input]') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'a.txt' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => { expect(screen.getByText('panel.addDuplicate')).toBeDefined() })
+    expect(document.querySelector('[data-diff-path-picker]')).not.toBeNull()
+  })
+
+  it('leaves no row highlighted once the path is edited by hand', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    ;(props.onBrowse as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue({
+      path: '/repo',
+      entries: [{ name: 'a.txt', type: 'file', path: '/repo/a.txt' }],
+      truncated: false,
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-add]') as HTMLElement)
+    await waitFor(() => { expect(document.querySelector('[data-diff-picker-select="/repo/a.txt"]')).not.toBeNull() })
+
+    fireEvent.click(document.querySelector('[data-diff-picker-select="/repo/a.txt"]') as HTMLElement)
+    expect(document.querySelector('[data-diff-picker-row="/repo/a.txt"]')!.hasAttribute('data-selected')).toBe(true)
+
+    // A hand-typed path is no row's path, so the highlight clears — and the
+    // typed path plus the box is what the button adds.
+    const input = document.querySelector('[data-diff-picker-input]') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'clean.txt' } })
+    // Nothing in the tree matches the typed path: no row stays highlighted.
+    expect(document.querySelector('[data-diff-picker-tree] [data-selected]')).toBeNull()
+    expect((document.querySelector('[data-diff-picker-unchanged]') as HTMLInputElement).checked).toBe(false)
+    fireEvent.click(document.querySelector('[data-diff-picker-unchanged]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-picker-submit]') as HTMLElement)
+    await waitFor(() => {
+      expect((props.onAddPath as unknown as { mock: { calls: unknown[][] } }).mock.calls).toEqual([[S1, 'clean.txt', true]])
+    })
+  })
+
+  it('closes the add dialog with Escape without closing the panel', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-add]') as HTMLElement)
+    await waitFor(() => { expect(document.querySelector('[data-diff-picker-input]')).not.toBeNull() })
+
+    fireEvent.keyDown(document.querySelector('[data-diff-picker-input]') as HTMLElement, { key: 'Escape' })
+    await waitFor(() => { expect(document.querySelector('[data-diff-path-picker]')).toBeNull() })
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+  })
+
+  it('drops the add dialog when the panel closes, so reopening starts clean', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-add]') as HTMLElement)
+    await waitFor(() => { expect(document.querySelector('[data-diff-path-picker]')).not.toBeNull() })
+
+    // Closing the panel closes its modal with it.
+    fireEvent.click(document.querySelector('[data-diff-approval-close]') as HTMLElement)
+    await waitFor(() => { expect(document.querySelector('[data-diff-approval-panel]')).toBeNull() })
+
+    // Reopening shows the list, not the dialog that was left behind.
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-path-picker]')).toBeNull()
   })
 
   it('refreshes the open file from its toolbar button and reports the updated diff', async () => {

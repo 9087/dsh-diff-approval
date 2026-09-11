@@ -166,6 +166,8 @@ export function apply(ctx: ClientContext): void {
       onRedo: (sessionId) => store.redo(sessionId),
       onImportVcs: (sessionId, includeUntracked) => store.importVcs(sessionId, includeUntracked),
       onRefreshVcs: (sessionId, id, includeUntracked) => store.refreshVcs(sessionId, id, includeUntracked),
+      onBrowse: (sessionId, path) => store.browse(sessionId, path),
+      onAddPath: (sessionId, path, includeUnchanged) => store.addPath(sessionId, path, includeUnchanged),
       onKeepAll: (sessionId) => store.keepAll(sessionId),
       onRevertAll: (sessionId) => store.revertAll(sessionId),
       onAckRedoCleared: () => store.clearRedoCleared(),
