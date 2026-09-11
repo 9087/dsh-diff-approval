@@ -14,6 +14,7 @@ const DIFF_FONT_SCALE_KEY = 'diff-approval:diff-font-scale'
 const DIFF_LINE_HEIGHT_KEY = 'diff-approval:diff-line-height'
 const DIFF_ADD_COLOR_KEY = 'diff-approval:diff-add-color'
 const DIFF_DEL_COLOR_KEY = 'diff-approval:diff-del-color'
+const LANG_BY_SUFFIX_KEY = 'diff-approval:lang-by-suffix'
 const WRAP_PREFIX = 'diff-approval:wrap:'
 
 /** Default lead rows above a jumped-to diff block (kept small and bounded). */
@@ -214,6 +215,56 @@ export function currentDiffAddColor(): string {
 /** The theme's removed-line base color, for the settings swatch default. */
 export function currentDiffDelColor(): string {
   return themeColor('--dsw-alias-state-error-primary', '#ef4444')
+}
+
+/**
+ * The highlight language chosen by hand for one file suffix, remembered so the
+ * choice sticks for every file with that suffix. Not a Settings row: it is a
+ * per-suffix consequence of using the language picker, so it lives here as
+ * storage only.
+ * @param suffix - the lowercase extension without the dot (see `suffixOfPath`).
+ * @returns the remembered language id, or undefined for "auto".
+ */
+export function languageForSuffix(suffix: string): string | undefined {
+  const stored = rememberedLanguages()
+  const language = stored[suffix]
+  return language === undefined || language === '' ? undefined : language
+}
+
+/**
+ * Remember (or clear) the language chosen for one suffix. A `null` language
+ * forgets the suffix, which is what picking "auto" means.
+ * @param suffix - the lowercase extension without the dot.
+ * @param language - the language id, or null to forget the suffix.
+ */
+export function setLanguageForSuffix(suffix: string, language: string | null): void {
+  const stored = rememberedLanguages()
+  if (language === null) {
+    if (stored[suffix] === undefined) return
+    delete stored[suffix]
+  } else {
+    if (stored[suffix] === language) return
+    stored[suffix] = language
+  }
+  localStorage.setItem(LANG_BY_SUFFIX_KEY, JSON.stringify(stored))
+}
+
+/** The whole suffix → language map (empty when unset or unreadable). */
+function rememberedLanguages(): Record<string, string> {
+  const raw = localStorage.getItem(LANG_BY_SUFFIX_KEY)
+  if (raw === null) return {}
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+    const cleaned: Record<string, string> = {}
+    for (const [suffix, language] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof language === 'string' && language !== '') cleaned[suffix] = language
+    }
+    return cleaned
+  } catch {
+    // A hand-edited or truncated value must not break the picker.
+    return {}
+  }
 }
 
 /**

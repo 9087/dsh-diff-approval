@@ -5,8 +5,8 @@ import {
   DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_LINE_HEIGHT_DEFAULT, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN,
   MD_MAX_WIDTH_DEFAULT, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN,
   currentDiffAddColor, currentDiffDelColor,
-  diffAddColor, diffDelColor, diffFontScale, diffLineHeight, matchesShortcut, mdMaxWidth, mdPreviewEnabled, quickSummonKey,
-  setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setMdMaxWidth, setMdPreviewEnabled, setQuickSummonKey, setTabWidth, tabWidth,
+  diffAddColor, diffDelColor, diffFontScale, diffLineHeight, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, quickSummonKey,
+  setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setLanguageForSuffix, setMdMaxWidth, setMdPreviewEnabled, setQuickSummonKey, setTabWidth, tabWidth,
 } from '../src/client/settings.ts'
 
 const TAB_WIDTH_KEY = 'diff-approval:tab-size'
@@ -17,6 +17,7 @@ const DIFF_ADD_COLOR_KEY = 'diff-approval:diff-add-color'
 const DIFF_DEL_COLOR_KEY = 'diff-approval:diff-del-color'
 const MD_PREVIEW_KEY = 'diff-approval:md-preview'
 const MD_MAX_WIDTH_KEY = 'diff-approval:md-max-width'
+const LANG_BY_SUFFIX_KEY = 'diff-approval:lang-by-suffix'
 
 describe('settings.tabWidth', () => {
   beforeEach(() => localStorage.clear())
@@ -153,6 +154,40 @@ describe('settings.current color defaults', () => {
   it('falls back to sane colors when the theme token is unavailable', () => {
     expect(currentDiffAddColor()).toMatch(/^#[0-9a-f]{6}$/i)
     expect(currentDiffDelColor()).toMatch(/^#[0-9a-f]{6}$/i)
+  })
+})
+
+describe('settings.languageBySuffix', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('defaults to auto for every suffix', () => {
+    expect(languageForSuffix('md')).toBeUndefined()
+    expect(localStorage.getItem(LANG_BY_SUFFIX_KEY)).toBeNull()
+  })
+
+  it('remembers one suffix without touching the others', () => {
+    setLanguageForSuffix('md', 'typescript')
+    setLanguageForSuffix('ts', 'python')
+    expect(languageForSuffix('md')).toBe('typescript')
+    expect(languageForSuffix('ts')).toBe('python')
+    expect(languageForSuffix('txt')).toBeUndefined()
+    expect(localStorage.getItem(LANG_BY_SUFFIX_KEY)).toBe('{"md":"typescript","ts":"python"}')
+  })
+
+  it('forgets a suffix when the choice goes back to auto', () => {
+    setLanguageForSuffix('md', 'typescript')
+    setLanguageForSuffix('md', null)
+    expect(languageForSuffix('md')).toBeUndefined()
+    expect(localStorage.getItem(LANG_BY_SUFFIX_KEY)).toBe('{}')
+  })
+
+  it('ignores a hand-edited or truncated stored value', () => {
+    localStorage.setItem(LANG_BY_SUFFIX_KEY, '{"md":')
+    expect(languageForSuffix('md')).toBeUndefined()
+    localStorage.setItem(LANG_BY_SUFFIX_KEY, '{"md":42,"ts":"","rb":"ruby"}')
+    expect(languageForSuffix('md')).toBeUndefined()
+    expect(languageForSuffix('ts')).toBeUndefined()
+    expect(languageForSuffix('rb')).toBe('ruby')
   })
 })
 

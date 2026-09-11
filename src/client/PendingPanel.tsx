@@ -19,10 +19,10 @@ import { computeSideBySideDiff, searchPairs } from './split-diff.ts'
 import type { SplitPair, SplitSide } from './split-diff.ts'
 import { HIGHLIGHT_LANGS, highlightLines, languageDisplayName } from './highlight.ts'
 import type { HighlightSpan } from './highlight.ts'
-import { langFromPath } from './lang.ts'
+import { langFromPath, suffixOfPath } from './lang.ts'
 import { referenceLabelOf } from './reference.ts'
 import { OPEN_FILE_EVENT } from './produced-diff.ts'
-import { confirmFileRemoveEnabled, includeUntrackedEnabled, keybindingOf, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setMdPreviewEnabled, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
+import { confirmFileRemoveEnabled, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setLanguageForSuffix, setMdPreviewEnabled, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import { matchRangesOf } from './search.ts'
 import type { SearchOptions } from './search.ts'
 import css from './PendingPanel.module.css'
@@ -48,8 +48,11 @@ const SEAT_SELECTOR = '[data-composer-seat]'
 const COMPOSER_HEIGHT_VAR = '--dsh-composer-height'
 /** Interactive composer/approval cards; clicking these keeps the panel open.
     Deliberately the cards themselves, not the seat: the approval frame's wide
-    side gutters are blank space, so a click there must still close. */
-const KEEP_OPEN_SELECTOR = '[data-composer-card],[data-question-key] > *,[data-plan-review-key] > *,[data-approval-key] > *'
+    side gutters are blank space, so a click there must still close.
+    `[role="menu"]` covers the portaled menus this panel opens (the highlight
+    language picker): the list is rendered into `document.body`, so picking an
+    item is a pointerdown outside the panel element and would otherwise close it. */
+const KEEP_OPEN_SELECTOR = '[data-composer-card],[data-question-key] > *,[data-plan-review-key] > *,[data-approval-key] > *,[role="menu"]'
 /** Seat counts as docked when its bottom is this close to the window bottom. */
 const DOCKED_TOLERANCE_PX = 48
 /** File-list pane width bounds for the manual split drag, in px. */
@@ -1838,12 +1841,19 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     ...HIGHLIGHT_LANGS.map(language => ({ id: language, label: languageDisplayName(language) })),
   ], [t])
   const detectedLang = useMemo(() => langFromPath(file.path), [file.path])
-  const lang = useMemo(() => langOverride ?? detectedLang, [detectedLang, langOverride])
-  // The trigger label: the override, or auto with the detected language named
-  // so the user sees what auto resolved to (plain text when none is detected).
-  const langLabel = langOverride === undefined
+  // The suffix a manual choice is remembered under (undefined when the name has
+  // no extension: there is nothing narrow enough to remember it by).
+  const langSuffix = useMemo(() => suffixOfPath(file.path), [file.path])
+  // This session's explicit pick for the OPEN file; undefined falls back to what
+  // was remembered for the file's suffix, and then to auto-detection.
+  const rememberedLang = useMemo(() => (langSuffix === undefined ? undefined : languageForSuffix(langSuffix)), [langSuffix])
+  const effectiveLang = langOverride ?? rememberedLang
+  const lang = useMemo(() => effectiveLang ?? detectedLang, [detectedLang, effectiveLang])
+  // The trigger label: an explicit choice names the language; auto names what it
+  // resolved to, so the user sees the effective highlighting either way.
+  const langLabel = effectiveLang === undefined
     ? (detectedLang === undefined ? t('action.langAuto') : t('action.langAutoDetected', { lang: languageDisplayName(detectedLang) }))
-    : languageDisplayName(langOverride)
+    : languageDisplayName(effectiveLang)
   // Per-language auto-wrap preference: keyed by the resolved language so each
   // language's setting is remembered independently; defaults to off.
   const wrapKey = lang ?? ''
@@ -3587,8 +3597,15 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
               compact
               align="end"
               items={langMenuItems}
-              selectedId={langOverride ?? ''}
-              onSelect={(id) => { setLangOverride(id === '' ? undefined : id); setLangMenuOpen(false) }}
+              selectedId={effectiveLang ?? ''}
+              onSelect={(id) => {
+                const next = id === '' ? undefined : id
+                setLangOverride(next)
+                // A hand-picked language is remembered for the file's suffix (and
+                // "auto" forgets it), so the same kind of file keeps the choice.
+                if (langSuffix !== undefined) setLanguageForSuffix(langSuffix, next ?? null)
+                setLangMenuOpen(false)
+              }}
               onClose={() => { setLangMenuOpen(false) }}
               anchor={(
                 <Tooltip label={t('action.langSelect')} side="top" delayMs={500}>

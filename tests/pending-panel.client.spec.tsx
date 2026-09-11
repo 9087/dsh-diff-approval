@@ -2777,6 +2777,46 @@ describe('PendingPanel', () => {
     expect(trigger.textContent).toContain('TypeScript')
   })
 
+  it('keeps the panel open when a portaled language item is picked', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    fireEvent.click(document.querySelector('[data-diff-lang]') as HTMLElement)
+    const item = screen.getByText('TypeScript')
+    // The menu is portaled into body, so picking an item is a pointerdown
+    // outside the panel element: it must not read as a click outside the panel.
+    fireEvent.pointerDown(item)
+    fireEvent.click(item)
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-lang]')!.textContent).toContain('TypeScript')
+  })
+
+  it('remembers a hand-picked language per file suffix and forgets it on auto', () => {
+    const file = entry({ id: 'entry-lang-md', path: '/repo/README.md', oldText: '# A\n', newText: '# B\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+
+    fireEvent.click(document.querySelector('[data-diff-lang]') as HTMLElement)
+    fireEvent.click(screen.getByText('TypeScript'))
+    expect(localStorage.getItem('diff-approval:lang-by-suffix')).toBe('{"md":"typescript"}')
+
+    // A fresh panel on the same suffix comes up with the remembered choice…
+    view.unmount()
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    expect(document.querySelector('[data-diff-lang]')!.textContent).toContain('TypeScript')
+
+    // …and picking auto forgets it again.
+    fireEvent.click(document.querySelector('[data-diff-lang]') as HTMLElement)
+    fireEvent.click(screen.getByText('action.langAuto'))
+    expect(localStorage.getItem('diff-approval:lang-by-suffix')).toBe('{}')
+  })
+
   it('lists only curated highlight languages, conventionally cased and sorted', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     const view = render(<PendingPanel {...props} />)

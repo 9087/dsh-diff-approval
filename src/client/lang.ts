@@ -55,8 +55,19 @@ const EXTENSION_LANGS: Record<string, string> = {
  * @returns the language id, or `undefined` when unknown.
  */
 export function langFromPath(path: string): string | undefined {
+  const suffix = suffixOfPath(path)
+  return suffix === undefined ? undefined : EXTENSION_LANGS[suffix]
+}
+
+/**
+ * The lowercase extension of a file path, without the dot — the key a manual
+ * language choice is remembered under. A name with no dot has no suffix, so a
+ * per-suffix preference never leaks onto every extension-less file at once.
+ * @param path - the file path, any separator style.
+ * @returns the suffix, or `undefined` when the name carries none.
+ */
+export function suffixOfPath(path: string): string | undefined {
   const match = /\.([^./\\]+)$/.exec(path)
-  if (match === null) return undefined
-  const extension = match[1]
-  return extension === undefined ? undefined : EXTENSION_LANGS[extension.toLowerCase()]
+  const suffix = match?.[1]
+  return suffix === undefined || suffix === '' ? undefined : suffix.toLowerCase()
 }
