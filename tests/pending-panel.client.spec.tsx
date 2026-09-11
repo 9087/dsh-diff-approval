@@ -10,11 +10,15 @@ import type { PendingFileDiff } from '../src/types.ts'
 import { PendingPanel } from '../src/client/PendingPanel.tsx'
 import { DiffApprovalSettingsTab } from '../src/client/SettingsTab.tsx'
 import { renderMarkdownPreview } from '../src/client/markdown-preview.ts'
+import { highlightWindow } from '../src/client/highlight.ts'
 import type { PendingDiffSnapshot } from '../src/client/slots.ts'
 
 // Spy (keeping the real renderer) so a test can prove the preview is not
 // re-rendered while its pane scrolls.
 vi.mock('../src/client/markdown-preview.ts', { spy: true })
+// Spy (keeping the real tokenizer) so a test can prove highlighting is windowed:
+// which line ranges the panel asks for, and that it never asks for a whole file.
+vi.mock('../src/client/highlight.ts', { spy: true })
 
 afterEach(cleanup)
 afterEach(() => { vi.restoreAllMocks() })
@@ -2279,6 +2283,69 @@ describe('PendingPanel', () => {
     // 20 visible + overscan, far fewer than the whole 4000-row file.
     expect(rendered).toBeGreaterThan(0)
     expect(rendered).toBeLessThan(100)
+  })
+
+  it('tokenizes only a bounded window of a large file, leaving the rest plain', async () => {
+    // A long TypeScript file with one change on its first line: the rows below are
+    // context, so a row past the window cap of 400 lines is plainly not tokenized
+    // (and the text is still there — a viewer never trades content for color).
+    const source = `${Array.from({ length: 900 }, (_, index) => `const v${index} = ${index}`).join('\n')}\n`
+    const big = entry({
+      id: 'entry-window', path: '/repo/a.ts',
+      oldText: source, newText: source.replace('const v0 = 0', 'const v0 = 1000'),
+    })
+    const props = panelProps({ read: true, files: [big], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.ts'))
+
+    await waitFor(() => { expect(vi.mocked(highlightWindow).mock.calls.length).toBeGreaterThan(0) })
+    const spans = vi.mocked(highlightWindow).mock.calls.map(call => ({ from: call[2], to: call[3] }))
+    // Bounded, and nowhere near the 900-line file.
+    for (const span of spans) expect(span.to - span.from).toBeLessThanOrEqual(400)
+    expect(spans.some(span => span.from <= 5)).toBe(true)
+
+    // The rows the window did not reach render as plain text: no token spans.
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const far = rows[700]!
+    const farCode = far.querySelector('[data-diff-code]') ?? far
+    expect(farCode.textContent).toMatch(/^const v\d+ = \d+$/)
+    expect(farCode.querySelectorAll('span').length).toBe(0)
+    // A row inside the window is highlighted.
+    const near = rows[2]!
+    const nearCode = near.querySelector('[data-diff-code]') ?? near
+    expect(nearCode.querySelectorAll('span').length).toBeGreaterThan(0)
+  })
+
+  it('highlights the window a jump lands on, and reuses it when nudging nearby', async () => {
+    const big = entry({
+      id: 'entry-window-end', path: '/repo/a.ts',
+      oldText: 'const a = 1\n'.repeat(900), newText: 'const a = 2\n'.repeat(900),
+    })
+    const props = panelProps({ read: true, files: [big], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.ts'))
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 440 })
+
+    // Scroll to the end: the pass that follows must cover the tail window only,
+    // never the file above it.
+    vi.mocked(highlightWindow).mockClear()
+    body.scrollTop = 1800 * 22 - 440
+    fireEvent.scroll(body)
+    const tail = (): number[][] => vi.mocked(highlightWindow).mock.calls
+      .map(call => [call[2], call[3]])
+      .filter(([from]) => (from ?? 0) > 500)
+    await waitFor(() => { expect(tail().length).toBeGreaterThan(0) })
+
+    // A few rows of scroll stay inside the highlighted margin, so nothing is
+    // re-tokenized (the store keeps what it has already done).
+    const before = tail().length
+    body.scrollTop = 1800 * 22 - 440 - 3 * 22
+    fireEvent.scroll(body)
+    await new Promise(resolve => setTimeout(resolve, 200))
+    expect(tail().length).toBe(before)
   })
 
   it('warns on the row when a tracked file is gone and explains when expanded', () => {

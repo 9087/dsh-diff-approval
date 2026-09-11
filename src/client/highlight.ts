@@ -44,38 +44,63 @@ export interface HighlightSpan {
   style: CSSProperties
 }
 
+/** One file's highlight runs, one entry per side and line (index = line - 1). A
+ *  hole means that line has not been highlighted — the viewer renders it plain,
+ *  which is the honest state of a windowed highlighter: only what has been looked
+ *  at is tokenized. */
+export interface HighlightSides {
+  oldRuns: HighlightSpan[][]
+  newRuns: HighlightSpan[][]
+}
+
+/** A saved grammar state: resuming from one continues tokenization *exactly*
+ *  where it stopped, instead of assuming the window's first line starts the file.
+ *  Opaque to callers — only `highlightWindow` produces and consumes it, and
+ *  `undefined` means "no saved state" (the file's first line is top-level). */
+export type HighlightState = Parameters<HighlighterCore['codeToTokens']>[1]['grammarState']
+
+/** One highlighted window: the requested lines' runs and the grammar state after
+ *  the last of them, for an exact continuation by the next window. */
+export interface HighlightWindow {
+  runs: HighlightSpan[][]
+  state: HighlightState
+}
+
+/** Options for {@link highlightWindow}. */
+export interface HighlightWindowOptions {
+  /** Lines of preceding context to run the grammar over without returning them,
+   *  so a window starting inside a multi-line construct (a block comment, a
+   *  template literal, a fenced code block) still colours correctly. Ignored when
+   *  `state` is given: that one is exact. */
+  context?: number
+  /** An exact state saved at this window's first line (a previous window's
+   *  `state`). */
+  state?: HighlightState
+}
+
 /**
  * Tokenize guards: the viewer must never let the synchronous JS-regex engine
  * block the main thread on a hostile file. Lines above the length cap are
- * returned plain by shiki, the per-line budget caps a single pathological
- * line, and whole files above the size/line caps skip highlighting entirely
- * (the diff still shows its added/deleted coloring). Company-workload files
- * (generated bundles, minified output, huge data dumps) otherwise stall the
- * tab for tens of seconds and can OOM it.
+ * returned plain by shiki, the per-line budget caps a single pathological line,
+ * and a window whose own text is enormous degrades to plain. Windows are what
+ * keeps this bounded in the first place — the viewer never tokenizes more than
+ * the lines it is about to show (see the windowed highlight hook), so a huge
+ * file is no longer skipped wholesale: it is highlighted a screen at a time.
  */
 const MAX_LINE_LENGTH = 2000
 const TOKENIZE_TIME_LIMIT_MS = 100
-const MAX_HIGHLIGHT_CHARS = 300_000
-const MAX_HIGHLIGHT_LINES = 10_000
+const MAX_WINDOW_CHARS = 500_000
 
 /**
- * Bounded tokenize cache keyed by the code string: reselecting a recently
- * viewed file (or a file whose content reference reappears) reuses the runs
- * instead of re-running the engine. Insertion-ordered, so the oldest entry is
- * evicted first; 16 codes bounds both memory and the eviction cost.
+ * Bounded tokenize cache keyed by the window's own text and language: scrolling
+ * back over a window that was just highlighted reuses its runs instead of
+ * re-running the engine. Insertion-ordered, so the oldest entry is evicted first;
+ * 24 entries bounds both memory and the eviction cost. Windows highlighted from a
+ * saved grammar state are not cached (the state is opaque, so it cannot be part
+ * of the key).
  */
-const TOKENIZE_CACHE_MAX = 16
-const tokenizeCache = new Map<string, Map<string, HighlightSpan[][]>>()
-
-/** Whether `code` is too large to highlight safely (short-circuits fast). */
-function tooLargeToHighlight(code: string): boolean {
-  if (code.length > MAX_HIGHLIGHT_CHARS) return true
-  let newlines = 0
-  for (let index = 0; index < code.length; index++) {
-    if (code.charCodeAt(index) === 10 && ++newlines > MAX_HIGHLIGHT_LINES) return true
-  }
-  return false
-}
+const TOKENIZE_CACHE_MAX = 24
+const tokenizeCache = new Map<string, HighlightSpan[][]>()
 
 /** All grammars this bundle registers; each entry's own `name` is the tokenize id. */
 const LANGS = [
@@ -225,50 +250,79 @@ const warmupTimer = setTimeout(() => { highlighter() }, 0)
 ;(warmupTimer as { unref?: () => void }).unref?.()
 
 /**
- * Tokenize `code` into per-line highlighted runs when `lang` names a
- * registered grammar; `undefined` means the caller renders its plain fallback.
- * Each run's color is a `--shiki-*` custom property, keeping token colors on
- * the harness theme's sheets. The trailing newline shiki appends as a final
- * empty line is dropped so the run count matches the caller's own line array.
- * @param code - the source text.
+ * Tokenize the lines `[from, to)` into per-line highlighted runs when `lang`
+ * names a registered grammar; `undefined` means the caller renders its plain
+ * fallback. Each run's color is a `--shiki-*` custom property, keeping token
+ * colors on the harness theme's sheets. The trailing newline shiki appends as a
+ * final empty line is dropped so the run count matches the caller's own array.
+ *
+ * This is the viewer's only entry point, and it is deliberately windowed: the
+ * code view renders a virtual window of rows, so highlighting a whole file to
+ * show one screenful is almost all waste (measured on a 3818-line file: ~945 ms
+ * for both sides whole-file against ~8 ms for one window). A window is continued
+ * *exactly* from a previous one's `state`, or approximately from `context` lines
+ * when no state is known yet — which is what lets a jump straight to the middle
+ * of a file colour correctly without tokenizing anything above it.
+ * @param lines - the side's lines, indexed from 0 as the caller's line numbers are.
  * @param lang - the Shiki grammar id, or `undefined` for plain text.
- * @returns one entry per source line (each an array of runs), or `undefined` when unhighlightable.
+ * @param from - the first line index to highlight (inclusive, clamped).
+ * @param to - one past the last line index to highlight (clamped).
+ * @param options - the grammar state to resume from and/or context lines for the grammar.
+ * @returns the window's runs and its end state, or `undefined` when the language
+ *   is unknown, the range is empty, or the window's own text is too large.
  */
-export function highlightLines(code: string, lang: string | undefined): HighlightSpan[][] | undefined {
-  if (lang === undefined || code === '') return undefined
+export function highlightWindow(
+  lines: readonly string[],
+  lang: string | undefined,
+  from: number,
+  to: number,
+  options: HighlightWindowOptions = {},
+): HighlightWindow | undefined {
+  if (lang === undefined) return undefined
   // Unknown ids (an extension mapping bug, never user text) must miss instead
   // of throwing inside shiki.
   if (!highlighter().getLoadedLanguages().includes(lang)) return undefined
-  // Oversized files degrade to plain text: highlighting them synchronously
-  // would stall (and can crash) the tab before the first paint.
-  if (tooLargeToHighlight(code)) return undefined
-  const cached = tokenizeCache.get(code)?.get(lang)
-  if (cached !== undefined) return cached
-  const { tokens } = highlighter().codeToTokens(code, {
+  const start = Math.max(0, Math.min(from, lines.length))
+  const end = Math.max(start, Math.min(to, lines.length))
+  if (end === start) return undefined
+  // A saved state makes the window exact and needs no context; without one, the
+  // lines just above it are run through the grammar so a multi-line construct
+  // that began above the window still colours correctly inside it.
+  const context = options.state === undefined ? Math.max(0, options.context ?? 0) : 0
+  const contextFrom = Math.max(0, start - context)
+  // The window is exactly the caller's own lines, joined: a file whose text ends
+  // with a newline has a final empty line in that array, and shiki hands it back
+  // as an empty token line — which is *in step*, so nothing is dropped here (the
+  // whole-text API this replaced had to drop shiki's terminator line; a line array
+  // already carries it or not, exactly as the caller counts lines).
+  const text = lines.slice(contextFrom, end).join('\n')
+  if (text.length > MAX_WINDOW_CHARS) return undefined
+  const spans = end - start
+  const cacheKey = options.state === undefined
+    ? `${lang}\u0000${contextFrom}\u0000${text}`
+    : undefined
+  const cached = cacheKey === undefined ? undefined : tokenizeCache.get(cacheKey)
+  // A hit must cover the same window size: the key carries the context start and
+  // the text, so the only way to reach here with a different size is a code edit.
+  if (cached !== undefined && cached.length === spans) return { runs: cached, state: undefined }
+  const { tokens, grammarState } = highlighter().codeToTokens(text, {
     lang,
     theme: 'css-variables',
     // Cap a single line's engine time and skip pathological long lines
     // entirely; both degrade that line to plain instead of throwing.
     tokenizeTimeLimit: TOKENIZE_TIME_LIMIT_MS,
     tokenizeMaxLineLength: MAX_LINE_LENGTH,
+    ...(options.state === undefined ? {} : { grammarState: options.state }),
   })
-  // shiki tokenizes `a\nb` into two lines; a trailing newline (`a\n`) adds a
-  // third, empty line the caller's own line array does not carry. Drop that
-  // one terminator line so the two structures stay in step.
-  const last = tokens[tokens.length - 1]
-  const lines = tokens.length > 1 && last !== undefined && last.length === 0
-    ? tokens.slice(0, -1)
-    : tokens
-  const runs = lines.map(line => line.map(token => ({ text: token.content, style: { color: token.color } })))
-  let byLang = tokenizeCache.get(code)
-  if (byLang === undefined) {
+  const runs = tokens
+    .slice(start - contextFrom)
+    .map(line => line.map(token => ({ text: token.content, style: { color: token.color } })))
+  if (cacheKey !== undefined) {
     if (tokenizeCache.size >= TOKENIZE_CACHE_MAX) {
       const oldest = tokenizeCache.keys().next().value
       if (oldest !== undefined) tokenizeCache.delete(oldest)
     }
-    byLang = new Map()
-    tokenizeCache.set(code, byLang)
+    tokenizeCache.set(cacheKey, runs)
   }
-  byLang.set(lang, runs)
-  return runs
+  return { runs, state: grammarState }
 }

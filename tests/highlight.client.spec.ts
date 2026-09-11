@@ -1,64 +1,109 @@
-// The bundled Shiki highlighter: per-line token runs and plain fallbacks.
+// The bundled Shiki highlighter: windowed per-line token runs and plain fallbacks.
 
 import { describe, expect, it } from 'vitest'
-import { highlightLines } from '../src/client/highlight.ts'
+import { highlightWindow } from '../src/client/highlight.ts'
 
-describe('highlightLines', () => {
+/** Split source text into the line array `highlightWindow` takes (no trailing
+ *  empty line for a terminated file, exactly as the caller's own array is). */
+const lines = (text: string): string[] =>
+  text.endsWith('\n') ? text.slice(0, -1).split('\n') : text.split('\n')
+
+/** One line's visible text, from its runs. */
+const textOf = (runs: { text: string }[]): string => runs.map(span => span.text).join('')
+/** One line's colours, from its runs. */
+const colorsOf = (runs: { style: { color?: string } }[]): string => runs.map(span => span.style.color).join('|')
+
+describe('highlightWindow', () => {
   it('returns one span list per line with the css-variable color theme', () => {
-    const runs = highlightLines('const answer: number = 42\nconsole.log(answer)\n', 'typescript')
-    expect(runs).toBeDefined()
-    expect(runs).toHaveLength(2)
-    const first = runs![0]!
+    const source = lines('const answer: number = 42\nconsole.log(answer)\n')
+    const window = highlightWindow(source, 'typescript', 0, source.length)
+    expect(window).toBeDefined()
+    expect(window!.runs).toHaveLength(2)
+    const first = window!.runs[0]!
     expect(first.length).toBeGreaterThan(0)
-    expect(first.map(span => span.text).join('')).toBe('const answer: number = 42')
+    expect(textOf(first)).toBe('const answer: number = 42')
     for (const span of first) {
       expect(span.style.color).toMatch(/^var\(--shiki-/)
     }
   })
 
-  it('drops the trailing terminator line shiki appends', () => {
-    const runs = highlightLines('x = 1\n', 'python')
-    expect(runs).toHaveLength(1)
-    expect(runs![0]!.map(span => span.text).join('')).toBe('x = 1')
+  it('highlights only the requested range, wherever it sits in the file', () => {
+    const source = lines(Array.from({ length: 500 }, (_, index) => `const v${index}: number = ${index}`).join('\n'))
+    const window = highlightWindow(source, 'typescript', 300, 310)
+    expect(window).toBeDefined()
+    expect(window!.runs).toHaveLength(10)
+    expect(textOf(window!.runs[0]!)).toBe('const v300: number = 300')
+    expect(textOf(window!.runs[9]!)).toBe('const v309: number = 309')
   })
 
-  it('returns undefined for unknown languages and empty code', () => {
-    expect(highlightLines('code', undefined)).toBeUndefined()
-    expect(highlightLines('code', 'not-a-grammar')).toBeUndefined()
-    expect(highlightLines('', 'typescript')).toBeUndefined()
+  it('returns undefined for unknown languages and empty ranges', () => {
+    expect(highlightWindow(lines('code'), undefined, 0, 1)).toBeUndefined()
+    expect(highlightWindow(lines('code'), 'not-a-grammar', 0, 1)).toBeUndefined()
+    expect(highlightWindow(lines('code'), 'typescript', 1, 1)).toBeUndefined()
+  })
+
+  it('clamps a range that runs past the end of the file', () => {
+    const source = lines('x = 1\ny = 2')
+    const window = highlightWindow(source, 'python', 1, 99)
+    expect(window!.runs).toHaveLength(1)
+    expect(textOf(window!.runs[0]!)).toBe('y = 2')
   })
 
   it('highlights several grammars from the static set', () => {
-    expect(highlightLines('echo hi', 'shellscript')).toBeDefined()
-    expect(highlightLines('{"a":1}', 'json')).toBeDefined()
-    expect(highlightLines('<div/>', 'html')).toBeDefined()
-    expect(highlightLines('fn main() {}', 'rust')).toBeDefined()
-    expect(highlightLines('local x = 1', 'lua')).toBeDefined()
+    const one = (code: string, lang: string): number =>
+      highlightWindow(lines(code), lang, 0, 1)?.runs.length ?? 0
+    expect(one('echo hi', 'shellscript')).toBe(1)
+    expect(one('{"a":1}', 'json')).toBe(1)
+    expect(one('<div/>', 'html')).toBe(1)
+    expect(one('fn main() {}', 'rust')).toBe(1)
+    expect(one('local x = 1', 'lua')).toBe(1)
   })
 
-  it('skips highlighting whole files above the size cap', () => {
-    const huge = 'a = 1\n'.repeat(40_000) // > MAX_HIGHLIGHT_CHARS (300k)
-    expect(highlightLines(huge, 'python')).toBeUndefined()
-    // A file under the char cap but over the line cap also degrades.
-    const manyLines = 'a = 1\n'.repeat(11_000) // > MAX_HIGHLIGHT_LINES (10k)
-    expect(highlightLines(manyLines, 'python')).toBeUndefined()
+  it('keeps highlighting a window with one overlong line (degraded, not skipped)', () => {
+    const wide = `x = 1\n${'y'.repeat(4000)}\nz = 2`
+    const window = highlightWindow(lines(wide), 'python', 0, 3)
+    expect(window).toBeDefined()
+    expect(window!.runs).toHaveLength(3)
+    // The overlong line degrades to a single plain span carrying its text.
+    expect(textOf(window!.runs[1]!)).toBe('y'.repeat(4000))
   })
 
-  it('keeps highlighting a file with one overlong line (degraded, not skipped)', () => {
-    const wide = `x = 1\n${'y'.repeat(4000)}\nz = 2\n` // line > MAX_LINE_LENGTH
-    const runs = highlightLines(wide, 'python')
-    expect(runs).toBeDefined()
-    expect(runs).toHaveLength(3)
-    // The overlong line degrades to a single plain span carrying the text.
-    expect(runs![1]!.length).toBeGreaterThanOrEqual(1)
-    expect(runs![1]!.map(span => span.text).join('')).toBe('y'.repeat(4000))
+  it('continues exactly from a saved grammar state', () => {
+    // A block comment makes the state matter: tokenizing line 3 on its own would
+    // not know it is still inside the comment.
+    const source = lines('/* a\n b\n c\n*/\nconst x: number = 1')
+    const whole = highlightWindow(source, 'typescript', 0, source.length)!
+    const head = highlightWindow(source, 'typescript', 0, 3)!
+    expect(head.state).toBeDefined()
+    const tail = highlightWindow(source, 'typescript', 3, source.length, { state: head.state })!
+    expect(tail.runs.map(textOf)).toEqual(whole.runs.slice(3).map(textOf))
+    expect(tail.runs.map(colorsOf)).toEqual(whole.runs.slice(3).map(colorsOf))
   })
 
-  it('serves repeated identical requests from the tokenize cache', () => {
-    const code = 'const answer: number = 42\n'
-    const first = highlightLines(code, 'typescript')
-    const second = highlightLines(code, 'typescript')
+  it('uses context lines so a window inside a construct still colours correctly', () => {
+    const source = lines('/* a\n b\n c\n*/\nconst x: number = 1')
+    const withContext = highlightWindow(source, 'typescript', 2, 4, { context: 40 })!
+    const without = highlightWindow(source, 'typescript', 2, 4)!
+    const whole = highlightWindow(source, 'typescript', 0, source.length)!
+    // Without context the grammar starts fresh at line 3, so the comment body is
+    // coloured as code; with context it agrees with the whole-file run.
+    expect(colorsOf(withContext.runs[0]!)).not.toBe(colorsOf(without.runs[0]!))
+    expect(withContext.runs.map(colorsOf)).toEqual(whole.runs.slice(2, 4).map(colorsOf))
+  })
+
+  it('serves repeated identical windows from the tokenize cache', () => {
+    const source = lines('const answer: number = 42')
+    const first = highlightWindow(source, 'typescript', 0, 1)
+    const second = highlightWindow(source, 'typescript', 0, 1)
     expect(first).toBeDefined()
-    expect(second).toBe(first)
+    expect(second!.runs).toBe(first!.runs)
+  })
+
+  it('degrades a window whose own text is enormous, without touching others', () => {
+    // 400 lines × 2000 chars is over the window text cap; a normal window over the
+    // same lines still highlights.
+    const source = Array.from({ length: 400 }, () => 'y'.repeat(2000))
+    expect(highlightWindow(source, 'python', 0, 400)).toBeUndefined()
+    expect(highlightWindow(source, 'python', 0, 10)).toBeDefined()
   })
 })

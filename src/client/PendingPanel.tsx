@@ -18,7 +18,10 @@ import { resolvePreviewImages } from './markdown-images.ts'
 import type { ChangeBlock, IntraRun, WholeFileDiffRow } from './whole-file-diff.ts'
 import { computeSideBySideDiff, searchPairs } from './split-diff.ts'
 import type { SplitPair, SplitSide } from './split-diff.ts'
-import { HIGHLIGHT_LANGS, highlightLines, languageDisplayName } from './highlight.ts'
+import { HIGHLIGHT_LANGS, languageDisplayName } from './highlight.ts'
+import type { HighlightSides } from './highlight.ts'
+import { useWindowedHighlight } from './windowed-highlight.ts'
+import type { LineRange, VisibleLines } from './windowed-highlight.ts'
 import type { HighlightSpan } from './highlight.ts'
 import { langFromPath, suffixOfPath } from './lang.ts'
 import { referenceLabelOf } from './reference.ts'
@@ -747,7 +750,7 @@ function useSearchOptions(): {
 const DiffRow = memo(function DiffRow(props: {
   index: number
   row: WholeFileDiffRow
-  runs: HighlightRuns | undefined
+  runs: HighlightSides | undefined
   focused: boolean
   /** Whether this row contains a search hit, and if so whether it is current. */
   searchHit: boolean
@@ -803,12 +806,6 @@ interface RowModel {
   intra: Map<number, IntraRun[]>
 }
 
-/** One file's deferred syntax-highlight runs, one entry per side. */
-interface HighlightRuns {
-  oldRuns: ReturnType<typeof highlightLines>
-  newRuns: ReturnType<typeof highlightLines>
-}
-
 /** One selected line range in row indices, normalized low-to-high. */
 interface RowRange {
   start: number
@@ -851,6 +848,48 @@ function matchingRows(rows: readonly WholeFileDiffRow[], query: string, options:
     if (matchRangesOf(rows[i]!.text, query, options).length > 0) out.push(i)
   }
   return out
+}
+
+/** The source lines one row window covers on a side (1-based, inclusive), or
+ *  undefined when the window shows none of that side — an all-added or
+ *  all-deleted stretch, where the other side has nothing to highlight. */
+function windowLineRange(
+  rows: readonly WholeFileDiffRow[],
+  from: number,
+  to: number,
+  side: 'old' | 'new',
+): LineRange | undefined {
+  let first = Infinity
+  let last = -Infinity
+  for (let index = from; index < to; index++) {
+    const row = rows[index]
+    if (row === undefined) continue
+    const line = side === 'old' ? row.oldLine : row.newLine
+    if (line === undefined) continue
+    if (line < first) first = line
+    if (line > last) last = line
+  }
+  return Number.isFinite(first) ? { from: first, to: last } : undefined
+}
+
+/** The source lines one split-view pair window covers on a side (1-based,
+ *  inclusive), or undefined when the window shows none of that side. */
+function pairLineRange(
+  pairs: readonly SplitPair[],
+  from: number,
+  to: number,
+  side: 'left' | 'right',
+): LineRange | undefined {
+  let first = Infinity
+  let last = -Infinity
+  for (let index = from; index < to; index++) {
+    const pair = pairs[index]
+    const line = side === 'left' ? pair?.left?.line : pair?.right?.line
+    if (line === undefined) continue
+    if (line < first) first = line
+    if (line > last) last = line
+  }
+  return Number.isFinite(first) ? { from: first, to: last } : undefined
 }
 
 /** One side's line-content for the split view: the highlighted runs or plain text. */
@@ -931,7 +970,7 @@ export interface SplitDiffHandle { jump: (direction: -1 | 1, wrapGuard?: boolean
 export const SplitDiff = forwardRef<SplitDiffHandle, {
   file: PendingFileDiff
   model: RowModel
-  runs: HighlightRuns | undefined
+  runs: HighlightSides | undefined
   langWrap: boolean
   tabWidthSpaces: number
   busy: boolean
@@ -942,7 +981,10 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   onBlockRevert: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
   /** Notify the parent to toast a block-wrap boundary / single-block (Ctrl+Up/Down). */
   onWrapToast: (text: string) => void
-}>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert, onWrapToast }, ref) {
+  /** Report which source lines this view is showing, so the parent's windowed
+   *  highlighter follows this view's own scroller (it has its own virtual window). */
+  onVisibleLines: (visible: VisibleLines) => void
+}>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert, onWrapToast, onVisibleLines }, ref) {
   // Use the configured line height for the split virtual window and jump math
   // (the rendered split rows already size to the same value).
   // eslint-disable-next-line @typescript-eslint/no-shadow
@@ -1272,6 +1314,18 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     end = Math.max(end, selection.end + 1)
   }
   const visiblePairs = pairs.slice(start, end)
+
+  // Tell the parent which source lines are on screen, so its windowed highlighter
+  // follows *this* view's scroller (the split view has its own virtual window and
+  // its own scroll container, so the parent's single-column window means nothing
+  // here). Runs after a scroll settles in the parent's own effect.
+  useEffect(() => {
+    onVisibleLines({
+      oldRange: pairLineRange(pairs, start, end, 'left'),
+      newRange: pairLineRange(pairs, start, end, 'right'),
+      live: viewportH > 0,
+    })
+  }, [onVisibleLines, pairs, start, end, viewportH])
 
   // Block navigation: jump between change blocks (flashes the focused one).
   // At the wrap boundary (last block + down, first block + up) a guarded press
@@ -2022,19 +2076,20 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     setMdRulerMarkers(measured.length > 0 ? measured : rulerMarkers)
   }, [previewActive, splitView, file.oldText, file.newText, mdImageTick, rulerMarkers])
 
-  // Syntax highlight arrives a tick after selection so clicking a file never
-  // blocks the diff paint on tokenization; the plain-text diff shows first.
-  const [runs, setRuns] = useState<HighlightRuns | undefined>(undefined)
-  useEffect(() => {
-    setRuns(undefined)
-    const timer = window.setTimeout(() => {
-      setRuns({
-        oldRuns: highlightLines(file.oldText, lang),
-        newRuns: highlightLines(file.newText, lang),
-      })
-    }, 0)
-    return () => { window.clearTimeout(timer) }
-  }, [file.id, file.oldText, file.newText, lang])
+  // Syntax highlighting is windowed (see the hook): only the lines near the
+  // viewport are tokenized, so opening a large file no longer pays for a
+  // whole-file tokenize, and jumping to its middle never tokenizes what is above
+  // it. The hook returns runs indexed by line - 1, with holes for lines that have
+  // not been reached yet — those render plain, which is what makes scrolling into
+  // fresh territory cheap instead of blocking.
+  const oldLines = useMemo(() => file.oldText.split('\n'), [file.oldText])
+  const newLines = useMemo(() => file.newText.split('\n'), [file.newText])
+  // The window store's identity: a new object means new content or a new
+  // language, and the hook drops everything highlighted for the previous one.
+  const highlightKey = useMemo(() => ({ file: file.id, lang }), [file.id, lang, file.oldText, file.newText])
+  // What the split view reports as visible: it owns its own scroller, so its
+  // window is the only one that describes what that view is showing.
+  const [splitVisible, setSplitVisible] = useState<VisibleLines | undefined>(undefined)
 
   const bodyRef = useRef<HTMLDivElement>(null)
   const [focus, setFocus] = useState(0)
@@ -2730,6 +2785,26 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     end = Math.max(end, selection.end + 1)
   }
   const visibleRows = rows.slice(start, end)
+
+  // The source lines that window covers on each side, so the highlighter works on
+  // exactly what is on screen (plus its own margins). One side can be missing
+  // entirely — a window of pure additions shows nothing from the old side.
+  const oldWindow = useMemo(() => windowLineRange(rows, start, end, 'old'), [rows, start, end])
+  const newWindow = useMemo(() => windowLineRange(rows, start, end, 'new'), [rows, start, end])
+  // The split view has its own scroller and its own virtual window, so it reports
+  // what it is showing instead — the single-column window above means nothing to it.
+  const onSplitVisibleLines = useCallback((visible: VisibleLines): void => { setSplitVisible(visible) }, [])
+  const runs = useWindowedHighlight({
+    key: highlightKey,
+    oldLines,
+    newLines,
+    lang,
+    oldRange: splitView ? splitVisible?.oldRange : oldWindow,
+    newRange: splitView ? splitVisible?.newRange : newWindow,
+    // The idle backfill needs a real viewport: without one there is nothing to
+    // prefetch toward (and jsdom, which reports none, stays deterministic).
+    live: splitView ? splitVisible?.live ?? false : viewportHeight > 0,
+  })
 
   // The floating Keep/Revert frame anchors to the hovered block's bottom edge.
   // It lives in the non-scrolling wrapper (viewport coordinates), so subtract
@@ -3724,6 +3799,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
           onBlockKeep={onBlockKeep}
           onBlockRevert={onBlockRevert}
           onWrapToast={(text) => onToast(text)}
+          onVisibleLines={onSplitVisibleLines}
         />
       ) : (
       <div className={css.diffBodyWrap} onMouseLeave={() => { setHoveredBlock(undefined) }}>
