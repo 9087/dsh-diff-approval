@@ -615,11 +615,44 @@ function textWithSearch(
   return nodes
 }
 
+/** Arrow keys render as arrows in a tooltip hint (`Ctrl+↑`, not `Ctrl+ArrowUp`). */
+const CHORD_KEY_GLYPHS: Record<string, string> = { ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' }
+
 /**
- * The in-file search's narrowing toggles, persisted as preferences so the split
- * and single-column bars agree and the choice survives a reopen. The options
- * object is memoized so the memoized rows only re-render when a toggle changes.
- * @returns the options, their current values, and the two toggles.
+ * A tooltip label with the action's configured chord appended. The hint states
+ * the binding the user actually has — including one rebound in Settings — rather
+ * than a default baked into the label.
+ * @param label - the translated action label.
+ * @param action - the keybinding action id (see `DEFAULT_KEYBINDINGS`).
+ * @returns the label, with ` (chord)` appended when one is configured.
+ */
+function withChord(label: string, action: string): string {
+  const chord = keybindingOf(action)
+  if (chord === '') return label
+  const hint = chord.split('+').map(part => CHORD_KEY_GLYPHS[part] ?? part).join('+')
+  return `${label} (${hint})`
+}
+
+/**
+ * Whether a key event came from the panel's own search bar (the query box or
+ * one of the bar's buttons). The narrowing chords are scoped this way: an open
+ * bar is not enough, because the same chord must stay free for whatever else
+ * happens to have focus (the chat composer above all).
+ * @param event - the keydown event.
+ * @returns whether the event came from the search bar.
+ */
+function isSearchBarEvent(event: KeyboardEvent): boolean {
+  const target = event.target
+  return target instanceof HTMLElement && target.closest('[data-diff-searchbar]') !== null
+}
+
+/**
+ * The in-file search's narrowing toggles. The persisted preference is the
+ * source of truth, so the choice survives a reopen and the two views cannot
+ * disagree: each bar owns one of these, and it re-reads the stored flags with
+ * {@link sync} whenever its bar opens. The options object is memoized so the
+ * memoized rows only re-render when a toggle changes.
+ * @returns the options, their current values, the two toggles, and the re-read.
  */
 function useSearchOptions(): {
   options: SearchOptions
@@ -627,6 +660,8 @@ function useSearchOptions(): {
   wholeWord: boolean
   toggleCase: () => void
   toggleWord: () => void
+  /** Re-read both persisted flags, so a bar opens on the stored setting. */
+  sync: () => void
 } {
   const [caseSensitive, setCase] = useState(searchCaseSensitive)
   const [wholeWord, setWord] = useState(searchWholeWord)
@@ -643,7 +678,11 @@ function useSearchOptions(): {
     setSearchWholeWord(next)
     setWord(next)
   }, [])
-  return { options, caseSensitive, wholeWord, toggleCase, toggleWord }
+  const sync = useCallback(() => {
+    setCase(searchCaseSensitive())
+    setWord(searchWholeWord())
+  }, [])
+  return { options, caseSensitive, wholeWord, toggleCase, toggleWord, sync }
 }
 
 /**
@@ -894,7 +933,7 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
 
 /** Imperative surface the parent uses to drive block navigation from the
  *  shared toolbar/keyboard in split mode (its own `focus` is private here). */
-export interface SplitDiffHandle { jump: (direction: -1 | 1, wrapGuard?: boolean, singleToast?: boolean) => void; openSearch: () => void; toggleSearch: () => void; searchNext: (direction: -1 | 1) => boolean }
+export interface SplitDiffHandle { jump: (direction: -1 | 1, wrapGuard?: boolean, singleToast?: boolean) => void; openSearch: () => void; toggleSearch: () => void; searchNext: (direction: -1 | 1) => boolean; toggleMatchCase: () => boolean; toggleMatchWholeWord: () => boolean }
 
 /** The two-column (side-by-side) whole-file diff view. */
 export const SplitDiff = forwardRef<SplitDiffHandle, {
@@ -1119,6 +1158,18 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     if (searchOpen) closeSearch()
     else openSearch()
   }
+  // The narrowing chords only apply while this bar is open, so report whether the
+  // chord was consumed rather than swallowing it for a closed bar.
+  const toggleMatchCase = (): boolean => {
+    if (!searchOpen) return false
+    search.toggleCase()
+    return true
+  }
+  const toggleMatchWholeWord = (): boolean => {
+    if (!searchOpen) return false
+    search.toggleWord()
+    return true
+  }
   const openSearch = (): void => {
     // The selection acts as the search's start position (there is no text
     // cursor in a diff): auto-fill the query with it and seed the current match.
@@ -1129,6 +1180,9 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
       searchInputRef.current?.select()
       return
     }
+    // The stored preference wins over this instance's last-known state: the
+    // other view's bar may have toggled it since.
+    search.sync()
     const live = window.getSelection()
     const liveRange = splitRowRangeOf(live)
     // Fall back to the last tracked selection: clicking the search button moves
@@ -1277,7 +1331,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   }
   // Expose the block jump to the parent so the shared toolbar/keyboard drives
   // this split view's own (private) focus in split mode.
-  useImperativeHandle(ref, () => ({ jump, openSearch, toggleSearch, searchNext }), [jump, openSearch, toggleSearch, searchNext])
+  useImperativeHandle(ref, () => ({ jump, openSearch, toggleSearch, searchNext, toggleMatchCase, toggleMatchWholeWord }), [jump, openSearch, toggleSearch, searchNext, toggleMatchCase, toggleMatchWholeWord])
 
   useLayoutEffect(() => {
     if (pairCount === 0) return
@@ -1472,7 +1526,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
               ? '0/0'
               : `${(searchIndex % searchMatches.length) + 1}/${searchMatches.length}`}
           </span>
-          <Tooltip label={t('action.matchCase')} side="bottom" delayMs={500}>
+          <Tooltip label={withChord(t('action.matchCase'), 'matchCase')} side="bottom" delayMs={500}>
             <button
               type="button"
               className={search.caseSensitive ? `${css.searchToggle} ${css.searchToggleOn}` : css.searchToggle}
@@ -1485,7 +1539,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
               <SearchOptionIcon kind="case" />
             </button>
           </Tooltip>
-          <Tooltip label={t('action.matchWholeWord')} side="bottom" delayMs={500}>
+          <Tooltip label={withChord(t('action.matchWholeWord'), 'matchWholeWord')} side="bottom" delayMs={500}>
             <button
               type="button"
               className={search.wholeWord ? `${css.searchToggle} ${css.searchToggleOn}` : css.searchToggle}
@@ -1498,12 +1552,12 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
               <SearchOptionIcon kind="word" />
             </button>
           </Tooltip>
-          <Tooltip label={`${t('action.prevDiff')} (Shift+F3)`} side="bottom" delayMs={500}>
+          <Tooltip label={withChord(t('action.prevDiff'), 'searchPrev')} side="bottom" delayMs={500}>
             <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-prev aria-label={t('action.prevDiff')} disabled={searchMatches.length === 0} onClick={() => { goSearch(-1) }}>
               <IconChevronUpOutline14 size={14} />
             </button>
           </Tooltip>
-          <Tooltip label={`${t('action.nextDiff')} (F3)`} side="bottom" delayMs={500}>
+          <Tooltip label={withChord(t('action.nextDiff'), 'searchNext')} side="bottom" delayMs={500}>
             <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-next aria-label={t('action.nextDiff')} disabled={searchMatches.length === 0} onClick={() => { goSearch(1) }}>
               <IconChevronDownOutline14 size={14} />
             </button>
@@ -2105,6 +2159,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       searchInputRef.current?.select()
       return
     }
+    // The stored preference wins over this instance's last-known state: the
+    // other view's bar may have toggled it since.
+    search.sync()
     const live = window.getSelection()
     const liveRange = splitView ? splitRowRangeOf(live) : rowRangeOf(live)
     // Fall back to the last tracked selection: clicking the search button moves
@@ -2694,6 +2751,34 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
   }, [searchOpen, searchMatches, splitView])
 
+  // Alt+C / Alt+W toggle the two search narrowing options — the chords VS Code's
+  // find widget uses. Scoped to the search bar: the event has to come from the
+  // bar (its query box or one of its buttons), so with the bar merely open the
+  // chord stays free for whatever else has focus. Each bar owns its own state,
+  // so this routes to the split view's bar in split mode; only an actually-open
+  // bar consumes the chord.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!isSearchBarEvent(event)) return
+      const option = matchesShortcut(event, keybindingOf('matchCase')) ? 'case'
+        : matchesShortcut(event, keybindingOf('matchWholeWord')) ? 'word'
+          : undefined
+      if (option === undefined) return
+      if (splitView) {
+        const handle = splitDiffRef.current
+        const acted = option === 'case' ? handle?.toggleMatchCase() === true : handle?.toggleMatchWholeWord() === true
+        if (acted) event.preventDefault()
+        return
+      }
+      if (!searchOpen) return
+      event.preventDefault()
+      if (option === 'case') search.toggleCase()
+      else search.toggleWord()
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true) }
+  }, [searchOpen, splitView, search])
+
   // Ctrl+Up/Down jumps between change blocks. The detail pane is mounted only
   // while a file is open, so this intercepts globally while the diff is shown
   // — the code view is read-only and never reliably holds focus (after any
@@ -2797,7 +2882,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
         )}
         {model.blocks.length > 0 && (
           <>
-            <Tooltip label={`${t('action.prevDiff')} (Ctrl+↑)`} side="bottom" delayMs={500}>
+            <Tooltip label={withChord(t('action.prevDiff'), 'jumpUp')} side="bottom" delayMs={500}>
               <button
                 type="button"
                 className={`${css.action} ${css.iconAction}`}
@@ -2809,7 +2894,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 <IconChevronUpOutline14 size={14} />
               </button>
             </Tooltip>
-            <Tooltip label={`${t('action.nextDiff')} (Ctrl+↓)`} side="bottom" delayMs={500}>
+            <Tooltip label={withChord(t('action.nextDiff'), 'jumpDown')} side="bottom" delayMs={500}>
               <button
                 type="button"
                 className={`${css.action} ${css.iconAction}`}
@@ -2823,7 +2908,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
             </Tooltip>
           </>
         )}
-        <Tooltip label={t('action.search')} side="bottom" delayMs={500}>
+        <Tooltip label={withChord(t('action.search'), 'openSearch')} side="bottom" delayMs={500}>
           <button
             type="button"
             className={`${css.action} ${css.iconAction}`}
@@ -3102,7 +3187,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 ? '0/0'
                 : `${(searchIndex % searchMatches.length) + 1}/${searchMatches.length}`}
             </span>
-            <Tooltip label={t('action.matchCase')} side="bottom" delayMs={500}>
+            <Tooltip label={withChord(t('action.matchCase'), 'matchCase')} side="bottom" delayMs={500}>
               <button
                 type="button"
                 className={search.caseSensitive ? `${css.searchToggle} ${css.searchToggleOn}` : css.searchToggle}
@@ -3115,7 +3200,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 <SearchOptionIcon kind="case" />
               </button>
             </Tooltip>
-            <Tooltip label={t('action.matchWholeWord')} side="bottom" delayMs={500}>
+            <Tooltip label={withChord(t('action.matchWholeWord'), 'matchWholeWord')} side="bottom" delayMs={500}>
               <button
                 type="button"
                 className={search.wholeWord ? `${css.searchToggle} ${css.searchToggleOn}` : css.searchToggle}
@@ -3128,7 +3213,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 <SearchOptionIcon kind="word" />
               </button>
             </Tooltip>
-            <Tooltip label={`${t('action.prevDiff')} (Shift+F3)`} side="bottom" delayMs={500}>
+            <Tooltip label={withChord(t('action.prevDiff'), 'searchPrev')} side="bottom" delayMs={500}>
               <button
                 type="button"
                 className={`${css.action} ${css.iconAction}`}
@@ -3140,7 +3225,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 <IconChevronUpOutline14 size={14} />
               </button>
             </Tooltip>
-            <Tooltip label={`${t('action.nextDiff')} (F3)`} side="bottom" delayMs={500}>
+            <Tooltip label={withChord(t('action.nextDiff'), 'searchNext')} side="bottom" delayMs={500}>
               <button
                 type="button"
                 className={`${css.action} ${css.iconAction}`}
@@ -3184,7 +3269,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       )}
       <div className={css.statusBar} data-diff-status-bar>
         {selectionReference === undefined ? null : (
-          <Tooltip label={copied ? t('action.copied') : `${t('action.copyHint')} (Ctrl+L)`} side="top" delayMs={300}>
+          <Tooltip label={copied ? t('action.copied') : withChord(t('action.copyHint'), 'copyRef')} side="top" delayMs={300}>
             {/*
              * Deliberately NOT a native <button>/<a>: the "dsh-pocket" mobile
              * bridge hijacks any button/link whose text *looks like a file path*

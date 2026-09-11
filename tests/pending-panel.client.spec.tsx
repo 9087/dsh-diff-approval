@@ -1354,6 +1354,66 @@ describe('PendingPanel', () => {
     expect(localStorage.getItem('diff-approval:search-word')).toBe('1')
   })
 
+  it('toggles the search narrowing from the keyboard, like the editor chords', () => {
+    const file = entry({ id: 'entry-search-keys', oldText: 'foo\nbar\nbaz\n', newText: 'foo\nbar\nqux\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByLabelText('action.search'))
+
+    const input = () => document.querySelector('[data-diff-search-input]') as HTMLInputElement
+    const caseToggle = () => document.querySelector('[data-diff-search-case]') as HTMLButtonElement
+    const wordToggle = () => document.querySelector('[data-diff-search-word]') as HTMLButtonElement
+    const count = () => document.querySelector('[data-diff-search-count]')!.textContent
+    fireEvent.change(input(), { target: { value: 'A' } })
+    expect(count()).toBe('1/2')
+
+    // Alt+C / Alt+W are the chords VS Code's find widget uses; they apply while
+    // the search bar has focus.
+    fireEvent.keyDown(input(), { key: 'c', altKey: true })
+    expect(caseToggle().getAttribute('aria-pressed')).toBe('true')
+    expect(count()).toBe('0/0')
+
+    fireEvent.keyDown(input(), { key: 'c', altKey: true })
+    expect(caseToggle().getAttribute('aria-pressed')).toBe('false')
+
+    fireEvent.keyDown(input(), { key: 'w', altKey: true })
+    expect(wordToggle().getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('leaves the narrowing chords alone unless the search bar has focus', () => {
+    const file = entry({ id: 'entry-search-keys-blur', oldText: 'foo\nbar\n', newText: 'foo\nbaz\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByLabelText('action.search'))
+
+    // The bar is open, but the chord came from somewhere else (the composer, for
+    // one): it must stay free for whoever actually has the focus.
+    fireEvent.keyDown(document.body, { key: 'c', altKey: true })
+    fireEvent.keyDown(document.body, { key: 'w', altKey: true })
+    expect((document.querySelector('[data-diff-search-case]') as HTMLButtonElement).getAttribute('aria-pressed')).toBe('false')
+    expect((document.querySelector('[data-diff-search-word]') as HTMLButtonElement).getAttribute('aria-pressed')).toBe('false')
+    expect(localStorage.getItem('diff-approval:search-case')).toBeNull()
+    expect(localStorage.getItem('diff-approval:search-word')).toBeNull()
+
+    // Anywhere inside the bar counts — including its step buttons, so a mouse
+    // step does not silently disarm the chords.
+    fireEvent.keyDown(document.querySelector('[data-diff-search-next]') as HTMLButtonElement, { key: 'c', altKey: true })
+    expect((document.querySelector('[data-diff-search-case]') as HTMLButtonElement).getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('leaves the narrowing chords alone while the search bar is closed', () => {
+    const file = entry({ id: 'entry-search-keys-closed', oldText: 'foo\nbar\n', newText: 'foo\nbaz\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // No bar open: the chord must not flip a hidden option.
+    fireEvent.keyDown(document.body, { key: 'c', altKey: true })
+    expect(localStorage.getItem('diff-approval:search-case')).toBeNull()
+  })
+
   it('offers the same search narrowing in the split view', () => {
     localStorage.setItem('diff-approval:split-mode', '1')
     const file = entry({ id: 'entry-split-search', oldText: 'foo\nbar\nbaz\n', newText: 'foo\nbar\nqux\n' })
@@ -1369,6 +1429,79 @@ describe('PendingPanel', () => {
     fireEvent.click(document.querySelector('[data-diff-search-case]') as HTMLButtonElement)
     expect(count()).toBe('0/0')
     expect(localStorage.getItem('diff-approval:search-case')).toBe('1')
+
+    // The chord reaches the split bar too (it owns its own state) — but only
+    // from that bar itself.
+    fireEvent.keyDown(document.body, { key: 'c', altKey: true })
+    expect(count()).toBe('0/0')
+    fireEvent.keyDown(document.querySelector('[data-diff-search-input]') as HTMLInputElement, { key: 'c', altKey: true })
+    expect(count()).toBe('1/2')
+    expect(localStorage.getItem('diff-approval:search-case')).toBe('0')
+  })
+
+  it('opens the other view\'s search bar on the stored narrowing state', () => {
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const file = entry({ id: 'entry-search-sync', oldText: 'foo\nbar\nbaz\n', newText: 'foo\nbar\nqux\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByLabelText('action.search'))
+
+    const caseToggle = () => document.querySelector('[data-diff-search-case]') as HTMLButtonElement
+    const count = () => document.querySelector('[data-diff-search-count]')!.textContent
+    fireEvent.change(document.querySelector('[data-diff-search-input]') as HTMLInputElement, { target: { value: 'A' } })
+    expect(count()).toBe('1/2')
+    fireEvent.click(caseToggle())
+    expect(caseToggle().getAttribute('aria-pressed')).toBe('true')
+
+    // Back to the unified view, whose bar seeded its state before the split
+    // toggle: it has to re-read the stored preference when it opens.
+    fireEvent.click(document.querySelector('[data-diff-search-close]') as HTMLElement)
+    fireEvent.click(screen.getByLabelText('action.viewUnified'))
+    fireEvent.click(screen.getByLabelText('action.search'))
+    expect(caseToggle().getAttribute('aria-pressed')).toBe('true')
+    fireEvent.change(document.querySelector('[data-diff-search-input]') as HTMLInputElement, { target: { value: 'A' } })
+    expect(count()).toBe('0/0')
+    // The pref survives the reopen, not just the view switch.
+    fireEvent.click(document.querySelector('[data-diff-search-close]') as HTMLElement)
+    fireEvent.click(screen.getByLabelText('action.search'))
+    expect(caseToggle().getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('names the configured chords in the tooltips', () => {
+    const file = entry({ id: 'entry-search-hint', oldText: 'foo\nbar\nbaz\n', newText: 'foo\nbar\nqux\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByLabelText('action.search'))
+    // A query enables the step buttons, which are disabled (and so unfocusable)
+    // on an empty search.
+    fireEvent.change(document.querySelector('[data-diff-search-input]') as HTMLInputElement, { target: { value: 'foo' } })
+
+    // An icon-only control is read by focusing it; the chord is appended from the
+    // binding the user has (Alt+C / Alt+W are VS Code's find-widget chords).
+    const hintOf = (selector: string): string => {
+      act(() => { (document.querySelector(selector) as HTMLElement).focus() })
+      return screen.getByRole('tooltip').textContent ?? ''
+    }
+    expect(hintOf('[data-diff-search-case]')).toBe('action.matchCase (Alt+C)')
+    expect(hintOf('[data-diff-search-word]')).toBe('action.matchWholeWord (Alt+W)')
+    expect(hintOf('[data-diff-search-next]')).toBe('action.nextDiff (F3)')
+    expect(hintOf('[data-diff-search-toggle]')).toBe('action.search (Ctrl+F)')
+    // Arrow chords render as arrows, not as the stored `Ctrl+ArrowUp`.
+    expect(hintOf('[data-diff-prev]')).toBe('action.prevDiff (Ctrl+↑)')
+  })
+
+  it('follows a rebound chord in the tooltip', () => {
+    localStorage.setItem('diff-approval:key:matchCase', 'Ctrl+Shift+K')
+    const file = entry({ id: 'entry-search-hint-rebound', oldText: 'foo\nbar\n', newText: 'foo\nbaz\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByLabelText('action.search'))
+
+    act(() => { (document.querySelector('[data-diff-search-case]') as HTMLElement).focus() })
+    expect(screen.getByRole('tooltip').textContent).toBe('action.matchCase (Ctrl+Shift+K)')
   })
 
   it('starts the first search from the current scroll position, wrapping to the top', () => {

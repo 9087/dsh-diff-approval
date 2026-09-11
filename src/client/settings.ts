@@ -309,6 +309,8 @@ export const DEFAULT_KEYBINDINGS: Record<string, string> = {
   openSearch: 'Ctrl+F',
   searchNext: 'F3',
   searchPrev: 'Shift+F3',
+  matchCase: 'Alt+C',
+  matchWholeWord: 'Alt+W',
   undo: 'Ctrl+Z',
   redo: 'Ctrl+Shift+Z',
   cycleNext: 'Ctrl+Tab',
