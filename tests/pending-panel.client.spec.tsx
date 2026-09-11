@@ -3087,6 +3087,10 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByText('a.txt'))
     expect(document.querySelector('[data-diff-md-preview-body]')).toBeNull()
     expect(document.querySelector('[data-diff-body]')).not.toBeNull()
+    // The preference is stored, but no preview is showing: the source view keeps
+    // its own controls (language and wrap are hidden only by an ACTIVE preview).
+    expect(document.querySelector('[data-diff-lang]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-wrap]')).not.toBeNull()
   })
 
   it('keeps/reverts one change block from the Markdown preview', async () => {

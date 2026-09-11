@@ -1868,6 +1868,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // is single-column (merged, unified-like) or double-column (before | after).
   // The default comes from the persisted setting (settable in DSH Settings).
   const [mdPreview, setMdPreview] = useState(() => mdPreviewEnabled())
+  // The preview replaces the code view only for a Markdown file while the
+  // preference is on. The stored preference alone (a non-Markdown file, or a
+  // manual language override) must never hide the source view's own controls —
+  // so everything below that asks "is the preview showing?" asks this, not
+  // `mdPreview`.
+  const previewActive = mdPreview && lang === 'markdown'
   // The preview body element, for the post-render local-image resolution pass.
   const mdPreviewBodyRef = useRef<HTMLDivElement>(null)
   // The single-column preview's diff-ruler markers, measured from the rendered
@@ -1941,12 +1947,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // After inlining, bump the tick so the ruler re-measures the images' true
   // heights (a data URI gives the <img> a real size).
   useEffect(() => {
-    if (!mdPreview) return
+    if (!previewActive) return
     const body = mdPreviewBodyRef.current
     if (body === null) return
     void resolvePreviewImages(body, file.path, workspacePath, (path) => onPreviewImage(file.sessionId, path))
       .then(() => setMdImageTick(tick => tick + 1))
-  }, [mdPreview, splitView, file.path, file.sessionId, workspacePath, onPreviewImage])
+  }, [previewActive, splitView, file.path, file.sessionId, workspacePath, onPreviewImage])
 
   // Overview-ruler markers: one per maximal run of same-kind changed rows,
   // positioned as a fraction of the whole file so the scrollbar strip mirrors
@@ -1987,12 +1993,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // so the ruler still appears while keeping height-aware positions in a
   // real browser.
   useLayoutEffect(() => {
-    if (!mdPreview || splitView) return
+    if (!previewActive || splitView) return
     const body = mdPreviewBodyRef.current
     if (body === null) return
     const measured = markdownPreviewMarkers(body)
     setMdRulerMarkers(measured.length > 0 ? measured : rulerMarkers)
-  }, [mdPreview, splitView, file.oldText, file.newText, mdImageTick, rulerMarkers])
+  }, [previewActive, splitView, file.oldText, file.newText, mdImageTick, rulerMarkers])
 
   // Syntax highlight arrives a tick after selection so clicking a file never
   // blocks the diff paint on tokenization; the plain-text diff shows first.
@@ -2485,10 +2491,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   }, [model])
 
   // Measure the scroller's viewport once it mounts and on resize, so the
-  // render window tracks the visible area. `splitView` and `mdPreview` are deps
-  // so toggling off the split view or the Markdown preview re-measures the fresh
-  // body (otherwise the stale viewportHeight would leave the window wrong until
-  // a scroll).
+  // render window tracks the visible area. `splitView` and `previewActive` are
+  // deps so toggling off the split view or the Markdown preview re-measures the
+  // fresh body (otherwise the stale viewportHeight would leave the window wrong
+  // until a scroll).
   useEffect(() => {
     const body = bodyRef.current
     if (body === null) return
@@ -2497,7 +2503,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
     observer?.observe(body)
     return () => { observer?.disconnect() }
-  }, [file.id, splitView, mdPreview])
+  }, [file.id, splitView, previewActive])
 
   // Measure the code scroll box's width so wrapped line heights can be computed.
   // Re-measure immediately on resize so a drag re-wraps live. ResizeObserver
@@ -2515,7 +2521,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
     observer?.observe(body)
     return () => { observer?.disconnect() }
-  }, [file.id, langWrap, mdPreview])
+  }, [file.id, langWrap, previewActive])
 
   // Scroll the focused change block into view after focus, content changes, or
   // a jump. The block's top edge lands two rows below the viewport top so a
@@ -2548,7 +2554,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     // recenters the focused block.
     // NOTE: `model`/`rowCount` are deliberately NOT deps — a content refresh
     // would otherwise re-center the view and lose the user's scroll position.
-  }, [scrollTick, rowOffsets === null, mdPreview])
+  }, [scrollTick, rowOffsets === null, previewActive])
 
   // At the wrap boundary (last block + down, first block + up) a guarded press
   // (keyboard or toolbar) only toasts; the next press in the same direction
@@ -2946,7 +2952,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
-  }, [searchOpen, splitView, mdPreview, lang])
+  }, [searchOpen, splitView, previewActive])
 
   // Ctrl+Up/Down jumps between change blocks. The detail pane is mounted only
   // while a file is open, so this intercepts globally while the diff is shown
@@ -3150,7 +3156,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       </div>
       {failedMessage !== undefined && <p className={css.actionError} data-diff-action-error>{failedMessage}</p>}
       {file.missing && <p className={css.missingHint}>{t('panel.missingHint')}</p>}
-      {mdPreview && lang === 'markdown' ? (
+      {previewActive ? (
         <MarkdownPreviewBoundary fallback={<div className={css.mdPreviewFallback} data-diff-md-preview-fallback>{t('panel.mdPreviewFailed')}</div>}>
           <div className={css.mdPreviewWrap} onMouseLeave={() => { setHoveredBlock(undefined) }}>
             <div
@@ -3573,7 +3579,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
           </Tooltip>
         )}
         <span className={css.flexSpacer} />
-        {!mdPreview && (
+        {!previewActive && (
           <>
             <Menu
               open={langMenuOpen}
