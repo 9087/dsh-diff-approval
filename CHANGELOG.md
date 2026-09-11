@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.19.3](https://github.com/9087/dsh-diff-approval/compare/v0.19.2...v0.19.3) (2026-09-11)
+
+### Features
+
+* ask whether to remove a file after a whole-file keep/revert ([92cd1c9](https://github.com/9087/dsh-diff-approval/commit/92cd1c98104791a9e4b9a85a564d95e737007214))
+* narrow the in-file search by case and whole word ([9ddc711](https://github.com/9087/dsh-diff-approval/commit/9ddc711c3a8c8baa228d2c9bfbb6f1526f2c1e1a))
+* refresh one file's diff from the working tree ([9f267b6](https://github.com/9087/dsh-diff-approval/commit/9f267b60e792c604426ec42ec6cb2fb448374929))
+* scope the search chords to the query box and unify Esc ([696f81a](https://github.com/9087/dsh-diff-approval/commit/696f81a4106a6dfcb00c078855c1a59ea0d5333b))
+* scope the search narrowing chords to the bar and hint the chords ([9ba1ec2](https://github.com/9087/dsh-diff-approval/commit/9ba1ec2a3166c737c16954319ea8d0540ea5a229))
+
 ## [0.19.2](https://github.com/9087/dsh-diff-approval/compare/v0.19.1...v0.19.2) (2026-09-10)
 
 ### Bug Fixes
