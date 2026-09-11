@@ -1308,6 +1308,69 @@ describe('PendingPanel', () => {
     expect(document.querySelectorAll('[data-diff-search]')).toHaveLength(0)
   })
 
+  it('narrows the search to an exact case without retyping', () => {
+    const file = entry({ id: 'entry-search-case', oldText: 'foo\nbar\nbaz\n', newText: 'foo\nbar\nqux\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByLabelText('action.search'))
+
+    const caseToggle = () => document.querySelector('[data-diff-search-case]') as HTMLButtonElement
+    const count = () => document.querySelector('[data-diff-search-count]')!.textContent
+    fireEvent.change(document.querySelector('[data-diff-search-input]') as HTMLInputElement, { target: { value: 'A' } })
+
+    // Case-insensitive by default: the 'a' in 'bar' and 'baz' both match.
+    expect(caseToggle().getAttribute('aria-pressed')).toBe('false')
+    expect(count()).toBe('1/2')
+
+    // Turning the toggle on re-runs the same query without retyping it.
+    fireEvent.click(caseToggle())
+    expect(caseToggle().getAttribute('aria-pressed')).toBe('true')
+    expect(count()).toBe('0/0')
+    expect(localStorage.getItem('diff-approval:search-case')).toBe('1')
+
+    fireEvent.click(caseToggle())
+    expect(count()).toBe('1/2')
+  })
+
+  it('narrows the search to whole words without retyping', () => {
+    const file = entry({ id: 'entry-search-word', oldText: 'bar\nbartender\nbaz\n', newText: 'bar\nbartender\nqux\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByLabelText('action.search'))
+
+    const wordToggle = () => document.querySelector('[data-diff-search-word]') as HTMLButtonElement
+    const count = () => document.querySelector('[data-diff-search-count]')!.textContent
+    fireEvent.change(document.querySelector('[data-diff-search-input]') as HTMLInputElement, { target: { value: 'bar' } })
+
+    // 'bar' and the 'bar' inside 'bartender' both match as substrings.
+    expect(count()).toBe('1/2')
+
+    fireEvent.click(wordToggle())
+    expect(wordToggle().getAttribute('aria-pressed')).toBe('true')
+    // Only the standalone word survives.
+    expect(count()).toBe('1/1')
+    expect(localStorage.getItem('diff-approval:search-word')).toBe('1')
+  })
+
+  it('offers the same search narrowing in the split view', () => {
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const file = entry({ id: 'entry-split-search', oldText: 'foo\nbar\nbaz\n', newText: 'foo\nbar\nqux\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByLabelText('action.search'))
+
+    const count = () => document.querySelector('[data-diff-search-count]')!.textContent
+    fireEvent.change(document.querySelector('[data-diff-search-input]') as HTMLInputElement, { target: { value: 'A' } })
+    // The split bar carries its own toggles over its own pair matching.
+    expect(count()).toBe('1/2')
+    fireEvent.click(document.querySelector('[data-diff-search-case]') as HTMLButtonElement)
+    expect(count()).toBe('0/0')
+    expect(localStorage.getItem('diff-approval:search-case')).toBe('1')
+  })
+
   it('starts the first search from the current scroll position, wrapping to the top', () => {
     const file = entry({ id: 'entry-search-scroll', oldText: 'foo\nbar\nbaz\n', newText: 'foo\nbar\nqux\n' })
     const props = panelProps({ read: true, files: [file], busy: new Set() })

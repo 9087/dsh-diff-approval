@@ -132,4 +132,16 @@ describe('searchPairs', () => {
     expect(searchPairs(pairs, '')).toEqual([])
     expect(searchPairs(pairs, 'zzzz')).toEqual([])
   })
+
+  it('narrows to an exact case when asked', () => {
+    // Pair 1's right side holds "HELLO there"; pair 0's left holds "hello world".
+    expect(searchPairs(pairs, 'hello', { caseSensitive: true, wholeWord: false })).toEqual([0])
+    expect(searchPairs(pairs, 'HELLO', { caseSensitive: true, wholeWord: false })).toEqual([1])
+  })
+
+  it('narrows to whole words when asked', () => {
+    // "there" is a word; "e" is not, so the single-letter query matches nothing.
+    expect(searchPairs(pairs, 'there', { caseSensitive: false, wholeWord: true })).toEqual([1])
+    expect(searchPairs(pairs, 'e', { caseSensitive: false, wholeWord: true })).toEqual([])
+  })
 })

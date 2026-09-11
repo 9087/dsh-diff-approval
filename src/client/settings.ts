@@ -3,6 +3,8 @@
 const PASTE_ON_COPY_KEY = 'diff-approval:paste-on-copy'
 const IMPORT_UNTRACKED_KEY = 'diff-approval:import-untracked'
 const CONFIRM_FILE_REMOVE_KEY = 'diff-approval:confirm-file-remove'
+const SEARCH_CASE_KEY = 'diff-approval:search-case'
+const SEARCH_WORD_KEY = 'diff-approval:search-word'
 const TAB_WIDTH_KEY = 'diff-approval:tab-size'
 const SPLIT_MODE_KEY = 'diff-approval:split-mode'
 const MD_PREVIEW_KEY = 'diff-approval:md-preview'
@@ -79,6 +81,34 @@ export function confirmFileRemoveEnabled(): boolean {
 /** Persist the whole-file remove-prompt preference. */
 export function setConfirmFileRemoveEnabled(value: boolean): void {
   localStorage.setItem(CONFIRM_FILE_REMOVE_KEY, value ? '1' : '0')
+}
+
+/**
+ * Whether the in-file search matches letter case exactly. Defaults to off, so a
+ * plain query keeps matching either case; only an explicit `'1'` turns it on.
+ * @returns whether the search is case-sensitive.
+ */
+export function searchCaseSensitive(): boolean {
+  return localStorage.getItem(SEARCH_CASE_KEY) === '1'
+}
+
+/** Persist the search case-sensitivity preference. */
+export function setSearchCaseSensitive(value: boolean): void {
+  localStorage.setItem(SEARCH_CASE_KEY, value ? '1' : '0')
+}
+
+/**
+ * Whether the in-file search only matches whole words. Defaults to off; only an
+ * explicit `'1'` enables it.
+ * @returns whether the search matches whole words only.
+ */
+export function searchWholeWord(): boolean {
+  return localStorage.getItem(SEARCH_WORD_KEY) === '1'
+}
+
+/** Persist the search whole-word preference. */
+export function setSearchWholeWord(value: boolean): void {
+  localStorage.setItem(SEARCH_WORD_KEY, value ? '1' : '0')
 }
 
 /**

@@ -10,6 +10,8 @@
 
 import type { WholeFileDiffRow } from './whole-file-diff.ts'
 import { alignChangedBlock } from './whole-file-diff.ts'
+import { DEFAULT_SEARCH_OPTIONS, matchRangesOf } from './search.ts'
+import type { SearchOptions } from './search.ts'
 
 /** One side of a split pair: text plus its 1-based line number (absent on a pure add). */
 export interface SplitSide {
@@ -107,23 +109,28 @@ export function computeSideBySideDiff(
 }
 
 /**
- * Pair indices whose left or right text contains the query (case-insensitive).
- * A pair counts once however many times the query appears, so split search
- * highlights the whole pair on both columns and a single "current" pair is
- * stepped through — not each individual left/right occurrence.
+ * Pair indices whose left or right text matches the query. A pair counts once
+ * however many times the query appears, so split search highlights the whole pair
+ * on both columns and a single "current" pair is stepped through — not each
+ * individual left/right occurrence.
  * @param pairs - the split pairs.
  * @param query - the query text; an empty query matches nothing.
+ * @param options - case and whole-word narrowing.
  * @returns matching pair indices, in file order.
  */
-export function searchPairs(pairs: readonly SplitPair[], query: string): number[] {
+export function searchPairs(
+  pairs: readonly SplitPair[],
+  query: string,
+  options: SearchOptions = DEFAULT_SEARCH_OPTIONS,
+): number[] {
   if (query === '') return []
-  const lower = query.toLowerCase()
   const matches: number[] = []
   for (let index = 0; index < pairs.length; index++) {
     const p = pairs[index]
     if (p === undefined) continue
-    if (p.left !== undefined && p.left.text.toLowerCase().includes(lower)) matches.push(index)
-    else if (p.right !== undefined && p.right.text.toLowerCase().includes(lower)) matches.push(index)
+    // The same matcher the rows highlight with, so the tally cannot disagree.
+    if (p.left !== undefined && matchRangesOf(p.left.text, query, options).length > 0) matches.push(index)
+    else if (p.right !== undefined && matchRangesOf(p.right.text, query, options).length > 0) matches.push(index)
   }
   return matches
 }

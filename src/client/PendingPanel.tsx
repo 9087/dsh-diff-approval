@@ -22,7 +22,9 @@ import type { HighlightSpan } from './highlight.ts'
 import { langFromPath } from './lang.ts'
 import { referenceLabelOf } from './reference.ts'
 import { OPEN_FILE_EVENT } from './produced-diff.ts'
-import { confirmFileRemoveEnabled, includeUntrackedEnabled, keybindingOf, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setMdPreviewEnabled, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
+import { confirmFileRemoveEnabled, includeUntrackedEnabled, keybindingOf, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setMdPreviewEnabled, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
+import { matchRangesOf } from './search.ts'
+import type { SearchOptions } from './search.ts'
 import css from './PendingPanel.module.css'
 
 /**
@@ -415,6 +417,28 @@ interface PendingFileRowProps {
   onSelect: (id: string) => void
 }
 
+/**
+ * Search narrowing glyphs, taken from VS Code's Codicons so the two find-widget
+ * toggles read exactly as they do in that editor: `case-sensitive` (an upper- and
+ * lower-case letter pair) and `whole-word` (the same letter pair over a bar that
+ * marks the word boundary). Inline SVG because the icon library ships neither.
+ * @param props.kind - which glyph to draw.
+ * @returns the 16px-grid glyph.
+ */
+function SearchOptionIcon({ kind }: { kind: 'case' | 'word' }) {
+  const upperA = 'M4.02602 3.34176C4.16218 2.93404 4.83818 2.93398 4.97426 3.34176L6.97426 9.34274C6.97526 9.34674 6.97817 9.35544 6.97817 9.35544L7.97426 12.3427C8.06126 12.6047 7.91984 12.8875 7.65786 12.9756C7.60486 12.9926 7.55165 13.0009 7.49965 13.0009C7.29082 13.0008 7.09602 12.868 7.02602 12.6591L6.14028 10.0009H2.86L1.97426 12.6591C1.88728 12.919 1.60634 13.0634 1.34243 12.9746C1.08043 12.8866 0.93902 12.6038 1.02602 12.3418L2.02211 9.35544C2.02311 9.35144 2.02602 9.34274 2.02602 9.34274L4.02602 3.34176ZM3.19399 8.99997H5.80629L4.49965 5.08102L3.19399 8.99997Z'
+  const lowerA = 'M11.8581 6.66794C13.165 6.73296 13.9427 7.48427 13.9967 8.69626L13.9997 8.83297V12.5078C13.9957 12.7568 13.809 12.9621 13.568 12.9951L13.4997 13C13.2469 12.9998 13.0376 12.8121 13.0045 12.5683L12.9997 12.5V12.4297C12.3407 12.8066 11.7316 13 11.1666 13C9.94081 12.9998 8.99965 12.1369 8.99965 10.833C8.99967 9.68299 9.79211 8.82889 11.1061 8.66989C11.7279 8.59493 12.3589 8.64164 12.9987 8.80954C12.9915 8.07194 12.6279 7.70704 11.8082 7.66598C11.1672 7.63398 10.7158 7.72415 10.4518 7.90915C10.2258 8.06799 9.91347 8.01301 9.75551 7.78708C9.59671 7.56115 9.65178 7.24878 9.87758 7.09079C10.3165 6.78283 10.9138 6.64715 11.6666 6.6611L11.8581 6.66794ZM12.7965 9.8154C12.2587 9.66749 11.7361 9.62551 11.2262 9.68747C10.4042 9.78747 9.99868 10.2244 9.99868 10.8574C9.99884 11.5881 10.474 12.0242 11.1657 12.0244C11.6196 12.0244 12.1777 11.8137 12.8336 11.3818L12.9987 11.2695V9.87594L12.7965 9.8154Z'
+  const wordA = 'M4.8584 5.6709C6.16516 5.73603 6.94308 6.48734 6.99707 7.69922L7 7.83594V11.5107C6.996 11.7596 6.80919 11.9649 6.56836 11.998L6.5 12.0029C6.24709 12.0029 6.038 11.8152 6.00488 11.5713L6 11.5029V11.4326C5.341 11.8096 4.73199 12.0029 4.16699 12.0029C2.941 12.0029 2 11.1399 2 9.83594C2.00003 8.68597 2.79247 7.83185 4.10645 7.67285C4.7283 7.59793 5.35918 7.64552 5.99902 7.81348C5.99202 7.07548 5.62762 6.70995 4.80762 6.66895C4.16686 6.637 3.7161 6.72717 3.45215 6.91211C3.22615 7.07111 2.91386 7.01604 2.75586 6.79004C2.5969 6.56404 2.65194 6.25174 2.87793 6.09375C3.31692 5.78579 3.91404 5.65006 4.66699 5.66406L4.8584 5.6709ZM5.79688 8.81836C5.25888 8.67037 4.73558 8.62843 4.22559 8.69043C3.40389 8.79054 2.99902 9.22747 2.99902 9.86035C2.99917 10.5911 3.47413 11.0273 4.16602 11.0273C4.62001 11.0273 5.17799 10.8168 5.83398 10.3848L5.99902 10.2725V8.87891L5.79688 8.81836Z'
+  const wordB = 'M9.55078 2.00586C9.78578 2.02986 9.97307 2.21715 9.99707 2.45215C10 2.46907 10 2.48601 10 2.50293V6.60254C10.418 6.22566 10.9371 6.00293 11.5 6.00293C12.881 6.00293 14 7.34596 14 9.00293C14 10.6599 12.881 12.0029 11.5 12.0029C10.9371 12.0029 10.418 11.7802 10 11.4033V11.5029C10 11.7619 9.80278 11.974 9.55078 12C9.53385 12.003 9.51693 12.0029 9.5 12.0029C9.224 12.0029 9 11.7789 9 11.5029V2.50293C9 2.486 9.00095 2.46907 9.00293 2.45215C9.02793 2.20015 9.241 2.00293 9.5 2.00293C9.51692 2.00293 9.53386 2.00388 9.55078 2.00586ZM11.4355 7.00391C11.0307 7.03208 10.5769 7.31545 10.29 7.82227C10.1232 8.12611 10.018 8.49479 10.002 8.89453C9.99995 8.92952 10 8.96597 10 9.00195C10 9.03795 10.001 9.07438 10.002 9.10938C10.018 9.50814 10.1222 9.87582 10.2891 10.1797C10.576 10.6875 11.0307 10.9728 11.4355 11C11.4565 11.002 11.478 11.002 11.5 11.002C11.522 11.002 11.5435 11.001 11.5645 11C11.9693 10.9728 12.424 10.6875 12.7109 10.1797C12.8778 9.87582 12.982 9.50814 12.998 9.10938C13 9.07438 13 9.03795 13 9.00195C13 8.96597 12.999 8.92952 12.998 8.89453C12.982 8.49479 12.8768 8.12611 12.71 7.82227C12.4231 7.31545 11.9693 7.03109 11.5645 7.00391C11.5435 7.00191 11.522 7.00195 11.5 7.00195C11.478 7.00195 11.4565 7.00291 11.4355 7.00391Z'
+  const wordBar = 'M15.5 12.5C15.776 12.5 16 12.724 16 13V13.5C16 14.327 15.327 15 14.5 15H1.5C0.673 15 0 14.327 0 13.5V13C0 12.724 0.224 12.5 0.5 12.5C0.776 12.5 1 12.724 1 13V13.5C1 13.775 1.224 14 1.5 14H14.5C14.776 14 15 13.775 15 13.5V13C15 12.724 15.224 12.5 15.5 12.5Z'
+  const d = kind === 'case' ? `${upperA}${lowerA}` : `${wordA}${wordB}${wordBar}`
+  return (
+    <svg width={16} height={16} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path fill="currentColor" fillRule="evenodd" clipRule="evenodd" d={d} />
+    </svg>
+  )
+}
+
 /** The right detail pane for one selected file: actions plus the merged diff. */
 interface PendingDiffProps {
   file: PendingFileDiff
@@ -534,21 +558,6 @@ function renderIntra(
   })
 }
 
-/** Character ranges of each case-insensitive occurrence of `query` in `text`. */
-function matchRangesOf(text: string, query: string): [number, number][] {
-  if (query === '') return []
-  const lower = text.toLowerCase()
-  const q = query.toLowerCase()
-  const out: [number, number][] = []
-  let from = 0
-  for (;;) {
-    const at = lower.indexOf(q, from)
-    if (at === -1) return out
-    out.push([at, at + query.length])
-    from = at + query.length
-  }
-}
-
 /** Render `text[segStart, segEnd)` with every `query` match wrapped in a search
  *  highlight, keeping the syntax highlight and intra-line chips on the non-match
  *  parts. When no match is present it renders exactly as before (syntax / intra /
@@ -557,13 +566,14 @@ function textWithSearch(
   text: string,
   runs: readonly HighlightSpan[] | undefined,
   intra: IntraRun[] | undefined,
+  options: SearchOptions,
   query: string,
   segStart = 0,
   segEnd = text.length,
   current = false,
 ): ReactNode {
   const segText = text.slice(segStart, segEnd)
-  const ranges = matchRangesOf(segText, query)
+  const ranges = matchRangesOf(segText, query, options)
   if (ranges.length === 0) {
     return intra !== undefined && intra.length > 0
       ? renderIntra(runs, intra, segStart, segEnd)
@@ -606,6 +616,37 @@ function textWithSearch(
 }
 
 /**
+ * The in-file search's narrowing toggles, persisted as preferences so the split
+ * and single-column bars agree and the choice survives a reopen. The options
+ * object is memoized so the memoized rows only re-render when a toggle changes.
+ * @returns the options, their current values, and the two toggles.
+ */
+function useSearchOptions(): {
+  options: SearchOptions
+  caseSensitive: boolean
+  wholeWord: boolean
+  toggleCase: () => void
+  toggleWord: () => void
+} {
+  const [caseSensitive, setCase] = useState(searchCaseSensitive)
+  const [wholeWord, setWord] = useState(searchWholeWord)
+  const options = useMemo<SearchOptions>(() => ({ caseSensitive, wholeWord }), [caseSensitive, wholeWord])
+  // Read the persisted value rather than flipping inside a state updater: an
+  // updater must stay pure, and the stored flag is this state's source.
+  const toggleCase = useCallback(() => {
+    const next = !searchCaseSensitive()
+    setSearchCaseSensitive(next)
+    setCase(next)
+  }, [])
+  const toggleWord = useCallback(() => {
+    const next = !searchWholeWord()
+    setSearchWholeWord(next)
+    setWord(next)
+  }, [])
+  return { options, caseSensitive, wholeWord, toggleCase, toggleWord }
+}
+
+/**
  * One rendered diff row, memoized so a poll or an unrelated state change
  * does not re-render rows whose content, highlight, and focus are unchanged.
  * With auto-wrap on, `wrappedLines` carries the row's visual sub-lines and the
@@ -622,24 +663,26 @@ const DiffRow = memo(function DiffRow(props: {
   searchCurrent: boolean
   /** The active search query, used to highlight the matched substrings. */
   searchQuery: string
+  /** How that query is matched (case, whole word). */
+  searchOptions: SearchOptions
   onRowHover: (index: number) => void
   /** Visual sub-lines when auto-wrap is on, else undefined (single line). */
   wrappedLines: string[] | undefined
 }) {
-  const { index, row, runs, focused, searchHit, searchCurrent, searchQuery, onRowHover, wrappedLines } = props
+  const { index, row, runs, focused, searchHit, searchCurrent, searchQuery, searchOptions, onRowHover, wrappedLines } = props
   const lineNumber = row.kind === 'del' ? row.oldLine : row.newLine
   const sideRuns = row.kind === 'del' ? runs?.oldRuns : runs?.newRuns
   const lineRuns = lineNumber === undefined ? undefined : sideRuns?.[lineNumber - 1]
 
   let code: ReactNode
   if (wrappedLines === undefined) {
-    code = textWithSearch(row.text, lineRuns, undefined, searchQuery, 0, row.text.length, searchCurrent)
+    code = textWithSearch(row.text, lineRuns, undefined, searchOptions, searchQuery, 0, row.text.length, searchCurrent)
   } else {
     let offset = 0
     code = wrappedLines.map((line, lineIndex) => {
       const start = offset
       offset += line.length
-      const content = textWithSearch(row.text, lineRuns, undefined, searchQuery, start, offset, searchCurrent)
+      const content = textWithSearch(row.text, lineRuns, undefined, searchOptions, searchQuery, start, offset, searchCurrent)
       return <div key={lineIndex} className={css.subline}>{content}</div>
     })
   }
@@ -767,13 +810,14 @@ function blockResolvesWholeFile(file: PendingFileDiff, block: DiffApprovalBlockR
     && block.newStart <= newMin && block.newEnd >= newMax
 }
 
-/** Row indices whose text contains `query` (case-insensitive); empty for ''. */
-function matchingRows(rows: readonly WholeFileDiffRow[], query: string): number[] {
+/** Row indices whose text matches `query` under the options; empty for ''. Counted
+ *  through the same matcher the highlights use, so the tally can never disagree
+ *  with what is drawn. */
+function matchingRows(rows: readonly WholeFileDiffRow[], query: string, options: SearchOptions): number[] {
   if (query === '') return []
-  const lower = query.toLowerCase()
   const out: number[] = []
   for (let i = 0; i < rows.length; i++) {
-    if (rows[i]!.text.toLowerCase().includes(lower)) out.push(i)
+    if (matchRangesOf(rows[i]!.text, query, options).length > 0) out.push(i)
   }
   return out
 }
@@ -784,18 +828,19 @@ function splitSideContent(
   wrapped: string[] | undefined,
   runs: readonly HighlightSpan[] | undefined,
   intra: IntraRun[] | undefined,
+  options: SearchOptions,
   query: string,
   current: boolean,
 ): ReactNode {
   if (side === undefined) return ''
   if (wrapped === undefined) {
-    return textWithSearch(side.text, runs, intra, query, 0, side.text.length, current)
+    return textWithSearch(side.text, runs, intra, options, query, 0, side.text.length, current)
   }
   let offset = 0
   return wrapped.map((line, i) => {
     const start = offset
     offset += line.length
-    const content = textWithSearch(side.text, runs, intra, query, start, offset, current)
+    const content = textWithSearch(side.text, runs, intra, options, query, start, offset, current)
     return <div key={i} className={css.subline}>{content}</div>
   })
 }
@@ -809,7 +854,7 @@ function splitSideContent(
  * one side is longer. The gutter and code are top-aligned so sub-lines line up
  * across the divider.
  */
-function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focused, searchHit, searchCurrent, searchQuery, onHover, intra }: {
+function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focused, searchHit, searchCurrent, searchQuery, searchOptions, onHover, intra }: {
   index: number
   side: SplitSide | undefined
   wrapped: string[] | undefined
@@ -822,6 +867,8 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
   searchCurrent: boolean
   /** The active search query, used to highlight the matched substrings. */
   searchQuery: string
+  /** How that query is matched (case, whole word). */
+  searchOptions: SearchOptions
   onHover: () => void
   intra: IntraRun[] | undefined
 }) {
@@ -840,14 +887,14 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
       onMouseEnter={onHover}
     >
       <span className={css.gutter} data-diff-gutter>{side?.line ?? ''}</span>
-      <span className={`${css.code} ${tint}`} data-diff-code data-diff-code-side={isLeft ? 'left' : 'right'}>{splitSideContent(side, wrapped, runs, intra, searchQuery, searchCurrent)}</span>
+      <span className={`${css.code} ${tint}`} data-diff-code data-diff-code-side={isLeft ? 'left' : 'right'}>{splitSideContent(side, wrapped, runs, intra, searchOptions, searchQuery, searchCurrent)}</span>
     </div>
   )
 }
 
 /** Imperative surface the parent uses to drive block navigation from the
  *  shared toolbar/keyboard in split mode (its own `focus` is private here). */
-export interface SplitDiffHandle { jump: (direction: -1 | 1, wrapGuard?: boolean, singleToast?: boolean) => void; openSearch: () => void; searchNext: (direction: -1 | 1) => boolean }
+export interface SplitDiffHandle { jump: (direction: -1 | 1, wrapGuard?: boolean, singleToast?: boolean) => void; openSearch: () => void; toggleSearch: () => void; searchNext: (direction: -1 | 1) => boolean }
 
 /** The two-column (side-by-side) whole-file diff view. */
 export const SplitDiff = forwardRef<SplitDiffHandle, {
@@ -923,6 +970,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   // split keeps its own bar independent of the single-column one.
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+  const search = useSearchOptions()
   const [searchIndex, setSearchIndex] = useState(0)
   const searchInputRef = useRef<HTMLInputElement>(null)
 
@@ -1055,7 +1103,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     col.scrollLeft = strip.scrollLeft
   }, [])
   // Search: pair indices whose left or right text contains the query.
-  const searchMatches = useMemo(() => searchPairs(pairs, searchQuery), [pairs, searchQuery])
+  const searchMatches = useMemo(() => searchPairs(pairs, searchQuery, search.options), [pairs, searchQuery, search.options])
   const searchHitSet = useMemo(() => new Set(searchMatches), [searchMatches])
   const currentSearchPair = searchMatches.length === 0 ? undefined : searchMatches[searchIndex % searchMatches.length]
 
@@ -1064,6 +1112,12 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     setSearchQuery('')
     setSearchIndex(0)
     bodyRef.current?.focus()
+  }
+  /** The shared toolbar's search button: the split view owns its own bar, so the
+   *  button has to toggle this one rather than the single-column state. */
+  const toggleSearch = (): void => {
+    if (searchOpen) closeSearch()
+    else openSearch()
   }
   const openSearch = (): void => {
     // The selection acts as the search's start position (there is no text
@@ -1083,7 +1137,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     const liveText = (live?.toString() ?? '').trim()
     const value = liveText !== '' && !liveText.includes('\n') ? liveText : ''
     setSearchQuery(value)
-    const matches = value === '' ? [] : searchPairs(pairs, value)
+    const matches = value === '' ? [] : searchPairs(pairs, value, search.options)
     let index = 0
     if (matches.length > 0) {
       const inSel =
@@ -1223,7 +1277,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   }
   // Expose the block jump to the parent so the shared toolbar/keyboard drives
   // this split view's own (private) focus in split mode.
-  useImperativeHandle(ref, () => ({ jump, openSearch, searchNext }), [jump, openSearch, searchNext])
+  useImperativeHandle(ref, () => ({ jump, openSearch, toggleSearch, searchNext }), [jump, openSearch, toggleSearch, searchNext])
 
   useLayoutEffect(() => {
     if (pairCount === 0) return
@@ -1326,6 +1380,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
                     searchHit={searchHitSet.has(index)}
                     searchCurrent={index === currentSearchPair}
                     searchQuery={searchQuery}
+                    searchOptions={search.options}
                     onHover={() => onPairHover(index)}
                     intra={sideIndex?.left === undefined ? undefined : model.intra.get(sideIndex.left)}
                   />
@@ -1359,6 +1414,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
                     searchHit={searchHitSet.has(index)}
                     searchCurrent={index === currentSearchPair}
                     searchQuery={searchQuery}
+                    searchOptions={search.options}
                     onHover={() => onPairHover(index)}
                     intra={sideIndex?.right === undefined ? undefined : model.intra.get(sideIndex.right)}
                   />
@@ -1391,7 +1447,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
               setSearchQuery(value)
               if (value !== '') {
                 const body = bodyRef.current
-                const matches = searchPairs(pairs, value)
+                const matches = searchPairs(pairs, value, search.options)
                 // Anchor from the current highlighted pair (the search "cursor").
                 // On the very first input there is no highlight yet, so fall back
                 // to the row at the viewport top.
@@ -1416,6 +1472,32 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
               ? '0/0'
               : `${(searchIndex % searchMatches.length) + 1}/${searchMatches.length}`}
           </span>
+          <Tooltip label={t('action.matchCase')} side="bottom" delayMs={500}>
+            <button
+              type="button"
+              className={search.caseSensitive ? `${css.searchToggle} ${css.searchToggleOn}` : css.searchToggle}
+              data-diff-search-case
+              data-on={search.caseSensitive ? '' : undefined}
+              aria-label={t('action.matchCase')}
+              aria-pressed={search.caseSensitive}
+              onClick={() => { search.toggleCase() }}
+            >
+              <SearchOptionIcon kind="case" />
+            </button>
+          </Tooltip>
+          <Tooltip label={t('action.matchWholeWord')} side="bottom" delayMs={500}>
+            <button
+              type="button"
+              className={search.wholeWord ? `${css.searchToggle} ${css.searchToggleOn}` : css.searchToggle}
+              data-diff-search-word
+              data-on={search.wholeWord ? '' : undefined}
+              aria-label={t('action.matchWholeWord')}
+              aria-pressed={search.wholeWord}
+              onClick={() => { search.toggleWord() }}
+            >
+              <SearchOptionIcon kind="word" />
+            </button>
+          </Tooltip>
           <Tooltip label={`${t('action.prevDiff')} (Shift+F3)`} side="bottom" delayMs={500}>
             <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-prev aria-label={t('action.prevDiff')} disabled={searchMatches.length === 0} onClick={() => { goSearch(-1) }}>
               <IconChevronUpOutline14 size={14} />
@@ -1882,6 +1964,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const [copied, setCopied] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+  const search = useSearchOptions()
   const [searchIndex, setSearchIndex] = useState(0)
   const searchInputRef = useRef<HTMLInputElement>(null)
   // Keys the block-flash overlay; every increment remounts it so the fade-out
@@ -1968,7 +2051,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // In-file search: matching lines over the whole diff (not just the rendered
   // window), so the count and jumps stay correct while the virtual list
   // scrolls. A line counts once however many times the query appears in it.
-  const searchMatches = useMemo(() => matchingRows(model.diff.rows, searchQuery), [model, searchQuery])
+  const searchMatches = useMemo(() => matchingRows(model.diff.rows, searchQuery, search.options), [model, searchQuery, search.options])
   const searchHitSet = useMemo(() => new Set(searchMatches), [searchMatches])
   const currentSearchRow = searchMatches.length === 0 ? undefined : searchMatches[searchIndex % searchMatches.length]
 
@@ -1991,7 +2074,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
    * start (the "no cursor" fallback).
    */
   const startIndexFor = (value: string): number => {
-    const matches = value === '' ? [] : matchingRows(model.diff.rows, value)
+    const matches = value === '' ? [] : matchingRows(model.diff.rows, value, search.options)
     const pos = cursorPosRef.current
     cursorPosRef.current = undefined // consumed after this search
     if (matches.length === 0) return 0
@@ -2043,6 +2126,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const searchOpenRef = useRef(searchOpen)
   searchOpenRef.current = searchOpen
   const toggleSearch = () => {
+    // In split mode the single-column bar is not mounted, so the shared button
+    // must drive the split view's own bar instead of this component's state.
+    if (splitView) {
+      splitDiffRef.current?.toggleSearch()
+      return
+    }
     if (searchOpen) {
       cursorPosRef.current = undefined
       lastRecordedCursorRef.current = undefined
@@ -2246,7 +2335,6 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // mirrored into state to re-render the window; onScroll covers real user
   // scrolling. Layout timing matters: the block-flash overlay reads scrollTop
   // while rendering, so the scroll must settle BEFORE the browser paints —
-  // otherwise the flash shows a frame at the stale offset and then jumps.
   useLayoutEffect(() => {
     if (rowCount === 0) return
     const block = model.blocks[focus]
@@ -2883,6 +2971,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                   searchHit={searchHitSet.has(index)}
                   searchCurrent={index === currentSearchRow}
                   searchQuery={searchQuery}
+                  searchOptions={search.options}
                   onRowHover={onRowHover}
                   wrappedLines={rowWrapped?.[index]}
                 />
@@ -3013,6 +3102,32 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 ? '0/0'
                 : `${(searchIndex % searchMatches.length) + 1}/${searchMatches.length}`}
             </span>
+            <Tooltip label={t('action.matchCase')} side="bottom" delayMs={500}>
+              <button
+                type="button"
+                className={search.caseSensitive ? `${css.searchToggle} ${css.searchToggleOn}` : css.searchToggle}
+                data-diff-search-case
+                data-on={search.caseSensitive ? '' : undefined}
+                aria-label={t('action.matchCase')}
+                aria-pressed={search.caseSensitive}
+                onClick={() => { search.toggleCase() }}
+              >
+                <SearchOptionIcon kind="case" />
+              </button>
+            </Tooltip>
+            <Tooltip label={t('action.matchWholeWord')} side="bottom" delayMs={500}>
+              <button
+                type="button"
+                className={search.wholeWord ? `${css.searchToggle} ${css.searchToggleOn}` : css.searchToggle}
+                data-diff-search-word
+                data-on={search.wholeWord ? '' : undefined}
+                aria-label={t('action.matchWholeWord')}
+                aria-pressed={search.wholeWord}
+                onClick={() => { search.toggleWord() }}
+              >
+                <SearchOptionIcon kind="word" />
+              </button>
+            </Tooltip>
             <Tooltip label={`${t('action.prevDiff')} (Shift+F3)`} side="bottom" delayMs={500}>
               <button
                 type="button"
@@ -3633,7 +3748,6 @@ export function PendingPanel({
 
   // Undo/redo resolves to the affected entry id while it is still pending.
   // The panel then selects that file, or — when it is already the open one —
-  // bumps `undoFlash` so its detail pane re-flashes the undone diff.
   const handleUndo = async (sessionId: SessionId): Promise<void> => {
     const id = await onUndo(sessionId)
     if (id === undefined) return

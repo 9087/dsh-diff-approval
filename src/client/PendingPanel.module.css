@@ -1443,6 +1443,32 @@
   white-space: nowrap;
 }
 
+/* A search narrowing toggle (match case / whole word). Same box as the bar's
+   other icon buttons (`action` + `iconAction`) so the row of controls lines up;
+   lit while active, so the bar shows at a glance how the query is matched. */
+.searchToggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 25px;
+  padding: 4px 6px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.searchToggle:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.searchToggleOn {
+  border-color: var(--dsw-alias-state-business-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-state-business-primary);
+}
+
 /* Per-occurrence search highlight: the exact matched substring (not the whole
    line), with a color that tells the current match from the other hits — the
    current match uses the stronger `.searchMatchCurrent`, the rest `.searchMatch`. */
