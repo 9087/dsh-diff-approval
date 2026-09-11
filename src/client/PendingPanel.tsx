@@ -2057,6 +2057,16 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const previewScrollTopRef = useRef(0)
   const previewHoverFrameRef = useRef<HTMLDivElement>(null)
   const previewSelectionFrameRef = useRef<HTMLDivElement>(null)
+  // The query's occurrences inside the rendered preview, in document order. The
+  // preview has no rows to map matches onto, so these marks ARE its match list
+  // (see the highlight pass). `previewHitCount` mirrors their length in state so
+  // the search bar can count them like the code view counts its rows.
+  const previewSearchHitsRef = useRef<HTMLElement[]>([])
+  const [previewHitCount, setPreviewHitCount] = useState(0)
+  // Set when the query changed and the preview's marks are about to be rebuilt:
+  // the pass then anchors the current match on what the pane is showing, instead
+  // of an index that named a row a moment ago.
+  const previewSearchAnchorRef = useRef(false)
   // The flash box for the last jump, and whether one is owed: `bumpFlash` (the
   // code view's own "flash the focused block" signal) marks it pending and the
   // shared landing path turns it into this box, so both views flash on exactly
@@ -2166,6 +2176,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const searchMatches = useMemo(() => matchingRows(model.diff.rows, searchQuery, search.options), [model, searchQuery, search.options])
   const searchHitSet = useMemo(() => new Set(searchMatches), [searchMatches])
   const currentSearchRow = searchMatches.length === 0 ? undefined : searchMatches[searchIndex % searchMatches.length]
+  // What the search bar counts and steps: the code view's matching rows, or the
+  // occurrences the preview actually rendered (a query can match Markdown text
+  // that the source diff rows show — and vice versa for markup).
+  const searchMatchCount = previewActive ? previewHitCount : searchMatches.length
 
   /**
    * Measure one frame's placement for a set of change blocks in the Markdown
@@ -2373,7 +2387,125 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     applyPreviewFrames()
   }
 
+  /**
+   * Bring one preview search occurrence into view. The code view's search rule is
+   * reused: a hit that is already fully visible is left alone (a search must not
+   * yank the pane off what the user can see), one above the viewport lands with
+   * the lead rows above it — the block-jump rule — and one below lands at the
+   * bottom edge. The settled offset is mirrored into the frames, as for a jump.
+   * @param hit - the highlighted occurrence to reveal.
+   */
+  const scrollPreviewHitIntoView = (hit: HTMLElement): void => {
+    const body = mdPreviewBodyRef.current
+    if (body === null) return
+    const bodyRect = body.getBoundingClientRect()
+    const hitTop = hit.getBoundingClientRect().top - bodyRect.top + body.scrollTop
+    const hitBottom = hit.getBoundingClientRect().bottom - bodyRect.top + body.scrollTop
+    const viewTop = body.scrollTop
+    const viewBottom = viewTop + body.clientHeight
+    let target: number | undefined
+    if (hitTop - leadRows * ROW_HEIGHT_PX < viewTop) target = hitTop - leadRows * ROW_HEIGHT_PX
+    else if (hitBottom > viewBottom) target = hitBottom - body.clientHeight
+    if (target === undefined) return
+    const maxTop = Math.max(0, body.scrollHeight - body.clientHeight)
+    const clamped = Math.max(0, Math.min(target, maxTop))
+    if (body.scrollTop !== clamped) body.scrollTop = clamped
+    previewScrollTopRef.current = body.scrollTop
+    applyPreviewOverlays()
+  }
+
+  /**
+   * Highlight the query inside the rendered preview. The preview's HTML is one
+   * sanitized string (a flat blob to React) and re-rendering the Markdown per
+   * keystroke is far too heavy, so the matches are wrapped onto the text nodes
+   * that are already there — same matcher, same colors as the code view. The
+   * wrapped elements become the preview's match list, since rendered Markdown
+   * has no rows to map hits onto. A match Markdown split across elements (say
+   * `**bo**ld` for `bold`) is not found: matching what is rendered cannot see
+   * through the markup, which is the honest trade for highlighting the text the
+   * user is actually looking at.
+   */
+  useLayoutEffect(() => {
+    // Undo the previous pass first: React rewrites the content only when the
+    // rendered HTML string changes, so marks can outlive the query that made
+    // them (a kept block, a toggled option, a closed bar).
+    for (const hit of previewSearchHitsRef.current) {
+      hit.replaceWith(document.createTextNode(hit.textContent ?? ''))
+      hit.parentNode?.normalize()
+    }
+    previewSearchHitsRef.current = []
+    const body = mdPreviewBodyRef.current
+    const content = body?.querySelector('[data-diff-md-preview-content]') ?? null
+    if (!previewActive || content === null || searchQuery === '') {
+      setPreviewHitCount(0)
+      return
+    }
+    const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT)
+    const texts: Text[] = []
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) texts.push(node as Text)
+    const hits: HTMLElement[] = []
+    for (const node of texts) {
+      const parent = node.parentElement
+      // Rendered code keeps its own text nodes; `<script>`/`<style>` bodies are
+      // not user content and must never be searched (or wrapped).
+      if (parent === null || parent.closest('script,style') !== null) continue
+      const ranges = matchRangesOf(node.data, searchQuery, search.options)
+      if (ranges.length === 0) continue
+      const marks: HTMLElement[] = []
+      // Right to left: wrapping an earlier range would invalidate the offsets of
+      // the later ones in the same text node.
+      for (let index = ranges.length - 1; index >= 0; index--) {
+        const [start, end] = ranges[index]!
+        const range = document.createRange()
+        range.setStart(node, start)
+        range.setEnd(node, end)
+        const mark = document.createElement('mark')
+        mark.className = css.searchMatch ?? ''
+        mark.setAttribute('data-diff-search-match', 'hit')
+        range.surroundContents(mark)
+        marks.push(mark)
+      }
+      hits.push(...marks.reverse())
+    }
+    previewSearchHitsRef.current = hits
+    setPreviewHitCount(hits.length)
+    if (previewSearchAnchorRef.current) {
+      previewSearchAnchorRef.current = false
+      // Anchor on what the pane is showing (the code view anchors on its viewport
+      // top): the first occurrence at or below the top edge, else the first one.
+      const bodyTop = body === null ? 0 : body.getBoundingClientRect().top
+      const scrollTop = body?.scrollTop ?? 0
+      const at = hits.findIndex(hit => hit.getBoundingClientRect().top - bodyTop + scrollTop >= scrollTop - 1)
+      setSearchIndex(at === -1 ? 0 : at)
+    }
+  }, [previewActive, searchQuery, search.options, file.oldText, file.newText, splitView])
+
+  // Paint the current occurrence differently from the other hits. The index is
+  // shared with the code view's rows, so it is clamped into this list rather
+  // than reset: retyping the query keeps the position roughly where it was.
+  useEffect(() => {
+    const hits = previewSearchHitsRef.current
+    if (!previewActive || hits.length === 0) return
+    const current = searchIndex % hits.length
+    hits.forEach((hit, index) => {
+      const isCurrent = index === current
+      hit.className = (isCurrent ? css.searchMatchCurrent : css.searchMatch) ?? ''
+      hit.setAttribute('data-diff-search-match', isCurrent ? 'current' : 'hit')
+    })
+  }, [previewActive, previewHitCount, searchIndex])
+
   const goSearch = (direction: -1 | 1) => {
+    if (previewActive) {
+      // The preview's anchoring is viewport-based (done by the highlight pass),
+      // so a recorded row cursor has nothing to say here.
+      cursorPosRef.current = undefined
+      const hits = previewSearchHitsRef.current
+      if (hits.length === 0) return
+      const next = ((searchIndex % hits.length) + direction + hits.length) % hits.length
+      setSearchIndex(next)
+      scrollPreviewHitIntoView(hits[next]!)
+      return
+    }
     if (searchMatches.length === 0) return
     // A just-recorded cursor (a fresh selection made while the bar is open) sets
     // the anchor: land on the selected occurrence first (so "选中这个作为第一个"
@@ -2427,7 +2559,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     // other view's bar may have toggled it since.
     search.sync()
     const live = window.getSelection()
-    const liveRange = splitView ? splitRowRangeOf(live) : rowRangeOf(live)
+    // Three selection geometries: the split view's rows, the code view's rows,
+    // and the preview's covered blocks (which the highlight pass anchors on
+    // instead, so neither row mapper applies — it simply yields nothing here).
+    const liveRange = splitView && !previewActive ? splitRowRangeOf(live) : rowRangeOf(live)
     // Fall back to the last tracked selection: clicking the search button moves
     // focus and can collapse the live selection before this handler runs.
     const pos = liveRange !== undefined ? liveRange : selection
@@ -2437,7 +2572,14 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     const value =
       liveText !== '' && !liveText.includes('\n') ? liveText : selectionTextRef.current
     setSearchQuery(value)
-    setSearchIndex(startIndexFor(value)) // consumes the cursor
+    if (previewActive) {
+      // The preview's occurrences are rebuilt after this render; the pass below
+      // anchors the current one on what the pane is showing.
+      previewSearchAnchorRef.current = true
+      setSearchIndex(0)
+    } else {
+      setSearchIndex(startIndexFor(value)) // consumes the cursor
+    }
     setSearchOpen(true)
     // Focus after the bar mounts (it is conditionally rendered).
     requestAnimationFrame(() => { searchInputRef.current?.focus(); searchInputRef.current?.select() })
@@ -2456,7 +2598,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const toggleSearch = () => {
     // In split mode the single-column bar is not mounted, so the shared button
     // must drive the split view's own bar instead of this component's state.
-    if (splitView) {
+    // The preview's double column is still this component's bar (there is no
+    // split view mounted under it).
+    if (splitView && !previewActive) {
       splitDiffRef.current?.toggleSearch()
       return
     }
@@ -3029,8 +3173,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       if (pathPickerOpen()) return
       event.preventDefault()
       // In split mode the single-column search bar isn't mounted; route to the
-      // split view's own search bar instead.
-      if (splitView) { splitDiffRef.current?.openSearch(); return }
+      // split view's own search bar instead. The preview has no split view (its
+      // double column is another preview mode), so its bar is this one.
+      if (splitView && !previewActive) { splitDiffRef.current?.openSearch(); return }
       openSearchRef.current?.()
     }
     window.addEventListener('keydown', onKeyDown, true)
@@ -3047,18 +3192,18 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       if (matchesShortcut(event, keybindingOf('searchNext'))) direction = 1
       else if (matchesShortcut(event, keybindingOf('searchPrev'))) direction = -1
       if (direction === 0) return
-      if (splitView) {
+      if (splitView && !previewActive) {
         if (splitDiffRef.current?.searchNext(direction)) event.preventDefault()
         return
       }
-      if (searchOpen && searchMatches.length > 0) {
+      if (searchOpen && searchMatchCount > 0) {
         event.preventDefault()
         goSearch(direction)
       }
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
-  }, [searchOpen, searchMatches, splitView])
+  }, [searchOpen, searchMatches, searchMatchCount, splitView, previewActive])
 
   // Alt+C / Alt+W toggle the two search narrowing options — the chords VS Code's
   // find widget uses. Scoped to the query box, like the step chords: only the
@@ -3072,7 +3217,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
         : matchesShortcut(event, keybindingOf('matchWholeWord')) ? 'word'
           : undefined
       if (option === undefined) return
-      if (splitView) {
+      if (splitView && !previewActive) {
         const handle = splitDiffRef.current
         const acted = option === 'case' ? handle?.toggleMatchCase() === true : handle?.toggleMatchWholeWord() === true
         if (acted) event.preventDefault()
@@ -3085,7 +3230,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
-  }, [searchOpen, splitView, search])
+  }, [searchOpen, splitView, previewActive, search])
 
   // Esc closes the open search bar — the innermost thing to dismiss — for a press
   // from inside the panel, wherever the focus sits there (the query box, one of
@@ -3098,10 +3243,11 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       // The add-path dialog is a modal this panel owns: it closes itself on
       // Escape, so the search bar underneath must not claim the press.
       if (pathPickerOpen()) return
-      // The Markdown preview replaces the whole code view (bar included), so an
-      // open bar's state can outlive its element: no bar, no press to claim.
-      if (previewActive) return
-      if (splitView) {
+      // The preview mounts this component's own bar (there is no split view under
+      // it, even in its double-column mode), so the press is the bar's to take.
+      // The split view owns its own bar, which this component's `searchOpen` does
+      // not describe, so it is asked before that state is consulted.
+      if (!previewActive && splitView) {
         // Report whether the bar was actually open, so a closed one leaves the
         // press to the panel's own Esc instead of swallowing it.
         if (splitDiffRef.current?.closeSearch() === true) event.preventDefault()
@@ -3171,6 +3317,106 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // The preview's flash box at the mirrored scroll offset; a scroll re-places it
   // imperatively (see `applyPreviewOverlays`), exactly like the frames.
   const previewFlashNow = previewActive ? previewFlashBox(previewFlash, previewScrollTopRef.current) : undefined
+
+  // The search bar, shared by the code view and the preview: each mounts it in
+  // its own positioned wrapper (the query box, its chords and its state are the
+  // same either way). Only the count differs — the preview counts the
+  // occurrences it rendered, the code view counts matching rows.
+  const searchBar = searchOpen ? (
+    <div className={css.searchBar} data-diff-searchbar>
+      <input
+        ref={searchInputRef}
+        className={css.searchInput}
+        data-diff-search-input
+        value={searchQuery}
+        placeholder={t('panel.searchPlaceholder')}
+        onChange={(event) => {
+          const value = event.target.value
+          setSearchQuery(value)
+          if (previewActive) {
+            // The preview's occurrences are wrapped after this render; that pass
+            // anchors the current one on what the pane is showing.
+            previewSearchAnchorRef.current = true
+            setSearchIndex(0)
+            return
+          }
+          // Anchor from the recorded cursor if one is pending, else the
+          // current highlight, else the viewport top (no cursor).
+          setSearchIndex(startIndexFor(value))
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            goSearch(event.shiftKey ? -1 : 1)
+          }
+        }}
+      />
+      <span className={css.searchCount} data-diff-search-count>
+        {searchMatchCount === 0
+          ? '0/0'
+          : `${(searchIndex % searchMatchCount) + 1}/${searchMatchCount}`}
+      </span>
+      <Tooltip label={withChord(t('action.matchCase'), 'matchCase')} side="bottom" delayMs={500}>
+        <button
+          type="button"
+          className={search.caseSensitive ? `${css.searchToggle} ${css.searchToggleOn}` : css.searchToggle}
+          data-diff-search-case
+          data-on={search.caseSensitive ? '' : undefined}
+          aria-label={t('action.matchCase')}
+          aria-pressed={search.caseSensitive}
+          onClick={() => { andRefocus(() => { search.toggleCase() }) }}
+        >
+          <SearchOptionIcon kind="case" />
+        </button>
+      </Tooltip>
+      <Tooltip label={withChord(t('action.matchWholeWord'), 'matchWholeWord')} side="bottom" delayMs={500}>
+        <button
+          type="button"
+          className={search.wholeWord ? `${css.searchToggle} ${css.searchToggleOn}` : css.searchToggle}
+          data-diff-search-word
+          data-on={search.wholeWord ? '' : undefined}
+          aria-label={t('action.matchWholeWord')}
+          aria-pressed={search.wholeWord}
+          onClick={() => { andRefocus(() => { search.toggleWord() }) }}
+        >
+          <SearchOptionIcon kind="word" />
+        </button>
+      </Tooltip>
+      <Tooltip label={withChord(t('action.prevDiff'), 'searchPrev')} side="bottom" delayMs={500}>
+        <button
+          type="button"
+          className={`${css.action} ${css.iconAction}`}
+          data-diff-search-prev
+          aria-label={t('action.prevDiff')}
+          disabled={searchMatchCount === 0}
+          onClick={() => { andRefocus(() => { goSearch(-1) }) }}
+        >
+          <IconChevronUpOutline14 size={14} />
+        </button>
+      </Tooltip>
+      <Tooltip label={withChord(t('action.nextDiff'), 'searchNext')} side="bottom" delayMs={500}>
+        <button
+          type="button"
+          className={`${css.action} ${css.iconAction}`}
+          data-diff-search-next
+          aria-label={t('action.nextDiff')}
+          disabled={searchMatchCount === 0}
+          onClick={() => { andRefocus(() => { goSearch(1) }) }}
+        >
+          <IconChevronDownOutline14 size={14} />
+        </button>
+      </Tooltip>
+      <button
+        type="button"
+        className={`${css.action} ${css.iconAction}`}
+        data-diff-search-close
+        aria-label={t('action.close')}
+        onClick={closeSearch}
+      >
+        <IconCloseOutline16 size={14} />
+      </button>
+    </div>
+  ) : null
 
   return (
     <div
@@ -3358,6 +3604,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 dangerouslySetInnerHTML={{ __html: renderMarkdownPreview(file.oldText, file.newText, splitView ? 'double' : 'single') }}
               />
             </div>
+            {searchBar}
             {previewFlash !== undefined && previewFlashNow !== undefined && (
               <div
                 ref={previewFlashRef}
@@ -3609,94 +3856,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
             }}
           />
         )}
-        {searchOpen && (
-          <div className={css.searchBar} data-diff-searchbar>
-            <input
-              ref={searchInputRef}
-              className={css.searchInput}
-              data-diff-search-input
-              value={searchQuery}
-              placeholder={t('panel.searchPlaceholder')}
-              onChange={(event) => {
-                const value = event.target.value
-                setSearchQuery(value)
-                // Anchor from the recorded cursor if one is pending, else the
-                // current highlight, else the viewport top (no cursor).
-                setSearchIndex(startIndexFor(value))
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault()
-                  goSearch(event.shiftKey ? -1 : 1)
-                }
-              }}
-            />
-            <span className={css.searchCount} data-diff-search-count>
-              {searchMatches.length === 0
-                ? '0/0'
-                : `${(searchIndex % searchMatches.length) + 1}/${searchMatches.length}`}
-            </span>
-            <Tooltip label={withChord(t('action.matchCase'), 'matchCase')} side="bottom" delayMs={500}>
-              <button
-                type="button"
-                className={search.caseSensitive ? `${css.searchToggle} ${css.searchToggleOn}` : css.searchToggle}
-                data-diff-search-case
-                data-on={search.caseSensitive ? '' : undefined}
-                aria-label={t('action.matchCase')}
-                aria-pressed={search.caseSensitive}
-                onClick={() => { andRefocus(() => { search.toggleCase() }) }}
-              >
-                <SearchOptionIcon kind="case" />
-              </button>
-            </Tooltip>
-            <Tooltip label={withChord(t('action.matchWholeWord'), 'matchWholeWord')} side="bottom" delayMs={500}>
-              <button
-                type="button"
-                className={search.wholeWord ? `${css.searchToggle} ${css.searchToggleOn}` : css.searchToggle}
-                data-diff-search-word
-                data-on={search.wholeWord ? '' : undefined}
-                aria-label={t('action.matchWholeWord')}
-                aria-pressed={search.wholeWord}
-                onClick={() => { andRefocus(() => { search.toggleWord() }) }}
-              >
-                <SearchOptionIcon kind="word" />
-              </button>
-            </Tooltip>
-            <Tooltip label={withChord(t('action.prevDiff'), 'searchPrev')} side="bottom" delayMs={500}>
-              <button
-                type="button"
-                className={`${css.action} ${css.iconAction}`}
-                data-diff-search-prev
-                aria-label={t('action.prevDiff')}
-                disabled={searchMatches.length === 0}
-                onClick={() => { andRefocus(() => { goSearch(-1) }) }}
-              >
-                <IconChevronUpOutline14 size={14} />
-              </button>
-            </Tooltip>
-            <Tooltip label={withChord(t('action.nextDiff'), 'searchNext')} side="bottom" delayMs={500}>
-              <button
-                type="button"
-                className={`${css.action} ${css.iconAction}`}
-                data-diff-search-next
-                aria-label={t('action.nextDiff')}
-                disabled={searchMatches.length === 0}
-                onClick={() => { andRefocus(() => { goSearch(1) }) }}
-              >
-                <IconChevronDownOutline14 size={14} />
-              </button>
-            </Tooltip>
-            <button
-              type="button"
-              className={`${css.action} ${css.iconAction}`}
-              data-diff-search-close
-              aria-label={t('action.close')}
-              onClick={closeSearch}
-            >
-              <IconCloseOutline16 size={14} />
-            </button>
-          </div>
-        )}
+        {searchBar}
         {rulerMarkers.length > 0 && (
           <div
             className={css.overviewRuler}

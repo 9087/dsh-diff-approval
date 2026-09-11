@@ -3656,6 +3656,20 @@ describe('PendingPanel', () => {
     expect(scrolled).toBe(400 - 2 * 22)
     expect(flashBox()).toEqual({ top: 44, height: 60, left: 40, right: 40 })
 
+    // Search works here too, and its chords are this bar's: the split view (which
+    // owns its own bar and chords in the code view) is not mounted under the
+    // preview, so the guarded routes must fall through to the preview's bar.
+    fireEvent.click(screen.getByLabelText('action.search'))
+    const input = document.querySelector('[data-diff-search-input]') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'keep two' } })
+    const hits = [...document.querySelectorAll('[data-diff-search-match]')] as HTMLElement[]
+    expect(hits.length).toBe(2)
+    expect(document.querySelector('[data-diff-search-count]')!.textContent).toBe('1/2')
+    fireEvent.keyDown(input, { key: 'F3' })
+    expect(document.querySelector('[data-diff-search-count]')!.textContent).toBe('2/2')
+    expect(hits[1]!.getAttribute('data-diff-search-match')).toBe('current')
+    fireEvent.keyDown(input, { key: 'c', altKey: true })
+    expect(document.querySelector('[data-diff-search-case]')!.getAttribute('data-on')).toBe('')
   })
 
   it('outlines the full row when a double-column change sits on one side only', () => {
@@ -3711,5 +3725,91 @@ describe('PendingPanel', () => {
     }).toEqual({ top: 44, height: 60, left: 40, right: 40 })
   })
 
+  it('highlights and steps search matches in the rendered preview', () => {
+    const file = entry({
+      id: 'entry-md-search',
+      path: '/repo/README.md',
+      oldText: '# T\nalpha one\nshared tail\n',
+      newText: '# T\nbeta one\nshared tail\n',
+    })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
 
+    // The preview mounts the search bar itself now (it used to be mounted nowhere,
+    // so the toolbar's button did nothing visible in this view).
+    fireEvent.click(screen.getByLabelText('action.search'))
+    expect(document.querySelector('[data-diff-searchbar]')).not.toBeNull()
+
+    fireEvent.change(document.querySelector('[data-diff-search-input]') as HTMLInputElement, {
+      target: { value: 'one' },
+    })
+    const hits = (): HTMLElement[] => [...document.querySelectorAll('[data-diff-search-match]')] as HTMLElement[]
+    // Both sides of the change are rendered, so the query is found twice — and the
+    // count is the preview's own, since rendered Markdown has no rows to count.
+    expect(hits().length).toBe(2)
+    expect(document.querySelector('[data-diff-search-count]')!.textContent).toBe('1/2')
+    expect(hits()[0]!.getAttribute('data-diff-search-match')).toBe('current')
+    expect(hits()[1]!.getAttribute('data-diff-search-match')).toBe('hit')
+
+    // Stepping moves the current occurrence without re-wrapping the query.
+    fireEvent.click(document.querySelector('[data-diff-search-next]') as HTMLElement)
+    expect(document.querySelector('[data-diff-search-count]')!.textContent).toBe('2/2')
+    expect(hits()[1]!.getAttribute('data-diff-search-match')).toBe('current')
+    expect(hits()[0]!.getAttribute('data-diff-search-match')).toBe('hit')
+
+    // Escape closes the preview's bar and leaves the panel standing, exactly as it
+    // does in the code view.
+    fireEvent.keyDown(document.querySelector('[data-diff-md-preview-body]') as HTMLElement, { key: 'Escape' })
+    expect(document.querySelector('[data-diff-searchbar]')).toBeNull()
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+    // Closing clears the query, so its marks go with it.
+    expect(hits().length).toBe(0)
+  })
+
+  it('scrolls the preview to a search match that is out of view', () => {
+    const file = entry({
+      id: 'entry-md-search-scroll',
+      path: '/repo/README.md',
+      oldText: '# T\nalpha one\nshared tail\n',
+      newText: '# T\nbeta one\nshared tail\n',
+    })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+    fireEvent.click(screen.getByLabelText('action.search'))
+    fireEvent.change(document.querySelector('[data-diff-search-input]') as HTMLInputElement, {
+      target: { value: 'one' },
+    })
+    const hits = [...document.querySelectorAll('[data-diff-search-match]')] as HTMLElement[]
+    expect(hits.length).toBe(2)
+
+    // jsdom has no layout: give the pane a scroll range and put both matches below
+    // its viewport, so the step has something real to move.
+    let scrolled = 0
+    const body = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
+    Object.defineProperty(body, 'scrollTop', {
+      configurable: true,
+      get: () => scrolled,
+      set: (value: number) => { scrolled = value },
+    })
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 100 })
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 1000 })
+    const rect = (top: number, bottom: number): DOMRect =>
+      ({ top, bottom, left: 0, right: 400, width: 400, height: bottom - top, x: 0, y: top, toJSON: () => ({}) }) as DOMRect
+    vi.spyOn(body, 'getBoundingClientRect').mockImplementation(() => rect(0, 100))
+    hits.forEach((hit, index) => {
+      vi.spyOn(hit, 'getBoundingClientRect').mockImplementation(() => rect(300 + index * 40, 320 + index * 40))
+    })
+
+    // The second match sits below the fold: it lands at the pane's bottom edge,
+    // which is the code view's rule for a match under the viewport. (A match
+    // already inside the viewport is left where it is, as there too.)
+    fireEvent.click(document.querySelector('[data-diff-search-next]') as HTMLElement)
+    expect(scrolled).toBe(360 - 100)
+  })
 })

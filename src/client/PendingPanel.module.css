@@ -1716,14 +1716,19 @@
 
 /* Per-occurrence search highlight: the exact matched substring (not the whole
    line), with a color that tells the current match from the other hits — the
-   current match uses the stronger `.searchMatchCurrent`, the rest `.searchMatch`. */
+   current match uses the stronger `.searchMatchCurrent`, the rest `.searchMatch`.
+   `color: inherit` matters for the Markdown preview, whose matches are wrapped
+   in `<mark>` elements (the browser's own mark styling would otherwise paint
+   dark text over the highlight, including on the dark themes). */
 .searchMatch {
   background-color: rgba(250, 204, 21, 0.26);
+  color: inherit;
   border-radius: 2px;
 }
 
 .searchMatchCurrent {
   background-color: rgba(250, 204, 21, 0.6);
+  color: inherit;
   border-radius: 2px;
 }
 
