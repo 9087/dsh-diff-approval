@@ -344,6 +344,17 @@ interface PreviewFramePlacement {
   right: number
 }
 
+/** One Markdown-preview flash box's measured placement: the jumped-to block's
+ *  rendered extent in content coordinates (scroll independent), plus its insets
+ *  from the pane's edges — the same shape the code view derives from row
+ *  offsets, measured from the rendered block instead. */
+interface PreviewFlashPlacement {
+  contentTop: number
+  contentBottom: number
+  left: number
+  right: number
+}
+
 /** Full panel props composed by the sidebar footer-action slot. */
 export type PendingPanelProps =
   PropsRuntime<'sidebar.footer.action'> & InjectFace<PendingPanelFace> & PropsLocale<'diff-approval'>
@@ -1995,13 +2006,16 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     return markers
   }, [model])
 
-  // Measure the single-column preview's change blocks into ruler markers once
-  // the preview is shown and after each re-render/image-inline. Falls back to
-  // the source-line `rulerMarkers` when the blocks cannot be laid out (jsdom),
-  // so the ruler still appears while keeping height-aware positions in a
-  // real browser.
+  // Measure the preview's change blocks into ruler markers once the preview is
+  // shown and after each re-render/image-inline. Both preview layouts are
+  // measured: the double column's rows are aligned, so its cells share the same
+  // vertical extent (and a change that renders on both sides contributes both a
+  // del and an add marker, exactly like the single column's two stacked runs).
+  // Falls back to the source-line `rulerMarkers` when the blocks cannot be laid
+  // out (jsdom), so the ruler still appears while keeping height-aware positions
+  // in a real browser.
   useLayoutEffect(() => {
-    if (!previewActive || splitView) return
+    if (!previewActive) return
     const body = mdPreviewBodyRef.current
     if (body === null) return
     const measured = markdownPreviewMarkers(body)
@@ -2043,6 +2057,13 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const previewScrollTopRef = useRef(0)
   const previewHoverFrameRef = useRef<HTMLDivElement>(null)
   const previewSelectionFrameRef = useRef<HTMLDivElement>(null)
+  // The flash box for the last jump, and whether one is owed: `bumpFlash` (the
+  // code view's own "flash the focused block" signal) marks it pending and the
+  // shared landing path turns it into this box, so both views flash on exactly
+  // the same events.
+  const [previewFlash, setPreviewFlash] = useState<PreviewFlashPlacement | undefined>(undefined)
+  const previewFlashRef = useRef<HTMLDivElement>(null)
+  const previewFlashPendingRef = useRef(false)
   // The plain text of the last valid (single-line) diff selection, so opening
   // search auto-fills the query even after clicking the search button collapses
   // the native selection.
@@ -2065,6 +2086,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const bumpFlash = (shake: boolean): void => {
     pinShakeRef.current = shake
     setFlashKey(prev => prev + 1)
+    // The preview draws the flash itself (from the rendered block, not from
+    // rows), so the landing path is told to build one for the block it lands on.
+    previewFlashPendingRef.current = true
   }
 
   // Reset transient viewer state whenever the selected file changes, take
@@ -2112,7 +2136,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // covering one or more complete blocks shows its own keep/revert frame (the
   // combined range below) in place of the single-block hover frame.
   const coveredBlockIndices = useMemo(() => {
-    if (mdPreview && lang === 'markdown') return previewCovered
+    if (previewActive) return previewCovered
     if (selection === undefined || splitView) return []
     const covered: number[] = []
     for (let index = 0; index < model.blocks.length; index++) {
@@ -2194,17 +2218,95 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     element.style.right = `${frame.right}px`
   }
 
+  /**
+   * Measure the flash box for one preview change block: the union of the block's
+   * rendered elements, in content coordinates. The box is the background-diff
+   * area itself — the code view's outline spans its pane the same way — so
+   * vertically it is the tinted block, and horizontally the widest thing that
+   * tint belongs to: its own edge in the single column, and the *aligned row* in
+   * the double column, which spans both columns even when the change exists on
+   * one side only. The code view derives that from row offsets; rendered
+   * Markdown has no rows, so the elements are measured.
+   * @param index - the change block to outline.
+   * @returns the placement, or undefined when the block is not rendered.
+   */
+  const previewFlashFor = (index: number): PreviewFlashPlacement | undefined => {
+    const body = mdPreviewBodyRef.current
+    if (body === null) return undefined
+    const bodyRect = body.getBoundingClientRect()
+    let top = Infinity
+    let bottom = -Infinity
+    let left = Infinity
+    let right = -Infinity
+    for (const element of body.querySelectorAll(`[data-md-block="${index}"]`)) {
+      const rect = element.getBoundingClientRect()
+      top = Math.min(top, rect.top)
+      bottom = Math.max(bottom, rect.bottom)
+      const row = element.closest('.mdDoubleRow')
+      const span = row === null ? rect : row.getBoundingClientRect()
+      left = Math.min(left, span.left)
+      right = Math.max(right, span.right)
+    }
+    if (!Number.isFinite(top) || !Number.isFinite(bottom)) return undefined
+    return {
+      contentTop: top - bodyRect.top + body.scrollTop,
+      contentBottom: bottom - bodyRect.top + body.scrollTop,
+      // Those edges are the inset: a 2px border drawn border-box lands on them.
+      left: Math.max(0, left - bodyRect.left),
+      right: Math.max(0, bodyRect.right - right),
+    }
+  }
+
+  /** One flash's viewport box at a given scroll offset. The block is clamped into
+   *  the pane exactly like the code view clamps its rows, so a block taller than
+   *  the pane outlines the visible part instead of running past the edge. */
+  const previewFlashBox = (flash: PreviewFlashPlacement | undefined, scrollTop: number): { top: number; height: number } | undefined => {
+    if (flash === undefined) return undefined
+    const paneHeight = mdPreviewBodyRef.current?.clientHeight ?? 0
+    const top = Math.max(0, flash.contentTop - scrollTop)
+    const bottom = Math.min(paneHeight > 0 ? paneHeight : Number.POSITIVE_INFINITY, flash.contentBottom - scrollTop)
+    return { top, height: Math.max(0, bottom - top) }
+  }
+
+  /** Write the flash box onto its element right away (the scroll path, so the box
+   *  tracks its block for the second it is visible). */
+  const applyPreviewFlash = (element: HTMLDivElement | null, flash: PreviewFlashPlacement | undefined): void => {
+    if (element === null || flash === undefined) return
+    const box = previewFlashBox(flash, previewScrollTopRef.current)
+    if (box === undefined) return
+    element.style.top = `${box.top}px`
+    element.style.height = `${box.height}px`
+    element.style.left = `${flash.left}px`
+    element.style.right = `${flash.right}px`
+  }
+
+  /** Re-place the two action frames at the mirrored scroll offset. */
+  const applyPreviewFrames = (): void => {
+    applyPreviewFrame(previewHoverFrameRef.current, previewFrame)
+    applyPreviewFrame(previewSelectionFrameRef.current, previewSelectionFrame)
+  }
+
+  /** Re-place every preview overlay: the frames follow the pointer and the
+   *  selection, the flash box the last jump. Only a user scroll uses this — the
+   *  landing path re-measures the flash instead, and writing the previous
+   *  placement there would stomp the element that React then declines to
+   *  rewrite (its style values come out equal, so the write is skipped). */
+  const applyPreviewOverlays = (): void => {
+    applyPreviewFrames()
+    applyPreviewFlash(previewFlashRef.current, previewFlash)
+  }
+
   // Place the preview's hover frame on the hovered block. Re-runs on a content
   // change (a keep/revert rewrites the preview) and after images inline, since
   // both move the block; scrolling is handled imperatively (see `onScroll`).
   useLayoutEffect(() => {
-    if (!(mdPreview && lang === 'markdown')) return
+    if (!previewActive) return
     setPreviewFrame(hoveredBlock === undefined ? undefined : previewFrameFor([hoveredBlock]))
   }, [mdPreview, lang, hoveredBlock, file.oldText, file.newText, splitView, mdImageTick, previewFrameFor])
 
   // Likewise for the selection frame: the last covered block's bottom edge.
   useLayoutEffect(() => {
-    if (!(mdPreview && lang === 'markdown')) return
+    if (!previewActive) return
     setPreviewSelectionFrame(previewFrameFor(previewCovered))
   }, [mdPreview, lang, previewCovered, file.oldText, file.newText, splitView, mdImageTick, previewFrameFor])
 
@@ -2243,11 +2345,32 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     return covered
   }
 
-  /** Bring one preview block into view (the code view's row arithmetic has no
-   *  equivalent here); the frame's prev/next steps use it. */
+  /**
+   * Bring one preview block into view. The code view scrolls arithmetically on
+   * row offsets; rendered Markdown has no rows to count, so the block's own
+   * element is measured instead. Its top edge lands `leadRows` code rows below
+   * the pane's top — the same lead the code view leaves — clamped to the scroll
+   * range, so a jump always lands the block in the same place (a bare
+   * `scrollIntoView({ block: 'nearest' })` left it flush against whichever edge
+   * it came from). The settled offset is mirrored into the frames right away: a
+   * programmatic `scrollTop` fires `scroll` no earlier than the next task, and
+   * the frames must not lag the content.
+   * @param index - the change block to bring into view.
+   */
   const scrollPreviewBlockIntoView = (index: number): void => {
-    const element = mdPreviewBodyRef.current?.querySelector(`[data-md-block="${index}"]`)
-    element?.scrollIntoView?.({ block: 'nearest' })
+    const body = mdPreviewBodyRef.current
+    if (body === null) return
+    const element = body.querySelector(`[data-md-block="${index}"]`)
+    if (element === null) return
+    const elementTop = element.getBoundingClientRect().top - body.getBoundingClientRect().top + body.scrollTop
+    const maxTop = Math.max(0, body.scrollHeight - body.clientHeight)
+    const target = Math.max(0, Math.min(elementTop - leadRows * ROW_HEIGHT_PX, maxTop))
+    if (body.scrollTop !== target) body.scrollTop = target
+    previewScrollTopRef.current = body.scrollTop
+    // Only the frames: the caller re-measures the flash for the block it landed
+    // on, and writing the outgoing one here would stomp the element that React
+    // then declines to rewrite (equal style values -> the write is skipped).
+    applyPreviewFrames()
   }
 
   const goSearch = (direction: -1 | 1) => {
@@ -2544,6 +2667,22 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     if (rowCount === 0) return
     const block = model.blocks[focus]
     if (block === undefined) return
+    // The preview replaces the code body, so there is no scroll box to move and
+    // no rows to compute with: the rendered block element is scrolled instead.
+    // This is the shared landing path of every jump — the toolbar's prev/next,
+    // the Ctrl+Up/Down chords, a re-click on the open file in the list, and the
+    // focus move a keep/revert leaves behind.
+    if (previewActive) {
+      scrollPreviewBlockIntoView(focus)
+      // A jump also flashes the block it landed on — the same outline the code
+      // view draws around its focused block. `bumpFlash` marks the flash pending
+      // and this landing path builds it from the rendered block.
+      if (previewFlashPendingRef.current) {
+        previewFlashPendingRef.current = false
+        setPreviewFlash(previewFlashFor(focus))
+      }
+      return
+    }
     const body = bodyRef.current
     if (body === null) return
     // Leave the configured lead rows above the block's top edge; when the block
@@ -2596,7 +2735,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
         }
       }
     }
-    setFocus(current => {
+    // The next block in `direction`. Backwards is a plain step; forwards skips
+    // the blocks already scrolled out above the viewport, so the walk follows
+    // what the user is looking at rather than a stale pointer. The preview has
+    // no code viewport (`bodyRef` is null), so `top` reads 0 there and this
+    // degrades to a plain forward step over the rendered block order.
+    const targetOf = (current: number): number => {
       if (direction === -1) {
         return (current - 1 + count) % count
       }
@@ -2610,7 +2754,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       }
       // Past the last block — wrap to the first.
       return 0
-    })
+    }
+    const landed = targetOf(focus)
+    setFocus(landed)
     // Bump the centering effect even when the focus is unchanged (a single
     // block), so an out-of-view block is always scrolled back into view, and
     // re-flash the block (its key changes -> the overlay remounts) so the
@@ -2622,10 +2768,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // Block jump the shared toolbar/keyboard/jumpSignal use. In split mode the
   // single-column `jump` below has no body to drive (its `bodyRef` is null), so
   // delegate to the split view's own imperative jump; otherwise use the
-  // single-column one. Kept in a ref so the capture-phase keydown listener
-  // always sees the current closure.
+  // single-column one. The preview's double column is NOT the split view — it is
+  // this component's own rendering, with no split view mounted under it — so it
+  // jumps through `jump` like the single-column preview. Kept in a ref so the
+  // capture-phase keydown listener always sees the current closure.
   const jumpBlock = (direction: -1 | 1, wrapGuard = false, singleToast = wrapGuard): void => {
-    if (splitView) {
+    if (splitView && !previewActive) {
       splitDiffRef.current?.jump(direction, wrapGuard, singleToast)
       return
     }
@@ -2636,7 +2784,8 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
 
   // Step the hovered block's floating actions frame to the adjacent diff block
   // (wrapping). Both the hovered block (the frame follows it) and the focused
-  // block (which recenters and re-flashes) advance together.
+  // block (which recenters and re-flashes) advance together; the shared
+  // centering effect is what scrolls the code view — or the preview — to it.
   const stepBlock = (direction: -1 | 1): void => {
     const count = model.blocks.length
     if (count === 0) return
@@ -2646,7 +2795,6 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     setFocus(target)
     setScrollTick(tick => tick + 1)
     bumpFlash(false)
-    if (mdPreview && lang === 'markdown') scrollPreviewBlockIntoView(target)
   }
 
   // Run one block (or combined multi-block) keep/revert, then advance focus to
@@ -2745,7 +2893,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       // The preview renders Markdown, not diff rows: its selection resolves to
       // the change blocks it fully covers (the same rule as below) rather than a
       // row range, and only the preview owns the selection then.
-      if (mdPreview && lang === 'markdown') {
+      if (previewActive) {
         setPreviewCovered(coveredPreviewBlocks())
         selectionTextRef.current = ''
         return
@@ -3020,6 +3168,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     : Math.min(viewportHeight > 0 ? viewportHeight : Number.POSITIVE_INFINITY, offsetOf(focusedBlock.end + 1) - scrollTop)
   const flashHeight = Math.max(0, flashBottom - flashTop)
 
+  // The preview's flash box at the mirrored scroll offset; a scroll re-places it
+  // imperatively (see `applyPreviewOverlays`), exactly like the frames.
+  const previewFlashNow = previewActive ? previewFlashBox(previewFlash, previewScrollTopRef.current) : undefined
+
   return (
     <div
       className={css.diff}
@@ -3183,8 +3335,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 // preview's markdown re-render is far too heavy to run per scroll
                 // event (that was the visible lag).
                 previewScrollTopRef.current = event.currentTarget.scrollTop
-                applyPreviewFrame(previewHoverFrameRef.current, previewFrame)
-                applyPreviewFrame(previewSelectionFrameRef.current, previewSelectionFrame)
+                applyPreviewOverlays()
               }}
               onMouseOver={(event) => {
                 // The rendered HTML is a flat blob to React: resolve the block from
@@ -3207,6 +3358,20 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 dangerouslySetInnerHTML={{ __html: renderMarkdownPreview(file.oldText, file.newText, splitView ? 'double' : 'single') }}
               />
             </div>
+            {previewFlash !== undefined && previewFlashNow !== undefined && (
+              <div
+                ref={previewFlashRef}
+                key={flashKey}
+                className={pinShakeRef.current ? `${css.blockFlash} ${css.blockFlashShake}` : css.blockFlash}
+                data-diff-block-flash
+                style={{
+                  top: previewFlashNow.top,
+                  height: previewFlashNow.height,
+                  left: previewFlash.left,
+                  right: previewFlash.right,
+                }}
+              />
+            )}
             {previewCovered.length > 0 && selectionRange !== undefined && previewSelectionFrame !== undefined ? (
               <div
                 ref={previewSelectionFrameRef}
@@ -3283,7 +3448,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
                 </button>
               </div>
             ) : null}
-            {!splitView && mdRulerMarkers.length > 0 && (
+            {mdRulerMarkers.length > 0 && (
               <div className={css.overviewRuler} data-diff-approval-ruler aria-hidden="true">
                 {mdRulerMarkers.map((marker, index) => (
                   <div

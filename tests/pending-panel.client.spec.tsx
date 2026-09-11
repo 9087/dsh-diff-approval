@@ -3252,7 +3252,7 @@ describe('PendingPanel', () => {
     // no word-level highlight.
     expect(body.querySelector('.mdWordDel')).toBeNull()
     expect(body.querySelector('.mdWordAdd')).toBeNull()
-    // Single-column preview shows the diff ruler beside the scrollbar.
+    // The preview shows the diff ruler beside the scrollbar (both layouts do).
     expect(document.querySelector('[data-diff-approval-ruler]')).not.toBeNull()
     expect(document.querySelector('[data-diff-ruler-marker]')).not.toBeNull()
     // The language dropdown and word-wrap toggle are source-diff only.
@@ -3270,8 +3270,10 @@ describe('PendingPanel', () => {
     // Word-level highlights survive in each column.
     expect(dbl.querySelectorAll('.mdDoubleCol .mdWordDel').length).toBeGreaterThan(0)
     expect(dbl.querySelectorAll('.mdDoubleCol .mdWordAdd').length).toBeGreaterThan(0)
-    // The ruler is single-column only.
-    expect(document.querySelector('[data-diff-approval-ruler]')).toBeNull()
+    // The ruler is measured in both preview layouts: the double column's rows are
+    // aligned, so their cells share the vertical extent a marker is placed by.
+    expect(document.querySelector('[data-diff-approval-ruler]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-ruler-marker]')).not.toBeNull()
 
     // Toggle back to the source diff.
     fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLButtonElement)
@@ -3493,4 +3495,221 @@ describe('PendingPanel', () => {
     fireEvent.mouseOver(block)
     await waitFor(() => { expect(frame()?.style.top).toBe('260px') })
   })
+
+  it('jumps between preview blocks from the toolbar, the chord and the file list', () => {
+    // Two change blocks separated by context, so block indices are meaningful.
+    const file = entry({
+      id: 'entry-md-jump',
+      path: '/repo/README.md',
+      oldText: '# T\nold one\nsame\nold two\n',
+      newText: '# T\nnew one\nsame\nnew two\n',
+    })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    // Opening the first row selects it AND, because the panel had it selected
+    // already, counts as a re-click: the focus starts on the second block.
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+
+    // jsdom has no layout: give the preview pane a real scroll range and the two
+    // blocks their content offsets, so the jump's scroll write is observable. The
+    // block rects move with the scroll (a fixed rect would drift by `scrollTop` on
+    // every later jump, exactly as it would in a browser).
+    let scrolled = 0
+    const body = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
+    Object.defineProperty(body, 'scrollTop', {
+      configurable: true,
+      get: () => scrolled,
+      set: (value: number) => { scrolled = value },
+    })
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 300 })
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 1000 })
+    const rect = (top: number, bottom: number, left = 0, right = 400): DOMRect =>
+      ({ top, bottom, left, right, width: right - left, height: bottom - top, x: left, y: top, toJSON: () => ({}) }) as DOMRect
+    vi.spyOn(body, 'getBoundingClientRect').mockImplementation(() => rect(0, 300))
+    // Every element of a block, not just the first: a change renders its deleted
+    // and added runs as separate elements (two columns in double mode), and the
+    // flash outlines the group's whole extent.
+    for (const [index, top] of [[0, 200], [1, 600]] as const) {
+      for (const element of document.querySelectorAll(`[data-md-block="${index}"]`)) {
+        vi.spyOn(element as HTMLElement, 'getBoundingClientRect')
+          // The tinted block is narrower than the pane: that width is what the
+          // outline has to enclose.
+          .mockImplementation(() => rect(top - scrolled, top + 60 - scrolled, 24, 376))
+      }
+    }
+    const flash = (): HTMLElement | null => document.querySelector('[data-diff-block-flash]')
+    // The flash box is in the pane's coordinates: `top` follows the scroll, the
+    // height covers the block's rendered extent clamped into the pane, and the
+    // insets are the tinted block's own edges (so the outline encloses the whole
+    // background-diff area, not just the text).
+    const box = (): { top: number; height: number; left: number; right: number } => ({
+      top: Number.parseFloat(flash()!.style.top),
+      height: Number.parseFloat(flash()!.style.height),
+      left: Number.parseFloat(flash()!.style.left),
+      right: Number.parseFloat(flash()!.style.right),
+    })
+
+    // The toolbar's prev brings the first block into view: its top edge lands two
+    // code rows below the pane's top (the code view's lead), and the landed block
+    // gets the code view's own flash outline — the preview has no focus rows, so
+    // that outline is the "you are here".
+    fireEvent.click(document.querySelector('[data-diff-prev]') as HTMLElement)
+    expect(scrolled).toBe(200 - 2 * 22)
+    expect(box()).toEqual({ top: 44, height: 60, left: 24, right: 24 })
+
+    // The toolbar's next walks forward the same way (block 1 spans content
+    // 600-660, so it lands at the same place in the pane).
+    fireEvent.click(document.querySelector('[data-diff-next]') as HTMLElement)
+    expect(scrolled).toBe(600 - 2 * 22)
+    expect(box()).toEqual({ top: 44, height: 60, left: 24, right: 24 })
+
+    // The chord is the same jump.
+    fireEvent.keyDown(window, { key: 'ArrowUp', ctrlKey: true })
+    expect(scrolled).toBe(200 - 2 * 22)
+    expect(box()).toEqual({ top: 44, height: 60, left: 24, right: 24 })
+
+    // Re-clicking the open file in the list is the same gesture: its jump signal
+    // used to move nothing at all while the preview was showing.
+    fireEvent.click(screen.getByText('README.md'))
+    expect(scrolled).toBe(600 - 2 * 22)
+    expect(box()).toEqual({ top: 44, height: 60, left: 24, right: 24 })
+
+    // The outline is a transient cue, not a marker that waits for the pointer:
+    // hovering context in the preview must not take it away (that is what the
+    // hover frame does, which is why a jump does not use one).
+    fireEvent.mouseOver(document.querySelector('.mdBlock:not([data-md-block])') as HTMLElement)
+    expect(flash()).not.toBeNull()
+  })
+
+  it('jumps and flashes in the double-column preview too', () => {
+    // The double-column preview is this component's own rendering, NOT the split
+    // view — but the jump used to be routed to the split view whenever
+    // `splitView` was on, so in this mode prev/next (and with them the flash) did
+    // nothing at all.
+    const file = entry({
+      id: 'entry-md-jump-double',
+      path: '/repo/README.md',
+      oldText: '# T\nkeep one\nkeep two\nkeep three\nkeep four\nkeep five\n',
+      newText: '# T edited\nkeep one\nkeep two\nkeep four\nkeep five\n',
+    })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-toggle-view]') as HTMLElement)
+    const body = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
+    expect(body.dataset.diffMdMode).toBe('double')
+    // Both changes render on both sides, one element per column.
+    expect(document.querySelectorAll('[data-md-block="0"]').length).toBe(2)
+    expect(document.querySelectorAll('[data-md-block="1"]').length).toBe(2)
+    expect(document.querySelector('[data-diff-split]')).toBeNull()
+
+    let scrolled = 0
+    Object.defineProperty(body, 'scrollTop', {
+      configurable: true,
+      get: () => scrolled,
+      set: (value: number) => { scrolled = value },
+    })
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 300 })
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 1000 })
+    const rect = (top: number, bottom: number, left: number, right: number): DOMRect =>
+      ({ top, bottom, left, right, width: right - left, height: bottom - top, x: left, y: top, toJSON: () => ({}) }) as DOMRect
+    vi.spyOn(body, 'getBoundingClientRect').mockImplementation(() => rect(0, 300, 0, 800))
+    // Each aligned row spans both columns (40..760) while its tinted cells are the
+    // two inner columns.
+    const columns = [[40, 380], [420, 760]] as const
+    for (const [index, contentTop] of [[0, 200], [1, 400]] as const) {
+      const elements = [...document.querySelectorAll(`[data-md-block="${index}"]`)] as HTMLElement[]
+      const row = elements[0]!.closest('.mdDoubleRow') as HTMLElement
+      expect(row).not.toBeNull()
+      vi.spyOn(row, 'getBoundingClientRect')
+        .mockImplementation(() => rect(contentTop - scrolled, contentTop + 60 - scrolled, 40, 760))
+      for (const element of elements) {
+        const cell = element.closest('.mdDoubleCol') as HTMLElement
+        const column = [...cell.parentElement!.children].indexOf(cell)
+        const [left, right] = column === 0 ? columns[0]! : columns[1]!
+        vi.spyOn(element, 'getBoundingClientRect')
+          .mockImplementation(() => rect(contentTop - scrolled, contentTop + 60 - scrolled, left, right))
+      }
+    }
+    const flashBox = (): { top: number; height: number; left: number; right: number } => {
+      const flash = document.querySelector('[data-diff-block-flash]') as HTMLElement
+      return {
+        top: Number.parseFloat(flash.style.top),
+        height: Number.parseFloat(flash.style.height),
+        left: Number.parseFloat(flash.style.left),
+        right: Number.parseFloat(flash.style.right),
+      }
+    }
+
+    // Opening the row was a re-click (the panel had it selected), so the focus
+    // starts on the second block: step back to the first one.
+    fireEvent.click(document.querySelector('[data-diff-prev]') as HTMLElement)
+    expect(scrolled).toBe(200 - 2 * 22)
+    expect(flashBox()).toEqual({ top: 44, height: 60, left: 40, right: 40 })
+
+    // Forward again, through the chord this time.
+    fireEvent.keyDown(window, { key: 'ArrowDown', ctrlKey: true })
+    expect(scrolled).toBe(400 - 2 * 22)
+    expect(flashBox()).toEqual({ top: 44, height: 60, left: 40, right: 40 })
+
+  })
+
+  it('outlines the full row when a double-column change sits on one side only', () => {
+    // A pure addition: the after column has the tinted cell, the before column is
+    // empty, and the outline still spans the aligned row rather than half of it.
+    const file = entry({
+      id: 'entry-md-flash-onesided',
+      path: '/repo/README.md',
+      oldText: '# T\nkeep one\n',
+      newText: '# T\nkeep one\nadded line\n',
+    })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-toggle-view]') as HTMLElement)
+    const body = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
+    expect(body.dataset.diffMdMode).toBe('double')
+    const elements = [...document.querySelectorAll('[data-md-block="0"]')] as HTMLElement[]
+    expect(elements.length).toBe(1)
+    // That one cell is the after column, so a tint-only box would be the right half.
+    const cell = elements[0]!.closest('.mdDoubleCol') as HTMLElement
+    expect([...cell.parentElement!.children].indexOf(cell)).toBe(2)
+
+    let scrolled = 0
+    Object.defineProperty(body, 'scrollTop', {
+      configurable: true,
+      get: () => scrolled,
+      set: (value: number) => { scrolled = value },
+    })
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 300 })
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 1000 })
+    const rect = (top: number, bottom: number, left: number, right: number): DOMRect =>
+      ({ top, bottom, left, right, width: right - left, height: bottom - top, x: left, y: top, toJSON: () => ({}) }) as DOMRect
+    vi.spyOn(body, 'getBoundingClientRect').mockImplementation(() => rect(0, 300, 0, 800))
+    vi.spyOn(elements[0]!.closest('.mdDoubleRow') as HTMLElement, 'getBoundingClientRect')
+      .mockImplementation(() => rect(200 - scrolled, 260 - scrolled, 40, 760))
+    vi.spyOn(elements[0]!, 'getBoundingClientRect')
+      .mockImplementation(() => rect(200 - scrolled, 260 - scrolled, 420, 760))
+
+    // The frame's own step button is a jump like any other: it flashes the block it
+    // lands on (here the only one, so it wraps onto itself).
+    fireEvent.mouseOver(elements[0]!)
+    fireEvent.click(document.querySelector('[data-diff-block-next]') as HTMLElement)
+    const flash = document.querySelector('[data-diff-block-flash]') as HTMLElement
+    expect(flash).not.toBeNull()
+    expect({
+      top: Number.parseFloat(flash.style.top),
+      height: Number.parseFloat(flash.style.height),
+      left: Number.parseFloat(flash.style.left),
+      right: Number.parseFloat(flash.style.right),
+    }).toEqual({ top: 44, height: 60, left: 40, right: 40 })
+  })
+
+
 })
