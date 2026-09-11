@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.20.0](https://github.com/9087/dsh-diff-approval/compare/v0.19.3...v0.20.0) (2026-09-11)
+
+### Features
+
+* add a named file or directory to the pending list ([ceb18d6](https://github.com/9087/dsh-diff-approval/commit/ceb18d646ab4f684c35763a5c4afc75e962006ba))
+* keep/revert Markdown preview change blocks ([bf9cb1a](https://github.com/9087/dsh-diff-approval/commit/bf9cb1a51da0205cc4d418b59d72d17ff616d94b))
+* navigate the Markdown preview between change blocks ([b1eb37b](https://github.com/9087/dsh-diff-approval/commit/b1eb37ba9c6ffc244cf3c19d13afe572850577c7))
+* remember the highlight language per file suffix ([9ec5f8a](https://github.com/9087/dsh-diff-approval/commit/9ec5f8a5b78897f59eeb725f1665e46cdda6531a))
+* search the rendered Markdown preview ([be26730](https://github.com/9087/dsh-diff-approval/commit/be26730df50cd38eab498d6c3ecfeb9df6ff00bb))
+
+### Bug Fixes
+
+* align the settings spacing with the preference-row rhythm ([cce5ee4](https://github.com/9087/dsh-diff-approval/commit/cce5ee44ec5f3b886e69fd24a50464dbdb06e92e))
+* gate the Markdown preview on the file being Markdown ([5d4f12c](https://github.com/9087/dsh-diff-approval/commit/5d4f12cc8236339191ad38c2c2ce97de6c4a3dbf))
+
+### Performance Improvements
+
+* highlight the diff a window at a time ([d8527d2](https://github.com/9087/dsh-diff-approval/commit/d8527d279e76a4b7de6c8af006e2b56efbf79695))
+
 ## [0.19.3](https://github.com/9087/dsh-diff-approval/compare/v0.19.2...v0.19.3) (2026-09-11)
 
 ### Features
