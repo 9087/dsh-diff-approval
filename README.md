@@ -11,6 +11,8 @@ A DeepSeek Harness (DSH) plugin for pending-change review: it automatically trac
 
 The panel also collapses its file list into a floating card; while floating, each of its four edges — the left sidebar, the header above, the right sidebar, the composer below — can be chosen to be covered (all four is what used to be fullscreen, and covering nothing is a plain floating card), and it can dock as a tab in the right sidebar:
 
+Two entries open it: the row at the sidebar foot, and a button in the Session header's right-hand controls — the cluster the app keeps its own per-session actions in (where "Download session log" lives) — so the review stays one click away with the sidebar collapsed or hidden.
+
 | Collapsed file list | Covering everything |
 | --- | --- |
 | ![Collapsed file list](docs/images/file-list-collapsed.png) | ![Covering everything](docs/images/fullscreen.png) |
@@ -27,7 +29,7 @@ For Markdown files, the source-line diff can also be shown as a rendered before/
 - **Per-file and bulk decisions**: the files in the file list can be kept / reverted one at a time, or **Keep all** / **Revert all** from its footer.
 - **Resolved files stay listed**: once every change in a file has been kept/reverted, the entry remains in the list and the panel asks whether to remove it or keep it for later.
 - **Undo / Redo**: every keep, revert, and import is undoable with `Ctrl+Z` / `Ctrl+Shift+Z` (rebindable in Shortcuts; `Ctrl+Y` remains an alias), active while the panel is open — text inputs keep their own editing.
-- **Quick summon & file cycling**: `Ctrl+D` (configurable in settings) toggles the review panel from anywhere and `Esc` closes it; `Ctrl+Tab` / `Ctrl+Shift+Tab` cycle through the pending files.
+- **Quick summon & file cycling**: `Ctrl+D` (configurable in settings) toggles the review panel from anywhere and `Esc` closes it; the panel is also one click away from the sidebar-foot row and from a button in the Session header beside the app's own controls; `Ctrl+Tab` / `Ctrl+Shift+Tab` cycle through the pending files.
 - **Line references**: select text in the diff — the status bar shows its `(file:line)` / `(file:start-end)` reference; click it (or press `Ctrl+L`) to copy, and with the setting on it auto-pastes into the composer and focuses it. References in the composer and queued messages are **auto-aligned** when the referenced file changes: surviving lines re-map to their new range, and a fully-removed line becomes `(file:LINE_MISSING)`.
 - **Highlight language**: auto-detected from the file extension, or overridden from a dropdown.
 - **Auto-wrap**: a "Wrap lines" toggle beside the language selector wraps long lines for that language (CJK breaks between characters, Latin words stay whole), remembered per language.
