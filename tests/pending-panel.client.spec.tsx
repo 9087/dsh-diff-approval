@@ -1255,6 +1255,60 @@ describe('PendingPanel', () => {
     }
   })
 
+  it('lands the folded list on the file view the moment a file is picked', () => {
+    // The folded list is placed from one measured box: the code view while a file
+    // is open, the detail pane while none is. Opening the first file mounts the
+    // diff's action row above the code view, so the box moves down by that row's
+    // height — and the card and the knob have to move with it in the same commit.
+    // They used to keep whatever box was measured last, which with a list that
+    // arrived after the panel opened meant no box at all: the knob sat at the
+    // panel's top-left and the card landed a toolbar lower once something finally
+    // re-measured.
+    const originalWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth')
+    const originalRect = Element.prototype.getBoundingClientRect
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 600 })
+    const box = (top: number, height: number): DOMRect => ({
+      left: 0, right: 600, width: 600, top, bottom: top + height, height, x: 0, y: top, toJSON: () => ({}),
+    }) as DOMRect
+    Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
+      const detail = document.querySelector('[data-diff-detail]')
+      // The file's action row is 36px tall, and the code view starts under it.
+      if (this.hasAttribute('data-diff-body')) return box(36, 364)
+      if (detail !== null && (this === detail || this === detail.parentElement)) return box(0, 400)
+      return originalRect.call(this)
+    }
+    try {
+      // The panel opens on an empty list — the state it starts in while the agent
+      // has not changed anything yet, and the state in which the list has no box.
+      const props = panelProps({ read: true, files: [], busy: new Set() })
+      const view = render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      expect(document.querySelector('[data-diff-approval-file-list]')).toBeNull()
+      expect(document.querySelector('[data-diff-file-list-toggle]')).toBeNull()
+
+      // A change lands: the list appears and the panel opens its first file.
+      const first = entry({ id: 'entry-a', path: '/repo/a.txt' })
+      const second = entry({ id: 'entry-b', path: '/repo/b.txt' })
+      view.rerender(<PendingPanel {...panelProps({ read: true, files: [first, second], busy: new Set() })} />)
+      expect(document.querySelector('[data-diff-body]')).not.toBeNull()
+
+      // Both are on the code view at once: the knob at its top-left corner, and
+      // the card exactly over the knob when it is opened.
+      const knob = (): HTMLElement => document.querySelector('[data-diff-file-list-toggle]') as HTMLElement
+      expect(knob().style.top).toBe('48px')
+      expect(knob().style.left).toBe('12px')
+      fireEvent.click(knob())
+      const card = (): HTMLElement => document.querySelector('[data-diff-floating-file-list]') as HTMLElement
+      expect(card().style.top).toBe('48px')
+      expect(card().style.left).toBe(knob().style.left)
+      expect(card().style.height).toBe('340px')
+    } finally {
+      Element.prototype.getBoundingClientRect = originalRect
+      if (originalWidth !== undefined) Object.defineProperty(window, 'innerWidth', originalWidth)
+      else delete (window as { innerWidth?: unknown }).innerWidth
+    }
+  })
+
   it('keeps the file-list knob outside the diff view, which can vanish', () => {
     const originalWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth')
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 600 })

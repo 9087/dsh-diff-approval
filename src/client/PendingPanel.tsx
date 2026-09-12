@@ -4383,17 +4383,55 @@ export function PendingPanel({
   // file is open, and from the detail pane when none is — so the folded list has
   // a box either way. Both the card and the knob on its corner are placed from
   // this one box, which is what keeps them aligned.
+  //
+  // The box has to follow the *content*, not just the panel's own size. Opening
+  // the first file mounts the diff's action row above the code view, which moves
+  // that view's top down by the row's height; the search bar adds another row, and
+  // the Markdown preview swaps the element being measured outright. Measuring only
+  // when the panel resized or the list was folded left the card and the knob on
+  // the stale box — with the list arriving after the panel opened, the knob was
+  // placed from no box at all and the card landed a toolbar lower when it was
+  // finally measured. So: measure in the layout phase after *every* render (before
+  // paint, so nothing shows at the old place), watch the box for a change that
+  // does not re-render this panel (a ResizeObserver), and watch the split for one
+  // that replaces the measured element without a re-render (a MutationObserver).
+  // The state is written only when a number actually moved, so none of the three
+  // can loop.
+  const measureFloatBox = (): void => {
+    if (!floatMode) return
+    const panel = panelRef.current
+    const split = splitRef.current
+    if (panel === null || split === null) return
+    const body = panel.querySelector<HTMLElement>('[data-diff-body],[data-diff-md-preview-body]')
+      ?? panel.querySelector<HTMLElement>('[data-diff-detail]')
+    if (body === null) return
+    const s = split.getBoundingClientRect()
+    const b = body.getBoundingClientRect()
+    setFloatBox(current => current !== null
+      && current.left === b.left - s.left && current.top === b.top - s.top
+      && current.width === b.width && current.height === b.height
+      ? current
+      : { left: b.left - s.left, top: b.top - s.top, width: b.width, height: b.height })
+  }
+  // Read through a ref so the observers below always run the current render's
+  // measurement (its `floatMode` and refs) without re-subscribing every render.
+  const measureFloatBoxRef = useRef(measureFloatBox)
+  measureFloatBoxRef.current = measureFloatBox
+  useLayoutEffect(() => { measureFloatBoxRef.current() })
   useEffect(() => {
     if (!floatMode) return
     const split = splitRef.current
     if (split === null) return
-    const body = panelRef.current?.querySelector<HTMLElement>('[data-diff-body],[data-diff-md-preview-body]')
-      ?? panelRef.current?.querySelector<HTMLElement>('[data-diff-detail]')
-    if (body == null) return
-    const s = split.getBoundingClientRect()
-    const b = body.getBoundingClientRect()
-    setFloatBox({ left: b.left - s.left, top: b.top - s.top, width: b.width, height: b.height })
-  }, [floatMode, floatOpen, panelWidth])
+    const measure = (): void => { measureFloatBoxRef.current() }
+    const resize = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
+    resize?.observe(split)
+    const mutations = typeof MutationObserver === 'undefined' ? null : new MutationObserver(measure)
+    mutations?.observe(split, { childList: true, subtree: true })
+    return () => {
+      resize?.disconnect()
+      mutations?.disconnect()
+    }
+  }, [floatMode, floatOpen, panelWidth, selected])
 
   // Surface a detected external change that superseded the redo history. The
   // notice is deferred until the panel is open, and the store latches the flag
@@ -4535,7 +4573,13 @@ export function PendingPanel({
   // Auto-open the first pending file when the panel opens, and advance to the
   // next one once the selected file is handled. Selection is single and cannot
   // be cleared by clicking — only an empty list shows the empty state.
-  useEffect(() => {
+  //
+  // In the layout phase, not after paint: the code view exists only once a file
+  // is open, and one painted frame of "nothing selected" is enough for the folded
+  // file list to be placed from the pane's box instead of the code view's — the
+  // stale placement this was reported for. Selecting in the same commit means the
+  // first frame the user sees is already the final one.
+  useLayoutEffect(() => {
     if (!open) return
     if (selected !== '' && files.some(file => file.id === selected)) return
     const next = files[0]
