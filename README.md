@@ -9,11 +9,11 @@ A DeepSeek Harness (DSH) plugin for pending-change review: it automatically trac
 
 ![Pending changes panel](docs/images/pending-panel.png)
 
-The panel also collapses its file list into a floating card and expands to fullscreen:
+The panel also collapses its file list into a floating card; while floating, each edge — the left sidebar, the right sidebar, the composer below — can be chosen to be covered (all three is what used to be fullscreen), and it can dock as a tab in the right sidebar:
 
-| Collapsed file list | Fullscreen |
+| Collapsed file list | Covering everything |
 | --- | --- |
-| ![Collapsed file list](docs/images/file-list-collapsed.png) | ![Fullscreen](docs/images/fullscreen.png) |
+| ![Collapsed file list](docs/images/file-list-collapsed.png) | ![Covering everything](docs/images/fullscreen.png) |
 
 For Markdown files, the source-line diff can also be shown as a rendered before/after preview:
 

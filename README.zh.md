@@ -9,11 +9,11 @@
 
 ![待处理改动面板](docs/images/pending-panel.zh.png)
 
-面板还可把文件列表折叠成浮动卡片，并把整个面板展开到全屏：
+面板还可把文件列表折叠成浮动卡片；浮窗形态下可以逐边选择覆盖左侧边栏、右侧边栏与下方输入框（三者全开就是原来的全屏），也可以停靠到右侧边栏、成为其中一个标签页：
 
-| 折叠的文件列表 | 全屏 |
+| 折叠的文件列表 | 覆盖全部 |
 | --- | --- |
-| ![折叠的文件列表](docs/images/file-list-collapsed.zh.png) | ![全屏](docs/images/fullscreen.zh.png) |
+| ![折叠的文件列表](docs/images/file-list-collapsed.zh.png) | ![覆盖全部](docs/images/fullscreen.zh.png) |
 
 对 Markdown 文件，还可把源码行差异切换为渲染后的「改前 / 改后」预览：
 
