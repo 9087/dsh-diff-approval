@@ -2106,11 +2106,15 @@
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
-  height: 15px;
+  /* The app's own scrollbar thickness (the harness publishes it as
+     `--dsh-scrollbar-width`, 8px, and styles every other bar with it), so the
+     split view's pinned horizontal bar and its vertical one read as one control
+     surface. Hard-coding a thicker bar here was a visible mismatch. */
+  height: var(--dsh-scrollbar-width, 8px);
 }
 
 .splitHScroll::-webkit-scrollbar {
-  height: 15px;
+  height: var(--dsh-scrollbar-width, 8px);
 }
 
 .splitHScroll::-webkit-scrollbar-track {
