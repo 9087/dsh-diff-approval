@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.1](https://github.com/9087/dsh-diff-approval/compare/v0.20.0...v0.20.1) (2026-09-12)
+
+### Bug Fixes
+
+* match the split view's horizontal scrollbar to the app's ([af109c4](https://github.com/9087/dsh-diff-approval/commit/af109c421382e709e525c8cd9286581e36bf4c17))
+* stop declaring peer ranges that cannot admit prerelease builds ([6ad7ef4](https://github.com/9087/dsh-diff-approval/commit/6ad7ef44d548e68906005fa9d31d22e2caa62f12))
+
 ## [0.20.0](https://github.com/9087/dsh-diff-approval/compare/v0.19.3...v0.20.0) (2026-09-11)
 
 ### Features
