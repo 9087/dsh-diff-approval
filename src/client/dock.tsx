@@ -36,6 +36,25 @@ export const DIFF_DOCK_ID = 'dsh-diff-approval'
  *  an event — the same bridge the produced-file buttons use. */
 export const SHOW_PANEL_EVENT = 'diff-approval:show-panel'
 
+// The panel's cross-mount channel: the floating panel, the docked tab, and the
+// Session header's entry are separate mounts in different slot trees, so there is
+// no common owner to lift the panel's open state into — instructions and state
+// travel as window events, the same bridge SHOW_PANEL_EVENT above, the settings
+// section, and the produced-file buttons all use.
+/** Ask the panel to toggle: what the header entry's button does. It runs the same
+ *  action as the footer badge, so the two entries can never disagree about what a
+ *  press means — including for a docked panel, whose tab the chip still closes. */
+export const TOGGLE_PANEL_EVENT = 'diff-approval:toggle-panel'
+/** The floating panel's own visibility, published on every change so a second
+ *  entry can light up while the panel is open (`detail.open`). */
+export const PANEL_STATE_EVENT = 'diff-approval:panel-state'
+
+/** Payload of {@link PANEL_STATE_EVENT}. */
+export interface PanelStateDetail {
+  /** Whether the floating panel is showing right now. */
+  open: boolean
+}
+
 /** What the footer entry needs to know about the dock. */
 export interface DockSnapshot {
   /** Whether this build has a right sidebar to dock into at all. */

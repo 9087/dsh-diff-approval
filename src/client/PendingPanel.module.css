@@ -22,6 +22,69 @@
   margin: 4px -2px 4px;
 }
 
+/* The Session header's entry: a compact icon button in the header's own
+   right-aligned utilities cluster, beside the app's more-actions button. The
+   geometry mirrors that button (28x28 circle, 15-16px glyph, secondary label,
+   translucent hover) so the two read as one row of controls; the count rides on
+   a pip, because a growing label would resize the row every time a file is
+   resolved. */
+.headerEntry {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 6px;
+  box-sizing: border-box;
+  border: none;
+  border-radius: 28px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.headerEntry:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.headerEntry[data-active] {
+  /* Open (floating or docked) keeps a solid highlight, like the footer entry. */
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+  color: var(--dsw-alias-label-primary);
+}
+
+.headerEntry:disabled {
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: default;
+}
+
+.headerEntryCount {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  box-sizing: border-box;
+  border-radius: 7px;
+  background: var(--dsw-alias-button-primary-fill);
+  color: var(--dsw-alias-label-primary-foreground);
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+/* The glyph is a block so the button's 16px content box centres it exactly,
+   with no inline baseline to shift it. */
+.headerEntry svg {
+  display: block;
+}
+
 .footerButtons {
   display: flex;
   align-items: center;

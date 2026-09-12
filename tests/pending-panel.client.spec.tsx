@@ -9,6 +9,7 @@ import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingFileDiff } from '../src/types.ts'
 import { PendingPanel, frameInsets } from '../src/client/PendingPanel.tsx'
 import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
+import { DiffApprovalHeaderEntry } from '../src/client/header-entry.tsx'
 import { DiffApprovalSettingsTab } from '../src/client/SettingsTab.tsx'
 import { renderMarkdownPreview } from '../src/client/markdown-preview.ts'
 import { highlightWindow } from '../src/client/highlight.ts'
@@ -4682,6 +4683,34 @@ describe('PendingPanel', () => {
     // The dock row mirrors the app's own right-sidebar mark.
     const dockMark = rows[1]!.querySelector('svg')
     expect(dockMark?.getAttribute('class')).toContain('mirrored')
+  })
+
+  it('is driven by the Session header entry, the second mount of the same action', () => {
+    // Both entries mounted, as in the app: the footer's (which owns the overlay's
+    // open state) and the header's. One action, so a press on either opens and
+    // closes the same panel, and the header button follows along.
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    const entry = (): HTMLButtonElement => document.querySelector('[data-diff-approval-header-entry]') as HTMLButtonElement
+    render(<DiffApprovalHeaderEntry {...({
+      t: (key: string) => key,
+      usePending: (select: (snapshot: PendingDiffSnapshot) => unknown) => select({ files: [FILE] } as unknown as PendingDiffSnapshot),
+      useDock: (select: (state: { available: boolean; open: boolean }) => unknown) => select({ available: true, open: false }),
+    } as unknown as ComponentProps<typeof DiffApprovalHeaderEntry>)} />)
+    const panel = (): Element | null => document.querySelector('[data-diff-approval-panel]')
+
+    expect(entry().dataset.diffApprovalHeaderEntry).toBe('1')
+    expect(panel()).toBeNull()
+
+    // One press opens; the entry learns it through the state event.
+    fireEvent.click(entry())
+    expect(panel()).not.toBeNull()
+    expect(entry().hasAttribute('data-active')).toBe(true)
+
+    // The next closes, exactly as the footer badge would.
+    fireEvent.click(entry())
+    expect(panel()).toBeNull()
+    expect(entry().hasAttribute('data-active')).toBe(false)
   })
 
   it('shows the overlay when the docked tab hands the panel back', () => {

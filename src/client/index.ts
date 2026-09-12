@@ -16,6 +16,7 @@ import { OPEN_FILE_EVENT, startProducedDiffInjection } from './produced-diff.ts'
 import type { PendingPanelFace } from './slots.ts'
 import { attachDiffDock, createDockState, DIFF_DOCK_ID, DiffDockBody, DiffDockTitle } from './dock.tsx'
 import type { DockHostContext } from './dock.tsx'
+import { DiffApprovalHeaderEntry } from './header-entry.tsx'
 import { en, NS, zh } from './locales.ts'
 
 export type { PendingPanelProps } from './PendingPanel.tsx'
@@ -211,6 +212,29 @@ export function apply(ctx: ClientContext): void {
     inject(name: string, callback: () => unknown): void
     register(config: Record<string, unknown>, component: unknown): unknown
   }
+  // The Session header's entry: the same action as the footer's, seated in the
+  // header's right-aligned utilities — the cluster the app puts its own
+  // more-actions button in (behind which the session-log export lives), and the
+  // one place a session's controls stay visible with the sidebar collapsed or
+  // hidden. `order: -5` keeps the app's more-actions button last, as its own
+  // design has it: the cluster runs ascending, and the app's sits at the default
+  // 0, after "open in app" at -10.
+  //
+  // Guarded on its own: like the docked seats, this slot belongs to a UI package
+  // that is not part of this program's SlotMap (so the name is a string), and a
+  // host without it must cost the header entry only — never the footer entry.
+  try {
+    looseSlots.inject('conversation.session.header.utilities', () => looseSlots.register({
+      name: 'conversation.session.header.utilities',
+      id: 'diff-approval-entry',
+      order: -5,
+      locale: NS,
+      inject: () => ({ ...buildFace() }),
+    }, DiffApprovalHeaderEntry))
+  } catch {
+    // No header utilities in this host.
+  }
+
   // Guarded as a whole: a seat whose contract differs from the one this was
   // written against costs the docked tab, never the footer entry seated above.
   try {

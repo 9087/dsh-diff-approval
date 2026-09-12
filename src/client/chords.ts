@@ -9,7 +9,8 @@
  * @module dsh-diff-approval/client/chords
  */
 
-import { keybindingOf } from './settings.ts'
+import type { Translator } from './locales.ts'
+import { keybindingOf, quickSummonKey } from './settings.ts'
 
 /** Arrow keys render as arrows in a hint (`Ctrl+↑`, not `Ctrl+ArrowUp`). */
 const CHORD_KEY_GLYPHS: Record<string, string> = { ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' }
@@ -44,4 +45,28 @@ export function chordLabel(action: string): string {
 export function withChord(label: string, action: string): string {
   const chord = chordLabel(action)
   return chord === '' ? label : `${label} (${chord})`
+}
+
+/**
+ * How the panel's close button names its two ways out: Escape, and the
+ * quick-summon chord when the user still has one bound. Unbinding the chord
+ * leaves Escape as the only answer, so the hint then says just that.
+ * @param t - the panel's translator.
+ * @returns the tooltip label.
+ */
+export function closeHint(t: Translator): string {
+  const hint = chordHint(quickSummonKey())
+  return hint === '' ? t('action.closeHintEsc') : t('action.closeHint', { chord: hint })
+}
+
+/**
+ * How an entry button names what it opens: the pending-changes panel, plus the
+ * chord that does the same. With the chord unbound the plain label is the whole
+ * hint — never an empty parenthetical.
+ * @param t - the panel's translator.
+ * @returns the tooltip label.
+ */
+export function summonHint(t: Translator): string {
+  const hint = chordHint(quickSummonKey())
+  return hint === '' ? t('panel.aria') : t('action.summonHint', { chord: hint })
 }

@@ -40,8 +40,11 @@ describe('plugin apply', () => {
 
     const byName = new Map(registrations.map(entry => [entry.config.name as string, entry.config]))
     // The seats this plugin fills. The two keyed ones must carry `key`: a keyed
-    // seat validates it at registration time and throws without it.
+    // seat validates it at registration time and throws without it. The header
+    // utilities seat is named as a string because the conversation UI package is
+    // not part of this program's SlotMap — the same optionality as the dock's.
     expect([...byName.keys()].sort()).toEqual([
+      'conversation.session.header.utilities',
       'settings.section',
       'sidebar.footer.action',
       'sidebar.right.pane.tab',
@@ -56,7 +59,31 @@ describe('plugin apply', () => {
     expect(byName.get('sidebar.footer.action')!.id).toBe('diff-approval-panel')
     expect(byName.get('sidebar.footer.action')!.key).toBeUndefined()
     expect(byName.get('settings.section')!.id).toBe('diff-approval')
+    // The header entry sorts before the app's own more-actions button (order 0),
+    // so the cluster keeps the app's button last.
+    expect(byName.get('conversation.session.header.utilities')!.id).toBe('diff-approval-entry')
+    expect(byName.get('conversation.session.header.utilities')!.order).toBe(-5)
+    expect(byName.get('conversation.session.header.utilities')!.key).toBeUndefined()
     expect(injections).toContain('sidebar.right.pane.tab')
+    expect(injections).toContain('conversation.session.header.utilities')
+  })
+
+  it('keeps the other seats when the header utilities seat is refused', () => {
+    // The header entry is the newest and most optional seat: it belongs to a UI
+    // package this plugin does not depend on, so a host that rejects the seat —
+    // or throws on the lookup — must cost that one button and nothing else.
+    const { ctx, registrations } = fakeContext()
+    const inject = ctx.slots.inject
+    ctx.slots.inject = (name: string, callback: () => unknown) => {
+      if (name === 'conversation.session.header.utilities') throw new Error('no such seat')
+      inject(name, callback)
+    }
+    apply(ctx as never)
+
+    const names = registrations.map(entry => entry.config.name)
+    expect(names).not.toContain('conversation.session.header.utilities')
+    expect(names).toContain('sidebar.footer.action')
+    expect(names).toContain('sidebar.right.pane.tab')
   })
 
   it('discovers the right sidebar by lookup and registers the tab type', () => {

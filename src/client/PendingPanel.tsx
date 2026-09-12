@@ -14,7 +14,9 @@ import type { Translator } from './locales.ts'
 import { PathPicker, pathPickerOpen } from './PathPicker.tsx'
 import { PresentationMenu } from './presentation-menu.tsx'
 import { CoverageControl, CoverageNotice, COVER_NOTICE_MS } from './coverage-control.tsx'
-import { chordHint, withChord } from './chords.ts'
+// The chord vocabulary is shared: the header entry advertises the same summon
+// hint this panel's close button spells, so both hint builders live in chords.ts.
+import { closeHint, summonHint, withChord } from './chords.ts'
 import { blockRangesOf, changeBlocksOf, computeIntraLineDiff, computeWholeFileDiff } from './whole-file-diff.ts'
 import { renderMarkdownPreview } from './markdown-preview.ts'
 import { resolvePreviewImages } from './markdown-images.ts'
@@ -31,7 +33,8 @@ import { langFromPath, suffixOfPath } from './lang.ts'
 import { referenceLabelOf } from './reference.ts'
 import { OPEN_FILE_EVENT } from './produced-diff.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
-import { SHOW_PANEL_EVENT } from './dock.tsx'
+import { PANEL_STATE_EVENT, SHOW_PANEL_EVENT, TOGGLE_PANEL_EVENT } from './dock.tsx'
+import type { PanelStateDetail } from './dock.tsx'
 import { confirmFileRemoveEnabled, COVER_CHANGED_EVENT, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
 import { matchRangesOf } from './search.ts'
@@ -784,30 +787,6 @@ function textWithSearch(
   }
   if (cursor < segEnd) push(cursor, segEnd, false)
   return nodes
-}
-
-/**
- * The close button's tooltip: the panel closes with Escape and with the
- * quick-summon chord, so the hint names both — and names the chord as the user
- * has it bound, not a default baked into the label. A chord the user unbound
- * leaves Escape as the only way, so the hint says just that.
- * @param t - the panel's translator.
- * @returns the label with the ways out appended.
- */
-function closeHint(t: Translator): string {
-  const hint = chordHint(quickSummonKey())
-  return hint === '' ? t('action.closeHintEsc') : t('action.closeHint', { chord: hint })
-}
-
-/**
- * The footer entry's tooltip: what the button opens, and the chord that does the
- * same from the keyboard.
- * @param t - the panel's translator.
- * @returns the label with the quick-summon chord appended.
- */
-function summonHint(t: Translator): string {
-  const hint = chordHint(quickSummonKey())
-  return hint === '' ? t('panel.aria') : t('action.summonHint', { chord: hint })
 }
 
 /**
@@ -4224,11 +4203,20 @@ export function PendingPanel({
   // overlay: the two are separate mounts, and the stored presentation says which
   // one. A docked instance ignores it — it is the one that asked.
   const revealRef = useRef<() => void>(() => {})
+  /** The header entry's toggle, deferred to the latest render (see `toggleOpen`):
+   *  this instance owns the overlay's open state, and the entry is a second mount
+   *  that can only ask. */
+  const toggleRef = useRef<() => void>(() => {})
   useEffect(() => {
     if (docked) return
     const onShow = (): void => { revealRef.current() }
+    const onToggle = (): void => { toggleRef.current() }
     window.addEventListener(SHOW_PANEL_EVENT, onShow)
-    return () => { window.removeEventListener(SHOW_PANEL_EVENT, onShow) }
+    window.addEventListener(TOGGLE_PANEL_EVENT, onToggle)
+    return () => {
+      window.removeEventListener(SHOW_PANEL_EVENT, onShow)
+      window.removeEventListener(TOGGLE_PANEL_EVENT, onToggle)
+    }
   }, [docked])
   // Rendering as the tab's body is itself the dock presentation: remember it, so
   // the footer entry brings the panel back here rather than floating it.
@@ -4697,6 +4685,19 @@ export function PendingPanel({
     if (!open) revealPanel()
     else closePanel()
   }
+
+  // The header entry's button runs this same toggle: one action, two mounts, so
+  // neither entry can disagree with the other about what a press does.
+  toggleRef.current = toggleOpen
+
+  // Tell the world (the header entry, in particular) whether the overlay is up:
+  // it lights its button from this, exactly as the footer badge lights itself
+  // from the state it owns. Published on mount too, so an entry that mounted
+  // after the panel opened still learns the truth.
+  useEffect(() => {
+    if (docked) return
+    window.dispatchEvent(new CustomEvent<PanelStateDetail>(PANEL_STATE_EVENT, { detail: { open } }))
+  }, [docked, open])
 
   // No reviewable session (none selected, or a freshly created blank one): the
   // button is disabled and an open panel closes — there is nothing to review.
