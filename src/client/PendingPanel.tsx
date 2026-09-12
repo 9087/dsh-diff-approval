@@ -14,6 +14,7 @@ import type { Translator } from './locales.ts'
 import { PathPicker, pathPickerOpen } from './PathPicker.tsx'
 import { PresentationMenu } from './presentation-menu.tsx'
 import { CoverageControl, CoverageNotice, COVER_NOTICE_MS } from './coverage-control.tsx'
+import { chordHint, withChord } from './chords.ts'
 import { blockRangesOf, changeBlocksOf, computeIntraLineDiff, computeWholeFileDiff } from './whole-file-diff.ts'
 import { renderMarkdownPreview } from './markdown-preview.ts'
 import { resolvePreviewImages } from './markdown-images.ts'
@@ -783,42 +784,6 @@ function textWithSearch(
   }
   if (cursor < segEnd) push(cursor, segEnd, false)
   return nodes
-}
-
-/** Arrow keys render as arrows in a tooltip hint (`Ctrl+↑`, not `Ctrl+ArrowUp`). */
-const CHORD_KEY_GLYPHS: Record<string, string> = { ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' }
-
-/**
- * One stored chord as a hint renders it: modifiers as written, arrow keys as
- * glyphs (`Ctrl+ArrowUp` → `Ctrl+↑`).
- * @param chord - the stored chord.
- * @returns the hint text.
- */
-function chordHint(chord: string): string {
-  return chord.split('+').map(part => CHORD_KEY_GLYPHS[part] ?? part).join('+')
-}
-
-/**
- * One action's chord as a hint. Every place a chord is shown reads it here, so a
- * rebind in Settings shows up everywhere it is advertised.
- * @param action - the keybinding action id (see `DEFAULT_KEYBINDINGS`).
- * @returns the hint text; `''` when the action has no chord at all.
- */
-function chordLabel(action: string): string {
-  return chordHint(keybindingOf(action))
-}
-
-/**
- * A tooltip label with the action's configured chord appended. The hint states
- * the binding the user actually has — including one rebound in Settings — rather
- * than a default baked into the label.
- * @param label - the translated action label.
- * @param action - the keybinding action id (see `DEFAULT_KEYBINDINGS`).
- * @returns the label, with ` (chord)` appended when one is configured.
- */
-function withChord(label: string, action: string): string {
-  const chord = chordLabel(action)
-  return chord === '' ? label : `${label} (${chord})`
 }
 
 /**
@@ -1813,9 +1778,11 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
               <IconChevronDownOutline14 size={14} />
             </button>
           </Tooltip>
-          <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-close aria-label={t('action.close')} onClick={closeSearch}>
-            <IconCloseOutline16 size={14} />
-          </button>
+          <Tooltip label={t('action.closeHintEsc')} side="bottom" delayMs={500}>
+            <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-close aria-label={t('action.close')} onClick={closeSearch}>
+              <IconCloseOutline16 size={14} />
+            </button>
+          </Tooltip>
         </div>
       )}
       {focusedBlock !== undefined && flashKey > 0 && (
@@ -3677,15 +3644,17 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
           <IconChevronDownOutline14 size={14} />
         </button>
       </Tooltip>
-      <button
-        type="button"
-        className={`${css.action} ${css.iconAction}`}
-        data-diff-search-close
-        aria-label={t('action.close')}
-        onClick={closeSearch}
-      >
-        <IconCloseOutline16 size={14} />
-      </button>
+      <Tooltip label={t('action.closeHintEsc')} side="bottom" delayMs={500}>
+        <button
+          type="button"
+          className={`${css.action} ${css.iconAction}`}
+          data-diff-search-close
+          aria-label={t('action.close')}
+          onClick={closeSearch}
+        >
+          <IconCloseOutline16 size={14} />
+        </button>
+      </Tooltip>
     </div>
   ) : null
 

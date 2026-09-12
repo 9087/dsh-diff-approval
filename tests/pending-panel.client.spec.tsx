@@ -2763,6 +2763,32 @@ describe('PendingPanel', () => {
     }
   })
 
+  it('advertises each coverage switch\'s own chord, as bound', () => {
+    // The panel has four rebindable coverage chords, so the buttons that flip the
+    // same switches name them — read at render time, like every other hint.
+    localStorage.setItem('diff-approval:key:coverLeft', 'Alt+L')
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-approval-cover]') as HTMLElement)
+
+    const label = (edge: string): string =>
+      (document.querySelector(`[data-diff-approval-cover-switch="${edge}"]`) as HTMLElement).getAttribute('aria-label') ?? ''
+    expect(label('left')).toBe('cover.left (Alt+L)')
+    expect(label('top')).toBe('cover.top (Ctrl+Shift+↑)')
+    expect(label('right')).toBe('cover.right (Ctrl+Shift+→)')
+    expect(label('composer')).toBe('cover.composer (Ctrl+Shift+↓)')
+  })
+
+  it('tells the search bar\'s close button that Escape closes it', () => {
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-search-toggle]') as HTMLElement)
+
+    // The bar is the innermost dismissible, so Esc closes it rather than the panel.
+    fireEvent.focus(document.querySelector('[data-diff-search-close]') as HTMLElement)
+    expect(screen.getAllByText('action.closeHintEsc').length).toBeGreaterThan(0)
+  })
+
   it('lays a sidebar-colored backdrop over the seam only when everything is covered', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)

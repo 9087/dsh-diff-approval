@@ -18,19 +18,25 @@ import { createPortal } from 'react-dom'
 import type { ReactElement, ReactNode } from 'react'
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import css from './PendingPanel.module.css'
+import { withChord } from './chords.ts'
 import type { DiffApprovalCover } from './settings.ts'
 import type { Translator } from './locales.ts'
 
-/** One coverage switch: its key, and the edge its glyph highlights. */
+/** One coverage switch: its key, and the keybinding action whose chord the
+ *  button advertises. */
 type CoverKey = keyof DiffApprovalCover
 
 /** The switches in the popover, in the order the panel names them: left, top,
  *  right, bottom. */
-const COVER_ROWS: readonly { key: CoverKey; label: 'cover.top' | 'cover.left' | 'cover.composer' | 'cover.right' }[] = [
-  { key: 'left', label: 'cover.left' },
-  { key: 'top', label: 'cover.top' },
-  { key: 'right', label: 'cover.right' },
-  { key: 'composer', label: 'cover.composer' },
+const COVER_ROWS: readonly {
+  key: CoverKey
+  action: string
+  label: 'cover.top' | 'cover.left' | 'cover.composer' | 'cover.right'
+}[] = [
+  { key: 'left', action: 'coverLeft', label: 'cover.left' },
+  { key: 'top', action: 'coverTop', label: 'cover.top' },
+  { key: 'right', action: 'coverRight', label: 'cover.right' },
+  { key: 'composer', action: 'coverComposer', label: 'cover.composer' },
 ]
 
 /** The rectangle every coverage glyph is built on: a wide panel in the 16 grid. */
@@ -191,14 +197,14 @@ export function CoverageControl({ t, cover, onToggle }: CoverageControlProps): R
       </Tooltip>
       {open && (
         <div className={`${css.coverCard} ${css.coverPopover}`} data-diff-approval-cover-popover role="group" aria-label={t('action.cover')}>
-          {COVER_ROWS.map(({ key, label }) => (
-            <Tooltip key={key} label={t(label)} side="bottom" delayMs={0}>
+          {COVER_ROWS.map(({ key, action, label }) => (
+            <Tooltip key={key} label={withChord(t(label), action)} side="bottom" delayMs={0}>
               <button
                 type="button"
                 className={css.coverButton}
                 data-diff-approval-cover-switch={key}
                 data-on={cover[key] ? '' : undefined}
-                aria-label={t(label)}
+                aria-label={withChord(t(label), action)}
                 aria-pressed={cover[key]}
                 onClick={() => { onToggle(key) }}
               >
