@@ -9,7 +9,7 @@ A DeepSeek Harness (DSH) plugin for pending-change review: it automatically trac
 
 ![Pending changes panel](docs/images/pending-panel.png)
 
-The panel also collapses its file list into a floating card; while floating, each edge — the left sidebar, the right sidebar, the composer below — can be chosen to be covered (all three is what used to be fullscreen), and it can dock as a tab in the right sidebar:
+The panel also collapses its file list into a floating card; while floating, each of its four edges — the left sidebar, the header above, the right sidebar, the composer below — can be chosen to be covered (all four is what used to be fullscreen, and covering nothing is a plain floating card), and it can dock as a tab in the right sidebar:
 
 | Collapsed file list | Covering everything |
 | --- | --- |
@@ -37,7 +37,7 @@ For Markdown files, the source-line diff can also be shown as a rendered before/
 - **External changes**: files already in the pending list are monitored — if one is later modified outside the reviewed edits (another tool, an editor), the panel adopts the new content and flags the divergence.
 - **Open / Reveal**: while reviewing a file's diff, open it in its default app or reveal it in the system file manager with one click.
 - **Import workspace changes**: when the list is empty, click the button to import the workspace's local changes from **Git / SVN / Perforce** — modified, deleted, and (opt-in) untracked files. The VCS root is found by walking up from the workspace, so a workspace inside a subdirectory works too.
-- **Settings**: a "Diff Approval" section in DeepSeek Harness settings, grouped into **Diff view** (code font size, line height, added / removed colors) and **Shortcuts** (rebind the panel's keyboard chords) plus preferences for auto-paste on copy, whether untracked files are included when importing, the diff's tab width (2 / 4 / 8 spaces), the side-by-side split view, the block-jump lead rows, the Markdown preview default and width, and the quick-summon chord.
+- **Settings**: a "Diff Approval" section in DeepSeek Harness settings, grouped into **Diff view** (code font size, line height, added / removed colors), **Shortcuts** (rebind the panel's keyboard chords), and **Floating coverage** (the same four edge switches the panel's own popover offers) plus preferences for auto-paste on copy, whether untracked files are included when importing, the diff's tab width (2 / 4 / 8 spaces), the side-by-side split view, the block-jump lead rows, the Markdown preview default and width, and the quick-summon chord.
 - **Persistence**: pending state is stored per workspace at `<dshHome>/diff-approval/workspaces/<workspaceId>.json` and survives restarts — unhandled changes are still there when you come back, even in a fresh session.
 
 ## 📦 Install
