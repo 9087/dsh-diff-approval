@@ -7,7 +7,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import type { ComponentProps } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingFileDiff } from '../src/types.ts'
-import { PendingPanel } from '../src/client/PendingPanel.tsx'
+import { PendingPanel, frameInsets } from '../src/client/PendingPanel.tsx'
+import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
 import { DiffApprovalSettingsTab } from '../src/client/SettingsTab.tsx'
 import { renderMarkdownPreview } from '../src/client/markdown-preview.ts'
 import { highlightWindow } from '../src/client/highlight.ts'
@@ -23,6 +24,10 @@ vi.mock('../src/client/highlight.ts', { spy: true })
 afterEach(cleanup)
 afterEach(() => { vi.restoreAllMocks() })
 afterEach(() => { localStorage.clear() })
+// A test that plants the harness composer's input box owns it for its own test
+// only: the panel focuses the first one it finds, so a leftover would silently
+// redirect the next test's caret assertion.
+afterEach(() => { for (const stale of document.querySelectorAll('[data-composer-input]')) stale.remove() })
 
 beforeAll(() => {
   // jsdom has no scrolling; the jump effect centers rows through it.
@@ -137,6 +142,37 @@ describe('PendingPanel', () => {
     navCell.remove()
   })
 
+  it('measures the app around the conversation, resizer or not', () => {
+    // The shell renders a column resizer only for an expanded column, so a
+    // collapsed sidebar used to read as "nothing on that side": the panel then
+    // sat over the 56px rail instead of beside it. The centre column's own box is
+    // the measurement that holds either way.
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1200 })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
+    const scroll = document.createElement('div')
+    scroll.setAttribute('data-conversation-scroll', '')
+    document.body.appendChild(scroll)
+    scroll.getBoundingClientRect = () => ({
+      left: 56, right: 800, width: 744, top: 96, bottom: 800, height: 704, x: 56, y: 96, toJSON: () => ({}),
+    }) as DOMRect
+
+    // No resizer and no frame marker: exactly the collapsed state.
+    expect(document.querySelector('[data-side]')).toBeNull()
+    expect(frameInsets()).toEqual({ top: 96, bottom: 0, left: 56, right: 400 })
+
+    // With the app's view tabs above the conversation, that strip's top edge is
+    // the boundary instead: the title row stays visible, the tabs are covered.
+    const tabs = document.createElement('div')
+    tabs.setAttribute('role', 'tablist')
+    document.body.insertBefore(tabs, scroll)
+    tabs.getBoundingClientRect = () => ({
+      left: 56, right: 800, width: 744, top: 60, bottom: 96, height: 36, x: 56, y: 60, toJSON: () => ({}),
+    }) as DOMRect
+    expect(frameInsets().top).toBe(60)
+    tabs.remove()
+    scroll.remove()
+  })
+
   it('sits above a docked composer seat (approval takeover included)', () => {
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
     const scroll = document.createElement('div')
@@ -207,14 +243,16 @@ describe('PendingPanel', () => {
     scroll.remove()
   })
 
-  it('closes when clicking outside the panel', () => {
+  it('stays open when clicking outside the panel', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     expect(document.querySelector('[data-diff-approval-panel]')).toBeTruthy()
 
+    // A working surface, not a popover: the ways out are the ✕, Escape, and the
+    // quick-summon chord — never a stray press on the app behind it.
     fireEvent.pointerDown(document.body)
-    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
   })
 
   it('stays open when clicking inside the panel', () => {
@@ -226,7 +264,7 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
   })
 
-  it('stays open on the input card but closes on its seat gutter', () => {
+  it('stays open on the input card and on its seat gutter alike', () => {
     const seat = document.createElement('div')
     seat.setAttribute('data-composer-seat', '')
     const card = document.createElement('div')
@@ -241,11 +279,11 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
 
     fireEvent.pointerDown(seat)
-    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
     seat.remove()
   })
 
-  it('stays open on the approval card but closes on its blank gutter', () => {
+  it('stays open on the approval card and on its blank gutter alike', () => {
     const frame = document.createElement('div')
     frame.setAttribute('data-question-key', 'q-1')
     const card = document.createElement('section')
@@ -259,11 +297,11 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
 
     fireEvent.pointerDown(frame)
-    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
     frame.remove()
   })
 
-  it('stays open on the approval-key card but closes on its blank gutter', () => {
+  it('stays open on the approval-key card and on its blank gutter alike', () => {
     const frame = document.createElement('div')
     frame.setAttribute('data-approval-key', 'approval-1')
     const card = document.createElement('section')
@@ -277,7 +315,7 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
 
     fireEvent.pointerDown(frame)
-    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
     frame.remove()
   })
 
@@ -287,6 +325,10 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     expect(document.querySelector('[data-diff-approval-panel]')).toBeTruthy()
 
+    // The close button's name stays the action; its tooltip carries the two
+    // chords (Escape, quick-summon). Focus shows the bubble without the hover delay.
+    fireEvent.focus(document.querySelector('[data-diff-approval-close]') as HTMLElement)
+    expect(screen.getByText('action.closeHint {"chord":"Ctrl+D"}')).toBeDefined()
     fireEvent.click(screen.getByLabelText('action.close'))
     expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
   })
@@ -1151,6 +1193,7 @@ describe('PendingPanel', () => {
       fireEvent.click(toggle)
       expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
 
+      // Folding it back removes the card at once: only the opening is animated.
       fireEvent.click(toggle)
       expect(document.querySelector('[data-diff-floating-file-list]')).toBeNull()
 
@@ -1163,13 +1206,72 @@ describe('PendingPanel', () => {
       expect(row).toBeDefined()
       fireEvent.click(row!)
       expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
-      // Clicking outside the card (the code box) folds it back.
+      // Clicking outside the card (the code box) folds it back at once.
       fireEvent.pointerDown(document.querySelector('[data-diff-approval-panel]') as HTMLElement)
       expect(document.querySelector('[data-diff-floating-file-list]')).toBeNull()
     } finally {
       if (originalWidth !== undefined) Object.defineProperty(window, 'innerWidth', originalWidth)
       else delete (window as { innerWidth?: unknown }).innerWidth
     }
+  })
+
+  it('keeps the file-list knob outside the diff view, which can vanish', () => {
+    const originalWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth')
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 600 })
+    try {
+      render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+
+      const knob = document.querySelector('[data-diff-file-list-toggle]') as HTMLElement
+      expect(knob).not.toBeNull()
+      // It used to sit in the diff view's action row, which is not drawn while no
+      // file is open — taking the switch for the folded list down with it. It now
+      // hangs off the panel itself, so the detail's content cannot remove it.
+      expect(knob.closest('[data-diff-toolbar]')).toBeNull()
+      expect(knob.closest('[data-diff-detail]')).toBeNull()
+      expect(knob.closest('[data-diff-approval-panel]')).not.toBeNull()
+
+      // Its place is the floating card's own top-left corner — the same measured
+      // box, the same inset — so opening the list, which sits above the knob in
+      // z-order, covers it exactly.
+      fireEvent.click(knob)
+      const card = document.querySelector('[data-diff-floating-file-list]') as HTMLElement
+      expect(card).not.toBeNull()
+      expect(parseFloat(knob.style.left)).toBe(parseFloat(card.style.left))
+      expect(parseFloat(knob.style.top)).toBe(parseFloat(card.style.top))
+    } finally {
+      if (originalWidth !== undefined) Object.defineProperty(window, 'innerWidth', originalWidth)
+      else delete (window as { innerWidth?: unknown }).innerWidth
+    }
+  })
+
+  it('folds the file list for good from the switch beside Add, and remembers it', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const first = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    // A wide window: the list sits beside the diff, and there is no knob.
+    expect(document.querySelector('[data-diff-approval-file-list]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-file-list-toggle]')).toBeNull()
+
+    const toggle = document.querySelector('[data-diff-file-list-float]') as HTMLElement
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(toggle)
+    // Folded for good, with the knob that opens the floating card…
+    expect(document.querySelector('[data-diff-approval-file-list]')).toBeNull()
+    expect(document.querySelector('[data-diff-file-list-toggle]')).not.toBeNull()
+    // …and stored, so the next open starts folded too.
+    expect(localStorage.getItem('diff-approval:file-list-float')).toBe('1')
+    first.unmount()
+
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(document.querySelector('[data-diff-approval-file-list]')).toBeNull()
+    // The switch lives with the list's other controls, so it is reached by
+    // opening the floating card the knob shows.
+    fireEvent.click(document.querySelector('[data-diff-file-list-toggle]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-file-list-float]') as HTMLElement)
+    expect(localStorage.getItem('diff-approval:file-list-float')).toBe('0')
+    expect(document.querySelector('[data-diff-approval-file-list]')).not.toBeNull()
   })
 
   it('shows the floating file list when the panel opens in Markdown preview', () => {
@@ -2376,52 +2478,270 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-approval-notice]')).toBeNull()
   })
 
-  it('pins the panel to the window edge when expanded and restores on a second click', () => {
-    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
-    const view = render(<PendingPanel {...props} />)
-    fireEvent.click(screen.getByLabelText('panel.aria'))
+  it('moves the panel edge by edge as the coverage switches are flipped', () => {
+    // A centre column with real insets: a 56px rail on the left, a 400px right
+    // sidebar, and a 60px header above (the values the shell reports).
+    const originalWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth')
+    const originalHeight = Object.getOwnPropertyDescriptor(window, 'innerHeight')
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1200 })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
+    const scroll = document.createElement('div')
+    scroll.setAttribute('data-conversation-scroll', '')
+    document.body.appendChild(scroll)
+    scroll.getBoundingClientRect = () => ({
+      left: 56, right: 800, width: 744, top: 60, bottom: 800, height: 740, x: 56, y: 60, toJSON: () => ({}),
+    }) as DOMRect
+    try {
+      const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+      render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
 
-    const panel = document.querySelector('[data-diff-approval-panel]') as HTMLElement
-    const expand = document.querySelector('[data-diff-approval-expand]') as HTMLElement
-    expect(expand).not.toBeNull()
-    // The close button sits to the right of the expand button.
-    const close = document.querySelector('[data-diff-approval-close]') as HTMLElement
-    expect(close.compareDocumentPosition(expand) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
-    // Default bottom is the fallback composer offset.
-    expect(panel.style.bottom).toBe('128px')
+      const panel = document.querySelector('[data-diff-approval-panel]') as HTMLElement
+      const presentation = document.querySelector('[data-diff-approval-presentation]') as HTMLElement
+      expect(presentation).not.toBeNull()
+      // The close button sits to the right of the presentation control.
+      const close = document.querySelector('[data-diff-approval-close]') as HTMLElement
+      expect(close.compareDocumentPosition(presentation) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
+      // The default coverage is the header and both sidebars, not the composer: the
+      // panel stops at the measured composer offset, and its other edges sit against
+      // the window.
+      expect(panel.style.top).toBe('8px')
+      expect(panel.style.bottom).toBe('128px')
+      expect(panel.style.left).toBe('8px')
+      expect(panel.style.right).toBe('8px')
 
-    fireEvent.click(expand)
-    // Expanded pins to the window edge, keeping the 8px inset of the other edges.
-    expect(panel.style.bottom).toBe('8px')
-    expect(expand.getAttribute('aria-label')).toBe('action.exitFullscreen')
+      /** Open the coverage popover, which stays up for the next switch. */
+      const popover = (): HTMLElement => {
+        const trigger = document.querySelector('[data-diff-approval-cover]') as HTMLElement
+        expect(trigger).not.toBeNull()
+        if (document.querySelector('[data-diff-approval-cover-popover]') === null) fireEvent.click(trigger)
+        const list = document.querySelector('[data-diff-approval-cover-popover]')
+        expect(list).not.toBeNull()
+        return list as HTMLElement
+      }
+      /** Flip one coverage switch; the popover stays open across switches. */
+      const toggle = (key: string): void => {
+        popover()
+        fireEvent.click(document.querySelector(`[data-diff-approval-cover-switch="${key}"]`) as HTMLElement)
+      }
+      // Covering the composer pins the panel to the window's bottom edge…
+      toggle('composer')
+      expect(panel.style.bottom).toBe('8px')
+      expect(localStorage.getItem('diff-approval:float-cover')).toBe('{"top":true,"left":true,"right":true,"composer":true}')
+      // …and the switch is a toggle: flipping it back restores the composer offset.
+      toggle('composer')
+      expect(panel.style.bottom).toBe('128px')
 
-    fireEvent.click(expand)
-    expect(panel.style.bottom).toBe('128px')
-    expect(expand.getAttribute('aria-label')).toBe('action.expand')
-
-    // Expanded is a persistent state: closing and reopening keeps it.
-    fireEvent.click(expand)
-    fireEvent.click(screen.getByLabelText('action.close'))
-    fireEvent.click(screen.getByLabelText('panel.aria'))
-    const reopened = document.querySelector('[data-diff-approval-panel]') as HTMLElement
-    expect(reopened.style.bottom).toBe('8px')
+      // Not covering the header starts the panel at the conversation's own top
+      // edge (the view tabs' when there are any) — no gap, or a strip of those
+      // tabs would poke out above it…
+      toggle('top')
+      expect(panel.style.top).toBe('60px')
+      // …while the sides keep a gap from the rail they leave visible.
+      toggle('left')
+      expect(panel.style.left).toBe('64px')
+      toggle('right')
+      expect(panel.style.right).toBe('408px')
+      expect(localStorage.getItem('diff-approval:float-cover')).toBe('{"top":false,"left":false,"right":false,"composer":false}')
+    } finally {
+      scroll.remove()
+      if (originalWidth !== undefined) Object.defineProperty(window, 'innerWidth', originalWidth)
+      else delete (window as { innerWidth?: unknown }).innerWidth
+      if (originalHeight !== undefined) Object.defineProperty(window, 'innerHeight', originalHeight)
+      else delete (window as { innerHeight?: unknown }).innerHeight
+    }
   })
 
-  it('lays a sidebar-colored backdrop over the seam while expanded', () => {
+  it('offers the coverage switches as one row, each showing its own state', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
-    const view = render(<PendingPanel {...props} />)
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-approval-cover]') as HTMLElement)
+
+    const popover = document.querySelector('[data-diff-approval-cover-popover]') as HTMLElement
+    expect(popover).not.toBeNull()
+    const switches = [...popover.querySelectorAll('[data-diff-approval-cover-switch]')] as HTMLElement[]
+    // One row: left, top, right, bottom.
+    expect(switches.map(node => node.dataset.diffApprovalCoverSwitch)).toEqual(['left', 'top', 'right', 'composer'])
+    for (const node of switches) {
+      // A glyph button with its own label — the tooltip's source.
+      expect(node.querySelector('svg')).not.toBeNull()
+      expect(node.getAttribute('aria-label')).toMatch(/^cover\./)
+    }
+    // The default coverage is the header and both sidebars, not the composer.
+    expect(switches.map(node => node.getAttribute('aria-pressed'))).toEqual(['true', 'true', 'true', 'false'])
+
+    // Escape closes the popover alone: the panel stays up for the next switch.
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(document.querySelector('[data-diff-approval-cover-popover]')).toBeNull()
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+
+    // As does a press outside it — including on the mode switch beside it, which
+    // stops its own presses from bubbling (the dock chip's tab-drag guard): the
+    // popover takes the press in the capture phase so it still hears it.
+    fireEvent.click(document.querySelector('[data-diff-approval-cover]') as HTMLElement)
+    expect(document.querySelector('[data-diff-approval-cover-popover]')).not.toBeNull()
+    fireEvent.pointerDown(document.body)
+    expect(document.querySelector('[data-diff-approval-cover-popover]')).toBeNull()
+
+    fireEvent.click(document.querySelector('[data-diff-approval-cover]') as HTMLElement)
+    fireEvent.pointerDown(document.querySelector('[data-diff-approval-presentation]') as HTMLElement)
+    expect(document.querySelector('[data-diff-approval-cover-popover]')).toBeNull()
+  })
+
+  it('names both ways out on the close button, with the chord the user bound', () => {
+    // The panel closes with Escape and with the quick-summon chord, so the tooltip
+    // names both — and names the chord as bound, arrow keys as glyphs.
+    localStorage.setItem('diff-approval:quick-summon-key', 'Ctrl+ArrowUp')
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.focus(document.querySelector('[data-diff-approval-close]') as HTMLElement)
+    expect(screen.getByText('action.closeHint {"chord":"Ctrl+↑"}')).toBeDefined()
+  })
+
+  it('advertises the bound chord on the footer entry, not the default', () => {
+    localStorage.setItem('diff-approval:quick-summon-key', 'Alt+P')
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+
+    // The footer entry: what it opens, plus the chord that does the same — read
+    // from the stored binding, so a rebind in Settings shows up here.
+    fireEvent.focus(screen.getByLabelText('panel.aria'))
+    expect(screen.getByText('action.summonHint {"chord":"Alt+P"}')).toBeDefined()
+  })
+
+  it('toggles each coverage edge from its own chord, and yields inside text fields', () => {
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const panel = document.querySelector('[data-diff-approval-panel]') as HTMLElement
+    expect(panel.style.bottom).toBe('128px')
+
+    // The composer edge has its own chord…
+    fireEvent.keyDown(document.body, { key: 'ArrowDown', ctrlKey: true, shiftKey: true })
+    expect(panel.style.bottom).toBe('8px')
+    // …and each sidebar edge flips only itself.
+    fireEvent.keyDown(document.body, { key: 'ArrowLeft', ctrlKey: true, shiftKey: true })
+    expect(localStorage.getItem('diff-approval:float-cover')).toBe('{"top":true,"left":false,"right":true,"composer":true}')
+    fireEvent.keyDown(document.body, { key: 'ArrowRight', ctrlKey: true, shiftKey: true })
+    expect(localStorage.getItem('diff-approval:float-cover')).toBe('{"top":true,"left":false,"right":false,"composer":true}')
+    // The header above has one too (no measured header in this bare DOM, so the
+    // edge lands at 0 — the geometry case above covers the real numbers).
+    fireEvent.keyDown(document.body, { key: 'ArrowUp', ctrlKey: true, shiftKey: true })
+    expect(panel.style.top).toBe('0px')
+    expect(localStorage.getItem('diff-approval:float-cover')).toBe('{"top":false,"left":false,"right":false,"composer":true}')
+
+    // The chat composer keeps them: that is where the caret usually is when the
+    // panel's edges need rearranging.
+    const composer = document.createElement('div')
+    composer.setAttribute('data-composer-input', '')
+    composer.contentEditable = 'true'
+    document.body.appendChild(composer)
+    fireEvent.keyDown(composer, { key: 'ArrowDown', ctrlKey: true, shiftKey: true })
+    expect(localStorage.getItem('diff-approval:float-cover')).toBe('{"top":false,"left":false,"right":false,"composer":false}')
+
+    // Every other text field keeps Ctrl+Shift+Arrow for word-wise selection.
+    const field = document.createElement('textarea')
+    document.body.appendChild(field)
+    fireEvent.keyDown(field, { key: 'ArrowLeft', ctrlKey: true, shiftKey: true })
+    expect(localStorage.getItem('diff-approval:float-cover')).toBe('{"top":false,"left":false,"right":false,"composer":false}')
+  })
+
+  it('echoes a chord flip on screen, without making it pressable', () => {
+    vi.useFakeTimers()
+    try {
+      render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      expect(document.querySelector('[data-diff-approval-cover-notice]')).toBeNull()
+
+      fireEvent.keyDown(document.body, { key: 'ArrowLeft', ctrlKey: true, shiftKey: true })
+      const notice = document.querySelector('[data-diff-approval-cover-notice]') as HTMLElement
+      expect(notice).not.toBeNull()
+      // The same row of glyphs the popover shows, all of them, in its order…
+      const glyphs = [...notice.querySelectorAll('[data-diff-approval-cover-notice-glyph]')] as HTMLElement[]
+      expect(glyphs.map(node => node.dataset.diffApprovalCoverNoticeGlyph)).toEqual(['left', 'top', 'right', 'composer'])
+      // …with the edge that just changed marked, and its new state shown.
+      expect(glyphs[0]!.hasAttribute('data-changed')).toBe(true)
+      expect(glyphs[0]!.hasAttribute('data-on')).toBe(false)
+      // Nothing in it is a control.
+      expect(notice.querySelector('button')).toBeNull()
+
+      // It clears itself: a report that stayed would need dismissing.
+      act(() => { vi.advanceTimersByTime(1300) })
+      expect(document.querySelector('[data-diff-approval-cover-notice]')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('leaves the echo to the chords: clicking a switch reports itself in place', () => {
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-approval-cover]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-approval-cover-switch="composer"]') as HTMLElement)
+    expect(document.querySelector('[data-diff-approval-cover-notice]')).toBeNull()
+  })
+
+  it('closes the docked panel from the quick-summon chord', () => {
+    const composer = document.createElement('div')
+    composer.setAttribute('data-composer-input', '')
+    composer.tabIndex = -1
+    document.body.appendChild(composer)
+    const closeDock = vi.fn()
+    const props = {
+      ...panelProps({ read: true, files: [FILE], busy: new Set() }),
+      closeDock,
+      useDock: (select: (state: { available: boolean; open: boolean }) => unknown) => select({ available: true, open: true }),
+    }
+    render(<PendingPanel {...props} />)
+    fireEvent.keyDown(document.body, { key: 'd', ctrlKey: true })
+    // The chord closed the dock tab (the chip published its close) instead of
+    // opening a second copy of the panel in the overlay — and handed the caret
+    // back to the composer, exactly as the floating close does.
+    expect(closeDock).toHaveBeenCalledTimes(1)
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+    expect(document.activeElement).toBe(composer)
+  })
+
+  it('hands the caret back to the composer when the panel is closed, not when clicked away', () => {
+    // The chat composer's editable box, as the harness marks it.
+    const composer = document.createElement('div')
+    composer.setAttribute('data-composer-input', '')
+    composer.tabIndex = -1
+    document.body.appendChild(composer)
+
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+
+    // Closing with the ✕ is a "done reviewing, back to typing" move.
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    document.body.focus()
+    fireEvent.click(document.querySelector('[data-diff-approval-close]') as HTMLElement)
+    expect(document.activeElement).toBe(composer)
+
+    // As is Escape, and the quick-summon chord.
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    document.body.focus()
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(document.activeElement).toBe(composer)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    document.body.focus()
+    fireEvent.keyDown(document.body, { key: 'd', ctrlKey: true })
+    expect(document.activeElement).toBe(composer)
+  })
+
+  it('lays a sidebar-colored backdrop over the seam only when everything is covered', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
-    // No backdrop in the docked state.
-    expect(document.querySelector('[data-diff-fullscreen-backdrop]')).toBeNull()
+    // Both sidebars is the plain floating panel: no backdrop.
+    expect(document.querySelector('[data-diff-cover-backdrop]')).toBeNull()
 
-    fireEvent.click(document.querySelector('[data-diff-approval-expand]') as HTMLElement)
-    const backdrop = document.querySelector('[data-diff-fullscreen-backdrop]') as HTMLElement
+    fireEvent.click(document.querySelector('[data-diff-approval-cover]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-approval-cover-switch="composer"]') as HTMLElement)
+    const backdrop = document.querySelector('[data-diff-cover-backdrop]') as HTMLElement
     expect(backdrop).not.toBeNull()
 
-    // Leaving fullscreen removes it.
-    fireEvent.click(document.querySelector('[data-diff-approval-expand]') as HTMLElement)
-    expect(document.querySelector('[data-diff-fullscreen-backdrop]')).toBeNull()
+    fireEvent.click(document.querySelector('[data-diff-approval-cover-switch="left"]') as HTMLElement)
+    expect(document.querySelector('[data-diff-cover-backdrop]')).toBeNull()
   })
 
   it('shows the selection reference in the status bar when text is selected', () => {
@@ -2975,6 +3295,68 @@ describe('PendingPanel', () => {
     // Collapse again.
     fireEvent.click(document.querySelector('[data-diff-keybindings-toggle]') as HTMLButtonElement)
     expect(document.querySelector('[data-diff-key-jumpdown]')).toBeNull()
+  })
+
+  it('the shortcut rows carry no chevron, and reset to their default', () => {
+    localStorage.removeItem('diff-approval:key:jumpDown')
+    const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
+    render(<DiffApprovalSettingsTab {...props} />)
+    fireEvent.click(document.querySelector('[data-diff-keybindings-toggle]') as HTMLButtonElement)
+
+    const recorder = (): HTMLButtonElement => document.querySelector('[data-diff-key-jumpdown]') as HTMLButtonElement
+    const reset = (): HTMLButtonElement => document.querySelector('[data-reset="data-diff-key-jumpDown"]') as HTMLButtonElement
+    // The control is the chord itself: there is no menu behind it, so no chevron.
+    expect(recorder().querySelector('svg')).toBeNull()
+    // Reset starts disabled: the row is already at its default.
+    expect(reset()).not.toBeNull()
+    expect(reset().disabled).toBe(true)
+
+    fireEvent.click(recorder())
+    fireEvent.keyDown(recorder(), { key: 'k', ctrlKey: true })
+    expect(localStorage.getItem('diff-approval:key:jumpDown')).toBe('Ctrl+K')
+    expect(reset().disabled).toBe(false)
+
+    fireEvent.click(reset())
+    expect(localStorage.getItem('diff-approval:key:jumpDown')).toBe('Ctrl+ArrowDown')
+    expect(recorder().textContent).toContain('Ctrl+ArrowDown')
+    expect(reset().disabled).toBe(true)
+  })
+
+  it('unbinds a shortcut when the recording is dismissed by a press elsewhere', () => {
+    localStorage.removeItem('diff-approval:key:jumpDown')
+    const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
+    render(<DiffApprovalSettingsTab {...props} />)
+    fireEvent.click(document.querySelector('[data-diff-keybindings-toggle]') as HTMLButtonElement)
+
+    const recorder = document.querySelector('[data-diff-key-jumpdown]') as HTMLButtonElement
+    fireEvent.click(recorder)
+    expect(recorder.textContent).toBe('panel.recordShortcut')
+
+    // A press anywhere else is the answer "no shortcut", not a cancel: the row
+    // shows it and the store holds it.
+    fireEvent.pointerDown(document.body)
+    expect(localStorage.getItem('diff-approval:key:jumpDown')).toBe('')
+    expect((document.querySelector('[data-diff-key-jumpdown]') as HTMLButtonElement).textContent).toBe('panel.shortcutNone')
+  })
+
+  it('the DSH Settings tab carries a recorder row per coverage edge', () => {
+    const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
+    render(<DiffApprovalSettingsTab {...props} />)
+    fireEvent.click(document.querySelector('[data-diff-keybindings-toggle]') as HTMLButtonElement)
+
+    // The four switches are rebindable like every other action, and each row
+    // shows the default the panel actually applies.
+    const defaults: Record<string, string> = {
+      coverleft: 'Ctrl+Shift+ArrowLeft',
+      covercomposer: 'Ctrl+Shift+ArrowDown',
+      coverright: 'Ctrl+Shift+ArrowRight',
+      covertop: 'Ctrl+Shift+ArrowUp',
+    }
+    for (const [attribute, chord] of Object.entries(defaults)) {
+      const row = document.querySelector(`[data-diff-key-${attribute}]`) as HTMLButtonElement
+      expect(row).not.toBeNull()
+      expect(row.textContent).toContain(chord)
+    }
   })
 
   it('the DSH Settings tab exposes an expanded diff-view group with editable appearance', () => {
@@ -3881,4 +4263,241 @@ describe('PendingPanel', () => {
     fireEvent.click(document.querySelector('[data-diff-search-next]') as HTMLElement)
     expect(scrolled).toBe(360 - 100)
   })
+
+  it('restores the remembered coverage from the footer entry', () => {
+    // The retired fullscreen state — everything covered — restores as the floating
+    // panel with every switch on, and the popover writes them back.
+    localStorage.setItem('diff-approval:presentation', 'fullscreen')
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const panel = document.querySelector('[data-diff-approval-panel]') as HTMLElement
+    expect(panel).not.toBeNull()
+    expect(document.querySelector('[data-diff-cover-backdrop]')).not.toBeNull()
+    expect(panel.style.bottom).toBe('8px')
+
+    // Turning the composer switch off is the old floating panel, and it sticks.
+    fireEvent.click(document.querySelector('[data-diff-approval-cover]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-approval-cover-switch="composer"]') as HTMLElement)
+    expect(document.querySelector('[data-diff-cover-backdrop]')).toBeNull()
+    expect(panel.style.bottom).toBe('128px')
+    expect(JSON.parse(localStorage.getItem('diff-approval:float-cover') ?? '{}')).toEqual({ top: true, left: true, right: true, composer: false })
+  })
+
+  it('hands the footer entry to the dock when that is the remembered presentation', () => {
+    localStorage.setItem('diff-approval:presentation', 'dock')
+    const onOpenDock = vi.fn()
+    const props = { ...panelProps({ read: true, files: [FILE], busy: new Set() }), onOpenDock }
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(onOpenDock).toHaveBeenCalledTimes(1)
+    // The panel lives in the sidebar's tab there: nothing floats in the overlay.
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+  })
+
+  it('falls back to the floating panel for a remembered dock in a build without one', () => {
+    localStorage.setItem('diff-approval:presentation', 'dock')
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+  })
+
+  it('renders docked as the sidebar tab body with no header of its own', () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} docked dockHost={host} />)
+
+    // The content is inside the host the tab body owns, marked docked, with no
+    // composer anchoring (the tab owns the size) and no footer badge.
+    const panel = host.querySelector('[data-diff-approval-panel]') as HTMLElement
+    expect(panel).not.toBeNull()
+    expect(panel.dataset.diffDocked).toBe('')
+    expect(panel.style.bottom).toBe('')
+    expect(document.querySelector('[data-diff-approval-badge]')).toBeNull()
+    // The tab above it IS the frame: its chip carries the title, the count, the
+    // mode switch, and the kit's own close button, so a header here would only
+    // repeat them and cost the list its height. None of its controls exist.
+    expect(panel.querySelector('[data-diff-approval-presentation]')).toBeNull()
+    expect(panel.querySelector('[data-diff-approval-close]')).toBeNull()
+    expect(panel.querySelector('[data-diff-approval-settings]')).toBeNull()
+    expect(panel.textContent).not.toContain('panel.title')
+    // The tab body holds the panel and nothing else. The footer seat's own layer
+    // (42px plus margins) used to be rendered here too, which pushed the tab
+    // content past its own height: the sidebar body then scrolled, showing a
+    // blank strip under the panel.
+    expect(host.querySelector('[data-diff-approval-layer]')).toBeNull()
+    expect(panel.parentElement).toBe(host)
+  })
+
+  it('remembers the dock when the panel renders as the tab body', () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} docked dockHost={host} />)
+    // Being the tab's body is the dock presentation: the footer entry will bring
+    // the panel back here instead of floating it.
+    expect(localStorage.getItem('diff-approval:presentation')).toBe('dock')
+  })
+
+  it('reports the tab body\'s own visibility to the dock state', () => {
+    const onDockShowing = vi.fn()
+    const close = vi.fn()
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    // The controller publishes no observable, so "docked and in view" can only
+    // come from the body the tab framework draws.
+    const bodyProps = {
+      ...props,
+      useTabInfo: () => ({ tab: { visible: true, actions: { close } } }),
+      onDockShowing,
+    } as unknown as Parameters<typeof DiffDockBody>[0]
+    const view = render(<DiffDockBody {...bodyProps} />)
+    expect(onDockShowing).toHaveBeenCalledWith(true)
+    view.unmount()
+    expect(onDockShowing).toHaveBeenLastCalledWith(false)
+  })
+
+  it('says so when the sidebar is mounted but cannot take the panel yet', () => {
+    // The controller throws when no seat is bound to a session: a handoff that
+    // fails must not look like a click that did nothing.
+    const onOpenDock = vi.fn(() => { throw new Error('no seat bound') }) as unknown as () => void
+    const props = {
+      ...panelProps({ read: true, files: [FILE], busy: new Set() }),
+      onOpenDock,
+      useDock: (select: (state: { available: boolean; open: boolean }) => unknown) => select({ available: true, open: false }),
+    }
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-approval-presentation]') as HTMLElement)
+    fireEvent.click(screen.getByText('action.presentationDock'))
+    expect(screen.getByText(/panel\.dockFailed/)).not.toBeNull()
+    // Nothing docked, so nothing is remembered as docked either.
+    expect(localStorage.getItem('diff-approval:presentation')).not.toBe('dock')
+  })
+
+  it('falls back to the overlay when the remembered dock cannot open', () => {
+    localStorage.setItem('diff-approval:presentation', 'dock')
+    const onOpenDock = vi.fn(() => { throw new Error('no seat bound') }) as unknown as () => void
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} onOpenDock={onOpenDock} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(onOpenDock).toHaveBeenCalledTimes(1)
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+  })
+
+  it('offers the dock choice in the presentation menu only with a sidebar', () => {
+    // The menu names the three states and checks the current one; "dock" is only
+    // offered where there is a right sidebar to dock into.
+    const withDock = {
+      ...panelProps({ read: true, files: [FILE], busy: new Set() }),
+      onOpenDock: vi.fn(),
+      useDock: (select: (state: { available: boolean; open: boolean }) => unknown) => select({ available: true, open: false }),
+    }
+    const first = render(<PendingPanel {...withDock} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-approval-presentation]') as HTMLElement)
+    fireEvent.click(screen.getByText('action.presentationDock'))
+    // The overlay steps aside for the tab, and the choice is remembered.
+    expect(withDock.onOpenDock).toHaveBeenCalledTimes(1)
+    expect(localStorage.getItem('diff-approval:presentation')).toBe('dock')
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+    first.unmount()
+
+  })
+
+  it('still lists the dock choice without a sidebar, and says why it cannot', () => {
+    const withoutDock = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...withoutDock} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+    fireEvent.click(document.querySelector('[data-diff-approval-presentation]') as HTMLElement)
+    // A missing feature is worth a sentence, not a vanishing menu row.
+    const item = (label: string): HTMLElement => (screen.getAllByText(label)
+      .find(candidate => candidate.closest('[data-diff-approval-panel]') === null)
+      ?? screen.getAllByText(label).at(-1)!) as HTMLElement
+    expect(item('action.presentationFloat')).toBeDefined()
+    fireEvent.click(item('action.presentationDock'))
+    expect(screen.getByText('panel.dockUnavailable')).toBeDefined()
+    // Still floating: nothing moved.
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+  })
+
+  it('names the two presentations, and keeps the current one checked', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    fireEvent.click(document.querySelector('[data-diff-approval-presentation]') as HTMLElement)
+    // Two rows, no third state: "fullscreen" is a coverage combination now, not a
+    // presentation of its own.
+    const rows = [...document.querySelectorAll('[role="menuitem"]')]
+    expect(rows).toHaveLength(2)
+    expect(screen.getByText('action.presentationFloat')).not.toBeNull()
+    expect(screen.getByText('action.presentationDock')).not.toBeNull()
+    expect(screen.queryByText('action.presentationFullscreen')).toBeNull()
+    // The floating row is the checked one: the kit's menu draws the check as a
+    // second glyph in the row, beside the row's own icon.
+    expect(rows[0]!.querySelectorAll('svg')).toHaveLength(2)
+    expect(rows[1]!.querySelectorAll('svg')).toHaveLength(1)
+    fireEvent.click(screen.getByText('action.presentationDock'))
+    expect(screen.getByText('panel.dockUnavailable')).toBeDefined()
+  })
+
+  it('shows the presentation as an icon, and leads every menu row with its own mark', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const trigger = document.querySelector('[data-diff-approval-presentation]') as HTMLElement
+    // The state's mark plus the menu chevron — and still no words: the name
+    // travels in the tooltip and the accessible label instead of the button.
+    expect(trigger.textContent).toBe('')
+    expect(trigger.querySelectorAll('svg')).toHaveLength(2)
+    expect(trigger.getAttribute('aria-label')).toContain('action.presentationCurrent')
+    expect(trigger.getAttribute('aria-haspopup')).toBe('menu')
+
+    fireEvent.click(trigger)
+    const rows = [...document.querySelectorAll('[role="menuitem"]')]
+    expect(rows).toHaveLength(2)
+    for (const row of rows) expect(row.querySelector('svg')).not.toBeNull()
+    // The dock row mirrors the app's own right-sidebar mark.
+    const dockMark = rows[1]!.querySelector('svg')
+    expect(dockMark?.getAttribute('class')).toContain('mirrored')
+  })
+
+  it('shows the overlay when the docked tab hands the panel back', () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    // Coverage is seeded when the panel mounts (the floating instance owns it), so
+    // an all-on cover has to be there before the footer entry renders.
+    localStorage.setItem('diff-approval:presentation', 'float')
+    localStorage.setItem('diff-approval:float-cover', '{"left":true,"right":true,"composer":true}')
+    // Both instances mounted, as in the app: the footer's (closed) and the docked
+    // tab's. Leaving the dock is the chip's move, and it reaches the footer
+    // instance — a separate mount — as an event.
+    const footer = render(<PendingPanel {...props} />)
+    render(<PendingPanel {...props} docked dockHost={host} />)
+    expect(document.querySelector('[data-diff-approval-panel]:not([data-diff-docked])')).toBeNull()
+
+    act(() => { window.dispatchEvent(new CustomEvent(SHOW_PANEL_EVENT)) })
+    expect(document.querySelector('[data-diff-approval-panel]:not([data-diff-docked])')).not.toBeNull()
+    expect(document.querySelector('[data-diff-cover-backdrop]')).not.toBeNull()
+    footer.unmount()
+  })
+
+  it('keeps a docked panel standing through an outside press and Escape', () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} docked dockHost={host} />)
+    const panel = (): Element | null => host.querySelector('[data-diff-approval-panel]')
+    expect(panel()).not.toBeNull()
+    // A tab is not a popover: a press on the app outside it — the editor, the
+    // chat, or the sidebar's own blank space — and Esc both leave it standing.
+    // Taking it out of the dock belongs to the tab chrome (its chip's mode
+    // switch, and the kit's own close button).
+    fireEvent.pointerDown(document.body)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(panel()).not.toBeNull()
+  })
+
 })

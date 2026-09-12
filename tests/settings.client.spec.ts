@@ -2,12 +2,16 @@
 
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
+  DEFAULT_KEYBINDINGS,
   DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_LINE_HEIGHT_DEFAULT, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN,
   MD_MAX_WIDTH_DEFAULT, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN,
   currentDiffAddColor, currentDiffDelColor,
-  diffAddColor, diffDelColor, diffFontScale, diffLineHeight, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, quickSummonKey,
-  setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setLanguageForSuffix, setMdMaxWidth, setMdPreviewEnabled, setQuickSummonKey, setTabWidth, tabWidth,
+  diffAddColor, diffDelColor, diffFontScale, diffLineHeight, fileListFloat, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, quickSummonKey,
+  panelCover, panelPresentation,
+  setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setFileListFloat, setLanguageForSuffix, setMdMaxWidth, setMdPreviewEnabled, setQuickSummonKey, setTabWidth, tabWidth,
+  setPanelCover, setPanelPresentation,
 } from '../src/client/settings.ts'
+import { en, zh } from '../src/client/locales.ts'
 
 const TAB_WIDTH_KEY = 'diff-approval:tab-size'
 const QUICK_SUMMON_KEY = 'diff-approval:quick-summon-key'
@@ -192,6 +196,17 @@ describe('settings.languageBySuffix', () => {
 })
 
 describe('matchesShortcut', () => {
+  it('binds the coverage edges to the Ctrl+Shift arrows by default', () => {
+    // Each default is a distinct edge chord, and none of them collides with an
+    // existing action's default.
+    expect(DEFAULT_KEYBINDINGS.coverLeft).toBe('Ctrl+Shift+ArrowLeft')
+    expect(DEFAULT_KEYBINDINGS.coverComposer).toBe('Ctrl+Shift+ArrowDown')
+    expect(DEFAULT_KEYBINDINGS.coverRight).toBe('Ctrl+Shift+ArrowRight')
+    expect(DEFAULT_KEYBINDINGS.coverTop).toBe('Ctrl+Shift+ArrowUp')
+    const chords = Object.values(DEFAULT_KEYBINDINGS)
+    expect(new Set(chords).size).toBe(chords.length)
+  })
+
   function event(partial: Partial<KeyboardEvent>): KeyboardEvent {
     return {
       key: '',
@@ -216,5 +231,93 @@ describe('matchesShortcut', () => {
   it('matches a modifier-alias and a bare-key chord', () => {
     expect(matchesShortcut(event({ key: 'p', metaKey: true }), 'Cmd+P')).toBe(true)
     expect(matchesShortcut(event({ key: 'F2' }), 'F2')).toBe(true)
+  })
+})
+
+describe('settings.fileListFloat', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('defaults to off, where the width decides', () => {
+    expect(fileListFloat()).toBe(false)
+    setFileListFloat(true)
+    expect(fileListFloat()).toBe(true)
+    setFileListFloat(false)
+    expect(fileListFloat()).toBe(false)
+  })
+})
+
+describe('locale copy', () => {
+  it('never bakes a rebindable chord into a string', () => {
+    // Every chord a user can rebind is injected at render time (see withChord /
+    // closeHint / summonHint), so a literal one in the copy would go stale the
+    // moment it is rebound. Escape is the one key that is not rebindable.
+    const rebindable = /Ctrl\+|Cmd\+|Alt\+|Shift\+|⌘|\bF\d\b/
+    for (const [language, strings] of [['zh', zh], ['en', en]] as const) {
+      for (const [key, value] of Object.entries(strings)) {
+        if (key === 'action.closeHint' || key === 'action.closeHintEsc') {
+          if (key === 'action.closeHint') expect(value).toContain('{chord}')
+          continue
+        }
+        expect(value, `${language} ${key}`).not.toMatch(rebindable)
+      }
+    }
+  })
+})
+
+describe('settings.panelPresentation', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('remembers where the panel shows, defaulting to the floating overlay', () => {
+    expect(panelPresentation()).toBe('float')
+    setPanelPresentation('dock')
+    expect(panelPresentation()).toBe('dock')
+    setPanelPresentation('float')
+    expect(panelPresentation()).toBe('float')
+  })
+
+  it('falls back to the floating overlay for a value it does not know', () => {
+    localStorage.setItem('diff-approval:presentation', 'nonsense')
+    expect(panelPresentation()).toBe('float')
+  })
+
+  it('reads the retired fullscreen state as floating, covering everything', () => {
+    // Before coverage split it into switches, "fullscreen" was the panel filling
+    // the window. Both readings must restore the same panel.
+    localStorage.setItem('diff-approval:presentation', 'fullscreen')
+    expect(panelPresentation()).toBe('float')
+    expect(panelCover()).toEqual({ top: true, left: true, right: true, composer: true })
+  })
+})
+
+describe('settings.panelCover', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('defaults to the header and both sidebars, leaving the composer usable', () => {
+    expect(panelCover()).toEqual({ top: true, left: true, right: true, composer: false })
+  })
+
+  it('remembers each switch independently', () => {
+    setPanelCover({ top: false, left: false, right: true, composer: true })
+    expect(panelCover()).toEqual({ top: false, left: false, right: true, composer: true })
+    setPanelCover({ top: true, left: true, right: false, composer: false })
+    expect(panelCover()).toEqual({ top: true, left: true, right: false, composer: false })
+  })
+
+  it('fills in a missing or malformed switch from the default, never throwing', () => {
+    // A cover stored before the header switch existed keeps the header covered.
+    localStorage.setItem('diff-approval:float-cover', JSON.stringify({ composer: true }))
+    expect(panelCover()).toEqual({ top: true, left: true, right: true, composer: true })
+    localStorage.setItem('diff-approval:float-cover', '{"left":"yes"}')
+    expect(panelCover()).toEqual({ top: true, left: true, right: true, composer: false })
+    localStorage.setItem('diff-approval:float-cover', 'not json')
+    expect(panelCover()).toEqual({ top: true, left: true, right: true, composer: false })
+    localStorage.setItem('diff-approval:float-cover', '[1,2]')
+    expect(panelCover()).toEqual({ top: true, left: true, right: true, composer: false })
+  })
+
+  it('lets an explicit cover win over the retired fullscreen state', () => {
+    localStorage.setItem('diff-approval:presentation', 'fullscreen')
+    setPanelCover({ top: false, left: false, right: false, composer: false })
+    expect(panelCover()).toEqual({ top: false, left: false, right: false, composer: false })
   })
 })

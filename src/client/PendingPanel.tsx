@@ -3,7 +3,7 @@
 import { Component, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from 'react'
-import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconFullscreenOutline16, IconListPenOutline16, IconPlusOutline16, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconListPenOutline16, IconPanelLeftOutline16, IconPlusOutline16, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -12,6 +12,8 @@ import type { DiffApprovalBlockRange, DiffApprovalOpenAction, DiffApprovalRefres
 import type { PendingPanelFace } from './slots.ts'
 import type { Translator } from './locales.ts'
 import { PathPicker, pathPickerOpen } from './PathPicker.tsx'
+import { PresentationMenu } from './presentation-menu.tsx'
+import { CoverageControl, CoverageNotice, COVER_NOTICE_MS } from './coverage-control.tsx'
 import { blockRangesOf, changeBlocksOf, computeIntraLineDiff, computeWholeFileDiff } from './whole-file-diff.ts'
 import { renderMarkdownPreview } from './markdown-preview.ts'
 import { resolvePreviewImages } from './markdown-images.ts'
@@ -22,11 +24,15 @@ import { HIGHLIGHT_LANGS, languageDisplayName } from './highlight.ts'
 import type { HighlightSides } from './highlight.ts'
 import { useWindowedHighlight } from './windowed-highlight.ts'
 import type { LineRange, VisibleLines } from './windowed-highlight.ts'
+import type { DockSnapshot } from './dock.tsx'
 import type { HighlightSpan } from './highlight.ts'
 import { langFromPath, suffixOfPath } from './lang.ts'
 import { referenceLabelOf } from './reference.ts'
 import { OPEN_FILE_EVENT } from './produced-diff.ts'
-import { confirmFileRemoveEnabled, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setLanguageForSuffix, setMdPreviewEnabled, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
+import type { DiffApprovalPresentation } from './settings.ts'
+import { SHOW_PANEL_EVENT } from './dock.tsx'
+import { confirmFileRemoveEnabled, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
+import type { DiffApprovalCover } from './settings.ts'
 import { matchRangesOf } from './search.ts'
 import type { SearchOptions } from './search.ts'
 import css from './PendingPanel.module.css'
@@ -43,20 +49,38 @@ const POLL_INTERVAL_MS = 1000
 const FALLBACK_BOTTOM_PX = 128
 /** Gap kept between the composer's top edge and the panel bottom, in px. */
 const COMPOSER_GAP_PX = 12
-/** Fixed window-edge inset used when expanded, mirroring `.panel`'s top/left/right. */
+/** The coverage switch each chord toggles, in the order the popover lists them. */
+const COVER_ACTIONS = [
+  ['coverLeft', 'left'],
+  ['coverTop', 'top'],
+  ['coverRight', 'right'],
+  ['coverComposer', 'composer'],
+] as const satisfies readonly (readonly [string, keyof DiffApprovalCover])[]
+
+/** Fixed window-edge inset the floating panel keeps on every side, mirroring
+ *  `.panel`'s own left/right/top. */
 const PANEL_INSET_PX = 8
+/** Narrowest docked panel that still fits the file list beside the detail. Below
+ *  it the list folds into the floating card, exactly as it does in a narrow
+ *  floating panel — a right-sidebar column is narrow even on a wide window, so the
+ *  viewport width says nothing about it. */
+const DOCK_TWO_COLUMN_MIN_PX = 520
 /** The harness composer seat (conversation scroll body + seat div). */
 const SCROLL_SELECTOR = '[data-conversation-scroll]'
 const SEAT_SELECTOR = '[data-composer-seat]'
+/** The chat composer's own editable box, where a closed panel hands the caret. */
+const COMPOSER_INPUT_SELECTOR = '[data-composer-input]'
+
+/**
+ * Hand the caret back to the chat composer. Closing the review panel is a "done
+ * reviewing, back to typing" move; a close the user made by clicking elsewhere is
+ * the exception, and that path does not call this.
+ */
+function focusComposer(): void {
+  document.querySelector<HTMLElement>(COMPOSER_INPUT_SELECTOR)?.focus()
+}
 /** Seat height ui-conversation publishes for floating controls (its own seat observer). */
 const COMPOSER_HEIGHT_VAR = '--dsh-composer-height'
-/** Interactive composer/approval cards; clicking these keeps the panel open.
-    Deliberately the cards themselves, not the seat: the approval frame's wide
-    side gutters are blank space, so a click there must still close.
-    `[role="menu"]` covers the portaled menus this panel opens (the highlight
-    language picker): the list is rendered into `document.body`, so picking an
-    item is a pointerdown outside the panel element and would otherwise close it. */
-const KEEP_OPEN_SELECTOR = '[data-composer-card],[data-question-key] > *,[data-plan-review-key] > *,[data-approval-key] > *,[role="menu"]'
 /** Seat counts as docked when its bottom is this close to the window bottom. */
 const DOCKED_TOLERANCE_PX = 48
 /** File-list pane width bounds for the manual split drag, in px. */
@@ -64,6 +88,7 @@ const MIN_LIST_WIDTH_PX = 160
 const MAX_LIST_WIDTH_PX = 560
 /** Inset of the floating file-list card from the code scroll box, in px. */
 const FLOAT_LIST_MARGIN_PX = 12
+
 /** Normalize a path for comparison: forward slashes, no trailing slash. */
 export function normalizeDiffPath(p: string): string {
   return p.replaceAll('\\', '/').replace(/\/+$/, '')
@@ -361,6 +386,19 @@ interface PreviewFlashPlacement {
 /** Full panel props composed by the sidebar footer-action slot. */
 export type PendingPanelProps =
   PropsRuntime<'sidebar.footer.action'> & InjectFace<PendingPanelFace> & PropsLocale<'diff-approval'>
+  & PendingPanelDockProps
+
+/** How the panel is hosted when it is not the footer's floating overlay: the
+ *  right sidebar's tab renders it docked, filling the tab and portaling its
+ *  content into `dockHost` (the element the tab body owns). */
+export interface PendingPanelDockProps {
+  /** Docked in the sidebar tab: no badge, no overlay positioning, no composer
+   *  offset, and no header of its own — the tab's chip carries the title, the
+   *  mode switch, and the kit's close button. */
+  docked?: boolean
+  /** The element the docked panel portals its content into. */
+  dockHost?: HTMLElement
+}
 
 /** A last-block keep/revert awaiting the user's remove-or-keep choice; the choice
  *  rides the same block RPC as its `removeWhenResolved` flag. */
@@ -468,9 +506,79 @@ function SearchOptionIcon({ kind }: { kind: 'case' | 'word' }) {
   )
 }
 
+/**
+ * The app's view tabs above the conversation (对话 / 轨迹 and the like). A panel
+ * that leaves the header visible still covers these: the session's title row is
+ * the part worth keeping, and the tab strip sits directly under it, above the
+ * conversation body — a sibling of the scroller's own parent. Nothing else's
+ * tablists count: the right sidebar's own tab strip, and any inside this panel,
+ * are excluded.
+ * @param scroller - the conversation scroll body.
+ * @returns the strip's top edge in viewport px, or undefined when there is none.
+ */
+function viewTabsTop(scroller: Element): number | undefined {
+  for (const strip of document.querySelectorAll('[role="tablist"]')) {
+    if (strip.closest('[data-sidebar-right-panel]') !== null) continue
+    if (strip.closest('[data-diff-approval-panel]') !== null) continue
+    if ((strip.compareDocumentPosition(scroller) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) continue
+    const rect = strip.getBoundingClientRect()
+    if (rect.height > 0) return rect.top
+  }
+  return undefined
+}
+
+/**
+ * How much of the window the app itself occupies on each side of the conversation
+ * — how far the floating panel has to start from an edge to leave that part
+ * visible.
+ *
+ * The centre column's own box is the direct answer: the header above it, an
+ * expanded sidebar, a collapsed rail, and a right panel hanging over the centre
+ * all sit outside it. The frame's grid tracks fill in the rest — they name the
+ * sidebar columns even before a conversation is mounted, and a right sidebar shown
+ * without a track of its own draws over the centre, so its own panel is measured
+ * instead. Relying on the frame's *resizers* alone was a bug: a collapsed sidebar
+ * renders no resizer, so a collapsed rail read as "nothing on that side".
+ * @returns each side's occupied size, 0 when that side shows nothing.
+ */
+export function frameInsets(): { top: number; bottom: number; left: number; right: number } {
+  if (typeof document === 'undefined') return { top: 0, bottom: 0, left: 0, right: 0 }
+  const viewport = window.innerWidth
+  const viewportHeight = window.innerHeight
+  let top = 0
+  let bottom = 0
+  let left = 0
+  let right = 0
+  const scroller = document.querySelector('[data-conversation-scroll]')
+  const centre = scroller?.getBoundingClientRect()
+  if (scroller != null && centre !== undefined && centre.width > 0 && centre.height > 0) {
+    // The title row stays visible; the view tabs under it do not, so the panel's
+    // top edge sits at the strip when there is one.
+    top = Math.max(top, viewTabsTop(scroller) ?? centre.top)
+    bottom = Math.max(bottom, viewportHeight - centre.bottom)
+    left = Math.max(left, centre.left)
+    right = Math.max(right, viewport - centre.right)
+  }
+  const frame = document.querySelector('[data-side="sidebar"],[data-side="rightbar"]')?.parentElement
+    ?? document.querySelector('[data-sidebar-collapsed],[data-rightbar-collapsed],[data-rightbar-fullscreen]')
+  const frameRect = frame?.getBoundingClientRect()
+  if (frame != null && frameRect !== undefined) {
+    const tracks = getComputedStyle(frame).gridTemplateColumns
+      .split(' ')
+      .map(part => Number.parseFloat(part))
+      .filter(Number.isFinite)
+    if (tracks.length > 0) {
+      left = Math.max(left, frameRect.left + (tracks[0] ?? 0))
+      right = Math.max(right, tracks.length > 1 ? (tracks[tracks.length - 1] ?? 0) : 0)
+    }
+  }
+  const rightPanel = document.querySelector('[data-sidebar-right-panel]')?.getBoundingClientRect()
+  if (rightPanel !== undefined && rightPanel.width > 0) right = Math.max(right, viewport - rightPanel.left)
+  return { top, bottom, left, right }
+}
+
 /** The right detail pane for one selected file: actions plus the merged diff. */
-interface PendingDiffProps {
-  file: PendingFileDiff
+interface PendingDiffProps {  file: PendingFileDiff
   busy: boolean
   /** The current workspace root, for workspace-relative copied references. */
   workspacePath?: string | undefined
@@ -496,13 +604,6 @@ interface PendingDiffProps {
   onOpen: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
   /** Inline one workspace image as a base64 data URI for the Markdown preview. */
   onPreviewImage: (sessionId: SessionId, path: string) => Promise<string | undefined>
-  /** The file list is collapsed to a floating button (its width would exceed a
-   * third of the panel); the diff then takes the full width. */
-  floatMode: boolean
-  /** Whether the floating file list is currently expanded. */
-  floatOpen: boolean
-  /** Toggle the floating file list. */
-  onToggleFileList: () => void
 }
 
 /** The diff body's row class per line kind. */
@@ -648,6 +749,26 @@ function textWithSearch(
 const CHORD_KEY_GLYPHS: Record<string, string> = { ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' }
 
 /**
+ * One stored chord as a hint renders it: modifiers as written, arrow keys as
+ * glyphs (`Ctrl+ArrowUp` → `Ctrl+↑`).
+ * @param chord - the stored chord.
+ * @returns the hint text.
+ */
+function chordHint(chord: string): string {
+  return chord.split('+').map(part => CHORD_KEY_GLYPHS[part] ?? part).join('+')
+}
+
+/**
+ * One action's chord as a hint. Every place a chord is shown reads it here, so a
+ * rebind in Settings shows up everywhere it is advertised.
+ * @param action - the keybinding action id (see `DEFAULT_KEYBINDINGS`).
+ * @returns the hint text; `''` when the action has no chord at all.
+ */
+function chordLabel(action: string): string {
+  return chordHint(keybindingOf(action))
+}
+
+/**
  * A tooltip label with the action's configured chord appended. The hint states
  * the binding the user actually has — including one rebound in Settings — rather
  * than a default baked into the label.
@@ -656,10 +777,32 @@ const CHORD_KEY_GLYPHS: Record<string, string> = { ArrowUp: '↑', ArrowDown: '�
  * @returns the label, with ` (chord)` appended when one is configured.
  */
 function withChord(label: string, action: string): string {
-  const chord = keybindingOf(action)
-  if (chord === '') return label
-  const hint = chord.split('+').map(part => CHORD_KEY_GLYPHS[part] ?? part).join('+')
-  return `${label} (${hint})`
+  const chord = chordLabel(action)
+  return chord === '' ? label : `${label} (${chord})`
+}
+
+/**
+ * The close button's tooltip: the panel closes with Escape and with the
+ * quick-summon chord, so the hint names both — and names the chord as the user
+ * has it bound, not a default baked into the label. A chord the user unbound
+ * leaves Escape as the only way, so the hint says just that.
+ * @param t - the panel's translator.
+ * @returns the label with the ways out appended.
+ */
+function closeHint(t: Translator): string {
+  const hint = chordHint(quickSummonKey())
+  return hint === '' ? t('action.closeHintEsc') : t('action.closeHint', { chord: hint })
+}
+
+/**
+ * The footer entry's tooltip: what the button opens, and the chord that does the
+ * same from the keyboard.
+ * @param t - the panel's translator.
+ * @returns the label with the quick-summon chord appended.
+ */
+function summonHint(t: Translator): string {
+  const hint = chordHint(quickSummonKey())
+  return hint === '' ? t('panel.aria') : t('action.summonHint', { chord: hint })
 }
 
 /**
@@ -699,6 +842,19 @@ function isInPanelEvent(event: KeyboardEvent): boolean {
 function isTextFieldEvent(event: KeyboardEvent): boolean {
   const target = event.target
   return target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') !== null
+}
+
+/**
+ * Whether a key event came from the chat composer. The coverage chords fire
+ * there — the user is usually typing when the panel's edges need rearranging —
+ * while every other text field (this panel's own search box, the add-path
+ * dialog's input) keeps its Ctrl+Shift+Arrow for word-wise selection.
+ * @param event - the keydown event.
+ * @returns whether the event came from the composer.
+ */
+function isComposerEvent(event: KeyboardEvent): boolean {
+  const target = event.target
+  return target instanceof Element && target.closest('[data-composer-input], [data-composer-card]') !== null
 }
 
 /**
@@ -1893,7 +2049,7 @@ function PendingFileRow({ file, selected, failedMessage, t, onSelect }: PendingF
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedMessage, onPasteReference, onToast, t, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, floatMode, floatOpen, onToggleFileList }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedMessage, onPasteReference, onToast, t, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -3499,7 +3655,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
       data-diff-approval-diff
       style={diffViewVars as unknown as CSSProperties}
     >
-      <div className={css.diffHeader}>
+      <div className={css.diffHeader} data-diff-toolbar>
         <span className={css.diffPath}>{file.path}</span>
         <Tooltip label={t('action.openFile')} side="bottom" delayMs={500}>
           <button
@@ -3525,19 +3681,6 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
         </Tooltip>
       </div>
       <div className={css.diffActions}>
-        {floatMode && (
-          <Tooltip label={t(floatOpen ? 'action.hideFileList' : 'action.showFileList')} side="bottom" delayMs={500}>
-            <button
-              type="button"
-              className={`${css.action} ${css.iconAction}`}
-              data-diff-file-list-toggle
-              aria-label={t(floatOpen ? 'action.hideFileList' : 'action.showFileList')}
-              onClick={onToggleFileList}
-            >
-              <IconListPenOutline16 size={14} />
-            </button>
-          </Tooltip>
-        )}
         {(model.diff.added !== 0 || model.diff.removed !== 0) && (
           <span className={css.diffStats}>{t('panel.stats', { added: model.diff.added, removed: model.diff.removed })}</span>
         )}
@@ -4049,6 +4192,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
   wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onRevertAll, onAckRedoCleared, collapseSidebar, t,
+  docked = false, dockHost, onOpenDock, closeDock, useDock,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
   // A newly created session is selected but still blank (no messages yet); it
@@ -4058,6 +4202,30 @@ export function PendingPanel({
     return id === undefined ? false : (state.byId[id]?.blank ?? false)
   })
   const noSession = current === undefined || currentBlank
+  // Whether the panel is showing in the right sidebar's tab right now (absent
+  // hook: this build has no right sidebar). The face is fixed per mount, so the
+  // optional hook never appears mid-life: the call order stays stable.
+  const dockShowing = useDock?.((state: DockSnapshot) => state.open) === true
+  // Whether this build has a right sidebar to dock into at all: the observable
+  // exists from apply time and flips to available once the sidebar is attached.
+  const dockAvailable = useDock?.((state: DockSnapshot) => state.available) === true
+  /** Why the dock is unavailable, when it is (shown once, if asked for). */
+  const dockReason = useDock?.((state: DockSnapshot) => state.reason) as string | undefined
+  // A docked panel that un-docks asks this instance (the footer's) to show the
+  // overlay: the two are separate mounts, and the stored presentation says which
+  // one. A docked instance ignores it — it is the one that asked.
+  const revealRef = useRef<() => void>(() => {})
+  useEffect(() => {
+    if (docked) return
+    const onShow = (): void => { revealRef.current() }
+    window.addEventListener(SHOW_PANEL_EVENT, onShow)
+    return () => { window.removeEventListener(SHOW_PANEL_EVENT, onShow) }
+  }, [docked])
+  // Rendering as the tab's body is itself the dock presentation: remember it, so
+  // the footer entry brings the panel back here rather than floating it.
+  useEffect(() => {
+    if (docked) setPanelPresentation('dock')
+  }, [docked])
   const snapshot = usePending(snapshot => snapshot)
   const [open, setOpen] = useState(false)
   const [selected, setSelected] = useState('')
@@ -4101,7 +4269,7 @@ export function PendingPanel({
       showCopyToast(t('panel.fileNotPending'))
       return
     }
-    setOpen(true)
+    revealPanel()
     setSelected(entry.id)
   }
   useEffect(() => {
@@ -4124,13 +4292,23 @@ export function PendingPanel({
   const [addOpen, setAddOpen] = useState(false)
   /** Bottom offset tracking the chat composer's top edge so the input stays visible. */
   const [bottomPx, setBottomPx] = useState(FALLBACK_BOTTOM_PX)
-  /** Fullscreen expanded: the panel bottom pins to the window edge, ignoring the composer offset. */
-  const [expanded, setExpanded] = useState(false)
+  /** The app frame's sidebar columns, in px: how far the floating panel has to
+   *  start from each window edge to leave that sidebar visible. */
+  /** How much of the window the app occupies on each side of the conversation:
+   *  how far the floating panel starts from an edge it does not cover. */
+  const [sideInset, setSideInset] = useState({ top: 0, bottom: 0, left: 0, right: 0 })
+  /** What the floating panel covers: the app's two sidebars and the composer. */
+  const [cover, setCover] = useState<DiffApprovalCover>(() => panelCover())
+  /** The chord's on-screen echo: the edge just flipped, and a nonce so a repeat
+   *  restarts the notice instead of re-rendering the same one. */
+  const [coverNotice, setCoverNotice] = useState<{ edge: keyof DiffApprovalCover; n: number } | null>(null)
   /** File-list pane width, adjustable by dragging the divider. */
   const [listWidth, setListWidth] = useState(240)
   const resizeDrag = useRef<{ startX: number; startWidth: number } | null>(null)
-  /** Whether the floating (collapsed) file list is currently expanded. */
+  /** Whether the floating (collapsed) file list is currently shown. */
   const [floatOpen, setFloatOpen] = useState(false)
+  /** Whether the file list is always folded, whatever the width allows. */
+  const [forceFloat, setForceFloat] = useState(() => fileListFloat())
   /** The review panel's width, measured so the file list can collapse when it
    * would take more than a third of it (browser zoom / window resize). */
   const [panelWidth, setPanelWidth] = useState(0)
@@ -4157,13 +4335,24 @@ export function PendingPanel({
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
     observer?.observe(el)
     return () => { observer?.disconnect() }
-  }, [open])
+  }, [open, docked])
 
   // The file list floats on the same breakpoint the DSH sidebar auto-collapses
   // on, so the two stay consistent (the sidebar closes at < 1024 and the file
-  // list folds into a floating button at the same width).
-  const floatMode = viewportWidth < SIDEBAR_AUTO_COLLAPSE_PX
+  // list folds into a floating button at the same width) — or whenever the user
+  // has asked for it always to, which is what the list's own switch stores.
+  const floatMode = forceFloat || (docked
+    ? panelWidth > 0 && panelWidth < DOCK_TWO_COLUMN_MIN_PX
+    : viewportWidth < SIDEBAR_AUTO_COLLAPSE_PX)
   const toggleFileList = (): void => { setFloatOpen(value => !value) }
+  /** Flip the always-fold preference, remembered for the next open. */
+  const toggleForceFloat = (): void => {
+    const next = !forceFloat
+    setForceFloat(next)
+    setFileListFloat(next)
+    // Folding it away means the card starts closed: the knob opens it again.
+    if (next) setFloatOpen(false)
+  }
 
   // Track the window width for the breakpoint above.
   useEffect(() => {
@@ -4188,14 +4377,17 @@ export function PendingPanel({
     return () => { el.removeEventListener('pointerdown', onPointerDown, true) }
   }, [floatMode, floatOpen])
 
-  // Constrain the floating file-list card to the code scroll box (`.diffBody`):
-  // measure its bounds within the split each time the list opens or the panel
-  // resizes, so the card never extends beyond the code view.
+  // Where the floating file list goes: it is measured from the code view when a
+  // file is open, and from the detail pane when none is — so the folded list has
+  // a box either way. Both the card and the knob on its corner are placed from
+  // this one box, which is what keeps them aligned.
   useEffect(() => {
-    if (!floatMode || !floatOpen) return
+    if (!floatMode) return
     const split = splitRef.current
+    if (split === null) return
     const body = panelRef.current?.querySelector<HTMLElement>('[data-diff-body],[data-diff-md-preview-body]')
-    if (split === null || body == null) return
+      ?? panelRef.current?.querySelector<HTMLElement>('[data-diff-detail]')
+    if (body == null) return
     const s = split.getBoundingClientRect()
     const b = body.getBoundingClientRect()
     setFloatBox({ left: b.left - s.left, top: b.top - s.top, width: b.width, height: b.height })
@@ -4223,6 +4415,7 @@ export function PendingPanel({
     if (!open) return
     const MEASURE_INTERVAL_MS = 400
     const measure = () => {
+      setSideInset(frameInsets())
       const scrollers = document.querySelectorAll(SCROLL_SELECTOR)
       for (const scroller of scrollers) {
         const seat = scroller.querySelector(SEAT_SELECTOR)
@@ -4259,30 +4452,11 @@ export function PendingPanel({
     }
   }, [open])
 
-  // Clicking outside the panel closes it, except on the entry badge itself
-  // (whose own click toggles) and on the interactive composer/approval cards
-  // — the input capsule and the approval/question card must keep the review
-  // panel open, but the approval frame's blank side gutters are outside.
-  useEffect(() => {
-    if (!open) return
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target as Node | null
-      if (target === null) return
-      const element = target instanceof Element ? target : target.parentElement
-      if (element !== null
-        && (element.closest('[data-diff-approval-panel]') !== null
-          || element.closest('[data-diff-approval-badge]') !== null
-          || element.closest(KEEP_OPEN_SELECTOR) !== null)) {
-        return
-      }
-      setOpen(false)
-    }
-    document.addEventListener('pointerdown', onPointerDown, true)
-    return () => { document.removeEventListener('pointerdown', onPointerDown, true) }
-  }, [open])
-
-
-
+  // Nothing outside the panel dismisses it — not a press on the editor, the chat,
+  // the composer, or the sidebar's own blank space. The panel is a working
+  // surface, not a popover: closing it is a decision, and the ways to make it are
+  // the ✕, Escape, and the quick-summon chord. (The folded file-list card inside
+  // it is still dismissed by a press away from the card — see below.)
   // The panel reviews only the current session's files; other sessions of the
   // same workspace stay out of the list, badge, and auto-advance. Sort by the
   // displayed file name so the list reads in dictionary order even before the
@@ -4399,12 +4573,107 @@ export function PendingPanel({
     }
   }
 
+  /**
+   * Show the panel the way the user last had it. `dock` hands off to the app's
+   * right sidebar, where the panel lives in its own tab; `float` opens this
+   * floating panel, covering whatever {@link panelCover} says. A remembered dock
+   * in a build without a right sidebar falls back to the floating panel instead
+   * of doing nothing.
+   */
+  const revealPanel = (): void => {
+    const stored = panelPresentation()
+    if (stored === 'dock' && onOpenDock !== undefined) {
+      try {
+        onOpenDock()
+        return
+      } catch {
+        // The sidebar is mounted but cannot take the panel yet (no seat bound):
+        // open the overlay instead of doing nothing at all.
+      }
+    }
+    // Opening the floating modal: collapse the narrow sidebar first so it can't
+    // overlap it.
+    collapseSidebar()
+    setOpen(true)
+  }
+
+  revealRef.current = revealPanel
+
+  /** Move the panel into the right sidebar's tab: the tab is opened and this
+   *  overlay steps aside, with the presentation remembered for the entry. The
+   *  sidebar's controller throws when it is mounted but cannot act on a session
+   *  yet (no seat bound), so a failure is said out loud rather than swallowed. */
+  const dockPanel = (): void => {
+    if (onOpenDock === undefined) return
+    try {
+      onOpenDock()
+    } catch (error) {
+      showCopyToast(`${t('panel.dockFailed')} (${error instanceof Error ? error.message : String(error)})`)
+      return
+    }
+    setPanelPresentation('dock')
+    setOpen(false)
+  }
+
+  /** Where the panel is showing right now: the mode switch's checked row. */
+  const presentation: DiffApprovalPresentation = docked ? 'dock' : 'float'
+  /**
+   * Move the panel to the chosen presentation. Leaving the dock is not this
+   * component's to do: a docked panel draws no header (its tab chip carries the
+   * switch), and the chip closes the tab and hands the panel back to the footer
+   * entry itself.
+   */
+  const choosePresentation = (next: DiffApprovalPresentation): void => {
+    if (next === 'dock') {
+      if (docked) return
+      if (!dockAvailable) {
+        // Say what the lookup saw; without a right sidebar there is nothing to
+        // dock into, and "nothing happens" would be the worst possible answer.
+        showCopyToast(`${t('panel.dockUnavailable')}${dockReason === undefined ? '' : ` (${dockReason})`}`)
+        return
+      }
+      dockPanel()
+      return
+    }
+    // Float: what it covers is the coverage control's business, and the choice is
+    // remembered for the next open.
+    if (docked) return
+    setPanelPresentation('float')
+  }
+
+  /** Flip one coverage switch, remembered for the next open. */
+  const toggleCover = (key: keyof DiffApprovalCover): void => {
+    const next = { ...cover, [key]: !cover[key] }
+    setCover(next)
+    setPanelCover(next)
+  }
+
+  // The echo clears itself once its animation has run: a fixed budget keeps a
+  // repeated chord from stacking notices, and needs no animation events.
+  useEffect(() => {
+    if (coverNotice === null) return
+    const timer = window.setTimeout(() => { setCoverNotice(null) }, COVER_NOTICE_MS)
+    return () => { window.clearTimeout(timer) }
+  }, [coverNotice])
+
+  /**
+   * Close the floating panel and hand the caret back to the chat composer:
+   * closing the review is a "done reviewing, back to typing" move. A close the
+   * user made by clicking somewhere else is the exception — that press is an
+   * instruction to put the caret where they clicked, so the outside-click path
+   * closes without touching focus.
+   */
+  const closePanel = (): void => {
+    setOpen(false)
+    focusComposer()
+  }
+
   const toggleOpen = () => {
     // Opening the modal: collapse the sidebar first so it can't overlap the
     // modal. Collapse before `setOpen` so the sidebar's own re-render doesn't
     // disrupt the panel while it opens.
-    if (!open) collapseSidebar()
-    setOpen(value => !value)
+    if (!open) revealPanel()
+    else closePanel()
   }
 
   // No reviewable session (none selected, or a freshly created blank one): the
@@ -4519,6 +4788,21 @@ export function PendingPanel({
               <IconPlusOutline16 size={12} />
             </button>
           </Tooltip>
+          {/* Beside Add: fold the list away for good, whatever the width allows.
+              The choice is stored, so it survives a reopen. */}
+          <Tooltip label={t(forceFloat ? 'action.fileListFloatOff' : 'action.fileListFloatOn')} side="bottom" delayMs={500}>
+            <button
+              type="button"
+              className={`${css.action} ${css.addButton}`}
+              data-diff-file-list-float
+              data-active={forceFloat ? '' : undefined}
+              aria-label={t(forceFloat ? 'action.fileListFloatOff' : 'action.fileListFloatOn')}
+              aria-pressed={forceFloat}
+              onClick={toggleForceFloat}
+            >
+              <IconPanelLeftOutline16 size={12} />
+            </button>
+          </Tooltip>
         </div>
       )}
       <div className={css.listScroll} data-diff-list-scroll>
@@ -4590,6 +4874,29 @@ export function PendingPanel({
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
   }, [open, current, handleUndo, handleRedo])
 
+  // The coverage switches have chords of their own (Alt-free Ctrl+Shift arrows by
+  // default), so the floating panel's edges can be re-arranged without reaching
+  // for the popover. They only apply where coverage does — the panel is open and
+  // floating, not a sidebar tab. The chat composer keeps them (that is where the
+  // caret usually is); every other text field keeps its own word-wise selection.
+  useEffect(() => {
+    if (!open || docked) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      const action = COVER_ACTIONS.find(([name]) => matchesShortcut(event, keybindingOf(name)))
+      if (action === undefined) return
+      if (pathPickerOpen()) return
+      if (isTextFieldEvent(event) && !isComposerEvent(event)) return
+      event.preventDefault()
+      const edge = action[1]
+      toggleCover(edge)
+      // A chord flip happens with no pointer anywhere near the control, so it
+      // reports itself on screen: the same row of glyphs, centred, for a second.
+      setCoverNotice({ edge, n: (coverNotice?.n ?? 0) + 1 })
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true) }
+  }, [open, docked, cover, coverNotice])
+
   // Ctrl+Tab / Ctrl+Shift+Tab cycle the pending file list (forward / backward),
   // wrapping at the ends. Same global-capture scope as the other chords so the
   // panel works without its own focus, and text inputs keep the browser's
@@ -4622,19 +4929,29 @@ export function PendingPanel({
   // outside an input: the user wants the chord to work even while the cursor is
   // in the composer, and Ctrl+D is not a common editing combo there.
   useEffect(() => {
+    // The docked instance stands down: the same chord is handled once, by the
+    // footer entry's handler, which is mounted whether or not a tab is drawn.
+    if (docked) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (!matchesShortcut(event, quickSummonKey())) return
       // A modal this panel owns keeps the keyboard to itself.
       if (pathPickerOpen()) return
       event.preventDefault()
-      // Same open path as the badge: collapse the narrow sidebar first so it
-      // can't overlap the modal, then toggle.
-      if (!open) collapseSidebar()
-      setOpen(value => !value)
+      // The panel lives in the sidebar's tab right now: the chord closes that tab
+      // (the chip published its close), rather than opening a second copy.
+      if (dockShowing) {
+        closeDock?.()
+        focusComposer()
+        return
+      }
+      // Same open path as the badge: restore the remembered presentation, or
+      // close the floating panel when it is already open.
+      if (open) closePanel()
+      else revealPanel()
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
-  }, [open, collapseSidebar])
+  }, [docked, open, dockShowing, closeDock, collapseSidebar])
 
   // Escape dismisses the panel (a modal-close convention). A press inside the
   // panel while a search bar is on screen is the bar's instead: the bar is the
@@ -4642,20 +4959,25 @@ export function PendingPanel({
   // one press never fires both. Everywhere else — the chat composer included,
   // which keeps its own Esc too — the panel closes.
   useEffect(() => {
-    if (!open) return
+    // Docked, the panel is a tab: Escape belongs to whatever is inside it (a
+    // search bar closes its own press) and never to the tab's own life.
+    if (!open || docked) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       // The add-path modal closes itself: this press is not the panel's.
       if (pathPickerOpen()) return
+      // The coverage popover is the innermost dismissible while it is up, and it
+      // closes on this same press.
+      if (document.querySelector('[data-diff-approval-cover-popover]') !== null) return
       const target = event.target
       const inPanel = target instanceof Node && panelRef.current?.contains(target) === true
       if (inPanel && document.querySelector('[data-diff-searchbar]') !== null) return
       event.preventDefault()
-      setOpen(false)
+      closePanel()
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
-  }, [open])
+  }, [open, docked])
 
   /** Drag the list/detail divider; width follows the pointer within its bounds. */
   const startResize = (event: ReactMouseEvent<HTMLDivElement>) => {
@@ -4681,8 +5003,12 @@ export function PendingPanel({
     window.addEventListener('mouseup', onUp)
   }
 
-  return (
-    <div className={wide ? css.layer : `${css.layer} ${css.rail}`}>
+  // Docked, the panel is a sidebar tab: it fills the tab body the dock body
+  // handed it, so it draws no layer of its own. That layer is the footer seat's
+  // box (42px plus margins) and would push the tab content past its own height —
+  // the sidebar body then scrolls and shows a blank strip under the panel.
+  const content = (
+    <>
       {/* A transient banner for an import that found no changes; the Toast
           reports completion so it can be unmounted. */}
       {importToast !== null && (
@@ -4694,19 +5020,41 @@ export function PendingPanel({
       {copyToast !== null && (
         <Toast key={copyToast.n} text={copyToast.text} onDone={() => { setCopyToast(null) }} />
       )}
-      {/* Expanded keeps an 8px inset, so a full-screen backdrop painted with
-          the sidebar's fill hides the app behind the seam instead of letting
-          it show through. It sits just below the panel's z-index. */}
-      {open && createPortal(
+      {/* The coverage chords' echo: keyed on the nonce so a repeated chord
+          restarts it rather than reusing the half-faded one. */}
+      {coverNotice !== null && (
+        <CoverageNotice key={coverNotice.n} t={t} cover={cover} changed={coverNotice.edge} />
+      )}
+      {/* Covering everything keeps an 8px inset, so a layer painted with the
+          sidebar's fill hides the app behind those seams instead of letting it
+          show through. It sits just below the panel's z-index. */}
+      {(docked || open) && createPortal(
         <>
-          {expanded && <div className={css.fullscreenBackdrop} data-diff-fullscreen-backdrop />}
+          {!docked && cover.top && cover.left && cover.right && cover.composer
+            && <div className={css.coverBackdrop} data-diff-cover-backdrop />}
           <section
-            className={css.panel}
+            className={docked ? `${css.panel} ${css.panelDocked}` : css.panel}
             ref={panelRef}
-            style={{ bottom: expanded ? PANEL_INSET_PX : bottomPx }}
+            style={docked ? undefined : {
+              // Each edge follows its coverage switch: against the window when the
+              // panel covers that side, at what the app draws there when it does
+              // not. The sides keep a gap from the rail they leave visible; the top
+              // does not, because its boundary IS the view tabs' own top edge —
+              // anything more would leave a strip of those tabs poking out.
+              top: cover.top ? PANEL_INSET_PX : sideInset.top,
+              left: cover.left ? PANEL_INSET_PX : sideInset.left + PANEL_INSET_PX,
+              right: cover.right ? PANEL_INSET_PX : sideInset.right + PANEL_INSET_PX,
+              bottom: cover.composer ? PANEL_INSET_PX : bottomPx,
+            }}
             data-diff-approval-panel
+            data-diff-docked={docked ? '' : undefined}
             aria-label={t('panel.title')}
           >
+          {/* A docked panel draws no header: the tab above it already IS the
+              frame — its chip carries the title, the pending count, the mode
+              switch, and the kit's own close button — so a second row would only
+              repeat them and cost the list its height. */}
+          {!docked && (
           <header className={css.header}>
             <span className={css.title}>{t('panel.title')}</span>
             <div className={css.headerActions}>
@@ -4717,45 +5065,39 @@ export function PendingPanel({
                   data-diff-approval-settings
                   aria-label={t('action.settings')}
                   onClick={() => {
-                    // Hand off to the settings dialog: close this panel too,
-                    // since the review list is left behind for the settings
-                    // section the button just opened.
-                    setOpen(false)
+                    // Hand off to the settings dialog: the floating panel closes
+                    // too, since the review list is left behind for the settings
+                    // section the button just opened. A docked tab has nothing to
+                    // hide — the settings dialog covers the sidebar anyway.
+                    if (!docked) setOpen(false)
                     openSettingsSection(t('settings.tabLabel'))
                   }}
                 >
                   <IconSettingsOutline16 size={14} />
                 </button>
               </Tooltip>
-              <Tooltip label={t(expanded ? 'action.exitFullscreen' : 'action.expand')} side="bottom" delayMs={500}>
-                <button
-                  type="button"
-                  className={expanded ? `${css.expand} ${css.expandExpanded}` : css.expand}
-                  data-diff-approval-expand
-                  aria-label={t(expanded ? 'action.exitFullscreen' : 'action.expand')}
-                  onClick={() => {
-                    // Fullscreening also collapses the sidebar (before the
-                    // expand) so the expanded modal isn't overlapped.
-                    if (!expanded) collapseSidebar()
-                    setExpanded(value => !value)
-                  }}
-                >
-                  <IconFullscreenOutline16 size={14} />
-                </button>
-              </Tooltip>
-              <Tooltip label={t('action.close')} side="bottom" delayMs={500}>
+              {/* What the floating panel covers: the two sidebars and the
+                  composer. What the panel used to call "fullscreen" is simply all
+                  three on, so the state is composed rather than enumerated. */}
+              {!docked && <CoverageControl t={t} cover={cover} onToggle={toggleCover} />}
+              {/* One control for where the panel shows: floating over the app, or
+                  the right sidebar's tab. The current one is checked, so the two
+                  are named rather than cycled. */}
+              <PresentationMenu t={t} current={presentation} onChoose={choosePresentation} />
+              <Tooltip label={closeHint(t)} side="bottom" delayMs={500}>
                 <button
                   type="button"
                   className={css.close}
                   data-diff-approval-close
                   aria-label={t('action.close')}
-                  onClick={() => { setOpen(false) }}
+                  onClick={closePanel}
                 >
                   <IconCloseOutline16 size={14} />
                 </button>
               </Tooltip>
             </div>
           </header>
+          )}
           {snapshot.error !== undefined || !snapshot.read || files.length === 0 ? (
             <div className={css.states}>
               {snapshot.error !== undefined && (
@@ -4790,13 +5132,38 @@ export function PendingPanel({
             </div>
           ) : (
             <div className={css.split} ref={splitRef}>
+              {/* Folding the list away must not fold its switch away with it: the
+                  knob lives on the panel's left edge, below the diff toolbar,
+                  rather than inside the diff view — which is not drawn at all
+                  while no file is open, and took the switch down with it. */}
+              {floatMode && (
+                <Tooltip label={t(floatOpen ? 'action.hideFileList' : 'action.showFileList')} side="bottom" delayMs={500}>
+                  <button
+                    type="button"
+                    className={css.fileListKnob}
+                    // Exactly the floating card's own corner — the same measured
+                    // box, the same inset — so opening the list covers the knob
+                    // rather than sitting beside it. Below the card in z-order.
+                    style={{
+                      left: (floatBox?.left ?? 0) + FLOAT_LIST_MARGIN_PX,
+                      top: (floatBox?.top ?? 0) + FLOAT_LIST_MARGIN_PX,
+                    }}
+                    data-diff-file-list-toggle
+                    aria-label={t(floatOpen ? 'action.hideFileList' : 'action.showFileList')}
+                    aria-expanded={floatOpen}
+                    onClick={toggleFileList}
+                  >
+                    <IconListPenOutline16 size={14} />
+                  </button>
+                </Tooltip>
+              )}
               {!floatMode && (
                 <nav className={css.fileList} style={{ width: listWidth }} data-diff-approval-file-list>
                   {fileListBody}
                 </nav>
               )}
               {!floatMode && <div className={css.resizeHandle} data-diff-resize onMouseDown={startResize} />}
-              <div className={css.detail}>
+              <div className={css.detail} data-diff-detail>
                 {selectedFile === undefined ? (
                   <p className={css.detailEmpty}>{t('panel.selectHint')}</p>
                 ) : (
@@ -4817,9 +5184,6 @@ export function PendingPanel({
                     onBlockRevert={blockRevertWithPrompt}
                     onOpen={onOpen}
                     onPreviewImage={onPreviewImage}
-                    floatMode={floatMode}
-                    floatOpen={floatOpen}
-                    onToggleFileList={toggleFileList}
                   />
                 )}
               </div>
@@ -4929,24 +5293,26 @@ export function PendingPanel({
           )}
           </section>
         </>,
-        document.body,
+        docked && dockHost !== undefined ? dockHost : document.body,
       )}
-      <div className={css.footerButtons}>
-        <button
-          type="button"
-          className={noSession ? `${css.badge} ${css.badgeDisabled}` : css.badge}
-          data-diff-approval-badge={files.length}
-          data-active={open ? '' : undefined}
-          aria-label={t('panel.aria')}
-          aria-expanded={open}
-          disabled={noSession}
-          onClick={toggleOpen}
-        >
-          <IconListPenOutline16 size={wide ? 16 : 18} />
-          {wide && <span className={css.badgeLabel}>{t('panel.aria')}</span>}
-          {(wide || files.length > 0) && <span className={css.badgeCount}>{files.length}</span>}
-        </button>
-      </div>
+      {!docked && <div className={css.footerButtons}>
+        <Tooltip label={summonHint(t)} side="top" delayMs={500}>
+          <button
+            type="button"
+            className={noSession ? `${css.badge} ${css.badgeDisabled}` : css.badge}
+            data-diff-approval-badge={files.length}
+            data-active={open || dockShowing ? '' : undefined}
+            aria-label={t('panel.aria')}
+            aria-expanded={open || dockShowing}
+            disabled={noSession}
+            onClick={toggleOpen}
+          >
+            <IconListPenOutline16 size={wide ? 16 : 18} />
+            {wide && <span className={css.badgeLabel}>{t('panel.aria')}</span>}
+            {(wide || files.length > 0) && <span className={css.badgeCount}>{files.length}</span>}
+          </button>
+        </Tooltip>
+      </div>}
       {redoClearedNotice && (
         <div className={css.notice} role="status" data-diff-approval-notice>
           <p className={css.noticeText}>{t('panel.externalChanged')}</p>
@@ -4960,6 +5326,9 @@ export function PendingPanel({
           </button>
         </div>
       )}
-    </div>
+    </>
   )
+  return docked
+    ? content
+    : <div className={wide ? css.layer : `${css.layer} ${css.rail}`} data-diff-approval-layer>{content}</div>
 }

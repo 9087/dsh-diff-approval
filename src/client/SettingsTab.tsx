@@ -1,10 +1,10 @@
 /** DSH Settings top-level section for this plugin's preferences. */
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
-import { DEFAULT_KEYBINDINGS, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
+import { IconChevronDownOutline14, IconRefreshOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
+import { DEFAULT_KEYBINDINGS, DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import { ColorPicker } from './ColorPicker.tsx'
 import css from './PendingPanel.module.css'
@@ -197,21 +197,40 @@ function chordLabel(event: ReactKeyboardEvent<HTMLElement>): string | undefined 
   return parts.join('+')
 }
 
-/** A button that records the next key chord (modifiers + key) as the shortcut. */
+/**
+ * A button that records the next key chord (modifiers + key) as the shortcut.
+ * Clicking it starts recording, clicking it again stops; a press anywhere else
+ * while recording means "no shortcut" — the row is the control, so a press
+ * outside it is the same answer as pressing Delete would be.
+ */
 function ShortcutRecorder({
-  value, onChange, dataAttribute, placeholder,
+  value, onChange, dataAttribute, placeholder, noneLabel,
 }: {
   value: string
   onChange: (value: string) => void
   dataAttribute: string
   placeholder: string
+  noneLabel: string
 }) {
   const [recording, setRecording] = useState(false)
+  const ref = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => {
+    if (!recording) return
+    const onPointerDown = (event: PointerEvent): void => {
+      if (event.target instanceof Node && ref.current?.contains(event.target) === true) return
+      onChange('')
+      setRecording(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    return () => { document.removeEventListener('pointerdown', onPointerDown, true) }
+  }, [recording, onChange])
   return (
     <button
+      ref={ref}
       type="button"
       className={css.settingsSelector}
-      onClick={() => { setRecording(true) }}
+      data-recording={recording ? '' : undefined}
+      onClick={() => { setRecording(value => !value) }}
       onBlur={() => { setRecording(false) }}
       onKeyDown={recording ? (event) => {
         event.preventDefault()
@@ -222,22 +241,24 @@ function ShortcutRecorder({
       } : undefined}
       {...{ [dataAttribute]: true }}
     >
-      {recording ? placeholder : value}
-      <IconChevronDownOutline14 className={css.settingsSelectorChevron} />
+      {recording ? placeholder : value === '' ? noneLabel : value}
     </button>
   )
 }
 
-/** One shortcut row: title + description, chord recorder right. */
+/** One shortcut row: title + description, chord recorder and its reset right. */
 function ShortcutRow({
-  title, description, value, onChange, dataAttribute, placeholder,
+  title, description, value, defaultValue, onChange, dataAttribute, placeholder, noneLabel, resetLabel,
 }: {
   title: string
   description: string
   value: string
+  defaultValue: string
   onChange: (value: string) => void
   dataAttribute: string
   placeholder: string
+  noneLabel: string
+  resetLabel: string
 }) {
   return (
     <div className={css.settingsRow}>
@@ -250,7 +271,19 @@ function ShortcutRow({
         onChange={onChange}
         dataAttribute={dataAttribute}
         placeholder={placeholder}
+        noneLabel={noneLabel}
       />
+      <button
+        type="button"
+        className={css.settingsReset}
+        data-reset={dataAttribute}
+        aria-label={resetLabel}
+        title={resetLabel}
+        disabled={value === defaultValue}
+        onClick={() => { onChange(defaultValue) }}
+      >
+        <IconRefreshOutline14 size={14} />
+      </button>
     </div>
   )
 }
@@ -577,9 +610,12 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
               title={t('panel.quickSummon')}
               description={t('panel.quickSummonDesc')}
               value={summon}
+              defaultValue={DEFAULT_QUICK_SUMMON}
               onChange={setSummon}
               dataAttribute="data-diff-quick-summon-key"
               placeholder={t('panel.recordShortcut')}
+              noneLabel={t('panel.shortcutNone')}
+              resetLabel={t('panel.shortcutReset')}
             />
             {Object.keys(DEFAULT_KEYBINDINGS).map(action => (
               <ShortcutRow
@@ -587,9 +623,12 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
                 title={t(`panel.key.${action}` as DiffApprovalKey)}
                 description={t('panel.keyDesc')}
                 value={keybindings[action] ?? DEFAULT_KEYBINDINGS[action] ?? ''}
+                defaultValue={DEFAULT_KEYBINDINGS[action] ?? ''}
                 onChange={(chord) => { setKB(action, chord) }}
                 dataAttribute={`data-diff-key-${action}`}
                 placeholder={t('panel.recordShortcut')}
+                noneLabel={t('panel.shortcutNone')}
+                resetLabel={t('panel.shortcutReset')}
               />
             ))}
           </div>

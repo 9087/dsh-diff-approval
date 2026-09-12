@@ -2,6 +2,7 @@
 
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
+import type { DockSnapshot } from './dock.tsx'
 import type { DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalOpenAction, DiffApprovalRefreshValue, PendingFileDiff, VcsImportValue } from '../types.ts'
 
 /** What the panel reads and drives: the pending list plus in-flight entries. */
@@ -29,7 +30,23 @@ export interface PendingPanelFace {
   hooks: {
     /** Live pending-diff snapshot for the current page. */
     pending: HostObservable<PendingDiffSnapshot>
+    /** The dock's state (whether our right-sidebar tab is showing), or absent
+     *  when this build has no right sidebar to dock into. */
+    dock?: HostObservable<DockSnapshot>
   }
+  /** Reveal the panel in the app's right sidebar, opening its tab if needed.
+   *  Absent when this build has no right sidebar: the panel then opens floating
+   *  whatever the remembered presentation says. */
+  onOpenDock?: (() => void) | undefined
+  /** The docked tab body's own visibility, so the footer entry can light up
+   *  while the panel lives in the sidebar. */
+  onDockShowing?: ((showing: boolean) => void) | undefined
+  /** Close the docked panel: the docked tab's own close, published by its chip.
+   *  `undefined` while no dock tab exists. */
+  onDockClose?: ((close: (() => void) | undefined) => void) | undefined
+  /** Close the docked tab now, when one exists (the quick-summon chord's job
+   *  while the panel lives in the sidebar). */
+  closeDock?: (() => void) | undefined
   /** Read the pending list for the current session into the snapshot. */
   onRefresh: (sessionId: SessionId | undefined) => void
   /** Keep one operation. `keepListed` leaves the resolved entry in the list. */
@@ -67,7 +84,7 @@ export interface PendingPanelFace {
   onRevertAll: (sessionId: SessionId) => Promise<void>
   /** Acknowledge the redo-cleared notice so it is only surfaced once. */
   onAckRedoCleared: () => void
-  /** Collapse the DSH sidebar (no-op when already collapsed) before the modal
-   * opens or fullscreens, so an expanded sidebar can't overlap the modal. */
+  /** Collapse the DSH sidebar (no-op when already collapsed) before the floating
+   *  modal opens on a narrow window, so the sidebar can't overlap it. */
   collapseSidebar: () => void
 }

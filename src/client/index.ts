@@ -14,6 +14,8 @@ import { attachReferenceRemap } from './remap-sync.ts'
 import { conversationAccess } from './conversation-access.ts'
 import { OPEN_FILE_EVENT, startProducedDiffInjection } from './produced-diff.ts'
 import type { PendingPanelFace } from './slots.ts'
+import { attachDiffDock, createDockState, DIFF_DOCK_ID, DiffDockBody, DiffDockTitle } from './dock.tsx'
+import type { DockHostContext } from './dock.tsx'
 import { en, NS, zh } from './locales.ts'
 
 export type { PendingPanelProps } from './PendingPanel.tsx'
@@ -137,12 +139,22 @@ export function apply(ctx: ClientContext): void {
 
   ctx.on('connection/reset', () => { store.reset() })
 
-  ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
-    name: 'sidebar.footer.action',
-    id: 'diff-approval-panel',
-    locale: NS,
-    inject: (): PendingPanelFace => ({
-      hooks: { pending: store },
+  // The right sidebar as a host for the panel: its state exists from here on, so
+  // the footer entry (seated once, below) can carry an observable that flips to
+  // "available" whenever the sidebar's services show up. In a build without a
+  // right sidebar it simply stays unavailable and the panel keeps opening as the
+  // floating overlay. The wiring itself happens *after* the essential
+  // registrations: this feature is optional and must never be able to take the
+  // panel down with it.
+  const dock = createDockState()
+
+  /** The face both the footer panel and the docked tab render with. */
+  const buildFace = (): PendingPanelFace => ({
+      hooks: { pending: store, dock: dock.face.hooks.dock },
+      onOpenDock: dock.face.open,
+      onDockShowing: dock.face.setShowing,
+      onDockClose: dock.face.setClose,
+      closeDock: dock.face.close,
       onRefresh: (sessionId) => { currentSessionId = sessionId; void store.refresh(sessionId) },
       onKeep: (sessionId, path, keepListed) => store.keep(sessionId, path, keepListed),
       onRevert: (sessionId, path, keepListed) => {
@@ -181,8 +193,45 @@ export function apply(ctx: ClientContext): void {
         document.querySelector<HTMLElement>('[data-composer-input]')?.focus()
       },
       collapseSidebar,
-    }),
+  })
+
+  ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+    name: 'sidebar.footer.action',
+    id: 'diff-approval-panel',
+    locale: NS,
+    inject: buildFace,
   }, PendingPanel))
+
+  // The docked panel's body and chip live in the sidebar's keyed seats. Both
+  // registrations are harmless where those seats do not exist (an older app):
+  // `ctx.slots.inject` simply never fires. The seat names are strings here
+  // because the sidebar's package is not part of this program's SlotMap — the
+  // same reason the whole feature is optional.
+  const looseSlots = ctx.slots as unknown as {
+    inject(name: string, callback: () => unknown): void
+    register(config: Record<string, unknown>, component: unknown): unknown
+  }
+  // Guarded as a whole: a seat whose contract differs from the one this was
+  // written against costs the docked tab, never the footer entry seated above.
+  try {
+    looseSlots.inject('sidebar.right.pane.tab', () => looseSlots.register({
+      name: 'sidebar.right.pane.tab',
+      // A keyed seat dispatches by `key` — here the tab type's own id, which is
+      // what the seat looks the body up under. (`id` is the non-keyed seats'
+      // spelling; passing it here fails the registration.)
+      key: DIFF_DOCK_ID,
+      locale: NS,
+      inject: () => ({ ...buildFace(), docked: true }),
+    }, DiffDockBody))
+    looseSlots.inject('sidebar.right.pane.tab.title', () => looseSlots.register({
+      name: 'sidebar.right.pane.tab.title',
+      key: DIFF_DOCK_ID,
+      locale: NS,
+      inject: () => ({ ...buildFace() }),
+    }, DiffDockTitle))
+  } catch {
+    // No docked tab in this host.
+  }
 
   // Inject a "查看差异" button beside every DSH produced-file chip so the panel
   // can be opened on that file directly from the turn's deliverables. This is a
@@ -194,6 +243,19 @@ export function apply(ctx: ClientContext): void {
       t('panel.viewDiff'),
       (path) => window.dispatchEvent(new CustomEvent(OPEN_FILE_EVENT, { detail: { path } })),
     ), 'diff-approval: produced-files diff buttons')
+  }
+
+  // Now the optional part: discover the right sidebar, register the tab type, and
+  // let it host the panel. Guarded as a whole — the panel above is already seated,
+  // so a host that rejects any of this (a sandbox, an unexpected service shape)
+  // costs the dock, never the panel.
+  try {
+    attachDiffDock(ctx as unknown as DockHostContext, {
+      title: () => t('panel.title'),
+      guideDescription: () => t('panel.dockGuide'),
+    }, (sidebar, reason) => dock.attach(sidebar, reason))
+  } catch {
+    // No dock; the footer entry keeps working as the floating overlay.
   }
 
   // Contribute this plugin's page as a top-level DSH Settings section.

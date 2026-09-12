@@ -15,7 +15,33 @@ const DIFF_LINE_HEIGHT_KEY = 'diff-approval:diff-line-height'
 const DIFF_ADD_COLOR_KEY = 'diff-approval:diff-add-color'
 const DIFF_DEL_COLOR_KEY = 'diff-approval:diff-del-color'
 const LANG_BY_SUFFIX_KEY = 'diff-approval:lang-by-suffix'
+const PRESENTATION_KEY = 'diff-approval:presentation'
+const FLOAT_COVER_KEY = 'diff-approval:float-cover'
+const FILE_LIST_FLOAT_KEY = 'diff-approval:file-list-float'
 const WRAP_PREFIX = 'diff-approval:wrap:'
+
+/** Where the review panel shows: floating over the app, or docked as a tab in the
+ *  app's right sidebar. What the floating panel covers is a separate setting —
+ *  see {@link DiffApprovalCover}. */
+export type DiffApprovalPresentation = 'float' | 'dock'
+
+/**
+ * What the floating panel covers: the app's header above the conversation, its
+ * left sidebar, its right sidebar, and the composer below. All four on is the
+ * presentation the panel used to call "fullscreen" — the panel filling the
+ * window; both sidebars and the header only is the plain floating panel, which
+ * leaves the input usable.
+ */
+export interface DiffApprovalCover {
+  readonly top: boolean
+  readonly left: boolean
+  readonly right: boolean
+  readonly composer: boolean
+}
+
+/** The floating panel's default coverage: the header and both sidebars, not the
+ *  composer. */
+export const FLOAT_COVER_DEFAULT: DiffApprovalCover = { top: true, left: true, right: true, composer: false }
 
 /** Default lead rows above a jumped-to diff block (kept small and bounded). */
 export const NAV_LEAD_ROWS_DEFAULT = 2
@@ -110,6 +136,75 @@ export function searchWholeWord(): boolean {
 /** Persist the search whole-word preference. */
 export function setSearchWholeWord(value: boolean): void {
   localStorage.setItem(SEARCH_WORD_KEY, value ? '1' : '0')
+}
+
+/**
+ * Where the review panel shows, as the user last had it. Two states, both
+ * remembered so the footer entry can restore the one they were using:
+ *
+ * - `float` — the panel floating over the app, covering what
+ *   {@link panelCover} says (and the composer only when that says so);
+ * - `dock` — the panel docked in the app's right sidebar, as its own tab.
+ *
+ * A stored `fullscreen` — the third state before coverage became three switches —
+ * reads as `float`, with {@link panelCover} supplying the all-on coverage it
+ * meant.
+ * @returns the remembered presentation; `float` when unset or unrecognized.
+ */
+export function panelPresentation(): DiffApprovalPresentation {
+  return localStorage.getItem(PRESENTATION_KEY) === 'dock' ? 'dock' : 'float'
+}
+
+/** Persist the panel's presentation (see {@link panelPresentation}). */
+export function setPanelPresentation(value: DiffApprovalPresentation): void {
+  localStorage.setItem(PRESENTATION_KEY, value)
+}
+
+/**
+ * What the floating panel covers (see {@link DiffApprovalCover}). Defaults to
+ * both sidebars and not the composer; a stored `fullscreen` presentation from
+ * before the switches means all three.
+ * @returns the remembered coverage.
+ */
+export function panelCover(): DiffApprovalCover {
+  const raw = localStorage.getItem(FLOAT_COVER_KEY)
+  if (raw === null) {
+    return localStorage.getItem(PRESENTATION_KEY) === 'fullscreen'
+      ? { top: true, left: true, right: true, composer: true }
+      : FLOAT_COVER_DEFAULT
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return FLOAT_COVER_DEFAULT
+    const stored = parsed as Record<string, unknown>
+    const flag = (name: keyof DiffApprovalCover): boolean => typeof stored[name] === 'boolean'
+      ? stored[name]
+      : FLOAT_COVER_DEFAULT[name]
+    return { top: flag('top'), left: flag('left'), right: flag('right'), composer: flag('composer') }
+  } catch {
+    // A hand-edited or truncated value must not break the panel.
+    return FLOAT_COVER_DEFAULT
+  }
+}
+
+/** Persist what the floating panel covers. */
+export function setPanelCover(value: DiffApprovalCover): void {
+  localStorage.setItem(FLOAT_COVER_KEY, JSON.stringify(value))
+}
+
+/**
+ * Whether the file list always folds into its floating card, whatever width the
+ * panel has. Defaults to off, where the width decides: the list sits beside the
+ * diff while there is room for both. Only an explicit `'1'` forces the fold.
+ * @returns whether the file list is always folded.
+ */
+export function fileListFloat(): boolean {
+  return localStorage.getItem(FILE_LIST_FLOAT_KEY) === '1'
+}
+
+/** Persist the always-fold preference for the file list. */
+export function setFileListFloat(value: boolean): void {
+  localStorage.setItem(FILE_LIST_FLOAT_KEY, value ? '1' : '0')
 }
 
 /**
@@ -352,7 +447,9 @@ export function setQuickSummonKey(value: string): void {
 const KEY_PREFIX = 'diff-approval:key:'
 
 /** Default chord for each configurable action (every supported key except the
- *  panel's own ESC-to-close, which is intentionally not remapped). */
+ *  panel's own ESC-to-close, which is intentionally not remapped). The coverage
+ *  switches are keyed like the edges they toggle, in the order the panel lists
+ *  them: left, top, right, bottom. */
 export const DEFAULT_KEYBINDINGS: Record<string, string> = {
   jumpUp: 'Ctrl+ArrowUp',
   jumpDown: 'Ctrl+ArrowDown',
@@ -366,6 +463,10 @@ export const DEFAULT_KEYBINDINGS: Record<string, string> = {
   redo: 'Ctrl+Shift+Z',
   cycleNext: 'Ctrl+Tab',
   cyclePrev: 'Ctrl+Shift+Tab',
+  coverLeft: 'Ctrl+Shift+ArrowLeft',
+  coverTop: 'Ctrl+Shift+ArrowUp',
+  coverRight: 'Ctrl+Shift+ArrowRight',
+  coverComposer: 'Ctrl+Shift+ArrowDown',
 }
 
 /** The currently configured chord for one action; falls back to its default. */

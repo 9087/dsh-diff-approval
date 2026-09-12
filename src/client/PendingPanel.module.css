@@ -122,11 +122,10 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Expanded mode fills the viewport seam: the panel keeps its 8px insets, so a
-   full-screen layer painted with the sidebar's fill covers the app that would
-   otherwise show through around the edges. z-index 29 sits just below the
-   panel's 30. */
-.fullscreenBackdrop {
+/* Fully covering mode fills the viewport seam: the panel keeps its 8px insets, so
+   a layer painted with the sidebar's fill covers the app that would otherwise
+   show through around the edges. z-index 29 sits just below the panel's 30. */
+.coverBackdrop {
   position: fixed;
   left: 0;
   right: 0;
@@ -166,6 +165,33 @@
   --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
 }
 
+/* Docked in the app's right sidebar: the tab body owns the size, so the panel
+   fills it instead of anchoring to the composer, and the tab's own chrome is the
+   frame (no border, radius or shadow of its own). */
+.panelDocked {
+  position: static;
+  inset: auto;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* The dock body's host: the panel portals its content in here, so the tab body
+   can size the panel without the panel's own markup changing shape. It fills the
+   kit's pane body (which is `position: relative` and scrolls on overflow) exactly
+   — absolute filling rather than `height: 100%`, so a percentage that resolves
+   against an auto-height ancestor can never leave the tab scrolling. */
+.dockHost {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .header {
   flex: none;
   display: flex;
@@ -191,11 +217,12 @@
 }
 
 /* A collapsible subgroup of settings rows (e.g. keybindings), collapsed by
-   default; the header toggles it and flips its chevron. A bottom border only:
-   the previous/preference rows each carry their own bottom border, so the group
-   does not also need a top one (which would double up). */
+   default; the header toggles it and flips its chevron. No margin of its own: the
+   header's padding is a preference row's, so group headers and rows share one
+   vertical rhythm — an extra top margin here pushed the first group's label lower
+   than the rows below it. A bottom border only, since the row above already
+   carries its own. */
 .settingsGroup {
-  margin-top: 8px;
   border-bottom: 1px solid var(--dsw-alias-border-l2);
 }
 .settingsGroupHeader {
@@ -297,11 +324,13 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
-/* Pill picker naming the current 打开 / 关闭 state (harness selector look). */
+/* The shortcut row's recorder: a pill showing the current chord (or 无), and the
+   quiet button beside it that restores the default. */
 .settingsSelector {
   display: inline-flex;
   align-items: center;
-  gap: 12px;
+  justify-content: center;
+  min-width: 72px;
   height: 36px;
   padding: 0 14px;
   border: none;
@@ -318,8 +347,35 @@
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
-.settingsSelectorChevron {
-  flex: none;
+/* Recording: the pill reads as armed, since the next key wins. */
+.settingsSelector[data-recording] {
+  box-shadow: inset 0 0 0 1px var(--dsw-alias-state-business-primary);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.settingsReset {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-left: 6px;
+  padding: 0;
+  border: none;
+  border-radius: 28px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.settingsReset:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.settingsReset:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* Color picker row control: a fixed-width DSH pill trigger (current swatch + hex)
@@ -821,6 +877,34 @@
   align-items: stretch;
 }
 
+/* The folded file list's knob: it sits in the floating card's own top-left
+   corner, placed from the same measured box the card uses (see the panel), so
+   opening the list covers it exactly. It lives outside the diff view's action row
+   because that row is not drawn while no file is open — which left the folded
+   list with no way back. Sized like the toolbar's icon actions (28x28 with a 14px
+   glyph) and below the card (`.fileListFloat`) in z-order. */
+.fileListKnob {
+  position: absolute;
+  z-index: 39;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+  box-shadow: var(--dsw-shadow-lv2);
+}
+
+.fileListKnob:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
 /* The floating (collapsed) file list: when the pane would take more than a
    third of the panel, it folds to a button and the diff takes the full width;
    the list then floats over the code scroll box as a rounded, inset card. Its
@@ -838,6 +922,27 @@
   border-radius: 12px;
   background: var(--dsw-alias-bg-base);
   box-shadow: var(--dsw-shadow-lv2);
+  /* It grows out of the corner the knob sits in — the knob is the anchor, so the
+     two read as one control. Folding it back is immediate, with no shrink. */
+  transform-origin: top left;
+  animation: fileListGrow 140ms ease-out;
+}
+
+@keyframes fileListGrow {
+  from {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fileListFloat {
+    animation: none;
+  }
 }
 
 .fileList {
@@ -1956,6 +2061,200 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The presentation control: the gear's quiet chrome, widened just enough for the
+   state's mark plus the menu chevron. */
+.presentationSelect {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  height: 28px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 28px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.presentationSelect:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* The docked panel's chip content (`sidebar.right.pane.tab.title`): the title,
+   then the mode switch at the chip's right edge. The kit's close button is
+   absolutely positioned 4px from that edge and 20px wide, so this reserves
+   exactly that strip — the switch ends up flush beside the ✕, and on hover the
+   two read as one pair of tab controls instead of the ✕ landing on top. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  min-width: 0;
+  padding-right: 14px;
+}
+
+.chipLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The coverage control: the header button, and the popover it opens. The popover
+   is positioned against that button (the panel clips its own overflow, so an
+   in-place card is anchored rather than portaled), and it is a row because its
+   three switches are independent. */
+.coverHost {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* The coverage card: the popover and the chord's centred echo share one surface,
+   so the keyboard report looks exactly like the control that produced it. */
+.coverCard {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-base);
+  box-shadow: var(--dsw-shadow-lv2);
+}
+
+.coverPopover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 50;
+}
+
+/* The chord's echo: centred, shown at once, gone after a second. It is a report
+   rather than a control, so it never takes a press. */
+.coverNotice {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 80;
+  pointer-events: none;
+  animation: coverNoticeFade 1250ms ease-out forwards;
+}
+
+.coverNoticeCard {
+  gap: 4px;
+  padding: 6px 8px;
+}
+
+@keyframes coverNoticeFade {
+  0%,
+  78% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+/* One echo glyph: the popover button's box, grown so the notice reads at a
+   glance from across the screen, and without the hover or the press. */
+.coverNoticeGlyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.coverNoticeGlyph[data-on] {
+  color: var(--dsw-alias-label-primary);
+}
+
+/* The edge that just changed, so the flip is legible at a glance. */
+.coverNoticeGlyph[data-changed] {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* The echo's screen-reader text: the change in words, since the card is glyphs. */
+.coverNoticeText {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Bigger than a menu row: these are the panel's own switches, pressed on their
+   own, so each gets a full-size glyph and its own hover fill. */
+.coverButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.coverButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* On: the band is filled and the whole glyph reads at full strength. */
+.coverButton[data-on] {
+  color: var(--dsw-alias-label-primary);
+}
+
+/* The mode switch's event boundary: a flex item that behaves exactly like the
+   button did, so wrapping the menu changes no layout. */
+.presentationHost {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* The chip's mode switch: the kit's own close button chrome (20px tall, 20px
+   radius, tertiary ink, fill on hover), widened into a pill so the mark and the
+   triangle both sit comfortably inside and it reads as a control rather than as
+   tab decoration. */
+.chipPresentation {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 36px;
+  height: 20px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 20px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.chipPresentation:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* The app's right sidebar is the panel mark mirrored (ui-sidebar-right's
+   ExpandButton does the same to IconPanelLeftOutline16), so the dock glyph shows
+   the same column the sidebar's own control points at. */
+.mirrored {
+  transform: scaleX(-1);
 }
 
 /* Bottom-right, non-blocking notice: an external change created a fresh undo
