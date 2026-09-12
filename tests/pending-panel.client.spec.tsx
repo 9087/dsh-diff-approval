@@ -2727,6 +2727,42 @@ describe('PendingPanel', () => {
     expect(document.activeElement).toBe(composer)
   })
 
+  it('covers the edges instead of squeezing the panel away on a small window', () => {
+    // A phone-sized window: the sidebar's column is most of the width, so leaving
+    // it uncovered would compute a panel with no room left — and an invisible
+    // panel is worse than a covered sidebar.
+    const originalWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth')
+    const originalHeight = Object.getOwnPropertyDescriptor(window, 'innerHeight')
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 640 })
+    const scroll = document.createElement('div')
+    scroll.setAttribute('data-conversation-scroll', '')
+    document.body.appendChild(scroll)
+    scroll.getBoundingClientRect = () => ({
+      left: 280, right: 390, width: 110, top: 60, bottom: 640, height: 580, x: 280, y: 60, toJSON: () => ({}),
+    }) as DOMRect
+    try {
+      render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      const panel = document.querySelector('[data-diff-approval-panel]') as HTMLElement
+
+      // Uncovering the left sidebar would leave 288 … 382 — a sliver — so the edge
+      // stays covered and the panel keeps the window. The preference is still
+      // stored: the floor overrules the geometry, not the user's choice.
+      fireEvent.click(document.querySelector('[data-diff-approval-cover]') as HTMLElement)
+      fireEvent.click(document.querySelector('[data-diff-approval-cover-switch="left"]') as HTMLElement)
+      expect(localStorage.getItem('diff-approval:float-cover')).toBe('{"top":true,"left":false,"right":true,"composer":false}')
+      expect(panel.style.left).toBe('8px')
+      expect(panel.style.right).toBe('8px')
+    } finally {
+      scroll.remove()
+      if (originalWidth !== undefined) Object.defineProperty(window, 'innerWidth', originalWidth)
+      else delete (window as { innerWidth?: unknown }).innerWidth
+      if (originalHeight !== undefined) Object.defineProperty(window, 'innerHeight', originalHeight)
+      else delete (window as { innerHeight?: unknown }).innerHeight
+    }
+  })
+
   it('lays a sidebar-colored backdrop over the seam only when everything is covered', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)

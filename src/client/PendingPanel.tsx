@@ -60,6 +60,46 @@ const COVER_ACTIONS = [
 /** Fixed window-edge inset the floating panel keeps on every side, mirroring
  *  `.panel`'s own left/right/top. */
 const PANEL_INSET_PX = 8
+/** The smallest floating panel worth drawing. A window that cannot hold the
+ *  uncovered edges *and* a panel this big covers them instead — the edges are a
+ *  preference, an invisible panel is a bug, and a phone-sized window is exactly
+ *  the case where leaving a sidebar visible can squeeze the panel to nothing. */
+const MIN_PANEL_WIDTH_PX = 240
+const MIN_PANEL_HEIGHT_PX = 200
+
+/**
+ * The floating panel's four insets for the current coverage. An edge the panel
+ * covers keeps the small window inset; one it does not cover starts past what the
+ * app draws there. If the result would leave the panel smaller than
+ * {@link MIN_PANEL_WIDTH_PX} / {@link MIN_PANEL_HEIGHT_PX}, the sides are covered
+ * again rather than drawn as an invisible sliver.
+ * @param cover - which edges the panel is covering.
+ * @param sideInset - what the app occupies on each side (see {@link frameInsets}).
+ * @param bottomPx - the composer offset used when the composer is not covered.
+ * @param viewport - the window's size in px.
+ * @returns the insets for the panel's style.
+ */
+function panelInsets(
+  cover: DiffApprovalCover,
+  sideInset: { top: number; left: number; right: number },
+  bottomPx: number,
+  viewport: { width: number; height: number },
+): { top: number; left: number; right: number; bottom: number } {
+  const side = (covered: boolean, value: number): number => covered ? PANEL_INSET_PX : value + PANEL_INSET_PX
+  let left = side(cover.left, sideInset.left)
+  let right = side(cover.right, sideInset.right)
+  if (viewport.width - left - right < MIN_PANEL_WIDTH_PX) {
+    left = PANEL_INSET_PX
+    right = PANEL_INSET_PX
+  }
+  let top = cover.top ? PANEL_INSET_PX : sideInset.top
+  let bottom = cover.composer ? PANEL_INSET_PX : bottomPx
+  if (viewport.height - top - bottom < MIN_PANEL_HEIGHT_PX) {
+    top = PANEL_INSET_PX
+    bottom = PANEL_INSET_PX
+  }
+  return { top, left, right, bottom }
+}
 /** Narrowest docked panel that still fits the file list beside the detail. Below
  *  it the list folds into the floating card, exactly as it does in a narrow
  *  floating panel — a right-sidebar column is narrow even on a wide window, so the
@@ -4313,6 +4353,8 @@ export function PendingPanel({
    * would take more than a third of it (browser zoom / window resize). */
   const [panelWidth, setPanelWidth] = useState(0)
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth)
+  /** The window's height, for the panel's minimum-size floor (see {@link panelInsets}). */
+  const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight)
   const panelRef = useRef<HTMLElement>(null)
   const splitRef = useRef<HTMLDivElement>(null)
   /** The code scroll box's bounds within the split, so the floating card is
@@ -4354,9 +4396,12 @@ export function PendingPanel({
     if (next) setFloatOpen(false)
   }
 
-  // Track the window width for the breakpoint above.
+  // Track the window's size for the breakpoint above and the panel's floor.
   useEffect(() => {
-    const onResize = (): void => { setViewportWidth(window.innerWidth) }
+    const onResize = (): void => {
+      setViewportWidth(window.innerWidth)
+      setViewportHeight(window.innerHeight)
+    }
     window.addEventListener('resize', onResize)
     return () => { window.removeEventListener('resize', onResize) }
   }, [])
@@ -5043,17 +5088,12 @@ export function PendingPanel({
           <section
             className={docked ? `${css.panel} ${css.panelDocked}` : css.panel}
             ref={panelRef}
-            style={docked ? undefined : {
-              // Each edge follows its coverage switch: against the window when the
-              // panel covers that side, at what the app draws there when it does
-              // not. The sides keep a gap from the rail they leave visible; the top
-              // does not, because its boundary IS the view tabs' own top edge —
-              // anything more would leave a strip of those tabs poking out.
-              top: cover.top ? PANEL_INSET_PX : sideInset.top,
-              left: cover.left ? PANEL_INSET_PX : sideInset.left + PANEL_INSET_PX,
-              right: cover.right ? PANEL_INSET_PX : sideInset.right + PANEL_INSET_PX,
-              bottom: cover.composer ? PANEL_INSET_PX : bottomPx,
-            }}
+            style={docked ? undefined : panelInsets(
+              cover,
+              sideInset,
+              bottomPx,
+              { width: viewportWidth, height: viewportHeight },
+            )}
             data-diff-approval-panel
             data-diff-docked={docked ? '' : undefined}
             aria-label={t('panel.title')}
