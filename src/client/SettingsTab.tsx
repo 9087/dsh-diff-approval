@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconChevronDownOutline14, IconRefreshOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
-import { DEFAULT_KEYBINDINGS, DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, pasteOnCopyEnabled, quickSummonKey, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPanelCover, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
+import { DEFAULT_KEYBINDINGS, DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, COVER_CHANGED_EVENT, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, pasteOnCopyEnabled, quickSummonKey, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPanelCover, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import { ColorPicker } from './ColorPicker.tsx'
@@ -412,6 +412,13 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const [diffOpen, setDiffOpen] = useState(true)
   const [cover, setCoverState] = useState<DiffApprovalCover>(panelCover)
   const [coverOpen, setCoverOpen] = useState(false)
+  // The panel's own popover flips the same switches: follow it, so neither
+  // surface can show a value the other has already changed.
+  useEffect(() => {
+    const onCover = (): void => { setCoverState(panelCover()) }
+    window.addEventListener(COVER_CHANGED_EVENT, onCover)
+    return () => { window.removeEventListener(COVER_CHANGED_EVENT, onCover) }
+  }, [])
   const setCoverFlag = (edge: keyof DiffApprovalCover, next: boolean): void => {
     const value = { ...cover, [edge]: next }
     setCoverState(value)
@@ -633,7 +640,10 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
                 value={keybindings[action] ?? DEFAULT_KEYBINDINGS[action] ?? ''}
                 defaultValue={DEFAULT_KEYBINDINGS[action] ?? ''}
                 onChange={(chord) => { setKB(action, chord) }}
-                dataAttribute={`data-diff-key-${action}`}
+                // Lowercase: an attribute name with a capital in it is legal but
+                // makes React complain, and the DOM lowercases it anyway, so the
+                // value the reset button echoes must be lowercased to match.
+                dataAttribute={`data-diff-key-${action.toLowerCase()}`}
                 placeholder={t('panel.recordShortcut')}
                 noneLabel={t('panel.shortcutNone')}
                 resetLabel={t('panel.shortcutReset')}

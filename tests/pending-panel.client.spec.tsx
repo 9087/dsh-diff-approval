@@ -169,7 +169,46 @@ describe('PendingPanel', () => {
       left: 56, right: 800, width: 744, top: 60, bottom: 96, height: 36, x: 56, y: 60, toJSON: () => ({}),
     }) as DOMRect
     expect(frameInsets().top).toBe(60)
+
+    // Only the app's own strip counts. A tablist inside the right sidebar, one
+    // inside this very panel, one that does not sit above the conversation (a
+    // footer strip, or a strip the scroller precedes), and one that draws nothing
+    // are all ignored. The app's own strip is taken away for that check, so a
+    // candidate that wrongly counted would show its own top (2 or 4) instead of
+    // falling back to the conversation body (96).
     tabs.remove()
+    const strip = (parent: HTMLElement | null, after = false): HTMLElement => {
+      const node = document.createElement('div')
+      node.setAttribute('role', 'tablist')
+      node.getBoundingClientRect = () => ({
+        left: 0, right: 800, width: 800, top: 4, bottom: 40, height: 36, x: 0, y: 4, toJSON: () => ({}),
+      }) as DOMRect
+      if (parent === null) {
+        if (after) scroll.after(node)
+        else document.body.insertBefore(node, scroll)
+      } else {
+        parent.appendChild(node)
+      }
+      return node
+    }
+    const dockPane = document.createElement('div')
+    dockPane.setAttribute('data-sidebar-right-panel', '')
+    document.body.insertBefore(dockPane, scroll)
+    const pluginPane = document.createElement('div')
+    pluginPane.setAttribute('data-diff-approval-panel', '')
+    document.body.insertBefore(pluginPane, scroll)
+    const ignored = [strip(dockPane), strip(pluginPane), strip(null, true)]
+    // A collapsed strip draws nothing: it cannot be the boundary either.
+    const empty = strip(null)
+    empty.getBoundingClientRect = () => ({
+      left: 0, right: 0, width: 0, top: 2, bottom: 2, height: 0, x: 0, y: 2, toJSON: () => ({}),
+    }) as DOMRect
+    ignored.push(empty)
+    expect(frameInsets().top).toBe(96)
+
+    for (const node of ignored) node.remove()
+    dockPane.remove()
+    pluginPane.remove()
     scroll.remove()
   })
 
@@ -2599,6 +2638,25 @@ describe('PendingPanel', () => {
     expect(screen.getByText('action.closeHint {"chord":"Ctrl+↑"}')).toBeDefined()
   })
 
+  it('falls back to Escape alone when the summon chord is unbound', () => {
+    // A user who unbound the chord (recording, then pressing elsewhere) has one
+    // way out, not a hint naming a chord that does nothing.
+    localStorage.setItem('diff-approval:quick-summon-key', '')
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+    const tooltips = (): string[] => screen.getAllByRole('tooltip').map(node => node.textContent ?? '')
+
+    // The footer entry names itself rather than showing an empty parenthetical.
+    fireEvent.focus(screen.getByLabelText('panel.aria'))
+    expect(tooltips()).toContain('panel.aria')
+    expect(tooltips().some(text => text.includes('summonHint'))).toBe(false)
+
+    // The close button names Escape and nothing else: no chord is advertised.
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.focus(document.querySelector('[data-diff-approval-close]') as HTMLElement)
+    expect(tooltips()).toContain('action.closeHintEsc')
+    expect(tooltips().some(text => text.startsWith('action.closeHint '))).toBe(false)
+  })
+
   it('advertises the bound chord on the footer entry, not the default', () => {
     localStorage.setItem('diff-approval:quick-summon-key', 'Alt+P')
     render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
@@ -2761,6 +2819,62 @@ describe('PendingPanel', () => {
       if (originalHeight !== undefined) Object.defineProperty(window, 'innerHeight', originalHeight)
       else delete (window as { innerHeight?: unknown }).innerHeight
     }
+  })
+
+  it('covers the composer instead of squeezing the panel on a short window', () => {
+    // The height floor's own case: a window just tall enough for the composer to
+    // leave a band too thin to draw in. The uncovered composer is the stored
+    // preference, and it stays stored — the geometry loses, not the choice.
+    const originalHeight = Object.getOwnPropertyDescriptor(window, 'innerHeight')
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 300 })
+    const scroll = document.createElement('div')
+    scroll.setAttribute('data-conversation-scroll', '')
+    const seat = document.createElement('div')
+    seat.setAttribute('data-composer-seat', '')
+    scroll.appendChild(seat)
+    document.body.appendChild(scroll)
+    seat.getBoundingClientRect = () => ({
+      top: 200, bottom: 300, height: 100, left: 0, right: 0, width: 0, x: 0, y: 0, toJSON: () => ({}),
+    }) as DOMRect
+
+    try {
+      render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      const panel = document.querySelector('[data-diff-approval-panel]') as HTMLElement
+
+      // Composer uncovered by default: 300 - 8 - (300 - 200 + 12) = 180, too thin,
+      // so the composer edge is covered after all and the panel keeps its height.
+      expect(localStorage.getItem('diff-approval:float-cover')).toBeNull()
+      expect(panel.style.bottom).toBe('8px')
+      expect(panel.style.top).toBe('8px')
+    } finally {
+      scroll.remove()
+      if (originalHeight !== undefined) Object.defineProperty(window, 'innerHeight', originalHeight)
+      else delete (window as { innerHeight?: unknown }).innerHeight
+    }
+  })
+
+  it('follows a flip made in the panel, not only the other way round', () => {
+    // The two surfaces are separate mounts sharing the stored cover. The settings
+    // rows learned about a flip by subscribing, so a stale switch cannot sit there
+    // showing the opposite of what the panel now does.
+    const panel = render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const settingsProps = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
+    render(<DiffApprovalSettingsTab {...settingsProps} />)
+    fireEvent.click(document.querySelector('[data-diff-cover-toggle]') as HTMLButtonElement)
+    const row = (edge: string): HTMLElement => document.querySelector(`[data-diff-cover-${edge}]`) as HTMLElement
+    expect(row('left').getAttribute('aria-checked')).toBe('true')
+    expect(row('composer').getAttribute('aria-checked')).toBe('false')
+
+    // Flip both in the panel's own popover.
+    fireEvent.click(document.querySelector('[data-diff-approval-cover]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-approval-cover-switch="left"]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-approval-cover-switch="composer"]') as HTMLElement)
+
+    expect(row('left').getAttribute('aria-checked')).toBe('false')
+    expect(row('composer').getAttribute('aria-checked')).toBe('true')
+    panel.unmount()
   })
 
   it('advertises each coverage switch\'s own chord, as bound', () => {
@@ -3366,12 +3480,17 @@ describe('PendingPanel', () => {
     fireEvent.click(document.querySelector('[data-diff-keybindings-toggle]') as HTMLButtonElement)
 
     const recorder = (): HTMLButtonElement => document.querySelector('[data-diff-key-jumpdown]') as HTMLButtonElement
-    const reset = (): HTMLButtonElement => document.querySelector('[data-reset="data-diff-key-jumpDown"]') as HTMLButtonElement
+    const reset = (): HTMLButtonElement => document.querySelector('[data-reset="data-diff-key-jumpdown"]') as HTMLButtonElement
     // The control is the chord itself: there is no menu behind it, so no chevron.
     expect(recorder().querySelector('svg')).toBeNull()
     // Reset starts disabled: the row is already at its default.
     expect(reset()).not.toBeNull()
     expect(reset().disabled).toBe(true)
+    // The attribute names the row is addressed by are lowercase: a capital in an
+    // attribute name is legal but React drops it, so a camelCase action must not
+    // reach the DOM as `data-diff-key-jumpDown`.
+    expect(reset().getAttribute('data-reset')).toBe('data-diff-key-jumpdown')
+    expect(recorder().getAttributeNames().every(name => name === name.toLowerCase())).toBe(true)
 
     fireEvent.click(recorder())
     fireEvent.keyDown(recorder(), { key: 'k', ctrlKey: true })
