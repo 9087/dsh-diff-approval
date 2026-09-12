@@ -1,6 +1,8 @@
 // Client settings: the diff tab-width preference.
 
 import { beforeEach, describe, expect, it } from 'vitest'
+import { readFileSync, readdirSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import {
   DEFAULT_KEYBINDINGS,
   DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_LINE_HEIGHT_DEFAULT, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN,
@@ -247,6 +249,30 @@ describe('settings.fileListFloat', () => {
 })
 
 describe('locale copy', () => {
+  it('defines every string the client asks for, in both languages', () => {
+    // A key that is used but never defined renders as the key itself, and one
+    // defined in a single language falls back to a raw English word in the other.
+    // Both are invisible in a build and obvious on screen, so they are checked
+    // here by reading the source for the literals it passes to `t`.
+    const dir = resolve(process.cwd(), 'src', 'client')
+    const used = new Set<string>()
+    for (const entry of readdirSync(dir)) {
+      if (!entry.endsWith('.ts') && !entry.endsWith('.tsx')) continue
+      const text = readFileSync(join(dir, entry), 'utf8')
+      for (const match of text.matchAll(/\bt\(\s*'([^']+)'/g)) used.add(match[1]!)
+      // One key is built from an action name (the shortcut rows).
+      if (text.includes('`panel.key.${')) {
+        for (const action of Object.keys(DEFAULT_KEYBINDINGS)) used.add(`panel.key.${action}`)
+      }
+    }
+    expect(used.size).toBeGreaterThan(50)
+    for (const [language, strings] of [['zh', zh], ['en', en]] as const) {
+      const missing = [...used].filter(key => !(key in strings)).sort()
+      expect(missing, `${language} is missing ${missing.join(', ')}`).toEqual([])
+    }
+    expect(Object.keys(zh).sort()).toEqual(Object.keys(en).sort())
+  })
+
   it('never bakes a rebindable chord into a string', () => {
     // Every chord a user can rebind is injected at render time (see withChord /
     // closeHint / summonHint), so a literal one in the copy would go stale the
