@@ -5050,6 +5050,12 @@ export function PendingPanel({
   const startResize = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (event.button !== 0) return
     event.preventDefault()
+    // The folded card floats inside the code view, so that view's box is its own
+    // ceiling: a drag past the code's right edge stops there rather than storing a
+    // width the card has no room to show.
+    const cap = floatMode && floatBox !== null
+      ? Math.max(MIN_LIST_WIDTH_PX, floatBox.width - 2 * FLOAT_LIST_MARGIN_PX)
+      : MAX_LIST_WIDTH_PX
     resizeDrag.current = { startX: event.clientX, startWidth: listWidth }
     document.body.style.userSelect = 'none'
     document.body.style.cursor = 'col-resize'
@@ -5057,7 +5063,7 @@ export function PendingPanel({
       const start = resizeDrag.current
       if (start === null) return
       const next = start.startWidth + (move.clientX - start.startX)
-      setListWidth(Math.min(Math.max(next, MIN_LIST_WIDTH_PX), MAX_LIST_WIDTH_PX))
+      setListWidth(Math.min(Math.max(next, MIN_LIST_WIDTH_PX), cap))
     }
     const onUp = () => {
       resizeDrag.current = null
@@ -5261,6 +5267,10 @@ export function PendingPanel({
                   data-diff-floating-file-list
                 >
                   {fileListBody}
+                  {/* The folded list is dragged by the same divider, on its own
+                      right edge: the card is the list, so its width is the one
+                      there is to set. */}
+                  <div className={css.floatResizeHandle} data-diff-float-resize onMouseDown={startResize} />
                 </div>
               )}
             </div>

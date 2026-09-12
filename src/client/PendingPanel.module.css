@@ -1060,6 +1060,24 @@
   background: var(--dsw-alias-border-l2);
 }
 
+/* The folded card's own divider: the same drag, on the card's right edge. The
+   card clips its content, so the hit area sits inside that edge — in the card's
+   own 8px side padding, where it covers no row. */
+.floatResizeHandle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 41;
+  width: 8px;
+  cursor: col-resize;
+  background: transparent;
+}
+
+.floatResizeHandle:hover {
+  background: var(--dsw-alias-border-l2);
+}
+
 .detail {
   flex: 1;
   min-width: 0;

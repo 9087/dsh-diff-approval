@@ -932,6 +932,73 @@ describe('PendingPanel', () => {
     expect(screen.queryByText('0')).toBeNull()
   })
 
+  it('drags the folded card too, bounded by the box it floats in', () => {
+    // The folded list is the same list: its width is dragged by the same handler,
+    // on the card's own right edge, and one state holds it — so the width set here
+    // is the width the docked list takes when the window has room for it again.
+    const originalWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth')
+    const originalRect = Element.prototype.getBoundingClientRect
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1200 })
+    // A 500px-wide code view: 12px inset on each side leaves the card a 476px
+    // ceiling, well above its 240px default and below the 560px bound.
+    const box = (top: number, width: number, height: number): DOMRect => ({
+      left: 0, right: width, width, top, bottom: top + height, height, x: 0, y: top, toJSON: () => ({}),
+    }) as DOMRect
+    Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
+      const detail = document.querySelector('[data-diff-detail]')
+      if (this.hasAttribute('data-diff-body')) return box(36, 500, 364)
+      if (detail !== null && (this === detail || this === detail.parentElement)) return box(0, 500, 400)
+      return originalRect.call(this)
+    }
+    try {
+      const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+      render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      // Wide window first: the docked divider is the one on screen, and no card.
+      expect(document.querySelector('[data-diff-resize]')).not.toBeNull()
+      expect(document.querySelector('[data-diff-float-resize]')).toBeNull()
+
+      // Narrow now: the list moves into the card, with its own divider.
+      act(() => {
+        Object.defineProperty(window, 'innerWidth', { configurable: true, value: 600 })
+        window.dispatchEvent(new Event('resize'))
+      })
+      fireEvent.click(document.querySelector('[data-diff-file-list-toggle]') as HTMLElement)
+      const card = (): HTMLElement => document.querySelector('[data-diff-floating-file-list]') as HTMLElement
+      const handle = (): HTMLElement => document.querySelector('[data-diff-float-resize]') as HTMLElement
+      expect(card().style.width).toBe('240px')
+      expect(handle().closest('[data-diff-floating-file-list]')).not.toBeNull()
+
+      fireEvent.mouseDown(handle(), { button: 0, clientX: 100 })
+      act(() => {
+        window.dispatchEvent(new MouseEvent('mousemove', { clientX: 180 }))
+        window.dispatchEvent(new MouseEvent('mouseup'))
+      })
+      expect(card().style.width).toBe('320px')
+
+      // Past the box's right edge the drag stops at the box: the card keeps 12px
+      // clear on each side rather than storing a width it cannot show.
+      fireEvent.mouseDown(handle(), { button: 0, clientX: 100 })
+      act(() => {
+        window.dispatchEvent(new MouseEvent('mousemove', { clientX: 1200 }))
+        window.dispatchEvent(new MouseEvent('mouseup'))
+      })
+      expect(card().style.width).toBe('476px')
+
+      // …and widening the window again hands the docked list the width just set.
+      act(() => {
+        Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1200 })
+        window.dispatchEvent(new Event('resize'))
+      })
+      const list = document.querySelector('[data-diff-approval-file-list]') as HTMLElement
+      expect(list.style.width).toBe('476px')
+    } finally {
+      Element.prototype.getBoundingClientRect = originalRect
+      if (originalWidth !== undefined) Object.defineProperty(window, 'innerWidth', originalWidth)
+      else delete (window as { innerWidth?: unknown }).innerWidth
+    }
+  })
+
   it('resizes the file list by dragging the divider within its bounds', () => {
     const second = entry({ id: 'entry-2', path: '/repo/b.txt' })
     const props = panelProps({ read: true, files: [FILE, second], busy: new Set() })
