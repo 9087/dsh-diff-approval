@@ -3339,6 +3339,45 @@ describe('PendingPanel', () => {
     expect((document.querySelector('[data-diff-key-jumpdown]') as HTMLButtonElement).textContent).toBe('panel.shortcutNone')
   })
 
+  it('the DSH Settings tab carries the coverage switches in a group of their own', () => {
+    const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
+    render(<DiffApprovalSettingsTab {...props} />)
+
+    // Collapsed like the other groups: the rows appear once it is expanded.
+    expect(document.querySelector('[data-diff-cover-left]')).toBeNull()
+    fireEvent.click(document.querySelector('[data-diff-cover-toggle]') as HTMLButtonElement)
+
+    // The same four edges the panel's popover offers, in the same order, each a
+    // switch showing its own state.
+    const edges = ['left', 'top', 'right', 'composer']
+    const switches = edges.map(edge => document.querySelector(`[data-diff-cover-${edge}]`) as HTMLElement)
+    for (const node of switches) expect(node).not.toBeNull()
+    for (const node of switches) expect(node.getAttribute('role')).toBe('switch')
+    // left, top, right on; composer off — the floating default.
+    expect(switches.map(node => node.getAttribute('aria-checked'))).toEqual(['true', 'true', 'true', 'false'])
+
+    // Flipping one stores it, exactly as the panel's own popover does.
+    fireEvent.click(switches[3]!)
+    expect(JSON.parse(localStorage.getItem('diff-approval:float-cover') ?? '{}')).toEqual({ top: true, left: true, right: true, composer: true })
+  })
+
+  it('lets the settings group move the open panel, a separate mount', () => {
+    // Both surfaces mounted, as in the app: the floating panel and the Settings
+    // section. They share the stored cover, so a flip in one reaches the other.
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const panel = document.querySelector('[data-diff-approval-panel]') as HTMLElement
+    expect(panel.style.bottom).toBe('128px')
+
+    const settingsProps = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
+    render(<DiffApprovalSettingsTab {...settingsProps} />)
+    fireEvent.click(document.querySelector('[data-diff-cover-toggle]') as HTMLButtonElement)
+    fireEvent.click(document.querySelector('[data-diff-cover-composer]') as HTMLElement)
+
+    // The open panel followed the switch: no reopen, no refresh.
+    expect(panel.style.bottom).toBe('8px')
+  })
+
   it('the DSH Settings tab carries a recorder row per coverage edge', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)

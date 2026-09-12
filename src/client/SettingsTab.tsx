@@ -4,7 +4,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconChevronDownOutline14, IconRefreshOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
-import { DEFAULT_KEYBINDINGS, DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, pasteOnCopyEnabled, quickSummonKey, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
+import { DEFAULT_KEYBINDINGS, DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, pasteOnCopyEnabled, quickSummonKey, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPanelCover, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
+import type { DiffApprovalCover } from './settings.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import { ColorPicker } from './ColorPicker.tsx'
 import css from './PendingPanel.module.css'
@@ -409,6 +410,13 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const addDefault = currentDiffAddColor()
   const delDefault = currentDiffDelColor()
   const [diffOpen, setDiffOpen] = useState(true)
+  const [cover, setCoverState] = useState<DiffApprovalCover>(panelCover)
+  const [coverOpen, setCoverOpen] = useState(false)
+  const setCoverFlag = (edge: keyof DiffApprovalCover, next: boolean): void => {
+    const value = { ...cover, [edge]: next }
+    setCoverState(value)
+    setPanelCover(value)
+  }
   const [summon, setSummonState] = useState(quickSummonKey)
   const [keysOpen, setKeysOpen] = useState(false)
   const [keybindings, setKeybindingsState] = useState<Record<string, string>>(() => {
@@ -629,6 +637,42 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
                 placeholder={t('panel.recordShortcut')}
                 noneLabel={t('panel.shortcutNone')}
                 resetLabel={t('panel.shortcutReset')}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+      <div className={css.settingsGroup} data-open={coverOpen || undefined}>
+        <button
+          type="button"
+          className={css.settingsGroupHeader}
+          onClick={() => { setCoverOpen(open => !open) }}
+          data-diff-cover-toggle
+        >
+          <span className={css.settingsGroupText}>
+            <span className={css.settingsGroupTitle}>{t('settings.cover')}</span>
+            <span className={css.settingsGroupDesc}>{t('settings.coverDesc')}</span>
+          </span>
+          <IconChevronDownOutline14 className={css.settingsGroupChevron} />
+        </button>
+        {coverOpen && (
+          <div className={css.settingsGroupBody}>
+            {/* The same four switches the panel's own popover offers, in the same
+                order: left, top, right, bottom. */}
+            {([
+              ['left', 'cover.left', 'cover.leftDesc'],
+              ['top', 'cover.top', 'cover.topDesc'],
+              ['right', 'cover.right', 'cover.rightDesc'],
+              ['composer', 'cover.composer', 'cover.composerDesc'],
+            ] as const).map(([edge, title, description]) => (
+              <PreferenceRow
+                key={edge}
+                title={t(title)}
+                description={t(description)}
+                value={cover[edge]}
+                onSelect={(next) => { setCoverFlag(edge, next) }}
+                dataAttribute={`data-diff-cover-${edge}`}
+                t={t}
               />
             ))}
           </div>

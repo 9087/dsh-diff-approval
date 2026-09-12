@@ -31,7 +31,7 @@ import { referenceLabelOf } from './reference.ts'
 import { OPEN_FILE_EVENT } from './produced-diff.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
 import { SHOW_PANEL_EVENT } from './dock.tsx'
-import { confirmFileRemoveEnabled, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
+import { confirmFileRemoveEnabled, COVER_CHANGED_EVENT, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
 import { matchRangesOf } from './search.ts'
 import type { SearchOptions } from './search.ts'
@@ -4655,6 +4655,14 @@ export function PendingPanel({
     const timer = window.setTimeout(() => { setCoverNotice(null) }, COVER_NOTICE_MS)
     return () => { window.clearTimeout(timer) }
   }, [coverNotice])
+
+  // The Settings section is a separate mount offering the same four coverage
+  // switches: it announces a flip, and the open panel follows straight away.
+  useEffect(() => {
+    const onCover = (): void => { setCover(panelCover()) }
+    window.addEventListener(COVER_CHANGED_EVENT, onCover)
+    return () => { window.removeEventListener(COVER_CHANGED_EVENT, onCover) }
+  }, [])
 
   /**
    * Close the floating panel and hand the caret back to the chat composer:

@@ -187,9 +187,16 @@ export function panelCover(): DiffApprovalCover {
   }
 }
 
+/** Window event: the floating panel's coverage changed (see {@link setPanelCover}). */
+export const COVER_CHANGED_EVENT = 'diff-approval:cover'
+
 /** Persist what the floating panel covers. */
 export function setPanelCover(value: DiffApprovalCover): void {
   localStorage.setItem(FLOAT_COVER_KEY, JSON.stringify(value))
+  // The panel and the Settings section are separate mounts, so the event is how a
+  // switch flipped in one reaches the other straight away rather than at the
+  // panel's next open.
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(COVER_CHANGED_EVENT))
 }
 
 /**
