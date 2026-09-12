@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.21.0](https://github.com/9087/dsh-diff-approval/compare/v0.20.1...v0.21.0) (2026-09-12)
+
+### Features
+
+* **panel:** advertise a button's chord wherever that button exists ([99d9930](https://github.com/9087/dsh-diff-approval/commit/99d99301d3d46145d2f000b983002e157d223af2))
+* **panel:** drag the folded file list's width like the docked one ([f919bf0](https://github.com/9087/dsh-diff-approval/commit/f919bf0668941438857d64730eadf867c8dfe3ae))
+* **panel:** float or dock the review panel, with per-edge coverage ([808a21e](https://github.com/9087/dsh-diff-approval/commit/808a21e463fc448d0db738df2d452ed785593e27))
+* **panel:** open the review from the Session header, beside the app's controls ([98094d2](https://github.com/9087/dsh-diff-approval/commit/98094d24e136d3eefd23092ec706d1d0c168666c))
+* **settings:** put the coverage switches in a group of their own ([9021d00](https://github.com/9087/dsh-diff-approval/commit/9021d00ef90f74eb530e5dc5b922e062b2cc6c66))
+
+### Bug Fixes
+
+* **panel:** keep the folded file list on the file view's box ([7329084](https://github.com/9087/dsh-diff-approval/commit/732908496ffb88128141a46be88ef19c96d24423))
+* **panel:** never let the coverage insets squeeze the panel away ([a5bc485](https://github.com/9087/dsh-diff-approval/commit/a5bc485cf675605532052fde0e67894936334025))
+* **settings:** hold the coverage switches in step with the panel ([fdf85bf](https://github.com/9087/dsh-diff-approval/commit/fdf85bf72fba85973edf5f9fee1b2426e25294e1))
+
 ## [0.20.1](https://github.com/9087/dsh-diff-approval/compare/v0.20.0...v0.20.1) (2026-09-12)
 
 ### Bug Fixes
