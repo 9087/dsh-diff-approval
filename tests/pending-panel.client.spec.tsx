@@ -1054,6 +1054,24 @@ describe('PendingPanel', () => {
     }
   })
 
+  it('gives the folded list the docked list\'s right inset', () => {
+    // The two lists hold the same rows, so their right insets have to match: 2px of
+    // padding plus the scroller's own reserved gutter (8px) is the rows' 10px inset
+    // in both, and the bulk footer's 8px right padding lands on that same line. An
+    // 8px padding on the card doubled the gutter — a stray margin, widest of all
+    // when the list did not overflow and no bar was drawn.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const block = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
+    const rightPadding = (name: string): string => /padding:\s*([^;]*);/.exec(block(name))?.[1]?.trim().split(/\s+/)[1] ?? ''
+    expect(rightPadding('fileList')).toBe('2px')
+    expect(rightPadding('fileListFloat')).toBe('2px')
+    // …and the grip that sets the folded list's width is a corner one, so the strip
+    // the scrollbar lives in along that edge stays the scrollbar's.
+    const grip = block('floatResizeHandle')
+    expect(grip).toContain('bottom: 0')
+    expect(grip).not.toContain('top: 0')
+  })
+
   it('resizes the file list by dragging the divider within its bounds', () => {
     const second = entry({ id: 'entry-2', path: '/repo/b.txt' })
     const props = panelProps({ read: true, files: [FILE, second], busy: new Set() })

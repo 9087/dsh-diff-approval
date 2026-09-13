@@ -1016,7 +1016,12 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  padding: 6px 8px 10px;
+  /* The right inset mirrors the docked list exactly: 2px here plus the scroller's
+     own reserved gutter (see `.listScroll`) is the rows' 10px inset there too, and
+     the bulk footer's 8px right padding lands on the same line. An 8px padding here
+     doubled the gutter and read as a stray margin, widest of all when nothing
+     overflowed and no bar was drawn. */
+  padding: 6px 2px 10px 8px;
   box-sizing: border-box;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 12px;
@@ -1097,17 +1102,21 @@
   background: var(--dsw-alias-border-l2);
 }
 
-/* The folded card's own divider: the same drag, on the card's right edge. The
-   card clips its content, so the hit area sits inside that edge — in the card's
-   own 8px side padding, where it covers no row. */
+/* The folded card's own divider: the same drag, as a corner grip on the card's
+   bottom-right. It cannot be a full-height strip along that edge like the docked
+   list's: the scroller's reserved gutter — where the bar is drawn — is the rest of
+   the card's right inset, and a strip over it would swallow the scrollbar's whole
+   hit area. The grip sits in the corner the bar does not reach, and the cursor and
+   hover tint do the telling. */
 .floatResizeHandle {
   position: absolute;
-  top: 0;
   right: 0;
   bottom: 0;
   z-index: 41;
-  width: 8px;
+  width: 16px;
+  height: 16px;
   cursor: col-resize;
+  border-bottom-right-radius: 11px;
   background: transparent;
 }
 
