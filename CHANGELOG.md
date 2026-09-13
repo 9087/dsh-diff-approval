@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.22.1](https://github.com/9087/dsh-diff-approval/compare/v0.22.0...v0.22.1) (2026-09-13)
+
+### Bug Fixes
+
+* **panel:** drag the folded list on a touch screen, by its right edge ([a170753](https://github.com/9087/dsh-diff-approval/commit/a17075351992e5a121caab3ca6853bf6c15f9761))
+* **panel:** fade the file-list knob while the pointer is away ([2ed6474](https://github.com/9087/dsh-diff-approval/commit/2ed64748883537bccef210a2504af0c82cc8d271))
+* **panel:** give the folded list the docked list's right inset ([9bc52ab](https://github.com/9087/dsh-diff-approval/commit/9bc52abe51eb6431e7f52d54455af363a95a75df))
+* **panel:** keep the caret out of a composer the panel covers ([ca9661b](https://github.com/9087/dsh-diff-approval/commit/ca9661b71165e8389339f4de8655d6b5a3d46da6))
+* **panel:** keep what floats over the code view opaque while hovered ([91d319e](https://github.com/9087/dsh-diff-approval/commit/91d319ef2a02f64a133b43972107d1760f87c07d))
+* **panel:** open a floating file list expanded, and stop its box measure looping ([c7d5eda](https://github.com/9087/dsh-diff-approval/commit/c7d5eda1f3e9234c9accdf23745bdc0c432624cf))
+
 ## [0.22.0](https://github.com/9087/dsh-diff-approval/compare/v0.21.0...v0.22.0) (2026-09-13)
 
 ### Features
