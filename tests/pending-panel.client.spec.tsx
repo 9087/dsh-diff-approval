@@ -1013,14 +1013,19 @@ describe('PendingPanel', () => {
       expect(document.querySelector('[data-diff-resize]')).not.toBeNull()
       expect(document.querySelector('[data-diff-float-resize]')).toBeNull()
 
-      // Narrow now: the list moves into the card, with its own divider.
+      // Narrow now: the list moves into the card, which a fresh showing opens — and
+      // the knob still folds it away and brings it back by hand.
       act(() => {
         Object.defineProperty(window, 'innerWidth', { configurable: true, value: 600 })
         window.dispatchEvent(new Event('resize'))
       })
-      fireEvent.click(document.querySelector('[data-diff-file-list-toggle]') as HTMLElement)
       const card = (): HTMLElement => document.querySelector('[data-diff-floating-file-list]') as HTMLElement
       const handle = (): HTMLElement => document.querySelector('[data-diff-float-resize]') as HTMLElement
+      const knob = (): HTMLElement => document.querySelector('[data-diff-file-list-toggle]') as HTMLElement
+      expect(card()).not.toBeNull()
+      fireEvent.click(knob())
+      expect(card()).toBeNull()
+      fireEvent.click(knob())
       expect(card().style.width).toBe('240px')
       // The grip is the card's right edge: a strip the card's own height, straddling
       // that edge, and outside the card node (the strip of scrollbar inside it stays
@@ -1074,6 +1079,67 @@ describe('PendingPanel', () => {
       if (originalWidth !== undefined) Object.defineProperty(window, 'innerWidth', originalWidth)
       else delete (window as { innerWidth?: unknown }).innerWidth
     }
+  })
+
+  it('opens a floating list expanded, every time the panel opens', () => {
+    // The panel opens to show the list, not just the knob that reveals it. Folding it
+    // away is the reader's move for that showing; the next open is a new showing.
+    const originalWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth')
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 600 })
+    try {
+      render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+      const card = (): Element | null => document.querySelector('[data-diff-floating-file-list]')
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      expect(card()).not.toBeNull()
+
+      // Folded by hand: it stays folded while the panel stays open…
+      fireEvent.click(document.querySelector('[data-diff-file-list-toggle]') as HTMLElement)
+      expect(card()).toBeNull()
+
+      // …and the next open starts expanded again, without waiting for the knob.
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      expect(card()).toBeNull()
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      expect(card()).not.toBeNull()
+    } finally {
+      if (originalWidth !== undefined) Object.defineProperty(window, 'innerWidth', originalWidth)
+      else delete (window as { innerWidth?: unknown }).innerWidth
+    }
+  })
+
+  it('opens a docked tab\'s floating list expanded once its width is known', () => {
+    // A docked panel measures its own width a frame after it mounts, so the folded
+    // mode is not known when the showing begins: the card opens as soon as it is,
+    // rather than being missed for that whole showing.
+    const clientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+      configurable: true,
+      get(this: Element) { return this.hasAttribute('data-diff-approval-panel') ? 400 : 0 },
+    })
+    try {
+      const host = document.createElement('div')
+      document.body.appendChild(host)
+      render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} docked dockHost={host} />)
+      // 400 < 520 (the two-column floor): the list floats in this narrow column, open.
+      expect(host.querySelector('[data-diff-approval-file-list]')).toBeNull()
+      expect(host.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
+      host.remove()
+    } finally {
+      if (clientWidth !== undefined) Object.defineProperty(HTMLElement.prototype, 'clientWidth', clientWidth)
+      else delete (HTMLElement.prototype as { clientWidth?: unknown }).clientWidth
+    }
+  })
+
+  it('keeps every effect\'s dependency array, and the box measure\'s in particular', () => {
+    // React's "maximum update depth exceeded" names this pattern for a reason: a
+    // `setState` from an effect with no dependency array, or one whose dependencies
+    // change on every render. The folded list's box was measured by a
+    // dependency-free layout effect, and dragging the docked panel's divider turned
+    // it into a real loop — each commit scheduled another update until React gave up
+    // and the panel's boundary closed the review mid-drag.
+    const source = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.tsx'), 'utf8')
+    expect(source).not.toMatch(/useLayoutEffect\(\(\) => \{\s*measureFloatBoxRef\.current\(\)\s*\}\)/)
+    expect(source).toMatch(/useLayoutEffect\(\(\) => \{\s*measureFloatBoxRef\.current\(\)\s*\}, \[/)
   })
 
   it('gives the folded list the docked list\'s right inset', () => {
@@ -1635,19 +1701,18 @@ describe('PendingPanel', () => {
       fireEvent.click(screen.getByLabelText('panel.aria'))
 
       // 600 < 1024 (the sidebar auto-collapse breakpoint), so the file list
-      // floats consistently with the sidebar and the toggle appears.
+      // floats consistently with the sidebar, the card is open because the panel
+      // just opened, and the knob is there to fold it away.
       expect(document.querySelector('[data-diff-approval-file-list]')).toBeNull()
       const toggle = document.querySelector('[data-diff-file-list-toggle]') as HTMLElement
       expect(toggle).not.toBeNull()
 
-      expect(document.querySelector('[data-diff-floating-file-list]')).toBeNull()
-      fireEvent.click(toggle)
       expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
-
       // Folding it back removes the card at once: only the opening is animated.
       fireEvent.click(toggle)
       expect(document.querySelector('[data-diff-floating-file-list]')).toBeNull()
 
+      // …and the knob brings it back.
       fireEvent.click(toggle)
       expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
       // Clicking a file row keeps the floating list open (so you can browse
@@ -1703,12 +1768,12 @@ describe('PendingPanel', () => {
       view.rerender(<PendingPanel {...panelProps({ read: true, files: [first, second], busy: new Set() })} />)
       expect(document.querySelector('[data-diff-body]')).not.toBeNull()
 
-      // Both are on the code view at once: the knob at its top-left corner, and
-      // the card exactly over the knob when it is opened.
+      // Both are on the code view at once: the knob at its top-left corner, and the
+      // card — open, since the list arrived while the panel was showing — exactly
+      // over the knob.
       const knob = (): HTMLElement => document.querySelector('[data-diff-file-list-toggle]') as HTMLElement
       expect(knob().style.top).toBe('48px')
       expect(knob().style.left).toBe('12px')
-      fireEvent.click(knob())
       const card = (): HTMLElement => document.querySelector('[data-diff-floating-file-list]') as HTMLElement
       expect(card().style.top).toBe('48px')
       expect(card().style.left).toBe(knob().style.left)
@@ -1737,9 +1802,8 @@ describe('PendingPanel', () => {
       expect(knob.closest('[data-diff-approval-panel]')).not.toBeNull()
 
       // Its place is the floating card's own top-left corner — the same measured
-      // box, the same inset — so opening the list, which sits above the knob in
+      // box, the same inset — so the open list, which sits above the knob in
       // z-order, covers it exactly.
-      fireEvent.click(knob)
       const card = document.querySelector('[data-diff-floating-file-list]') as HTMLElement
       expect(card).not.toBeNull()
       expect(parseFloat(knob.style.left)).toBe(parseFloat(card.style.left))
@@ -1771,9 +1835,9 @@ describe('PendingPanel', () => {
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     expect(document.querySelector('[data-diff-approval-file-list]')).toBeNull()
-    // The switch lives with the list's other controls, so it is reached by
-    // opening the floating card the knob shows.
-    fireEvent.click(document.querySelector('[data-diff-file-list-toggle]') as HTMLElement)
+    // The switch lives with the list's other controls, so it is reached through the
+    // card the panel opens with.
+    expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
     fireEvent.click(document.querySelector('[data-diff-file-list-float]') as HTMLElement)
     expect(localStorage.getItem('diff-approval:file-list-float')).toBe('0')
     expect(document.querySelector('[data-diff-approval-file-list]')).not.toBeNull()
@@ -1790,12 +1854,10 @@ describe('PendingPanel', () => {
       fireEvent.click(screen.getByLabelText('panel.aria'))
 
       // The Markdown preview is showing (no source diff body), yet the floating
-      // list still works on the narrow breakpoint.
+      // list still works on the narrow breakpoint — open, as a fresh showing has it.
       expect(document.querySelector('[data-diff-md-preview-body]')).not.toBeNull()
       expect(document.querySelector('[data-diff-body]')).toBeNull()
-      const toggle = document.querySelector('[data-diff-file-list-toggle]') as HTMLElement
-      expect(toggle).not.toBeNull()
-      fireEvent.click(toggle)
+      expect(document.querySelector('[data-diff-file-list-toggle]')).not.toBeNull()
       expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
     } finally {
       if (originalWidth !== undefined) Object.defineProperty(window, 'innerWidth', originalWidth)

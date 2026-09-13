@@ -4463,9 +4463,22 @@ export function PendingPanel({
   const floatMode = forceFloat || (docked
     ? panelWidth > 0 && panelWidth < DOCK_TWO_COLUMN_MIN_PX
     : viewportWidth < SIDEBAR_AUTO_COLLAPSE_PX)
-  const toggleFileList = (): void => { setFloatOpen(value => !value) }
+  /**
+   * Set when a fresh showing of the panel should start with the folded list open —
+   * the panel opens to show the list, and the knob that reveals it is for folding
+   * it away again — and spent by the first frame it can be spent on. The folded
+   * mode is not always known on that frame: a docked panel measures its own width a
+   * frame after it mounts. A hand on the list's own switches clears it, so the
+   * reader's choice always wins over the default.
+   */
+  const startListOpenRef = useRef(false)
+  const toggleFileList = (): void => {
+    startListOpenRef.current = false
+    setFloatOpen(value => !value)
+  }
   /** Flip the always-fold preference, remembered for the next open. */
   const toggleForceFloat = (): void => {
+    startListOpenRef.current = false
     const next = !forceFloat
     setForceFloat(next)
     setFileListFloat(next)
@@ -4482,6 +4495,17 @@ export function PendingPanel({
     window.addEventListener('resize', onResize)
     return () => { window.removeEventListener('resize', onResize) }
   }, [])
+
+  // Spend the "start with the folded list open" mark as soon as it applies: the
+  // panel is showing and the list really is floating (so there is a card to open at
+  // all; in the in-flow list there is nothing folded to reveal).
+  useEffect(() => {
+    if (!startListOpenRef.current) return
+    if (!open && !docked) return
+    if (!floatMode) return
+    startListOpenRef.current = false
+    setFloatOpen(true)
+  }, [open, docked, floatMode])
 
   // Clicking anywhere outside the floating card — or on the toggle button, which
   // toggles it, or on the card's width grip, which sits just outside its right
@@ -4510,16 +4534,19 @@ export function PendingPanel({
   // The box has to follow the *content*, not just the panel's own size. Opening
   // the first file mounts the diff's action row above the code view, which moves
   // that view's top down by the row's height; the search bar adds another row, and
-  // the Markdown preview swaps the element being measured outright. Measuring only
-  // when the panel resized or the list was folded left the card and the knob on
-  // the stale box — with the list arriving after the panel opened, the knob was
-  // placed from no box at all and the card landed a toolbar lower when it was
-  // finally measured. So: measure in the layout phase after *every* render (before
-  // paint, so nothing shows at the old place), watch the box for a change that
-  // does not re-render this panel (a ResizeObserver), and watch the split for one
-  // that replaces the measured element without a re-render (a MutationObserver).
-  // The state is written only when a number actually moved, so none of the three
-  // can loop.
+  // the Markdown preview swaps the element being measured outright. So it is
+  // measured in the layout phase (before paint, so nothing shows at the old place)
+  // whenever something that moves it changes, and watched for the changes that come
+  // with no render of this panel at all: a ResizeObserver for the box resizing (a
+  // dock divider being dragged), and a MutationObserver because the measured
+  // element can be replaced outright.
+  //
+  // Deliberately NOT a dependency-free effect, which is what this was: React's
+  // "maximum update depth exceeded" names that pattern for a reason. The observers
+  // hand an update to a commit that is already rendering, so a `setState` from there
+  // has no eager bail-out to absorb it — with the drag moving the box every frame,
+  // each commit scheduled another, and the panel's boundary took the review away
+  // mid-drag. The dependencies below are what that effect was really for.
   const measureFloatBox = (): void => {
     if (!floatMode) return
     const panel = panelRef.current
@@ -4540,7 +4567,9 @@ export function PendingPanel({
   // measurement (its `floatMode` and refs) without re-subscribing every render.
   const measureFloatBoxRef = useRef(measureFloatBox)
   measureFloatBoxRef.current = measureFloatBox
-  useLayoutEffect(() => { measureFloatBoxRef.current() })
+  useLayoutEffect(() => {
+    measureFloatBoxRef.current()
+  }, [floatMode, floatOpen, panelWidth, selected, snapshot.files.length])
   useEffect(() => {
     if (!floatMode) return
     const split = splitRef.current
@@ -4712,6 +4741,12 @@ export function PendingPanel({
     const started = showing && !wasShowingRef.current
     wasShowingRef.current = showing
     if (!showing) return
+    // A fresh showing starts with the folded list open: the panel opens to show the
+    // list, and the knob that reveals it is for folding it away again. Marked here,
+    // before any selection decision: a showing on an empty list has no file to pick,
+    // and the list that arrives later belongs to this same showing. (The mark is
+    // spent once the folded mode is known — see below.)
+    if (started) startListOpenRef.current = true
     const pending = (id: string): boolean => files.some(file => file.id === id)
     // The file already chosen, while it is still pending.
     const keep = selected !== '' && pending(selected) ? selected : undefined
