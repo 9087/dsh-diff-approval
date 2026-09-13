@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.22.0](https://github.com/9087/dsh-diff-approval/compare/v0.21.0...v0.22.0) (2026-09-13)
+
+### Features
+
+* **panel:** remember the review's place, and never lose the panel ([6fa7b1f](https://github.com/9087/dsh-diff-approval/commit/6fa7b1f0d77a619039084c28d3f1bed204a0d380))
+
+### Bug Fixes
+
+* **panel:** keep the path bar scrollable without a bar in it ([d4e22fb](https://github.com/9087/dsh-diff-approval/commit/d4e22fb7035f99f03e9639af5c00850376030d81))
+
 ## [0.21.0](https://github.com/9087/dsh-diff-approval/compare/v0.20.1...v0.21.0) (2026-09-12)
 
 ### Features
