@@ -13,10 +13,11 @@
  * @module dsh-diff-approval/client/dock
  */
 
-import { Component, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { HostObservable, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import css from './PendingPanel.module.css'
+import { PanelBoundary } from './boundary.tsx'
 import { PendingPanel } from './PendingPanel.tsx'
 import type { PendingPanelProps } from './PendingPanel.tsx'
 import { PresentationMenu } from './presentation-menu.tsx'
@@ -48,6 +49,18 @@ export const TOGGLE_PANEL_EVENT = 'diff-approval:toggle-panel'
 /** The floating panel's own visibility, published on every change so a second
  *  entry can light up while the panel is open (`detail.open`). */
 export const PANEL_STATE_EVENT = 'diff-approval:panel-state'
+/** Name a file for the panel to show, from a mount that is not the panel itself
+ *  (the produced-file chip): every mounted panel instance switches to it and lands
+ *  on its first change — the ask is "show me this diff", not "put me back where I
+ *  was". The file is also recorded as the last one, so an instance that only
+ *  appears afterwards (the docked tab) opens the same file the same way. */
+export const OPEN_PANEL_FILE_EVENT = 'diff-approval:panel-file'
+
+/** Payload of {@link OPEN_PANEL_FILE_EVENT}. */
+export interface PanelFileDetail {
+  /** The pending entry to show. */
+  fileId: string
+}
 
 /** Payload of {@link PANEL_STATE_EVENT}. */
 export interface PanelStateDetail {
@@ -266,18 +279,9 @@ export function createDockState(): DockState {
  * @param props - the seat's runtime props, this plugin's face, and `useTabInfo`.
  * @returns the host element and, once it exists, the docked panel inside it.
  */
-/** Keeps a failure inside the tab from unmounting the app's tree — and with it
- *  the footer entry that opened this tab. */
-class DockBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
-  override state = { failed: false }
-  static getDerivedStateFromError(): { failed: boolean } {
-    return { failed: true }
-  }
-
-  override render(): ReactNode {
-    return this.state.failed ? null : this.props.children
-  }
-}
+/** Keeps a failure inside the tab from taking the app's tree down with it, and
+ *  from leaving the pane blank: {@link PanelBoundary} says what happened and can
+ *  re-render the panel without a reload. */
 
 export function DiffDockBody(props: DiffDockBodyProps): ReactNode {
   const { t, useTabInfo, onDockShowing, ...panelProps } = props
@@ -295,14 +299,14 @@ export function DiffDockBody(props: DiffDockBodyProps): ReactNode {
     <>
       <div ref={setHost} className={css.dockHost} data-diff-approval-dock />
       {host !== null && (
-        <DockBoundary>
+        <PanelBoundary t={t}>
           <PendingPanel
             {...(panelProps as unknown as PendingPanelProps)}
             t={t}
             docked
             dockHost={host}
           />
-        </DockBoundary>
+        </PanelBoundary>
       )}
     </>
   )

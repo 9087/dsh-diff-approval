@@ -6,10 +6,12 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import type { ComponentProps } from 'react'
+import { Component } from 'react'
+import type { ComponentProps, ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingFileDiff } from '../src/types.ts'
 import { PendingPanel, frameInsets } from '../src/client/PendingPanel.tsx'
+import { lastPanelFile, panelFileOffset, resetPanelMemory } from '../src/client/panel-memory.ts'
 import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
 import { DiffApprovalHeaderEntry } from '../src/client/header-entry.tsx'
 import { DiffApprovalSettingsTab } from '../src/client/SettingsTab.tsx'
@@ -27,6 +29,9 @@ vi.mock('../src/client/highlight.ts', { spy: true })
 afterEach(cleanup)
 afterEach(() => { vi.restoreAllMocks() })
 afterEach(() => { localStorage.clear() })
+// The panel's view memory is module state that outlives a test (and is meant to
+// outlive a close): each case starts from a page that has never opened it.
+afterEach(resetPanelMemory)
 // A test that plants the harness composer's input box owns it for its own test
 // only: the panel focuses the first one it finds, so a leftover would silently
 // redirect the next test's caret assertion.
@@ -36,6 +41,54 @@ beforeAll(() => {
   // jsdom has no scrolling; the jump effect centers rows through it.
   Element.prototype.scrollIntoView = () => {}
 })
+
+/** The code view the panel is showing (the only one, while one instance is open). */
+function codeBody(): HTMLElement {
+  return document.querySelector('[data-diff-body]') as HTMLElement
+}
+
+/** Click one file's row in the file list, by the name it shows. */
+function clickFileRow(name: string): void {
+  const list = document.querySelector('[data-diff-approval-file-list]') as HTMLElement
+  const row = [...list.querySelectorAll('button')].find(button => button.textContent?.includes(name))
+  if (row === undefined) throw new Error(`no file row for ${name}`)
+  fireEvent.click(row)
+}
+
+/**
+ * jsdom has no layout, so a code view reports a zero-height box and a scrollTop
+ * that cannot be set. Give every code view a 2000px scroll range in an 800px
+ * viewport, with a real, writable scrollTop — what the panel's own programmatic
+ * scrolls and the tests' simulated user scrolls both need.
+ * @returns a restore function, for the test's `finally`.
+ */
+function stubCodeScroll(): () => void {
+  const descriptors = {
+    scrollTop: Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollTop'),
+    scrollHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight'),
+    clientHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight'),
+  }
+  const stored = new WeakMap<Element, number>()
+  Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+    configurable: true,
+    get(this: Element) { return stored.get(this) ?? 0 },
+    set(this: Element, value: number) { stored.set(this, value) },
+  })
+  Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+    configurable: true,
+    get(this: Element) { return this.hasAttribute('data-diff-body') ? 2000 : 0 },
+  })
+  Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+    configurable: true,
+    get(this: Element) { return this.hasAttribute('data-diff-body') ? 800 : 0 },
+  })
+  return () => {
+    for (const [name, descriptor] of Object.entries(descriptors)) {
+      if (descriptor === undefined) delete (HTMLElement.prototype as unknown as Record<string, unknown>)[name]
+      else Object.defineProperty(HTMLElement.prototype, name, descriptor)
+    }
+  }
+}
 
 const S1 = 'session-1' as SessionId
 const FILE: PendingFileDiff = {
@@ -1076,6 +1129,42 @@ describe('PendingPanel', () => {
     })
   })
 
+  it('records the docked tab\'s place as its tab closes', () => {
+    // The docked panel's "close" is its tab closing, which unmounts this instance:
+    // that closer has to remember the place like the overlay's ✕ does, even though
+    // it runs as the panel's own tree is going away.
+    const restore = stubCodeScroll()
+    try {
+      const host = document.createElement('div')
+      document.body.appendChild(host)
+      const view = render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} docked dockHost={host} />)
+      codeBody().scrollTop = 320
+      view.unmount()
+      expect(lastPanelFile(S1)).toBe('entry-1')
+      expect(panelFileOffset(S1, 'entry-1')).toBe(320)
+      host.remove()
+    } finally {
+      restore()
+    }
+  })
+
+  it('names a file for the docked tab as well, from a produced-file chip', () => {
+    // The docked panel is its own mount: the chip's ask reaches it as an event, so
+    // "查看差异" works wherever the panel is showing, not only in the overlay.
+    const second = entry({ id: 'entry-b', path: '/repo/b.txt' })
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE, second], busy: new Set() })} docked dockHost={host} />)
+    expect(host.textContent).toContain('/repo/a.txt')
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:open-file', { detail: { path: '/repo/b.txt' } }))
+    })
+    expect(lastPanelFile(S1)).toBe('entry-b')
+    expect(host.textContent).toContain('/repo/b.txt')
+    host.remove()
+  })
+
   it('auto-selects the first pending file and advances to the next after handling', () => {
     const second = entry({ id: 'entry-2', path: '/repo/b.txt' })
     const props = panelProps({ read: true, files: [FILE, second], busy: new Set() })
@@ -1090,6 +1179,184 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByText('action.keep'))
     view.rerender(<PendingPanel {...panelProps({ read: true, files: [second], busy: new Set() })} />)
     expect(screen.getByText('/repo/b.txt')).toBeDefined()
+  })
+
+  it('reopens on the file it was closed on, at the offset it was left', () => {
+    // Closing the panel is not "done reviewing": the next open resumes the file
+    // and the place. Both are remembered for this page's lifetime only.
+    const restore = stubCodeScroll()
+    try {
+      const second = entry({ id: 'entry-b', path: '/repo/b.txt' })
+      render(<PendingPanel {...panelProps({ read: true, files: [FILE, second], busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      clickFileRow('b.txt')
+      expect(screen.getByText('/repo/b.txt')).toBeDefined()
+      codeBody().scrollTop = 640
+
+      fireEvent.click(document.querySelector('[data-diff-approval-close]') as HTMLElement)
+      expect(document.querySelector('[data-diff-approval-diff]')).toBeNull()
+
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      // The same file, at the same offset — not the first change of the list's
+      // first file, and not the first change of this one.
+      expect(screen.getByText('/repo/b.txt')).toBeDefined()
+      expect(codeBody().scrollTop).toBe(640)
+    } finally {
+      restore()
+    }
+  })
+
+  it('survives every state a produced-file chip can open it in', () => {
+    // A crash inside a slot entry retires it for the rest of the page (the
+    // renderer's boundary abdicates it), which shows up as "the panel will not
+    // open until a refresh". So the chip's path is exercised through a boundary
+    // that records instead of swallowing, across the states it can land in: a
+    // file of another session, a file that is gone, a docked and a floating
+    // instance at once, and the split and preview views.
+    const caught: string[] = []
+    class Boundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+      override state = { failed: false }
+      static getDerivedStateFromError(error: unknown): { failed: boolean } {
+        caught.push(error instanceof Error ? `${error.name}: ${error.message}` : String(error))
+        return { failed: true }
+      }
+      override render(): ReactNode { return this.state.failed ? null : this.props.children }
+    }
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const mine = entry({ id: 'entry-1', path: '/repo/a.txt' })
+    const theirs = entry({ id: 'entry-other', path: '/repo/other.txt', sessionId: 'session-2' as SessionId })
+    const gone = entry({ id: 'entry-gone', path: '/repo/gone.txt' })
+    const props = () => panelProps({ read: true, files: [mine, theirs], busy: new Set() })
+
+    render(<Boundary><PendingPanel {...props()} /></Boundary>)
+    const openFile = (path: string): void => {
+      act(() => {
+        window.dispatchEvent(new CustomEvent('diff-approval:open-file', { detail: { path } }))
+      })
+    }
+
+    // Closed, floating: a pending file of this session opens the panel on it.
+    openFile('/repo/a.txt')
+    expect(document.querySelector('[data-diff-approval-diff]')).not.toBeNull()
+    // The same file again (the chip re-click): still fine.
+    openFile('/repo/a.txt')
+    // A file only another session has pending: the panel still opens, on what it
+    // can show, rather than throwing over a file it does not list.
+    openFile('/repo/other.txt')
+    // A file that is no longer pending at all: a toast, not a crash.
+    openFile('/repo/gone.txt')
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:open-file', { detail: { path: '/repo/gone.txt' } }))
+    })
+    expect(caught).toEqual([])
+
+    // Docked and floating at once, with a file this session does not list.
+    cleanup()
+    render(<Boundary><PendingPanel {...props()} /></Boundary>)
+    render(<Boundary><PendingPanel {...props()} docked dockHost={host} /></Boundary>)
+    openFile('/repo/other.txt')
+    openFile('/repo/a.txt')
+    expect(caught).toEqual([])
+
+    // Split view, then the Markdown preview, then a chip click in each.
+    cleanup()
+    localStorage.setItem('diff-approval:split-mode', '1')
+    render(<Boundary><PendingPanel {...props()} /></Boundary>)
+    openFile('/repo/a.txt')
+    cleanup()
+    localStorage.setItem('diff-approval:split-mode', '0')
+    localStorage.setItem('diff-approval:md-preview', '1')
+    render(<Boundary><PendingPanel {...panelProps({ read: true, files: [entry({ id: 'entry-md', path: '/repo/README.md', oldText: '# T\n', newText: '# T\n\nNew\n' })], busy: new Set() })} /></Boundary>)
+    openFile('/repo/README.md')
+    expect(caught).toEqual([])
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+    host.remove()
+  })
+
+  it('lands the chip\'s jump on the file\'s first change, not where it was left', () => {
+    // The chip's arrow says "show me this diff": it opens the file at its first
+    // change, wherever the reader had left it — and clicking it again for the file
+    // already open lands there again instead of doing nothing.
+    const restore = stubCodeScroll()
+    try {
+      render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      codeBody().scrollTop = 640
+      fireEvent.click(document.querySelector('[data-diff-approval-close]') as HTMLElement)
+      // The reader's place is remembered by the close…
+      expect(panelFileOffset(S1, 'entry-1')).toBe(640)
+
+      // …and the chip ignores it: the file's first change is at the top.
+      act(() => {
+        window.dispatchEvent(new CustomEvent('diff-approval:open-file', { detail: { path: '/repo/a.txt' } }))
+      })
+      expect(screen.getByText('/repo/a.txt')).toBeDefined()
+      expect(codeBody().scrollTop).toBe(0)
+      // The remembered place is stale now — the jump was not a resume.
+      expect(panelFileOffset(S1, 'entry-1')).toBeUndefined()
+
+      // Scrolled away again, the same chip click lands on the first change again.
+      codeBody().scrollTop = 500
+      act(() => {
+        window.dispatchEvent(new CustomEvent('diff-approval:open-file', { detail: { path: '/repo/a.txt' } }))
+      })
+      expect(codeBody().scrollTop).toBe(0)
+    } finally {
+      restore()
+    }
+  })
+
+  it('hands the remembered place to the docked tab, which resumes it', () => {
+    // The floating overlay and the docked tab are separate mounts of one panel:
+    // the presentation switch must not lose the reader's place.
+    const restore = stubCodeScroll()
+    try {
+      const second = entry({ id: 'entry-b', path: '/repo/b.txt' })
+      const files = [FILE, second]
+      render(<PendingPanel {...panelProps({ read: true, files, busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      clickFileRow('b.txt')
+      codeBody().scrollTop = 480
+      fireEvent.click(document.querySelector('[data-diff-approval-close]') as HTMLElement)
+
+      const host = document.createElement('div')
+      document.body.appendChild(host)
+      render(<PendingPanel {...panelProps({ read: true, files, busy: new Set() })} docked dockHost={host} />)
+      // The tab's body resumes the file — and selects one at all, which it never
+      // used to do — and scrolls it to the remembered offset.
+      expect(host.textContent).toContain('/repo/b.txt')
+      expect(codeBody().scrollTop).toBe(480)
+      host.remove()
+    } finally {
+      restore()
+    }
+  })
+
+  it('lands a hand-picked file on its first change, not where it was left', () => {
+    // The remembered offset is for reopening, not for browsing: a file the reader
+    // picks from the list opens at its first change.
+    const restore = stubCodeScroll()
+    try {
+      const second = entry({ id: 'entry-b', path: '/repo/b.txt' })
+      const files = [FILE, second]
+      render(<PendingPanel {...panelProps({ read: true, files, busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      // Give b.txt a remembered offset, then reopen onto it.
+      clickFileRow('b.txt')
+      codeBody().scrollTop = 640
+      fireEvent.click(document.querySelector('[data-diff-approval-close]') as HTMLElement)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      expect(codeBody().scrollTop).toBe(640)
+
+      // Now pick the other file by hand: the file changed, so it opens at its
+      // first change (a.txt's sits at the top) rather than at b.txt's offset.
+      clickFileRow('a.txt')
+      expect(screen.getByText('/repo/a.txt')).toBeDefined()
+      expect(codeBody().scrollTop).toBe(0)
+    } finally {
+      restore()
+    }
   })
 
   it('cycles the pending files with Ctrl+Tab and Ctrl+Shift+Tab', () => {
@@ -4645,11 +4912,109 @@ describe('PendingPanel', () => {
   it('hands the footer entry to the dock when that is the remembered presentation', () => {
     localStorage.setItem('diff-approval:presentation', 'dock')
     const onOpenDock = vi.fn()
-    const props = { ...panelProps({ read: true, files: [FILE], busy: new Set() }), onOpenDock }
+    const props = {
+      ...panelProps({ read: true, files: [FILE], busy: new Set() }),
+      onOpenDock,
+      useDock: (select: (state: { available: boolean; open: boolean }) => unknown) => select({ available: true, open: false }),
+    }
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     expect(onOpenDock).toHaveBeenCalledTimes(1)
     // The panel lives in the sidebar's tab there: nothing floats in the overlay.
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+  })
+
+  it('opens the overlay when the remembered dock cannot take the panel at all', () => {
+    // The reported failure: "dock" is remembered from a page where the sidebar
+    // existed, and a page load that never found the sidebar's services used to
+    // swallow every open — the footer badge, the header entry, the chord and the
+    // produced-file chips all did nothing, and the switch back to floating lives
+    // *inside* the panel, so only a reload could reach the review again.
+    localStorage.setItem('diff-approval:presentation', 'dock')
+    // The real dock face is `sidebar?.openTab(...)`: with no sidebar attached it
+    // accepts the call and does nothing — it does not throw.
+    const onOpenDock = vi.fn()
+    const props = {
+      ...panelProps({ read: true, files: [FILE], busy: new Set() }),
+      onOpenDock,
+      useDock: (select: (state: { available: boolean; open: boolean }) => unknown) => select({ available: false, open: false }),
+    }
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+    expect(screen.getByText('panel.title')).toBeDefined()
+    // Nothing was asked of a sidebar that cannot answer, and the remembered
+    // presentation is left alone: the next open with a working sidebar docks.
+    expect(onOpenDock).not.toHaveBeenCalled()
+    expect(localStorage.getItem('diff-approval:presentation')).toBe('dock')
+  })
+
+  it('opens the overlay when an available dock never actually comes up', () => {
+    // A sidebar that accepts the ask and never brings the tab up (a tab type that
+    // never registered, a controller gone stale) must not swallow the click
+    // either: after the grace the overlay steps in.
+    vi.useFakeTimers()
+    try {
+      localStorage.setItem('diff-approval:presentation', 'dock')
+      const onOpenDock = vi.fn()
+      const props = {
+        ...panelProps({ read: true, files: [FILE], busy: new Set() }),
+        onOpenDock,
+        useDock: (select: (state: { available: boolean; open: boolean }) => unknown) => select({ available: true, open: false }),
+      }
+      render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      // Asked, and nothing yet: the tab body mounts a frame or two later.
+      expect(onOpenDock).toHaveBeenCalledTimes(1)
+      expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+      act(() => { vi.advanceTimersByTime(500) })
+      // It never came up, so the review opens as the overlay.
+      expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('shows the overlay on the first click when a docked tab hands the panel back', () => {
+    // The chip's "floating" row: the presentation is stored as float, the tab is
+    // closed, and the overlay is asked to open — all in one tick, while the dock
+    // still reports "showing" until that tab's body unmounts. The one-place rule
+    // must not read that overlap as "the dock has it" and shut the overlay again,
+    // which made the switch need a second click.
+    localStorage.setItem('diff-approval:presentation', 'float')
+    let dockState: { available: boolean; open: boolean } = { available: true, open: true }
+    const props = () => ({
+      ...panelProps({ read: true, files: [FILE], busy: new Set() }),
+      onOpenDock: vi.fn(),
+      useDock: (select: (state: { available: boolean; open: boolean }) => unknown) => select(dockState),
+    })
+    const view = render(<PendingPanel {...props()} />)
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+
+    act(() => { window.dispatchEvent(new CustomEvent(SHOW_PANEL_EVENT)) })
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+
+    // …and it stays open as the dock reports itself gone.
+    dockState = { available: true, open: false }
+    view.rerender(<PendingPanel {...props()} />)
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+  })
+
+  it('steps the overlay aside once the docked tab is really showing', () => {
+    // One panel, one place: a hand-off that lands late (or the fallback above)
+    // must not leave a second copy of the review on screen.
+    let dockState: { available: boolean; open: boolean } = { available: true, open: false }
+    const props = () => ({
+      ...panelProps({ read: true, files: [FILE], busy: new Set() }),
+      onOpenDock: vi.fn(),
+      useDock: (select: (state: { available: boolean; open: boolean }) => unknown) => select(dockState),
+    })
+    const view = render(<PendingPanel {...props()} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+
+    dockState = { available: true, open: true }
+    view.rerender(<PendingPanel {...props()} />)
     expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
   })
 
@@ -4737,7 +5102,12 @@ describe('PendingPanel', () => {
   it('falls back to the overlay when the remembered dock cannot open', () => {
     localStorage.setItem('diff-approval:presentation', 'dock')
     const onOpenDock = vi.fn(() => { throw new Error('no seat bound') }) as unknown as () => void
-    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} onOpenDock={onOpenDock} />)
+    const props = {
+      ...panelProps({ read: true, files: [FILE], busy: new Set() }),
+      onOpenDock,
+      useDock: (select: (state: { available: boolean; open: boolean }) => unknown) => select({ available: true, open: false }),
+    }
+    render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     expect(onOpenDock).toHaveBeenCalledTimes(1)
     expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()

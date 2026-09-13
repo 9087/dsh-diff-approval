@@ -1,5 +1,7 @@
 /** Pending-edit review panel, browser half: footer action, pending list, and whole-file diff viewer. */
 
+import type { ComponentProps, ReactNode } from 'react'
+import { createElement } from 'react'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConnectionHandle, SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -7,6 +9,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 // Type-only: brings the `settings.section` SlotMap entry into this program.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { PendingPanel, SIDEBAR_AUTO_COLLAPSE_PX } from './PendingPanel.tsx'
+import type { PendingPanelProps } from './PendingPanel.tsx'
+import { PanelBoundary } from './boundary.tsx'
 import { DiffApprovalSettingsTab } from './SettingsTab.tsx'
 import { createDiffApprovalPort } from './port.ts'
 import { createPendingDiffStore } from './store.ts'
@@ -24,9 +28,52 @@ export type { PendingDiffSnapshot, PendingPanelFace } from './slots.ts'
 export type { DiffApprovalKey } from './locales.ts'
 export { DIFF_APPROVAL_CHANNEL } from './port.ts'
 
+/**
+ * The footer seat's registrant: the panel inside its own error boundary, so a
+ * crash there cannot retire the entry for the life of the page (see
+ * {@link PanelBoundary}).
+ * @param props - the seat's runtime props, this plugin's face, and the locale `t`.
+ * @returns the boundary-wrapped panel.
+ */
+function PendingPanelEntry(props: PendingPanelProps): ReactNode {
+  // `createElement` rather than JSX: this module is plain `.ts`.
+  return createElement(PanelBoundary, { t: props.t }, createElement(PendingPanel, props))
+}
+
+/**
+ * The header seat's registrant: the entry button inside the same boundary, so a
+ * crash costs a visible note rather than the whole button for the page's life.
+ * @param props - the seat's runtime props, the face's hooks, and the locale `t`.
+ * @returns the boundary-wrapped entry.
+ */
+function HeaderEntry(props: ComponentProps<typeof DiffApprovalHeaderEntry>): ReactNode {
+  return createElement(PanelBoundary, { t: props.t }, createElement(DiffApprovalHeaderEntry, props))
+}
+
 /** Required services: locale, slots, the wire channel, the current session, and
  * the layout controller (this plugin collapses the sidebar before its modal opens). */
 export const inject = ['slots', 'locale', 'connection', 'sessions', 'layout']
+
+/**
+ * Fill one slot, with the failure contained: a registration runs inside the
+ * client's boot (or, for a seat declared later, inside the slot machinery), so a
+ * throw here would take down more than this panel. A refused seat costs that one
+ * surface, and the reason goes to the console rather than being swallowed.
+ * @param slots - the client slot service.
+ * @param name - the SlotMap key to fill.
+ * @param register - the registration, run when the seat's declaration is live.
+ */
+function seat(
+  slots: { inject(name: string, callback: () => unknown): void },
+  name: string,
+  register: () => unknown,
+): void {
+  try {
+    slots.inject(name, () => register())
+  } catch (error) {
+    console.error(`diff-approval could not fill ${name}:`, error)
+  }
+}
 
 /**
  * The dsh web-react renderer gives `div[data-slot="sidebar.footer.action"]` an
@@ -196,12 +243,18 @@ export function apply(ctx: ClientContext): void {
       collapseSidebar,
   })
 
-  ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+  // The two seats this plugin cannot work without — its footer entry and its
+  // Settings section — are seated under a guard each. A refused or failing
+  // registration must cost that one surface, never the plugin's load: `apply`
+  // runs inside the client's boot, and a throw here (a seat that was already
+  // taken, a registration racing a reload) would take the app down with it rather
+  // than just this panel. The failure is said on the console instead of swallowed.
+  seat(ctx.slots, 'sidebar.footer.action', () => ctx.slots.register({
     name: 'sidebar.footer.action',
     id: 'diff-approval-panel',
     locale: NS,
     inject: buildFace,
-  }, PendingPanel))
+  }, PendingPanelEntry))
 
   // The docked panel's body and chip live in the sidebar's keyed seats. Both
   // registrations are harmless where those seats do not exist (an older app):
@@ -230,7 +283,7 @@ export function apply(ctx: ClientContext): void {
       order: -5,
       locale: NS,
       inject: () => ({ ...buildFace() }),
-    }, DiffApprovalHeaderEntry))
+    }, HeaderEntry))
   } catch {
     // No header utilities in this host.
   }
@@ -283,7 +336,7 @@ export function apply(ctx: ClientContext): void {
   }
 
   // Contribute this plugin's page as a top-level DSH Settings section.
-  ctx.slots.inject('settings.section', () => ctx.slots.register({
+  seat(ctx.slots, 'settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'diff-approval',
     order: 100,

@@ -33,8 +33,9 @@ import { langFromPath, suffixOfPath } from './lang.ts'
 import { referenceLabelOf } from './reference.ts'
 import { OPEN_FILE_EVENT } from './produced-diff.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
-import { PANEL_STATE_EVENT, SHOW_PANEL_EVENT, TOGGLE_PANEL_EVENT } from './dock.tsx'
-import type { PanelStateDetail } from './dock.tsx'
+import { OPEN_PANEL_FILE_EVENT, PANEL_STATE_EVENT, SHOW_PANEL_EVENT, TOGGLE_PANEL_EVENT } from './dock.tsx'
+import type { PanelFileDetail, PanelStateDetail } from './dock.tsx'
+import { lastPanelFile, panelFileOffset, rememberPanelView } from './panel-memory.ts'
 import { confirmFileRemoveEnabled, COVER_CHANGED_EVENT, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
 import { matchRangesOf } from './search.ts'
@@ -220,6 +221,11 @@ const WRAP_GUTTERS_PX = 88
  * below it the sidebar auto-collapses, and the file list floats on the same
  * breakpoint so the two stay consistent. */
 export const SIDEBAR_AUTO_COLLAPSE_PX = 1024
+/** How long a requested dock may take to actually show the panel before the
+ *  overlay steps in. The tab body mounts a frame or two after the ask, so the
+ *  wait is short — but a sidebar that accepts the ask and never brings the tab up
+ *  must not swallow the click. */
+const DOCK_REVEAL_GRACE_MS = 400
 
 /** A shared canvas for measuring wrapped line heights (CPU-only, no DOM reflow). */
 let measureCanvas: CanvasRenderingContext2D | undefined
@@ -632,6 +638,12 @@ interface PendingDiffProps {  file: PendingFileDiff
   /** Bumped when an undo/redo touched the currently open file: re-select the
    * undone diff (flash its first change block). */
   undoFlash: number
+  /** The code view's offset to open this file at, when the panel resumed a
+   *  remembered view; absent means the file's first change block. */
+  landingTop?: number | undefined
+  /** Bumped with every landing request, so a repeated one for the file already
+   *  open (the produced-file chip, clicked twice) lands again. */
+  landingTick?: number | undefined
   /** The last keep/revert failure for this file, shown as an inline banner. */
   failedMessage?: string | undefined
   /** Paste a copied reference into the session's chat input and focus it. */
@@ -2035,7 +2047,7 @@ function PendingFileRow({ file, selected, failedMessage, t, onSelect }: PendingF
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedMessage, onPasteReference, onToast, t, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, failedMessage, onPasteReference, onToast, t, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -2271,6 +2283,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   const [previewFlash, setPreviewFlash] = useState<PreviewFlashPlacement | undefined>(undefined)
   const previewFlashRef = useRef<HTMLDivElement>(null)
   const previewFlashPendingRef = useRef(false)
+  /** The offset the file now showing was asked to open at, held until the landing
+   *  effect below spends it (that effect runs a render later than the switch). */
+  const landingTopRef = useRef<number | undefined>(undefined)
   // The plain text of the last valid (single-line) diff selection, so opening
   // search auto-fills the query even after clicking the search button collapses
   // the native selection.
@@ -2302,17 +2317,27 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // keyboard focus into the diff body so the Ctrl+Up/Down block-jump (scoped
   // to the panel) works as soon as a file is shown, and flash the initial
   // block so the user sees where the first change sits. The scroll position is
-  // left to the block-centering effect below: it scrolls the first change
-  // block into view, and resetting it to 0 here would override that for long
-  // files whose first change sits far down.
+  // left to the landing effect below: it scrolls the first change block into
+  // view, and resetting it to 0 here would override that for long files whose
+  // first change sits far down.
   useEffect(() => {
-    setFocus(0)
-    // Bump the centering tick so switching files re-centers even when the
-    // focus index is unchanged (0 -> 0); the centering effect keys off this
-    // instead of the model, so a content refresh no longer re-centers.
+    // Where this file opens, decided by the panel per selection: the offset the
+    // reader was left at when it resumed a remembered view, or nothing for the
+    // file's first change. `focus` follows it — the block the reader was in
+    // becomes the current one, so prev/next walk from there — but nothing
+    // flashes: no jump happened.
+    landingTopRef.current = landingTop
+    if (landingTop === undefined) {
+      setFocus(0)
+      bumpFlash(false)
+    } else {
+      setFocus(blockIndexAtOffset(landingTop))
+    }
+    // Bump the landing tick so switching files re-lands even when the focus index
+    // is unchanged (0 -> 0); the landing effect keys off this instead of the
+    // model, so a content refresh no longer re-centers.
     setScrollTick(tick => tick + 1)
     bodyRef.current?.focus()
-    bumpFlash(false)
     setHoveredBlock(undefined)
     setSelection(undefined)
     setLangOverride(undefined)
@@ -2321,7 +2346,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     setSearchOpen(false)
     setSearchQuery('')
     setSearchIndex(0)
-  }, [file.id])
+    // `landingTop` and `landingTick` are deps as well as `file.id`: a fresh
+    // showing can re-land the *same* file (reopening where it was left), and the
+    // chip's own jump lands on the first change of the file already open.
+  }, [file.id, landingTop, landingTick])
 
   // An undo/redo that touched the currently open file re-selects the undone
   // diff the same way switching to a file does: reset to the first change
@@ -3026,6 +3054,23 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
   // while rendering, so the scroll must settle BEFORE the browser paints —
   useLayoutEffect(() => {
     if (rowCount === 0) return
+    // A resumed view wins over the focused block: the reader comes back to the
+    // line they left, and the exact stored offset is a better answer than the
+    // change block the anchor in `blockIndexAtOffset` approximated. Spent here,
+    // so a later jump recenters as usual.
+    const resumed = landingTopRef.current
+    if (resumed !== undefined) {
+      landingTopRef.current = undefined
+      if (!previewActive) {
+        const resumeBody = bodyRef.current
+        if (resumeBody !== null) {
+          const clamped = Math.max(0, Math.min(resumed, resumeBody.scrollHeight - resumeBody.clientHeight))
+          if (resumeBody.scrollTop !== clamped) resumeBody.scrollTop = clamped
+          setScrollTop(clamped)
+        }
+      }
+      return
+    }
     const block = model.blocks[focus]
     if (block === undefined) return
     // The preview replaces the code body, so there is no scroll box to move and
@@ -3209,6 +3254,24 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, failedM
     if (jumpSignal === 0) return
     jumpBlock(1, true, false)
   }, [jumpSignal])
+
+  /**
+   * The change block the view is in at one scroll offset: the last block at or
+   * above the offset, i.e. the same anchor `onScroll` re-focuses from. Used when
+   * a resumed view starts away from the first change, so prev/next walk from the
+   * block the reader was actually in.
+   * @param offset - a code view scrollTop.
+   * @returns the block index; 0 when the offset is above every change.
+   */
+  const blockIndexAtOffset = (offset: number): number => {
+    const anchor = offset + leadRows * ROW_HEIGHT_PX
+    let found = 0
+    for (let index = 0; index < model.blocks.length; index++) {
+      const block = model.blocks[index]
+      if (block !== undefined && offsetOf(block.start) <= anchor + NAV_ANCHOR_TOLERANCE_PX) found = index
+    }
+    return found
+  }
 
   const onScroll = () => {
     const body = bodyRef.current
@@ -4199,6 +4262,15 @@ export function PendingPanel({
   const dockAvailable = useDock?.((state: DockSnapshot) => state.available) === true
   /** Why the dock is unavailable, when it is (shown once, if asked for). */
   const dockReason = useDock?.((state: DockSnapshot) => state.reason) as string | undefined
+  /** The dock's visibility as the latest render has it, for the reveal fallback's
+   *  timer (which runs outside this render's closure). */
+  const dockShowingRef = useRef(false)
+  dockShowingRef.current = dockShowing
+  /** The pending "did the dock actually come up" check, if any. */
+  const revealTimerRef = useRef<number | undefined>(undefined)
+  useEffect(() => () => {
+    if (revealTimerRef.current !== undefined) window.clearTimeout(revealTimerRef.current)
+  }, [])
   // A docked panel that un-docks asks this instance (the footer's) to show the
   // overlay: the two are separate mounts, and the stored presentation says which
   // one. A docked instance ignores it — it is the one that asked.
@@ -4226,6 +4298,25 @@ export function PendingPanel({
   const snapshot = usePending(snapshot => snapshot)
   const [open, setOpen] = useState(false)
   const [selected, setSelected] = useState('')
+  /**
+   * Where the diff should land for the file it is about to show, and a nonce so a
+   * repeated request for the *same* file lands again. `top` carries the offset the
+   * reader was left at when the panel resumes a view (see `panel-memory`); it is
+   * absent when the request means "show me this diff" — a file picked from the
+   * list, the advance a decision leaves behind, or the produced-file chip — and
+   * that lands on the file's first change.
+   */
+  const [landing, setLanding] = useState<{ fileId: string; top?: number | undefined; n: number } | undefined>(undefined)
+  /** Ask the diff to land on one file: its first change unless `top` says where.
+   *  The nonce makes the request an event rather than a value, so re-clicking the
+   *  chip for the file already open lands on its first change again. */
+  const landOn = (fileId: string, top?: number | undefined): void => {
+    setLanding(prev => ({ fileId, top, n: (prev?.n ?? 0) + 1 }))
+  }
+  /** The selection as the latest render has it, for the closers that run from a
+   *  cleanup (the docked tab unmounting) rather than from a handler. */
+  const selectedRef = useRef(selected)
+  selectedRef.current = selected
   /** Bumped when the already-open file is clicked again, to jump to the next
    * diff block in the open file's detail pane. */
   const [jumpSignal, setJumpSignal] = useState(0)
@@ -4266,8 +4357,14 @@ export function PendingPanel({
       showCopyToast(t('panel.fileNotPending'))
       return
     }
+    // The chip named the file, not an offset in it: it opens at that file's first
+    // change. Every mounted instance follows the ask (the floating overlay and the
+    // docked tab are separate mounts), and the memory names the file — with its
+    // remembered place *forgotten*, since the landing is the first change — so an
+    // instance that only appears afterwards opens the same file the same way.
     revealPanel()
-    setSelected(entry.id)
+    rememberPanelView(current, { fileId: entry.id })
+    window.dispatchEvent(new CustomEvent<PanelFileDetail>(OPEN_PANEL_FILE_EVENT, { detail: { fileId: entry.id } }))
   }
   useEffect(() => {
     const onOpenFile = (event: Event): void => {
@@ -4277,6 +4374,25 @@ export function PendingPanel({
     }
     window.addEventListener(OPEN_FILE_EVENT, onOpenFile)
     return () => { window.removeEventListener(OPEN_FILE_EVENT, onOpenFile) }
+  }, [])
+  // A file named for the panel (see OPEN_PANEL_FILE_EVENT): both mounts follow it,
+  // so the chip's "查看差异" reaches the panel wherever it is showing — in the
+  // overlay or in the docked tab — instead of only the mount that is already open.
+  // The payload is checked: this is a window event, and a listener that trusted
+  // it would let any other event's shape (the chip's own path payload) clear the
+  // selection.
+  useEffect(() => {
+    const onPanelFile = (event: Event): void => {
+      const detail = (event as CustomEvent<PanelFileDetail>).detail
+      if (detail === undefined || typeof detail.fileId !== 'string') return
+      setSelected(detail.fileId)
+      // "Show me this diff": the file's first change, wherever it was left — for
+      // the file already open too, so re-clicking the chip jumps back to the top
+      // change rather than doing nothing.
+      landOn(detail.fileId)
+    }
+    window.addEventListener(OPEN_PANEL_FILE_EVENT, onPanelFile)
+    return () => { window.removeEventListener(OPEN_PANEL_FILE_EVENT, onPanelFile) }
   }, [])
   /** Whether the redo-cleared notice is showing (bottom-right, OK to dismiss). */
   const [redoClearedNotice, setRedoClearedNotice] = useState(false)
@@ -4570,21 +4686,42 @@ export function PendingPanel({
     failedRef.current = current
   }, [snapshot.failed])
 
-  // Auto-open the first pending file when the panel opens, and advance to the
-  // next one once the selected file is handled. Selection is single and cannot
-  // be cleared by clicking — only an empty list shows the empty state.
+  // What the panel shows, and where it lands, each time it starts showing: the
+  // overlay opening (the panel is always mounted, its content is not) or the
+  // docked tab mounting. Closing the panel is not "done reviewing", so a fresh
+  // showing resumes the file this session was left in — at the offset it was left
+  // at — and falls back to the list's first file, at its first change, when there
+  // is nothing remembered. Selection is single and cannot be cleared by clicking:
+  // only an empty list shows the empty state.
   //
   // In the layout phase, not after paint: the code view exists only once a file
   // is open, and one painted frame of "nothing selected" is enough for the folded
   // file list to be placed from the pane's box instead of the code view's — the
   // stale placement this was reported for. Selecting in the same commit means the
   // first frame the user sees is already the final one.
+  const wasShowingRef = useRef(false)
   useLayoutEffect(() => {
-    if (!open) return
-    if (selected !== '' && files.some(file => file.id === selected)) return
-    const next = files[0]
-    if (next !== undefined && next.id !== selected) setSelected(next.id)
-  }, [open, current, files, selected])
+    const showing = open || docked
+    const started = showing && !wasShowingRef.current
+    wasShowingRef.current = showing
+    if (!showing) return
+    const pending = (id: string): boolean => files.some(file => file.id === id)
+    // The file already chosen, while it is still pending.
+    const keep = selected !== '' && pending(selected) ? selected : undefined
+    // Resuming is for a fresh showing with nothing chosen yet; a selection that a
+    // keep/revert resolved away mid-session keeps the older rule (the list's
+    // first file) rather than jumping to whatever was open last time.
+    const remembered = keep === undefined && started ? lastPanelFile(current) : undefined
+    const resumed = remembered !== undefined && pending(remembered) ? remembered : undefined
+    const pick = keep ?? resumed ?? files[0]?.id
+    if (pick === undefined) return
+    if (pick !== selected) setSelected(pick)
+    // A fresh showing lands where that file was left (its first change when it has
+    // never been left). Everything else — a row the reader clicked, the advance a
+    // decision leaves behind — lands on the file's first change, which is the
+    // default its own callers set.
+    if (started) landOn(pick, panelFileOffset(current, pick))
+  }, [open, docked, current, files, selected])
 
   // A fully-processed (emptied) list stays open with the empty state on
   // purpose — no auto-close — so the last action (a Keep-all/Revert-all
@@ -4622,20 +4759,41 @@ export function PendingPanel({
   /**
    * Show the panel the way the user last had it. `dock` hands off to the app's
    * right sidebar, where the panel lives in its own tab; `float` opens this
-   * floating panel, covering whatever {@link panelCover} says. A remembered dock
-   * in a build without a right sidebar falls back to the floating panel instead
-   * of doing nothing.
+   * floating panel, covering whatever {@link panelCover} says.
+   *
+   * A remembered dock is only taken when the dock can actually show the panel.
+   * "dock" is remembered from a page where the right sidebar existed, and the ask
+   * itself is not proof: `onOpenDock` is always wired, and a sidebar whose
+   * services never came up (or a controller that has since gone stale) accepts the
+   * call and shows nothing. That used to swallow the click whole — the badge, the
+   * header entry, the chord and the produced-file chips all did nothing, and the
+   * only switch back to floating lives *inside* the panel, so the page had to be
+   * reloaded to reach the review again. Now the overlay steps in whenever the tab
+   * does not come up.
    */
   const revealPanel = (): void => {
     const stored = panelPresentation()
-    if (stored === 'dock' && onOpenDock !== undefined) {
+    if (stored === 'dock' && onOpenDock !== undefined && dockAvailable) {
       try {
         onOpenDock()
-        return
       } catch {
         // The sidebar is mounted but cannot take the panel yet (no seat bound):
         // open the overlay instead of doing nothing at all.
+        collapseSidebar()
+        setOpen(true)
+        return
       }
+      // Give the tab a moment to come up (its body mounts a frame or two later and
+      // reports itself through the dock state), then fall back to the overlay if it
+      // never did.
+      if (revealTimerRef.current !== undefined) window.clearTimeout(revealTimerRef.current)
+      revealTimerRef.current = window.setTimeout(() => {
+        revealTimerRef.current = undefined
+        if (dockShowingRef.current) return
+        collapseSidebar()
+        setOpen(true)
+      }, DOCK_REVEAL_GRACE_MS)
+      return
     }
     // Opening the floating modal: collapse the narrow sidebar first so it can't
     // overlap it.
@@ -4644,6 +4802,24 @@ export function PendingPanel({
   }
 
   revealRef.current = revealPanel
+
+  // The panel shows in one place at a time: if the docked tab comes up while this
+  // overlay is open (the fallback above, or a tab the user brought back), the
+  // overlay steps aside rather than drawing a second copy of the review.
+  //
+  // It watches the dock *becoming* visible, not the two states merely overlapping,
+  // because the hand-off out of the dock is itself a moment of overlap: the chip
+  // closes the tab and asks the overlay to open in the same tick, and the dock keeps
+  // reporting "showing" until that tab's body unmounts a commit later. Closing on
+  // the level alone shut the overlay the instant it was asked for — which is what
+  // made "switch a docked panel to floating" take a second click.
+  const wasDockShowingRef = useRef(false)
+  useEffect(() => {
+    const was = wasDockShowingRef.current
+    wasDockShowingRef.current = dockShowing
+    if (docked) return
+    if (!was && dockShowing && open) setOpen(false)
+  }, [docked, dockShowing, open])
 
   /** Move the panel into the right sidebar's tab: the tab is opened and this
    *  overlay steps aside, with the presentation remembered for the entry. The
@@ -4658,6 +4834,9 @@ export function PendingPanel({
       return
     }
     setPanelPresentation('dock')
+    // This mount is closing as the docked tab takes over: record the place, so the
+    // tab resumes it — the two are separate mounts sharing one memory.
+    rememberView()
     setOpen(false)
   }
 
@@ -4711,6 +4890,33 @@ export function PendingPanel({
   }, [])
 
   /**
+   * Remember what this panel is showing, so the next open resumes it: the file
+   * that is open and how far down it the code view is. Called on every way out —
+   * the overlay's close, the hand-off to the dock, and the docked tab unmounting.
+   * With no code view (the Markdown preview is showing) the file's offset is kept
+   * as it was: the file is what the reader comes back to.
+   */
+  const rememberView = (): void => {
+    const id = selectedRef.current
+    if (id === '' || current === undefined) return
+    const body = panelRef.current?.querySelector<HTMLElement>('[data-diff-body]')
+    const previous = panelFileOffset(current, id)
+    rememberPanelView(current, { fileId: id, scrollTop: body?.scrollTop ?? previous ?? 0 })
+  }
+  /** The latest `rememberView`, for the docked instance's unmount cleanup: that
+   *  closer runs outside this render's closure. */
+  const rememberViewRef = useRef(rememberView)
+  rememberViewRef.current = rememberView
+  // A layout effect, so the closer runs while the panel's own tree is still in the
+  // document: it reads the code view's offset, and a passive cleanup would run
+  // after the tree is detached.
+  useLayoutEffect(() => {
+    if (!docked) return
+    // The docked panel's "close" is its tab closing, which unmounts this instance.
+    return () => { rememberViewRef.current() }
+  }, [docked])
+
+  /**
    * Close the floating panel and hand the caret back to the chat composer:
    * closing the review is a "done reviewing, back to typing" move. A close the
    * user made by clicking somewhere else is the exception — that press is an
@@ -4718,6 +4924,7 @@ export function PendingPanel({
    * closes without touching focus.
    */
   const closePanel = (): void => {
+    rememberView()
     setOpen(false)
     focusComposer()
   }
@@ -4820,11 +5027,16 @@ export function PendingPanel({
       t={t}
       onSelect={(id) => {
         // Re-clicking the already-open file jumps to the next diff block in
-        // the open file; any other row switches the selection. The floating
-        // list stays open so you can browse more files; clicking outside the
-        // card (or the toggle button) folds it back.
+        // the open file; any other row switches the selection and lands on that
+        // file's first change (not the offset it was left at: the reader asked for
+        // the file, not for wherever it happened to be). The floating list stays
+        // open so you can browse more files; clicking outside the card (or the
+        // toggle button) folds it back.
         if (id === selected) setJumpSignal(signal => signal + 1)
-        else setSelected(id)
+        else {
+          setSelected(id)
+          landOn(id)
+        }
       }}
     />
   )
@@ -4906,13 +5118,19 @@ export function PendingPanel({
     const id = await onUndo(sessionId)
     if (id === undefined) return
     if (id === selected) setUndoFlash(signal => signal + 1)
-    else setSelected(id)
+    else {
+      setSelected(id)
+      landOn(id)
+    }
   }
   const handleRedo = async (sessionId: SessionId): Promise<void> => {
     const id = await onRedo(sessionId)
     if (id === undefined) return
     if (id === selected) setUndoFlash(signal => signal + 1)
-    else setSelected(id)
+    else {
+      setSelected(id)
+      landOn(id)
+    }
   }
 
   // Ctrl+Z / Ctrl+Y undo/redo the last keep/revert (per-file or bulk). The
@@ -4983,7 +5201,12 @@ export function PendingPanel({
       event.preventDefault()
       const index = files.findIndex(file => file.id === selected)
       const next = files[(index + direction + files.length) % files.length]
-      if (next !== undefined) setSelected(next.id)
+      if (next !== undefined) {
+        // Cycling is a switch like a click on the list: the file opens at its
+        // first change rather than at wherever it was last left.
+        setSelected(next.id)
+        landOn(next.id)
+      }
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
@@ -5241,6 +5464,11 @@ export function PendingPanel({
                     workspacePath={snapshot.workspacePath}
                     jumpSignal={jumpSignal}
                     undoFlash={undoFlash}
+                    // The offset this file should open at, when this showing resumed
+                    // a remembered view: absent means the file's first change. The
+                    // tick makes a repeated request for the same file land again.
+                    landingTop={landing !== undefined && landing.fileId === selectedFile.id ? landing.top : undefined}
+                    landingTick={landing !== undefined && landing.fileId === selectedFile.id ? landing.n : 0}
                     failedMessage={failed.get(selectedFile.id)}
                     onPasteReference={onPasteReference}
                     onToast={showCopyToast}

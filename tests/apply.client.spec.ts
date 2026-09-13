@@ -86,6 +86,30 @@ describe('plugin apply', () => {
     expect(names).toContain('sidebar.right.pane.tab')
   })
 
+  it('never lets a refused seat throw out of apply', () => {
+    // `apply` runs inside the client's boot: a seat that was already taken (a
+    // reload racing the previous fiber) must cost that one surface, not the app.
+    const { ctx, registrations } = fakeContext()
+    const inject = ctx.slots.inject
+    ctx.slots.inject = (name: string, callback: () => unknown) => {
+      if (name === 'sidebar.footer.action') throw new Error('seat already filled')
+      inject(name, callback)
+    }
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      expect(() => { apply(ctx as never) }).not.toThrow()
+      // The reason is said out loud rather than swallowed.
+      expect(logged).toHaveBeenCalled()
+    } finally {
+      logged.mockRestore()
+    }
+    // …and the sections that do not depend on that seat are still registered.
+    const names = registrations.map(entry => entry.config.name)
+    expect(names).not.toContain('sidebar.footer.action')
+    expect(names).toContain('settings.section')
+    expect(names).toContain('sidebar.right.pane.tab')
+  })
+
   it('discovers the right sidebar by lookup and registers the tab type', () => {
     const { ctx, registrations } = fakeContext()
     const sidebar = {

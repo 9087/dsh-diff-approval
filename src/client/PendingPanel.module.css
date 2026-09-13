@@ -2,6 +2,43 @@
    Geometry mirrors the stock Cordis panel (fixed card above the footer,
    body-only scroll); the diff body reuses the DiffBlock line vocabulary. */
 
+/* What a crashed panel mount shows instead of vanishing: the seat's own entry is
+   already retired by then, so this is the only thing on screen that can explain
+   the state — and its retry re-renders the panel without a page reload. */
+.panelFailure {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.panelFailureText {
+  min-width: 0;
+}
+
+.panelFailureRetry {
+  flex: none;
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.panelFailureRetry:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
 /* The entry button mirrors the harness settings trigger (ui-settings-general
    SettingsRoot.module.css .trigger). Its class name is a build-hashed
    CSS-module token, so it cannot be shared across packages — geometry is
