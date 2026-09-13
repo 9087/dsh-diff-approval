@@ -2,7 +2,7 @@
 
 import { Component, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from 'react'
+import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconListPenOutline16, IconPanelLeftOutline16, IconPlusOutline16, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
@@ -133,6 +133,11 @@ const MIN_LIST_WIDTH_PX = 160
 const MAX_LIST_WIDTH_PX = 560
 /** Inset of the floating file-list card from the code scroll box, in px. */
 const FLOAT_LIST_MARGIN_PX = 12
+/** The folded card's width grip: how wide its hit strip is, and how much of it
+ *  lies over the card (the rest overhangs the code view, so the card's own
+ *  scrollbar strip stays clear). */
+const FLOAT_GRIP_WIDTH_PX = 9
+const FLOAT_GRIP_OVERHANG_PX = 3
 
 /** Normalize a path for comparison: forward slashes, no trailing slash. */
 export function normalizeDiffPath(p: string): string {
@@ -4417,7 +4422,6 @@ export function PendingPanel({
   const [coverNotice, setCoverNotice] = useState<{ edge: keyof DiffApprovalCover; n: number } | null>(null)
   /** File-list pane width, adjustable by dragging the divider. */
   const [listWidth, setListWidth] = useState(240)
-  const resizeDrag = useRef<{ startX: number; startWidth: number } | null>(null)
   /** Whether the floating (collapsed) file list is currently shown. */
   const [floatOpen, setFloatOpen] = useState(false)
   /** Whether the file list is always folded, whatever the width allows. */
@@ -4479,8 +4483,9 @@ export function PendingPanel({
     return () => { window.removeEventListener('resize', onResize) }
   }, [])
 
-  // Clicking anywhere outside the floating card — or on the toggle button,
-  // which toggles it — folds the floating list back.
+  // Clicking anywhere outside the floating card — or on the toggle button, which
+  // toggles it, or on the card's width grip, which sits just outside its right
+  // edge — folds the floating list back.
   useEffect(() => {
     if (!floatMode || !floatOpen) return
     const el = panelRef.current
@@ -4488,7 +4493,9 @@ export function PendingPanel({
     const onPointerDown = (event: PointerEvent): void => {
       const target = event.target as Node | null
       if (target instanceof Element
-        && (target.closest('[data-diff-floating-file-list]') !== null || target.closest('[data-diff-file-list-toggle]') !== null)) return
+        && (target.closest('[data-diff-floating-file-list]') !== null
+          || target.closest('[data-diff-file-list-toggle]') !== null
+          || target.closest('[data-diff-float-resize]') !== null)) return
       setFloatOpen(false)
     }
     el.addEventListener('pointerdown', onPointerDown, true)
@@ -5042,6 +5049,20 @@ export function PendingPanel({
   )
 
   const selectedFile = files.find(file => file.id === selected)
+  /**
+   * The folded card's own box, derived from the measured one, or undefined while
+   * the list is not folded open. The card and its width grip are both placed from
+   * these numbers, which is what keeps the grip on the card's right edge as the
+   * width changes.
+   */
+  const floatCard = !floatMode || !floatOpen || files.length === 0 || floatBox === null
+    ? undefined
+    : {
+        left: floatBox.left + FLOAT_LIST_MARGIN_PX,
+        top: floatBox.top + FLOAT_LIST_MARGIN_PX,
+        width: Math.min(listWidth, Math.max(0, floatBox.width - 2 * FLOAT_LIST_MARGIN_PX)),
+        height: Math.max(0, floatBox.height - 2 * FLOAT_LIST_MARGIN_PX),
+      }
   /** The file whose removal is being confirmed (a last-block action), if any. */
   const promptFile = blockPrompt === null ? undefined : files.find(file => file.id === blockPrompt.id)
   /** The file whose removal is being confirmed (a whole-file action), if any. */
@@ -5269,34 +5290,54 @@ export function PendingPanel({
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
   }, [open, docked])
 
-  /** Drag the list/detail divider; width follows the pointer within its bounds. */
-  const startResize = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return
+  /**
+   * Drag the list's width, from a mouse *or* a finger. Pointer events rather than
+   * mouse ones, because a touch drag never produces the mouse events this used to
+   * wait for: the browser's synthetic `mousemove` does not exist, and the synthetic
+   * `mousedown`/`mouseup` pair arrives together at the *end* of the gesture — so on
+   * a phone the grip read as a tap and the width never changed. The handles also
+   * declare `touch-action: none` (see the stylesheet), without which the browser
+   * would take the drag as a pan and cancel the pointer stream outright.
+   */
+  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    // Primary button or finger only: a right-click, or a second finger landing
+    // mid-drag, is not a resize.
+    if (event.button !== 0 || event.isPrimary === false) return
     event.preventDefault()
+    const startX = event.clientX
+    const startWidth = listWidth
     // The folded card floats inside the code view, so that view's box is its own
     // ceiling: a drag past the code's right edge stops there rather than storing a
     // width the card has no room to show.
     const cap = floatMode && floatBox !== null
       ? Math.max(MIN_LIST_WIDTH_PX, floatBox.width - 2 * FLOAT_LIST_MARGIN_PX)
       : MAX_LIST_WIDTH_PX
-    resizeDrag.current = { startX: event.clientX, startWidth: listWidth }
+    // Keep the moves coming when the pointer leaves the grip (a mouse dragged out
+    // of the card, a finger that strays): a touch pointer is captured implicitly,
+    // and this captures a mouse. jsdom has no `setPointerCapture`, hence the guard.
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    } catch {
+      // Not implemented here; the window listeners below still carry the drag.
+    }
     document.body.style.userSelect = 'none'
     document.body.style.cursor = 'col-resize'
-    const onMove = (move: MouseEvent) => {
-      const start = resizeDrag.current
-      if (start === null) return
-      const next = start.startWidth + (move.clientX - start.startX)
+    const onMove = (move: PointerEvent) => {
+      const next = startWidth + (move.clientX - startX)
       setListWidth(Math.min(Math.max(next, MIN_LIST_WIDTH_PX), cap))
     }
-    const onUp = () => {
-      resizeDrag.current = null
+    // `pointercancel` is the browser taking the gesture over (a pan it decided to
+    // start, a system gesture): the drag ends there, like a release.
+    const finish = (): void => {
       document.body.style.userSelect = ''
       document.body.style.cursor = ''
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', finish)
+      window.removeEventListener('pointercancel', finish)
     }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', finish)
+    window.addEventListener('pointercancel', finish)
   }
 
   // Docked, the panel is a sidebar tab: it fills the tab body the dock body
@@ -5453,7 +5494,7 @@ export function PendingPanel({
                   {fileListBody}
                 </nav>
               )}
-              {!floatMode && <div className={css.resizeHandle} data-diff-resize onMouseDown={startResize} />}
+              {!floatMode && <div className={css.resizeHandle} data-diff-resize onPointerDown={startResize} />}
               <div className={css.detail} data-diff-detail>
                 {selectedFile === undefined ? (
                   <p className={css.detailEmpty}>{t('panel.selectHint')}</p>
@@ -5483,23 +5524,34 @@ export function PendingPanel({
                   />
                 )}
               </div>
-              {floatMode && floatOpen && files.length > 0 && floatBox !== null && (
-                <div
-                  className={css.fileListFloat}
-                  style={{
-                    left: floatBox.left + FLOAT_LIST_MARGIN_PX,
-                    top: floatBox.top + FLOAT_LIST_MARGIN_PX,
-                    width: Math.min(listWidth, Math.max(0, floatBox.width - 2 * FLOAT_LIST_MARGIN_PX)),
-                    height: Math.max(0, floatBox.height - 2 * FLOAT_LIST_MARGIN_PX),
-                  }}
-                  data-diff-floating-file-list
-                >
-                  {fileListBody}
-                  {/* The folded list is dragged by the same divider, on its own
-                      right edge: the card is the list, so its width is the one
-                      there is to set. */}
-                  <div className={css.floatResizeHandle} data-diff-float-resize onMouseDown={startResize} />
-                </div>
+              {floatCard !== undefined && (
+                <>
+                  <div
+                    className={css.fileListFloat}
+                    style={{ left: floatCard.left, top: floatCard.top, width: floatCard.width, height: floatCard.height }}
+                    data-diff-floating-file-list
+                  >
+                    {fileListBody}
+                  </div>
+                  {/* The folded list is dragged by the same divider the docked one
+                      uses: a full-height strip on its right edge, straddling the
+                      card's border so the edge the eye already reads as "the end of
+                      the list" is the edge the finger grabs. It sits *outside* the
+                      card (a sibling, like the docked divider is a sibling of the
+                      docked list) so the strip of scrollbar along that edge stays
+                      the scrollbar's. */}
+                  <div
+                    className={css.floatResizeHandle}
+                    style={{
+                      left: floatCard.left + floatCard.width - FLOAT_GRIP_OVERHANG_PX,
+                      top: floatCard.top,
+                      width: FLOAT_GRIP_WIDTH_PX,
+                      height: floatCard.height,
+                    }}
+                    data-diff-float-resize
+                    onPointerDown={startResize}
+                  />
+                </>
               )}
             </div>
           )}

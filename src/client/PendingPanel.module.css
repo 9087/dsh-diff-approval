@@ -1096,28 +1096,33 @@
   margin: 0 -2px;
   cursor: col-resize;
   background: transparent;
+  /* A finger drag on a divider is a resize, not a page pan: without this the
+     browser claims the gesture and cancels the pointer stream out from under it. */
+  touch-action: none;
 }
 
 .resizeHandle:hover {
   background: var(--dsw-alias-border-l2);
 }
 
-/* The folded card's own divider: the same drag, as a corner grip on the card's
-   bottom-right. It cannot be a full-height strip along that edge like the docked
-   list's: the scroller's reserved gutter — where the bar is drawn — is the rest of
-   the card's right inset, and a strip over it would swallow the scrollbar's whole
-   hit area. The grip sits in the corner the bar does not reach, and the cursor and
-   hover tint do the telling. */
+/* The folded card's width grip: the same full-height divider the docked list has,
+   straddling the card's right border — the edge the eye already reads as the end
+   of the list, and so the edge a finger reaches for. It is a *sibling* of the card
+   (the panel places it from the card's own box) rather than a child, because the
+   strip of scrollbar along that edge belongs to the card's scroller: a grip over it
+   would swallow the bar. Width and overhang come from the panel; the hover tint and
+   the cursor do the telling where a pointer can hover. */
 .floatResizeHandle {
   position: absolute;
-  right: 0;
-  bottom: 0;
   z-index: 41;
-  width: 16px;
-  height: 16px;
   cursor: col-resize;
-  border-bottom-right-radius: 11px;
+  border-radius: 4px;
   background: transparent;
+  /* It lies over the code view, so a press on it must not start a text selection
+     there, and a finger drag on it is a resize rather than a page pan. */
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
 }
 
 .floatResizeHandle:hover {

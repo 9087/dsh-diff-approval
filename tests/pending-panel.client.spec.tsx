@@ -1022,21 +1022,43 @@ describe('PendingPanel', () => {
       const card = (): HTMLElement => document.querySelector('[data-diff-floating-file-list]') as HTMLElement
       const handle = (): HTMLElement => document.querySelector('[data-diff-float-resize]') as HTMLElement
       expect(card().style.width).toBe('240px')
-      expect(handle().closest('[data-diff-floating-file-list]')).not.toBeNull()
+      // The grip is the card's right edge: a strip the card's own height, straddling
+      // that edge, and outside the card node (the strip of scrollbar inside it stays
+      // the scrollbar's). It is where the docked divider is on the docked list — the
+      // edge the eye already reads as the end of the list, which is what a finger
+      // reaches for.
+      const cardRight = parseFloat(card().style.left) + parseFloat(card().style.width)
+      expect(handle().closest('[data-diff-floating-file-list]')).toBeNull()
+      expect(handle().style.height).toBe(card().style.height)
+      const gripLeft = parseFloat(handle().style.left)
+      const gripWidth = parseFloat(handle().style.width)
+      expect(gripLeft + gripWidth).toBeGreaterThan(cardRight)
+      expect(gripLeft).toBeLessThan(cardRight)
+      expect(handle().style.top).toBe(card().style.top)
 
-      fireEvent.mouseDown(handle(), { button: 0, clientX: 100 })
+      // A touch drag: pointer events are what a finger produces — the synthetic
+      // mousemove the handler used to wait for never arrives on a phone, which is
+      // why the grip did nothing there.
+      fireEvent.pointerDown(handle(), { button: 0, clientX: 100, pointerId: 1, pointerType: 'touch', isPrimary: true })
       act(() => {
-        window.dispatchEvent(new MouseEvent('mousemove', { clientX: 180 }))
-        window.dispatchEvent(new MouseEvent('mouseup'))
+        window.dispatchEvent(new PointerEvent('pointermove', { clientX: 180, pointerId: 1 }))
+        window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1 }))
       })
       expect(card().style.width).toBe('320px')
 
       // Past the box's right edge the drag stops at the box: the card keeps 12px
       // clear on each side rather than storing a width it cannot show.
-      fireEvent.mouseDown(handle(), { button: 0, clientX: 100 })
+      fireEvent.pointerDown(handle(), { button: 0, clientX: 100, pointerId: 2, pointerType: 'touch', isPrimary: true })
       act(() => {
-        window.dispatchEvent(new MouseEvent('mousemove', { clientX: 1200 }))
-        window.dispatchEvent(new MouseEvent('mouseup'))
+        window.dispatchEvent(new PointerEvent('pointermove', { clientX: 1200, pointerId: 2 }))
+        window.dispatchEvent(new PointerEvent('pointercancel', { pointerId: 2 }))
+      })
+      expect(card().style.width).toBe('476px')
+
+      // A drag that the browser takes over (`pointercancel`) ends there: moves
+      // after it are ignored rather than dragging on.
+      act(() => {
+        window.dispatchEvent(new PointerEvent('pointermove', { clientX: 200, pointerId: 2 }))
       })
       expect(card().style.width).toBe('476px')
 
@@ -1065,11 +1087,10 @@ describe('PendingPanel', () => {
     const rightPadding = (name: string): string => /padding:\s*([^;]*);/.exec(block(name))?.[1]?.trim().split(/\s+/)[1] ?? ''
     expect(rightPadding('fileList')).toBe('2px')
     expect(rightPadding('fileListFloat')).toBe('2px')
-    // …and the grip that sets the folded list's width is a corner one, so the strip
-    // the scrollbar lives in along that edge stays the scrollbar's.
-    const grip = block('floatResizeHandle')
-    expect(grip).toContain('bottom: 0')
-    expect(grip).not.toContain('top: 0')
+    // Both dividers keep the gesture for themselves: without `touch-action: none`
+    // the browser takes a finger drag as a page pan and cancels the pointer stream.
+    expect(block('resizeHandle')).toContain('touch-action: none')
+    expect(block('floatResizeHandle')).toContain('touch-action: none')
   })
 
   it('resizes the file list by dragging the divider within its bounds', () => {
@@ -1082,18 +1103,27 @@ describe('PendingPanel', () => {
     const handle = document.querySelector('[data-diff-resize]') as HTMLElement
     expect(list.style.width).toBe('240px')
 
-    fireEvent.mouseDown(handle, { button: 0, clientX: 100 })
+    // A mouse drag, which is the same pointer stream a mouse produces.
+    fireEvent.pointerDown(handle, { button: 0, clientX: 100, pointerId: 1, pointerType: 'mouse', isPrimary: true })
     act(() => {
-      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 180 }))
-      window.dispatchEvent(new MouseEvent('mouseup'))
+      window.dispatchEvent(new PointerEvent('pointermove', { clientX: 180, pointerId: 1 }))
+      window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1 }))
     })
     expect(list.style.width).toBe('320px')
 
     // Clamped at both ends on an extreme drag.
-    fireEvent.mouseDown(handle, { button: 0, clientX: 100 })
+    fireEvent.pointerDown(handle, { button: 0, clientX: 100, pointerId: 2, pointerType: 'mouse', isPrimary: true })
     act(() => {
-      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 1200 }))
-      window.dispatchEvent(new MouseEvent('mouseup'))
+      window.dispatchEvent(new PointerEvent('pointermove', { clientX: 1200, pointerId: 2 }))
+      window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 2 }))
+    })
+    expect(list.style.width).toBe('560px')
+
+    // A secondary button (a right-click) does not start a drag.
+    fireEvent.pointerDown(handle, { button: 2, clientX: 100, pointerId: 3 })
+    act(() => {
+      window.dispatchEvent(new PointerEvent('pointermove', { clientX: 400, pointerId: 3 }))
+      window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 3 }))
     })
     expect(list.style.width).toBe('560px')
   })
