@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.2](https://github.com/9087/dsh-diff-approval/compare/v0.22.1...v0.22.2) (2026-09-13)
+
+### Bug Fixes
+
+* **panel:** keep the file list's right margin with and without a scrollbar ([b04b82c](https://github.com/9087/dsh-diff-approval/commit/b04b82c60fb5f1aa87e25b65237e4c3ed3330e88))
+* **panel:** open the add-path dialog above the folded file list ([09c5ebb](https://github.com/9087/dsh-diff-approval/commit/09c5ebb67dc49c53bed42709998c5c64458167a5))
+
 ## [0.22.1](https://github.com/9087/dsh-diff-approval/compare/v0.22.0...v0.22.1) (2026-09-13)
 
 ### Bug Fixes
