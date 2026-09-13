@@ -1606,12 +1606,24 @@
   overflow-x: auto;
   overflow-y: hidden;
   white-space: nowrap;
+  /* It scrolls, but with no bar of its own: this row is one 18px line of text,
+     and the app's 8px scrollbar would be drawn inside it — taking a third of the
+     line from the glyphs and reading as a control in a label. A trackpad swipe,
+     shift+wheel, or a drag past either edge pans the path; the bar itself simply
+     does not sit in the path. (`display: none` for the engines that style
+     scrollbars through the pseudo-element, `scrollbar-width` for the rest; the
+     theme's own `body *` rule loses to this class.) */
+  scrollbar-width: none;
   color: var(--dsw-alias-label-primary);
   font: var(--dsw-font-markdown-code-block);
   font-size: 12px;
   line-height: 18px;
   user-select: text;
   -webkit-user-select: text;
+}
+
+.diffPath::-webkit-scrollbar {
+  display: none;
 }
 
 .diffActions {

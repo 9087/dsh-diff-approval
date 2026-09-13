@@ -3,6 +3,8 @@
 // navigation, live-state warnings, and the line-selection copy toolbar.
 
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ComponentProps } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
@@ -1023,6 +1025,20 @@ describe('PendingPanel', () => {
       window.dispatchEvent(new MouseEvent('mouseup'))
     })
     expect(list.style.width).toBe('560px')
+  })
+
+  it('scrolls the path bar without putting a scrollbar inside it', () => {
+    // The path row is one 18px line of text. It pans, so a long path is never
+    // truncated into an ellipsis — but it draws no bar of its own, because the
+    // theme's 8px scrollbar would be painted inside that line and read as a
+    // control in a label. Both halves are the requirement, and jsdom applies no
+    // stylesheet, so this reads the module the panel ships.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const block = /\.diffPath \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(block).toContain('overflow-x: auto')
+    expect(block).toContain('scrollbar-width: none')
+    // The pseudo-element spelling is what Chromium and WebKit honour.
+    expect(css).toMatch(/\.diffPath::-webkit-scrollbar \{\s*display: none;?\s*\}/)
   })
 
   it('opens or reveals the selected file through the header icon buttons', () => {
