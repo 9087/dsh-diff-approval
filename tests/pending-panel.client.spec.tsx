@@ -1155,20 +1155,45 @@ describe('PendingPanel', () => {
   })
 
   it('gives the folded list the docked list\'s right inset', () => {
-    // The two lists hold the same rows, so their right insets have to match: 2px of
-    // padding plus the scroller's own reserved gutter (8px) is the rows' 10px inset
-    // in both, and the bulk footer's 8px right padding lands on that same line. An
-    // 8px padding on the card doubled the gutter — a stray margin, widest of all
-    // when the list did not overflow and no bar was drawn.
+    // The two lists hold the same rows, so their right insets have to match: an 8px
+    // right padding — the same as the left one — with the scroller's own scroll
+    // strip (8px) inside it puts the rows, the heading's buttons and the bulk footer
+    // on the same 16px line, and leaves the strip sitting in the middle of the
+    // margin rather than hard against the frame's edge.
     const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const block = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
     const rightPadding = (name: string): string => /padding:\s*([^;]*);/.exec(block(name))?.[1]?.trim().split(/\s+/)[1] ?? ''
-    expect(rightPadding('fileList')).toBe('2px')
-    expect(rightPadding('fileListFloat')).toBe('2px')
+    expect(rightPadding('fileList')).toBe('8px')
+    expect(rightPadding('fileListFloat')).toBe('8px')
+    // The heading and the footer sit outside the scroller, so each carries a right
+    // inset of its own that has to reach that same line: the footer's own 8px, and
+    // the heading's, which is what lands its buttons on the rows' right edge.
+    expect(/padding:\s*8px 8px 0 0;/.test(block('bulkActions'))).toBe(true)
+    expect(/padding-right:\s*8px;/.test(block('groupHead'))).toBe(true)
     // Both dividers keep the gesture for themselves: without `touch-action: none`
     // the browser takes a finger drag as a page pan and cancels the pointer stream.
     expect(block('resizeHandle')).toContain('touch-action: none')
     expect(block('floatResizeHandle')).toContain('touch-action: none')
+  })
+
+  it('reserves the scroll strip of a list that is not overflowing', () => {
+    // `scrollbar-gutter: stable` is not honoured by every engine, and where it is
+    // ignored — Safari before 18.2 styles this very 8px bar through the theme's
+    // `::-webkit-scrollbar`, so it takes layout space all the same — a list short
+    // enough to fit reserved no strip at all: the folded card's rows then sat flush
+    // against its edge and the card read 8px narrower than the same card holding a
+    // bar. Asking for the scrollbar is what reserves the strip in every engine.
+    // Measured in a headless Chromium: three rows with `overflow-y: auto` + `stable`
+    // gave an 8px strip, but with the property ignored (`auto`) 0px; `overflow-y:
+    // scroll` gave 8px either way.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const block = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
+    expect(block('listScroll')).toContain('overflow-y: scroll')
+    // The add-path tree is the same scroll box one dialog over, and gets the same
+    // treatment — but only vertically: a path too long for the box still asks for
+    // the horizontal bar on its own.
+    expect(block('tree')).toContain('overflow-y: scroll')
+    expect(block('tree')).toContain('overflow-x: auto')
   })
 
   it('keeps what floats over the code view opaque while hovered', () => {

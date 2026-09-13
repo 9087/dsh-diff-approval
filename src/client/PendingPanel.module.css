@@ -1029,12 +1029,11 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  /* The right inset mirrors the docked list exactly: 2px here plus the scroller's
-     own reserved gutter (see `.listScroll`) is the rows' 10px inset there too, and
-     the bulk footer's 8px right padding lands on the same line. An 8px padding here
-     doubled the gutter and read as a stray margin, widest of all when nothing
-     overflowed and no bar was drawn. */
-  padding: 6px 2px 10px 8px;
+  /* The right inset mirrors the docked list exactly: 8px here, the same as the
+     left, with the scroller's own scroll strip (see `.listScroll`) inside it — so
+     the rows and the bulk footer land on the same 16px line, and the strip sits in
+     the middle of the margin instead of hard against the card's edge. */
+  padding: 6px 8px 10px 8px;
   box-sizing: border-box;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 12px;
@@ -1069,28 +1068,36 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  /* The 2px right inset is the only space to the scrollbar's right: the gutter
-     inside the scroller (see `.listScroll`) is the list's own right margin. */
-  padding: 4px 2px 12px 8px;
+  /* The 8px right inset equals the left one, and the scroller's scroll strip (see
+     `.listScroll`) sits inside it, which is what puts the rows and the bulk footer
+     on the same 16px line. */
+  padding: 4px 8px 12px 8px;
   box-sizing: border-box;
   border-right: 1px solid var(--dsw-alias-border-l2);
 }
 
-/* The file rows scroll; the Keep-all / Revert-all footer stays pinned. The right
-   gutter is reserved unconditionally, so the rows keep exactly the same width
-   with a scrollbar, without one, and across the moment one appears: the bar
-   lives inside that reserved strip (flush against the panel edge) instead of
-   taking width away from the content. The strip IS the list's right inset — no
-   padding is added on top of it, or the margin would read as two. */
+/* The file rows scroll; the Keep-all / Revert-all footer stays pinned. The strip
+   the scrollbar lives in is reserved unconditionally, so the rows keep exactly the
+   same width with a bar, without one, and across the moment one appears: the bar
+   sits inside that strip instead of taking width away from the content, and the
+   strip plus the frame's own 8px right padding is the list's right margin.
+   Asking for the scrollbar outright is what reserves the strip. `scrollbar-gutter:
+   stable` also reserves it, but only where the engine honours that property
+   alongside a classic bar: the engines that ignore it (Safari before 18.2, which
+   styles this very 8px bar through the theme's `::-webkit-scrollbar` all the same)
+   left the strip out whenever the list did not overflow, so the folded card's rows
+   sat flush against its edge and the card read 8px narrower than the same card
+   holding a bar. A bar that is always there cannot be missed; with nothing to
+   scroll, the theme's transparent track paints nothing. */
 .listScroll {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
-  scrollbar-gutter: stable;
+  overflow-y: scroll;
 }
 
-/* Bulk decisions under the file list: two equal-width actions, aligned with the
-   rows' inset (the footer does not scroll, so it has no scrollbar to clear). */
+/* Bulk decisions under the file list: two equal-width actions. The footer does not
+   scroll, so it has no strip of its own to clear: its 8px right padding plus the
+   frame's 8px lands the buttons on the rows' 16px line. */
 .bulkActions {
   flex: none;
   display: flex;
@@ -1283,16 +1290,17 @@
 }
 
 /* The tree: one scroll box holding the workspace's levels; it takes whatever
-   height the card's fixed share leaves, so nothing else ever resizes. Its gutter
-   is reserved for the same reason as the file list's: opening a level must not
-   change the rows' width. */
+   height the card's fixed share leaves, so nothing else ever resizes. Its scroll
+   strip is reserved the same way as the file list's — and for the same reason, so
+   opening a level never changes the rows' width. Only the vertical bar is asked
+   for: the horizontal one still appears solely for a path too long for the box. */
 .tree {
   flex: 1 1 auto;
   min-height: 0;
-  overflow: auto;
-  scrollbar-gutter: stable;
-  /* The reserved gutter is the right inset (plus the same 2px to the bar's
-     right as the file list leaves), so no padding is added on that side. */
+  overflow-x: auto;
+  overflow-y: scroll;
+  /* The strip sits in this right edge, with the padding as the sliver between the
+     strip and the frame: nothing else is added on that side. */
   padding: 4px 2px 4px 4px;
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 8px;
@@ -1477,14 +1485,15 @@
 }
 
 /* The list's heading row: the group title with the add buttons at its right.
-   The heading sits outside the scroller, so it carries its own right inset
-   (matching the bulk footer) instead of the scrollbar's reserved gutter. */
+   The heading sits outside the scroller, so it carries its own right inset — the
+   same 8px the bulk footer uses, which lands its buttons on the rows' 16px line
+   (frame right padding + scroll strip) rather than 4px short of it. */
 .groupHead {
   display: flex;
   align-items: center;
   gap: 4px;
   margin: 8px 0 4px;
-  padding-right: 4px;
+  padding-right: 8px;
 }
 
 /* The heading's add button: a step smaller than the toolbar's icon action, which
