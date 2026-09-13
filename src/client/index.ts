@@ -9,6 +9,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 // Type-only: brings the `settings.section` SlotMap entry into this program.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { PendingPanel, SIDEBAR_AUTO_COLLAPSE_PX } from './PendingPanel.tsx'
+import { pasteReferenceIntoComposer } from './composer-cover.ts'
 import type { PendingPanelProps } from './PendingPanel.tsx'
 import { PanelBoundary } from './boundary.tsx'
 import { DiffApprovalSettingsTab } from './SettingsTab.tsx'
@@ -234,11 +235,13 @@ export function apply(ctx: ClientContext): void {
       onPasteReference: (sessionId, reference) => {
         // Append the reference to the session's composer draft (replace only
         // when empty), addressed explicitly to the copied reference's session
-        // rather than the current-session accessor used by the remap sync.
-        conversationAccess(ctx, () => sessionId).appendDraft(reference)
-        // The composer surface is a contenteditable div (`[data-composer-input]`),
-        // not a <textarea>, so bring it into focus there.
-        document.querySelector<HTMLElement>('[data-composer-input]')?.focus()
+        // rather than the current-session accessor used by the remap sync. The
+        // caret follows only when the panel is not over the composer — see
+        // `pasteReferenceIntoComposer`.
+        pasteReferenceIntoComposer(
+          (text) => { conversationAccess(ctx, () => sessionId).appendDraft(text) },
+          reference,
+        )
       },
       collapseSidebar,
   })

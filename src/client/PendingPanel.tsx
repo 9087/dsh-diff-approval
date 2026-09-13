@@ -36,6 +36,7 @@ import type { DiffApprovalPresentation } from './settings.ts'
 import { OPEN_PANEL_FILE_EVENT, PANEL_STATE_EVENT, SHOW_PANEL_EVENT, TOGGLE_PANEL_EVENT } from './dock.tsx'
 import type { PanelFileDetail, PanelStateDetail } from './dock.tsx'
 import { lastPanelFile, panelFileOffset, rememberPanelView } from './panel-memory.ts'
+import { composerCoveredByPanel, leaveComposerCaret } from './composer-cover.ts'
 import { confirmFileRemoveEnabled, COVER_CHANGED_EVENT, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
 import { matchRangesOf } from './search.ts'
@@ -4643,6 +4644,18 @@ export function PendingPanel({
       window.removeEventListener('resize', measure)
     }
   }, [open])
+
+  // A covered composer must not keep the caret. The panel is over it, so the reader
+  // cannot see what they type — and the caret is usually already there (typing is
+  // what a composer is for, and selecting lines in the diff with the mouse does not
+  // move the focus). The copy-reference action applies the same rule before it pastes
+  // (see `composer-cover`); this is the half that catches the panel simply opening,
+  // or being covered, while the caret was in the composer.
+  useEffect(() => {
+    if (!open && !docked) return
+    if (!composerCoveredByPanel()) return
+    leaveComposerCaret()
+  }, [open, docked, floatMode, cover.composer, selected, panelWidth, snapshot.files.length])
 
   // Nothing outside the panel dismisses it — not a press on the editor, the chat,
   // the composer, or the sidebar's own blank space. The panel is a working

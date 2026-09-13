@@ -1798,6 +1798,48 @@ describe('PendingPanel', () => {
     }
   })
 
+  it('takes the caret out of a composer the panel covers', () => {
+    // The panel opening over a composer the caret is in would otherwise leave the
+    // reader typing into a field they cannot see. jsdom lays nothing out, so the two
+    // boxes the coverage is measured from are stubbed; the extra file is only there
+    // to re-render the panel (a file *switch* would move the focus itself).
+    const composer = document.createElement('div')
+    composer.setAttribute('data-composer-input', '')
+    composer.tabIndex = -1
+    composer.getBoundingClientRect = () => ({
+      left: 300, top: 700, width: 600, height: 90, right: 900, bottom: 790, x: 300, y: 700,
+      toJSON: () => ({}),
+    }) as DOMRect
+    document.body.appendChild(composer)
+    const panelBox = (bottom: number): DOMRect => ({
+      left: 8, top: 8, width: 1184, height: bottom - 8, right: 1192, bottom, x: 8, y: 8,
+      toJSON: () => ({}),
+    }) as DOMRect
+    const withFiles = (...paths: string[]): PanelProps => panelProps({
+      read: true,
+      files: paths.map((path, index) => entry({ id: `entry-${String(index)}`, path })),
+      busy: new Set(),
+    })
+    try {
+      const view = render(<PendingPanel {...withFiles('/repo/a.txt')} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      const panel = document.querySelector('[data-diff-approval-panel]') as HTMLElement
+
+      // The panel stops above the composer: the caret stays where the reader left it.
+      panel.getBoundingClientRect = () => panelBox(600)
+      composer.focus()
+      view.rerender(<PendingPanel {...withFiles('/repo/a.txt', '/repo/b.txt')} />)
+      expect(document.activeElement).toBe(composer)
+
+      // The panel is over the composer now: the caret leaves it.
+      panel.getBoundingClientRect = () => panelBox(792)
+      view.rerender(<PendingPanel {...withFiles('/repo/a.txt', '/repo/b.txt', '/repo/c.txt')} />)
+      expect(document.activeElement).not.toBe(composer)
+    } finally {
+      composer.remove()
+    }
+  })
+
   it('keeps the file-list knob outside the diff view, which can vanish', () => {
     const originalWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth')
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 600 })
