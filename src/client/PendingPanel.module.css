@@ -996,12 +996,19 @@
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 8px;
   background: var(--dsw-alias-bg-base);
+  /* Resting, it floats a good deal transparent over the code it sits on — present
+     without shouting — and the pointer (or the keyboard) makes it solid. The hover
+     fill itself stays opaque: see below. */
+  opacity: 0.45;
+  transition: opacity 120ms ease;
   color: var(--dsw-alias-label-primary);
   cursor: pointer;
   box-shadow: var(--dsw-shadow-lv2);
 }
 
-.fileListKnob:hover {
+.fileListKnob:hover,
+.fileListKnob:focus-visible {
+  opacity: 1;
   /* Keep the surface opaque. The knob floats over the code view, and the hover tint
      the app publishes is translucent (it is meant to be painted over a surface, the
      way the docked list's divider sits on the panel): used as the fill on its own it

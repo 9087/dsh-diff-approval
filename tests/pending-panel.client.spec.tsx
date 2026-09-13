@@ -1142,6 +1142,18 @@ describe('PendingPanel', () => {
     expect(source).toMatch(/useLayoutEffect\(\(\) => \{\s*measureFloatBoxRef\.current\(\)\s*\}, \[/)
   })
 
+  it('floats the file-list knob a little transparent until the pointer is on it', () => {
+    // Resting over the code view it should be present without shouting; hovered (or
+    // focused from the keyboard) it is solid. The *fill* is opaque in both states —
+    // see the test above — so this is about the whole control's weight.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const block = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
+    const idle = Number(/opacity:\s*([\d.]+)/.exec(block('fileListKnob'))?.[1] ?? '1')
+    expect(idle).toBeGreaterThan(0)
+    expect(idle).toBeLessThan(1)
+    expect(new RegExp('\\.fileListKnob:hover[^{]*\\{([^}]*)\\}').exec(css)?.[1] ?? '').toContain('opacity: 1')
+  })
+
   it('gives the folded list the docked list\'s right inset', () => {
     // The two lists hold the same rows, so their right insets have to match: 2px of
     // padding plus the scroller's own reserved gutter (8px) is the rows' 10px inset
@@ -1166,7 +1178,8 @@ describe('PendingPanel', () => {
     // the pointer is on it. Both layer it over an opaque surface instead.
     const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     for (const name of ['fileListKnob', 'floatResizeHandle']) {
-      const hover = new RegExp(`\\.${name}:hover \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
+      // The `:hover` rule may share its block with `:focus-visible`.
+      const hover = new RegExp(`\\.${name}:hover[^{]*\\{([^}]*)\\}`).exec(css)?.[1] ?? ''
       expect(hover, name).toContain('background-color: var(--dsw-alias-bg-base)')
       expect(hover, name).toContain('background-image: linear-gradient(')
     }
