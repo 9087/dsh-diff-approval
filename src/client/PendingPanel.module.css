@@ -1173,11 +1173,17 @@
   text-align: center;
 }
 
-/* Confirm-removal overlay: dims the panel behind a centered card. */
+/* Confirm-removal and add-path overlay: dims the panel behind a centered card.
+   It clears everything the panel can have floating over the code view, which is
+   what makes it a modal: the folded list's card (40) and that card's width grip
+   (41) — the add button lives *in* the folded list, so this dialog is routinely
+   opened from underneath that card — and the coverage popover (50). Only the
+   status notice (60) and the chord's echo (80) stay above it: reports, not
+   controls, and neither takes a press away from the dialog. */
 .confirmBackdrop {
   position: absolute;
   inset: 0;
-  z-index: 5;
+  z-index: 55;
   display: flex;
   align-items: center;
   justify-content: center;

@@ -1196,6 +1196,23 @@ describe('PendingPanel', () => {
     expect(block('tree')).toContain('overflow-x: auto')
   })
 
+  it('opens the panel\'s dialogs above anything it floats over the code view', () => {
+    // The add-path dialog is opened from the folded file list, so its backdrop has
+    // to clear the very card it was opened from (40) and that card's width grip
+    // (41) — with the old layer 5 the dialog opened *underneath* the list, and the
+    // same went for the confirm cards raised from a row in that list. The coverage
+    // popover (50) is the last control that floats, so the dialogs clear it too;
+    // only the status notice (60) and the chord's echo (80) stay above them.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const layer = (name: string): number => {
+      const block = new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
+      return Number(/z-index:\s*(-?\d+)/.exec(block)?.[1] ?? Number.NaN)
+    }
+    expect(layer('confirmBackdrop')).toBeGreaterThan(layer('fileListFloat'))
+    expect(layer('confirmBackdrop')).toBeGreaterThan(layer('floatResizeHandle'))
+    expect(layer('confirmBackdrop')).toBeGreaterThan(layer('coverPopover'))
+  })
+
   it('keeps what floats over the code view opaque while hovered', () => {
     // The file-list knob and the folded card's grip both sit over the code view. The
     // hover tint the app publishes is translucent — it belongs *over* a surface — so
