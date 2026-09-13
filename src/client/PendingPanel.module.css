@@ -1002,7 +1002,13 @@
 }
 
 .fileListKnob:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
+  /* Keep the surface opaque. The knob floats over the code view, and the hover tint
+     the app publishes is translucent (it is meant to be painted over a surface, the
+     way the docked list's divider sits on the panel): used as the fill on its own it
+     lets the code read through the button. Layered over the knob's own surface, the
+     hover reads the same as everywhere else and nothing shows through. */
+  background-color: var(--dsw-alias-bg-base);
+  background-image: linear-gradient(var(--dsw-alias-interactive-bg-hover), var(--dsw-alias-interactive-bg-hover));
 }
 
 /* The floating (collapsed) file list: when the pane would take more than a
@@ -1126,7 +1132,10 @@
 }
 
 .floatResizeHandle:hover {
-  background: var(--dsw-alias-border-l2);
+  /* Opaque for the same reason the knob is: this strip lies over the code view, and
+     a translucent fill would let the code show through it mid-drag. */
+  background-color: var(--dsw-alias-bg-base);
+  background-image: linear-gradient(var(--dsw-alias-border-l2), var(--dsw-alias-border-l2));
 }
 
 .detail {

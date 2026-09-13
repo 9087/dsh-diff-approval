@@ -1093,6 +1093,19 @@ describe('PendingPanel', () => {
     expect(block('floatResizeHandle')).toContain('touch-action: none')
   })
 
+  it('keeps what floats over the code view opaque while hovered', () => {
+    // The file-list knob and the folded card's grip both sit over the code view. The
+    // hover tint the app publishes is translucent — it belongs *over* a surface — so
+    // painting it as the fill on its own lets the code read through the control while
+    // the pointer is on it. Both layer it over an opaque surface instead.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    for (const name of ['fileListKnob', 'floatResizeHandle']) {
+      const hover = new RegExp(`\\.${name}:hover \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
+      expect(hover, name).toContain('background-color: var(--dsw-alias-bg-base)')
+      expect(hover, name).toContain('background-image: linear-gradient(')
+    }
+  })
+
   it('resizes the file list by dragging the divider within its bounds', () => {
     const second = entry({ id: 'entry-2', path: '/repo/b.txt' })
     const props = panelProps({ read: true, files: [FILE, second], busy: new Set() })
