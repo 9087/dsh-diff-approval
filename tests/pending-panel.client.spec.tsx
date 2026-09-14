@@ -1169,11 +1169,15 @@ describe('PendingPanel', () => {
     // `lv2`: the knob is the file list's only entry while the list is folded, and it
     // sits over the code, so it needs more halo to read as a control.
     expect(block('fileListKnob')).toContain('--dsw-elevation-prominent')
-    // While the card is up it covers the knob, so the knob waits at zero and fades in on
-    // the transition as the card folds away — its halo riding along, since an element's
-    // own opacity carries its shadow with it. The fade is slow and symmetric: a front-loaded
-    // curve reads as the button hurrying in behind the departing card.
-    expect(block('fileListKnob')).toContain('transition: opacity 320ms ease-in-out')
+    // While the card is up it covers the knob, so the knob waits at zero; the moment it is
+    // not open the knob comes in on its own animation — half a second of wait for the card
+    // to leave, then 320ms of fade — with the halo riding along, since an element's own
+    // opacity carries its shadow with it. An animation rather than a transition, so folding
+    // and unfolding quickly cancels the fade instead of leaving it half-applied, and the
+    // next fold plays it from the beginning again.
+    expect(/\.fileListKnob:not\(\[data-open\]\) \{[^}]*animation: fileListKnobIn 320ms ease-in-out 500ms both/.test(css)).toBe(true)
+    expect(/@keyframes fileListKnobIn \{\s*from \{\s*opacity: 0;\s*\}\s*to \{\s*opacity: 1;\s*\}\s*\}/.test(css)).toBe(true)
+    expect(block('fileListKnob')).not.toContain('transition')
     expect(/\.fileListKnob\[data-open\] \{[^}]*opacity: 0/.test(css)).toBe(true)
   })
 
@@ -1227,6 +1231,11 @@ describe('PendingPanel', () => {
     const block = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
     expect(block('rowPath')).toContain('font-size: 12px')
     expect(block('rowPath')).toContain('line-height: 18px')
+    expect(block('rowPath')).toContain('margin-left: 4px')
+    expect(block('rowPath')).toContain('top: 1px')
+    // A file name is a label, not code: it takes the app's own font rather than the code
+    // block's monospace one.
+    expect(block('rowPath')).not.toContain('--dsw-font-markdown-code-block')
     expect(block('rowHead')).toContain('align-items: center')
     expect(block('rowHead')).not.toContain('align-items: baseline')
   })
@@ -1579,6 +1588,12 @@ describe('PendingPanel', () => {
     const block = /\.diffPath \{([^}]*)\}/.exec(css)?.[1] ?? ''
     expect(block).toContain('overflow-x: auto')
     expect(block).toContain('scrollbar-width: none')
+    // It reads the app's own font like the file list's rows do, rather than the code
+    // block's monospace one: a path is a label wherever it shows up, inset off the edge
+    // the same way.
+    expect(block).not.toContain('--dsw-font-markdown-code-block')
+    expect(block).toContain('margin-left: 4px')
+    expect(block).toContain('top: 1px')
     // The pseudo-element spelling is what Chromium and WebKit honour.
     expect(css).toMatch(/\.diffPath::-webkit-scrollbar \{\s*display: none;?\s*\}/)
   })

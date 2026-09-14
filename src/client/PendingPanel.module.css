@@ -1006,11 +1006,6 @@
      keeps it from reading as part of that code. */
   color: var(--dsw-alias-label-primary);
   cursor: pointer;
-  /* The card is painted over this button, so while the list is open the button is held at
-     zero opacity and this transition is what brings it in: folding the list away uncovers
-     it by fading it up, rather than snapping it on the moment the card unmounts. Slow and
-     symmetric — `ease-out` front-loads the fade, which reads as the button hurrying in. */
-  transition: opacity 320ms ease-in-out;
   /* A firmer outer glow than the other floating chrome (`.dsw-shadow-lv2`): this knob is
      the file list's only entry once the list has folded, and it sits over the code, so it
      needs the halo to read as a control rather than a mark in the diff. The elevation
@@ -1021,13 +1016,30 @@
 
 /* While the list itself is open the glow belongs to nothing — the card is painted over the
    knob but NOT over the halo around it, so a 20px glow would fringe out past the card's
-   top-left corner and read as a glow on the card — and the button itself is held invisible,
-   since the card covers it anyway. Both come back together as the card folds away: the
-   opacity through the transition above, the halo the moment it is asked for again (its own
-   opacity carries the shadow with it). */
+   top-left corner and read as a glow on the card — and the button itself is hidden, since
+   the card covers it anyway. */
 .fileListKnob[data-open] {
   box-shadow: none;
   opacity: 0;
+}
+
+/* Not open means the card is on its way out (or gone), and that is where the button comes
+   from: it waits half a second for the card to leave, then fades up over 320ms. An
+   animation rather than a transition, which matters when the list is folded and unfolded
+   quickly: reopening drops the selector, so the fade is cancelled where it stands instead
+   of being left half-applied, and the next fold plays it again from the beginning, delay
+   included. The halo rides along, since an element's own opacity carries its shadow. */
+.fileListKnob:not([data-open]) {
+  animation: fileListKnobIn 320ms ease-in-out 500ms both;
+}
+
+@keyframes fileListKnobIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .fileListKnob:hover,
@@ -1610,9 +1622,14 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font: var(--dsw-font-markdown-code-block);
-  /* A step down from the code block's own size: this row is a label among 11px metadata,
-     and the code font at full size made the name the loudest thing in the list. */
+  /* The app's own font, not the code one: a file name is a label, and it sits beside 11px
+     metadata rather than among code. The size is a step down from the default too, since
+     that metadata is what it has to sit level with. The small inset keeps the name off the
+     card's edge — on the row rather than in the row's padding, so the hover fill still
+     spans the whole row — and the nudge drops it onto that metadata's line. */
+  margin-left: 4px;
+  position: relative;
+  top: 1px;
   font-size: 12px;
   line-height: 18px;
 }
@@ -1751,7 +1768,12 @@
      theme's own `body *` rule loses to this class.) */
   scrollbar-width: none;
   color: var(--dsw-alias-label-primary);
-  font: var(--dsw-font-markdown-code-block);
+  /* The app's own font, like the file list's rows: a path is a label, not code, and the
+     two places the same path shows up now read the same — inset off the edge, and dropped
+     a pixel to sit level, the same way too. */
+  margin-left: 4px;
+  position: relative;
+  top: 1px;
   font-size: 12px;
   line-height: 18px;
   user-select: text;
