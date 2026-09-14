@@ -146,6 +146,9 @@ const FLOAT_LIST_MARGIN_PX = 12
  *  scrollbar strip stays clear). */
 const FLOAT_GRIP_WIDTH_PX = 9
 const FLOAT_GRIP_OVERHANG_PX = 3
+/** How long the floating file list takes to fold away once it is put back — the
+ *  `fileListShrink` animation's duration, which the panel holds the card for. */
+const FILE_LIST_FOLD_MS = 140
 
 /** Normalize a path for comparison: forward slashes, no trailing slash. */
 export function normalizeDiffPath(p: string): string {
@@ -5470,18 +5473,53 @@ export function PendingPanel({
    * reader's choice always wins over the default.
    */
   const startListOpenRef = useRef(false)
+  // The card is on its way into the corner: still mounted (and still `floatOpen`) so the
+  // shrink can play, with the reveal switch below counting it as open meanwhile.
+  const [floatClosing, setFloatClosing] = useState(false)
+  const foldTimerRef = useRef<number | undefined>(undefined)
+  useEffect(() => () => {
+    if (foldTimerRef.current !== undefined) window.clearTimeout(foldTimerRef.current)
+  }, [])
+  /** Fold the card away, giving the exit animation its `FILE_LIST_FOLD_MS` first; `then`
+   *  runs once it has gone, for callers with work to do the moment it is folded. */
+  const foldCardAway = (then?: () => void): void => {
+    if (foldTimerRef.current !== undefined) window.clearTimeout(foldTimerRef.current)
+    setFloatClosing(true)
+    foldTimerRef.current = window.setTimeout(() => {
+      foldTimerRef.current = undefined
+      setFloatClosing(false)
+      setFloatOpen(false)
+      then?.()
+    }, FILE_LIST_FOLD_MS)
+  }
   const toggleFileList = (): void => {
     startListOpenRef.current = false
-    setFloatOpen(value => !value)
+    // Pressing the knob again while the card is being drawn into the corner takes the fold
+    // back: the card never left the DOM, so it is simply there again.
+    if (floatClosing) {
+      if (foldTimerRef.current !== undefined) window.clearTimeout(foldTimerRef.current)
+      foldTimerRef.current = undefined
+      setFloatClosing(false)
+      return
+    }
+    if (floatOpen) { foldCardAway(); return }
+    setFloatOpen(true)
   }
   /** Flip the always-fold preference, remembered for the next open. */
   const toggleForceFloat = (): void => {
     startListOpenRef.current = false
     const next = !forceFloat
-    setForceFloat(next)
-    setFileListFloat(next)
-    // Folding it away means the card starts closed: the knob opens it again.
-    if (next) setFloatOpen(false)
+    const apply = (): void => {
+      setForceFloat(next)
+      setFileListFloat(next)
+      // Folding it away means the card starts closed: the knob opens it again.
+      if (next) setFloatOpen(false)
+    }
+    // Folding the list for good with the card open plays the same corner fold, and only
+    // then hands over to the folded mode — so the switch does not make the card vanish
+    // under the pointer.
+    if (next && floatOpen) { foldCardAway(apply); return }
+    apply()
   }
 
   // Track the window's size for the breakpoint above and the panel's floor.
@@ -5507,7 +5545,7 @@ export function PendingPanel({
 
   // Clicking anywhere outside the floating card — or on the toggle button, which
   // toggles it, or on the card's width grip, which sits just outside its right
-  // edge — folds the floating list back.
+  // edge — folds the floating list back, through the same corner fold the knob uses.
   useEffect(() => {
     if (!floatMode || !floatOpen) return
     const el = panelRef.current
@@ -5518,11 +5556,13 @@ export function PendingPanel({
         && (target.closest('[data-diff-floating-file-list]') !== null
           || target.closest('[data-diff-file-list-toggle]') !== null
           || target.closest('[data-diff-float-resize]') !== null)) return
-      setFloatOpen(false)
+      // Already on its way in: leave the fold it is playing alone.
+      if (floatClosing) return
+      foldCardAway()
     }
     el.addEventListener('pointerdown', onPointerDown, true)
     return () => { el.removeEventListener('pointerdown', onPointerDown, true) }
-  }, [floatMode, floatOpen])
+  }, [floatMode, floatOpen, floatClosing])
 
   // Where the floating file list goes: it is measured from the code view when a
   // file is open, and from the detail pane when none is — so the folded list has
@@ -6526,6 +6566,10 @@ export function PendingPanel({
                       top: (floatBox?.top ?? 0) + FLOAT_LIST_MARGIN_PX,
                     }}
                     data-diff-file-list-toggle
+                    // The card covers the knob but not its glow, which would otherwise
+                    // fringe past the card's corner while the list is open: the halo is
+                    // for the button standing on its own (see `.fileListKnob[data-open]`).
+                    data-open={floatOpen || undefined}
                     aria-label={t(floatOpen ? 'action.hideFileList' : 'action.showFileList')}
                     aria-expanded={floatOpen}
                     onClick={toggleFileList}
@@ -6575,7 +6619,7 @@ export function PendingPanel({
               {floatCard !== undefined && (
                 <>
                   <div
-                    className={css.fileListFloat}
+                    className={floatClosing ? `${css.fileListFloat} ${css.fileListFloatClosing}` : css.fileListFloat}
                     style={{ left: floatCard.left, top: floatCard.top, width: floatCard.width, height: floatCard.height }}
                     data-diff-floating-file-list
                   >

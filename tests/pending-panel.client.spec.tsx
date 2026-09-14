@@ -996,7 +996,7 @@ describe('PendingPanel', () => {
     expect(screen.queryByText('0')).toBeNull()
   })
 
-  it('drags the folded card too, bounded by the box it floats in', () => {
+  it('drags the folded card too, bounded by the box it floats in', async () => {
     // The folded list is the same list: its width is dragged by the same handler,
     // on the card's own right edge, and one state holds it — so the width set here
     // is the width the docked list takes when the window has room for it again.
@@ -1033,7 +1033,10 @@ describe('PendingPanel', () => {
       const knob = (): HTMLElement => document.querySelector('[data-diff-file-list-toggle]') as HTMLElement
       expect(card()).not.toBeNull()
       fireEvent.click(knob())
-      expect(card()).toBeNull()
+      // Folding it back draws the card into the knob's corner, so it outlives the press by
+      // the length of that; the knob brings it straight back.
+      expect(card()).not.toBeNull()
+      await waitFor(() => { expect(card()).toBeNull() })
       fireEvent.click(knob())
       expect(card().style.width).toBe('240px')
       // The grip is the card's right edge: a strip the card's own height, straddling
@@ -1090,7 +1093,7 @@ describe('PendingPanel', () => {
     }
   })
 
-  it('opens a floating list expanded, every time the panel opens', () => {
+  it('opens a floating list expanded, every time the panel opens', async () => {
     // The panel opens to show the list, not just the knob that reveals it. Folding it
     // away is the reader's move for that showing; the next open is a new showing.
     const originalWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth')
@@ -1101,9 +1104,11 @@ describe('PendingPanel', () => {
       fireEvent.click(screen.getByLabelText('panel.aria'))
       expect(card()).not.toBeNull()
 
-      // Folded by hand: it stays folded while the panel stays open…
+      // Folded by hand: it is drawn into the corner first (the card is still mounted while
+      // that plays), then it stays folded while the panel stays open…
       fireEvent.click(document.querySelector('[data-diff-file-list-toggle]') as HTMLElement)
-      expect(card()).toBeNull()
+      expect(card()).not.toBeNull()
+      await waitFor(() => { expect(card()).toBeNull() })
 
       // …and the next open starts expanded again, without waiting for the knob.
       fireEvent.click(screen.getByLabelText('panel.aria'))
@@ -1151,16 +1156,79 @@ describe('PendingPanel', () => {
     expect(source).toMatch(/useLayoutEffect\(\(\) => \{\s*measureFloatBoxRef\.current\(\)\s*\}, \[/)
   })
 
-  it('floats the file-list knob a little transparent until the pointer is on it', () => {
-    // Resting over the code view it should be present without shouting; hovered (or
-    // focused from the keyboard) it is solid. The *fill* is opaque in both states —
-    // see the test above — so this is about the whole control's weight.
+  it('keeps the file-list knob fully opaque, hovered or not', () => {
+    // It is the only way back to the file list once the list has folded, so it does not
+    // fade out when the pointer is elsewhere: no translucent rest state at all. The fill
+    // is the panel's own surface in both states (the hover tint is layered over it — see
+    // the test above), and the halo is what separates it from the code.
     const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const block = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
-    const idle = Number(/opacity:\s*([\d.]+)/.exec(block('fileListKnob'))?.[1] ?? '1')
-    expect(idle).toBeGreaterThan(0)
-    expect(idle).toBeLessThan(1)
-    expect(new RegExp('\\.fileListKnob:hover[^{]*\\{([^}]*)\\}').exec(css)?.[1] ?? '').toContain('opacity: 1')
+    expect(block('fileListKnob')).not.toContain('opacity:')
+    expect(block('fileListKnob')).toContain('background: var(--dsw-alias-bg-base)')
+    // Its outer glow is the heavier elevation token, not the floating chrome's own
+    // `lv2`: the knob is the file list's only entry while the list is folded, and it
+    // sits over the code, so it needs more halo to read as a control.
+    expect(block('fileListKnob')).toContain('--dsw-elevation-prominent')
+    // While the card is up it covers the knob, so the knob waits at zero and fades in on
+    // the transition as the card folds away — its halo riding along, since an element's
+    // own opacity carries its shadow with it. The fade is slow and symmetric: a front-loaded
+    // curve reads as the button hurrying in behind the departing card.
+    expect(block('fileListKnob')).toContain('transition: opacity 320ms ease-in-out')
+    expect(/\.fileListKnob\[data-open\] \{[^}]*opacity: 0/.test(css)).toBe(true)
+  })
+
+  it('folds the floating card away softly, toward the knob\'s corner', () => {
+    // The card used to grow in on every open and vanish on the press. The entrance is gone
+    // — pressing the knob puts the card there — and the exit is a gentle version of it: the
+    // card gives up a few percent of its size toward the corner the knob sits in while it
+    // fades, with nothing held back so neither half of it stands out. The panel holds it
+    // mounted for exactly as long as that runs.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    // Comments stripped: this case asks what the rule DECLARES, and the prose around it
+    // names the animations in passing.
+    const block = (name: string): string => (new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(css)?.[1] ?? '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(block('fileListFloat')).not.toContain('animation:')
+    expect(css).not.toContain('@keyframes fileListGrow')
+    expect(block('fileListFloatClosing')).toContain('fileListShrink 140ms')
+    expect(block('fileListFloatClosing')).toContain('forwards')
+    const shrink = /@keyframes fileListShrink \{([\s\S]*?)\n\}/.exec(css)?.[1] ?? ''
+    const frames = shrink.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(/from \{\s*opacity: 1;\s*transform: scale\(1\);\s*\}/.test(frames)).toBe(true)
+    // Soft, not a collapse: a few percent, and no keyframe in between holding the fade back
+    // (which is what made the earlier versions read as a lunge at the corner).
+    const last = Number(/scale\(([\d.]+)\)/.exec(/to \{([^}]*)\}/.exec(frames)?.[1] ?? '')?.[1] ?? '0')
+    expect(last).toBeGreaterThan(0.9)
+    expect(last).toBeLessThan(1)
+    expect(frames.match(/\d+% \{/g)).toBeNull()
+    // The floating card has no glow of its own: the halo belongs to the knob that reveals
+    // the list, and the fold shrinks toward that corner.
+    expect(block('fileListFloat')).toContain('box-shadow: none')
+    expect(block('fileListFloat')).toContain('transform-origin: top left')
+    const panel = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.tsx'), 'utf8')
+    expect(/const FILE_LIST_FOLD_MS = (\d+)/.exec(panel)?.[1]).toBe('140')
+    // The heavier glow is the open-button's: while the list is up, the knob drops it, and
+    // the button keeps it for the state it is actually seen in. Its fill stays the panel's
+    // own neutral surface — no accent — and the glow is what marks it.
+    const knob = block('fileListKnob')
+    expect(knob).toContain('--dsw-elevation-prominent')
+    expect(knob).toContain('background: var(--dsw-alias-bg-base)')
+    expect(knob).not.toContain('business-primary')
+    expect(/\.fileListKnob\[data-open\] \{[^}]*box-shadow: none/.test(css)).toBe(true)
+    expect(panel).toContain('data-open={floatOpen || undefined}')
+  })
+
+  it('keeps the file-list row\'s name in step with its metadata', () => {
+    // The row is a label among 11px metadata, so the code font at its own size made the
+    // name the loudest thing in the list; it is a step down from that, and the row centres
+    // the three things it holds rather than aligning them on the name's baseline (the tag's
+    // padding above and below the text pulled it out of line).
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const block = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
+    expect(block('rowPath')).toContain('font-size: 12px')
+    expect(block('rowPath')).toContain('line-height: 18px')
+    expect(block('rowHead')).toContain('align-items: center')
+    expect(block('rowHead')).not.toContain('align-items: baseline')
   })
 
   it('gives the folded list the docked list\'s right inset', () => {
@@ -1985,7 +2053,7 @@ describe('PendingPanel', () => {
     expect(position.textContent).toContain('1')
   })
 
-  it('collapses the file list to a floating button below the sidebar breakpoint', () => {
+  it('collapses the file list to a floating button below the sidebar breakpoint', async () => {
     const originalWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth')
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 600 })
     try {
@@ -2002,9 +2070,11 @@ describe('PendingPanel', () => {
       expect(toggle).not.toBeNull()
 
       expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
-      // Folding it back removes the card at once: only the opening is animated.
+      // Folding it back draws the card into the corner — it is still mounted while that
+      // plays — and the knob brings it back.
       fireEvent.click(toggle)
-      expect(document.querySelector('[data-diff-floating-file-list]')).toBeNull()
+      expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
+      await waitFor(() => { expect(document.querySelector('[data-diff-floating-file-list]')).toBeNull() })
 
       // …and the knob brings it back.
       fireEvent.click(toggle)
@@ -2016,9 +2086,10 @@ describe('PendingPanel', () => {
       expect(row).toBeDefined()
       fireEvent.click(row!)
       expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
-      // Clicking outside the card (the code box) folds it back at once.
+      // Clicking outside the card (the code box) folds it back the same way.
       fireEvent.pointerDown(document.querySelector('[data-diff-approval-panel]') as HTMLElement)
-      expect(document.querySelector('[data-diff-floating-file-list]')).toBeNull()
+      expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
+      await waitFor(() => { expect(document.querySelector('[data-diff-floating-file-list]')).toBeNull() })
     } finally {
       if (originalWidth !== undefined) Object.defineProperty(window, 'innerWidth', originalWidth)
       else delete (window as { innerWidth?: unknown }).innerWidth
@@ -2144,6 +2215,33 @@ describe('PendingPanel', () => {
       expect(card).not.toBeNull()
       expect(parseFloat(knob.style.left)).toBe(parseFloat(card.style.left))
       expect(parseFloat(knob.style.top)).toBe(parseFloat(card.style.top))
+    } finally {
+      if (originalWidth !== undefined) Object.defineProperty(window, 'innerWidth', originalWidth)
+      else delete (window as { innerWidth?: unknown }).innerWidth
+    }
+  })
+
+  it('folds the card away with the switch beside Add, through the same corner fold', async () => {
+    // The other way to fold the list: while the card is open, the switch folds it for good.
+    // Same gesture as the knob's, so the same fold plays, and only then does the folded mode
+    // take over.
+    const originalWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth')
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 600 })
+    try {
+      localStorage.setItem('diff-approval:file-list-float', '0')
+      render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      const card = (): Element | null => document.querySelector('[data-diff-floating-file-list]')
+      expect(card()).not.toBeNull()
+
+      fireEvent.click(document.querySelector('[data-diff-file-list-float]') as HTMLElement)
+      // Still there — folding — and the preference is not written yet, so nothing unmounts
+      // the card out from under the animation.
+      expect(card()).not.toBeNull()
+      expect(localStorage.getItem('diff-approval:file-list-float')).toBe('0')
+      await waitFor(() => { expect(card()).toBeNull() })
+      expect(localStorage.getItem('diff-approval:file-list-float')).toBe('1')
+      expect(document.querySelector('[data-diff-file-list-toggle]')).not.toBeNull()
     } finally {
       if (originalWidth !== undefined) Object.defineProperty(window, 'innerWidth', originalWidth)
       else delete (window as { innerWidth?: unknown }).innerWidth

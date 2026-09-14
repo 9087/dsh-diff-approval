@@ -1001,19 +1001,37 @@
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 8px;
   background: var(--dsw-alias-bg-base);
-  /* Resting, it floats a good deal transparent over the code it sits on — present
-     without shouting — and the pointer (or the keyboard) makes it solid. The hover
-     fill itself stays opaque: see below. */
-  opacity: 0.45;
-  transition: opacity 120ms ease;
+  /* Opaque at rest: it is the only way back to the file list once the list has folded, so
+     it stays legible over whatever code happens to sit under it. The halo below is what
+     keeps it from reading as part of that code. */
   color: var(--dsw-alias-label-primary);
   cursor: pointer;
-  box-shadow: var(--dsw-shadow-lv2);
+  /* The card is painted over this button, so while the list is open the button is held at
+     zero opacity and this transition is what brings it in: folding the list away uncovers
+     it by fading it up, rather than snapping it on the moment the card unmounts. Slow and
+     symmetric — `ease-out` front-loads the fade, which reads as the button hurrying in. */
+  transition: opacity 320ms ease-in-out;
+  /* A firmer outer glow than the other floating chrome (`.dsw-shadow-lv2`): this knob is
+     the file list's only entry once the list has folded, and it sits over the code, so it
+     needs the halo to read as a control rather than a mark in the diff. The elevation
+     token carries its own hairline stroke, which keeps the button's edge crisp over a
+     light row. */
+  box-shadow: var(--dsw-elevation-prominent);
+}
+
+/* While the list itself is open the glow belongs to nothing — the card is painted over the
+   knob but NOT over the halo around it, so a 20px glow would fringe out past the card's
+   top-left corner and read as a glow on the card — and the button itself is held invisible,
+   since the card covers it anyway. Both come back together as the card folds away: the
+   opacity through the transition above, the halo the moment it is asked for again (its own
+   opacity carries the shadow with it). */
+.fileListKnob[data-open] {
+  box-shadow: none;
+  opacity: 0;
 }
 
 .fileListKnob:hover,
 .fileListKnob:focus-visible {
-  opacity: 1;
   /* Keep the surface opaque. The knob floats over the code view, and the hover tint
      the app publishes is translucent (it is meant to be painted over a surface, the
      way the docked list's divider sits on the panel): used as the fill on its own it
@@ -1043,27 +1061,41 @@
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 12px;
   background: var(--dsw-alias-bg-base);
-  box-shadow: var(--dsw-shadow-lv2);
-  /* It grows out of the corner the knob sits in — the knob is the anchor, so the
-     two read as one control. Folding it back is immediate, with no shrink. */
+  /* No glow of its own: the halo belongs to the knob that reveals the list (see
+     `.fileListKnob`), and a floating card is delineated well enough by its border and its
+     opaque surface. It also has no entrance to play — it is simply there when the knob is
+     pressed — and folding it away is the one thing that animates. The origin is the
+     corner the knob sits in, which is the corner the exit shrinks toward. */
+  box-shadow: none;
   transform-origin: top left;
-  animation: fileListGrow 140ms ease-out;
 }
 
-@keyframes fileListGrow {
+/* Folding the card away: a soft version of the entrance it used to have, run backwards —
+   the card gives up a few percent of its size toward the corner the knob sits in (the
+   transform origin) while it fades out across the same 140ms. Deliberately gentle: the
+   fade carries the exit and the shrink is only there to give it a direction, so the card
+   does not appear to lunge at the corner. The class is added while the panel still counts
+   the card as open, so it stays mounted for exactly as long as the animation runs; it takes
+   no pointer events, so a click during it goes to whatever is underneath.
+
+   Deliberately NOT switched off under `prefers-reduced-motion`: this is the card's only
+   motion, and an OS-level "reduce motion" turned it into no feedback at all — clicking away
+   looked like it did nothing. */
+.fileListFloatClosing {
+  animation: fileListShrink 140ms ease-in forwards;
+  pointer-events: none;
+}
+
+@keyframes fileListShrink {
   from {
-    opacity: 0;
-    transform: scale(0.92);
-  }
-  to {
     opacity: 1;
     transform: scale(1);
   }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .fileListFloat {
-    animation: none;
+  to {
+    opacity: 0;
+    /* The entrance's own 8% would still read as a move of its own; half of it is enough to
+       point the fade at the corner. */
+    transform: scale(0.96);
   }
 }
 
