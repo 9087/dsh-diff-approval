@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconChevronDownOutline14, IconRefreshOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
-import { DEFAULT_KEYBINDINGS, DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, COVER_CHANGED_EVENT, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, pasteOnCopyEnabled, quickSummonKey, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPanelCover, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
+import { DEFAULT_KEYBINDINGS, DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, COVER_CHANGED_EVENT, commentModeEnabled, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, pasteOnCopyEnabled, quickSummonKey, setCommentModeEnabled, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPanelCover, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import { ColorPicker } from './ColorPicker.tsx'
@@ -392,6 +392,9 @@ function DiffViewPreview({ fontScale, lineHeight, addColor, delColor, tabSize, t
  */
 export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const [pasteOnCopy, setPasteOnCopyState] = useState(pasteOnCopyEnabled)
+  // Comment mode is a preview that ships off (see `commentModeEnabled`); the row is here,
+  // and not in the diff-view group, because it is about the commenting feature itself.
+  const [commentMode, setCommentModeState] = useState(commentModeEnabled)
   const [includeUntracked, setIncludeUntrackedState] = useState(includeUntrackedEnabled)
   const [confirmFileRemove, setConfirmFileRemoveState] = useState(confirmFileRemoveEnabled)
   const [tab, setTabState] = useState(tabWidth)
@@ -442,6 +445,10 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const setPasteOnCopy = (value: boolean): void => {
     setPasteOnCopyState(value)
     setPasteOnCopyEnabled(value)
+  }
+  const setCommentMode = (value: boolean): void => {
+    setCommentModeState(value)
+    setCommentModeEnabled(value)
   }
   const setIncludeUntracked = (value: boolean): void => {
     setIncludeUntrackedState(value)
@@ -601,6 +608,14 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
               value={pasteOnCopy}
               onSelect={setPasteOnCopy}
               dataAttribute="data-diff-paste-on-copy-select"
+              t={t}
+            />
+            <PreferenceRow
+              title={t('panel.commentMode')}
+              description={t('panel.commentModeDesc')}
+              value={commentMode}
+              onSelect={setCommentMode}
+              dataAttribute="data-diff-comment-mode-select"
               t={t}
             />
           </div>

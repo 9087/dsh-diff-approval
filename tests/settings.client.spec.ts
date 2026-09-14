@@ -10,6 +10,7 @@ import {
   currentDiffAddColor, currentDiffDelColor,
   diffAddColor, diffDelColor, diffFontScale, diffLineHeight, fileListFloat, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, quickSummonKey,
   panelCover, panelPresentation,
+  commentModeEnabled, setCommentModeEnabled,
   setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setFileListFloat, setLanguageForSuffix, setMdMaxWidth, setMdPreviewEnabled, setQuickSummonKey, setTabWidth, tabWidth,
   setPanelCover, setPanelPresentation,
 } from '../src/client/settings.ts'
@@ -24,6 +25,24 @@ const DIFF_DEL_COLOR_KEY = 'diff-approval:diff-del-color'
 const MD_PREVIEW_KEY = 'diff-approval:md-preview'
 const MD_MAX_WIDTH_KEY = 'diff-approval:md-max-width'
 const LANG_BY_SUFFIX_KEY = 'diff-approval:lang-by-suffix'
+
+describe('settings.commentMode', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('ships off, under a key meant to be replaced rather than renamed', () => {
+    // The value lives under a `-preview` key on purpose (see `settings.ts`): the mode is
+    // expected to default ON later, and an answer stored under the field's final name would
+    // keep everyone who ever ran this version off, with nothing to notice. The last
+    // assertion is the guard: the eventual key must still be untouched.
+    expect(commentModeEnabled()).toBe(false)
+    setCommentModeEnabled(true)
+    expect(commentModeEnabled()).toBe(true)
+    expect(localStorage.getItem('diff-approval:comment-mode-preview')).toBe('1')
+    expect(localStorage.getItem('diff-approval:comment-mode')).toBeNull()
+    setCommentModeEnabled(false)
+    expect(commentModeEnabled()).toBe(false)
+  })
+})
 
 describe('settings.tabWidth', () => {
   beforeEach(() => localStorage.clear())

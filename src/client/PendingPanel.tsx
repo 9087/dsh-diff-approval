@@ -44,7 +44,7 @@ import { OPEN_PANEL_FILE_EVENT, PANEL_STATE_EVENT, SHOW_PANEL_EVENT, TOGGLE_PANE
 import type { PanelFileDetail, PanelStateDetail } from './dock.tsx'
 import { lastPanelFile, panelFileOffset, rememberPanelView } from './panel-memory.ts'
 import { composerCoveredByPanel, leaveComposerCaret } from './composer-cover.ts'
-import { confirmFileRemoveEnabled, COVER_CHANGED_EVENT, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
+import { commentModeEnabled, COMMENT_MODE_CHANGED_EVENT, confirmFileRemoveEnabled, COVER_CHANGED_EVENT, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
 import { matchRangesOf } from './search.ts'
 import type { SearchOptions } from './search.ts'
@@ -2341,6 +2341,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   const [hScrollbarPx, setHScrollbarPx] = useState(0)
   const [hoveredBlock, setHoveredBlock] = useState<number | undefined>(undefined)
   const [selection, setSelection] = useState<RowRange | undefined>(undefined)
+  // Comment mode (a preview that ships off — see `commentModeEnabled`): whether the panel
+  // offers to comment on a range at all. The event below is what re-renders the panel when
+  // the Settings section flips it, since the two are separate mounts.
+  const [commentMode, setCommentMode] = useState(commentModeEnabled)
   // Discussions attached to a row range, kept per file so switching files (and
   // coming back) does not lose them. Each one reserves rows in the height table
   // (see `discussionRowExtras`) and paints its block below the range, so the code
@@ -3522,6 +3526,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
 
   /** Start a discussion on the current selection (no-op on a range that has one). */
   const addDiscussion = (): void => {
+    // Comment mode is off by default (a preview): the button and the chord are withheld
+    // while it is, so this is the belt to that pair of braces.
+    if (!commentMode) return
     if (selection === undefined) return
     // A row belongs to one annotation at most, so any overlap refuses a second.
     if (discussionOverlapping(discussions, selection) !== undefined) return
@@ -4167,15 +4174,24 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
   }, [copySelection])
 
-  // What the frame offers for the current selection (see `selectionFrame`). The render
-  // needs `visible`; the comment chord is live exactly while `comment` is, so a frame
-  // showing only keep/revert leaves Ctrl+K to the browser. Declared here, above the key
-  // handlers, because the chord lives as long as the button it stands for.
+  // Comment mode changed elsewhere (the Settings section is a different mount): re-read it,
+  // so a switch flipped there reaches the frame without waiting for the next open.
+  useEffect(() => {
+    const onCommentMode = (): void => { setCommentMode(commentModeEnabled()) }
+    window.addEventListener(COMMENT_MODE_CHANGED_EVENT, onCommentMode)
+    return () => { window.removeEventListener(COMMENT_MODE_CHANGED_EVENT, onCommentMode) }
+  }, [])
+
+  // What the frame offers for the current selection (see `selectionFrame`), with comment
+  // mode applied: an OFF mode withholds the comment action but not the frame, so a range
+  // over change blocks still offers keep/revert. A range whose only action would have been
+  // the comment then has no frame at all — which is also what keeps the chord below off.
   const frameForSelection = !splitView && selection !== undefined
     ? selectionFrame({ coversBlocks: selectionRange !== undefined, hasDiscussion: discussionOverlapping(discussions, selection) !== undefined })
     : undefined
-  const selectionFrameVisible = frameForSelection?.visible === true
-  const selectionCommentOffered = frameForSelection?.comment === true
+  const selectionCommentOffered = commentMode && frameForSelection?.comment === true
+  const selectionFrameVisible = frameForSelection !== undefined
+    && (frameForSelection.keepRevert || selectionCommentOffered)
 
   // Ctrl/Cmd+K comments on the selection - but only while the button that does it is on
   // screen: the chord is bound to the affordance, so it can never start a comment the
@@ -5022,27 +5038,29 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
               covered change blocks, and the comment on the range. The hairline
               appears only when both are there - keep/revert are hidden over a
               range with no covered blocks (their `hidden` attribute takes them
-              out of the layout), and a divider with nothing on one side of it
-              would read as a rendering fault. */}
-          {selectionRange !== undefined && (
+              out of the layout), the comment group is missing while comment mode
+              is off, and a divider with nothing on one side of it would read as a
+              rendering fault. */}
+          {selectionRange !== undefined && selectionCommentOffered && (
             <span className={css.blockActionsDivider} data-diff-selection-divider aria-hidden="true" />
           )}
-          {/* Always offered: a range without change blocks can still be
-              discussed. A range that already has a discussion does not offer a
-              second one - `selectionFrame` decides, and a frame with no visible
-              action is not rendered at all. The chord is shown the way the other
-              chord-bearing buttons show theirs, and it is live exactly while this
-              button is. */}
-          <Tooltip label={withChord(t('action.comment'), 'addComment')} side="bottom" delayMs={500}>
-            <button
-              type="button"
-              className={css.action}
-              data-diff-selection-comment
-              onClick={addDiscussion}
-            >
-              {t('action.comment')}
-            </button>
-          </Tooltip>
+          {/* Offered when the range has no discussion yet and comment mode is on
+              (`selectionFrame`, plus the mode): a range without change blocks can
+              still be discussed, and a range that already has one gets no second.
+              The chord is shown the way the other chord-bearing buttons show
+              theirs, and it is live exactly while this button is. */}
+          {selectionCommentOffered && (
+            <Tooltip label={withChord(t('action.comment'), 'addComment')} side="bottom" delayMs={500}>
+              <button
+                type="button"
+                className={css.action}
+                data-diff-selection-comment
+                onClick={addDiscussion}
+              >
+                {t('action.comment')}
+              </button>
+            </Tooltip>
+          )}
           </div>
         ) : hoveredBlock !== undefined && model.blocks[hoveredBlock] !== undefined ? (
           <div

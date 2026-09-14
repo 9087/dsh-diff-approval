@@ -18,6 +18,17 @@ const LANG_BY_SUFFIX_KEY = 'diff-approval:lang-by-suffix'
 const PRESENTATION_KEY = 'diff-approval:presentation'
 const FLOAT_COVER_KEY = 'diff-approval:float-cover'
 const FILE_LIST_FLOAT_KEY = 'diff-approval:file-list-float'
+// TEMPORARY, and deliberately NOT the field's final name. Comment mode ships off for now
+// and is expected to default ON once it has seen some use. A value stored under the final
+// key would outlive that flip — for anyone who toggled it, and for any surface that writes
+// a preference out eagerly — leaving them stuck off with no way to notice. Parking it under
+// a `-preview` key keeps the future field empty for everybody, so its default decides, and
+// whoever opted into the preview lands on the same answer that default gives.
+//
+// When the mode becomes the default: DELETE this constant, its getter and its setter, and
+// add the real field — do not rename them. Renaming would carry the preview's stored answer
+// over as if the user had chosen it under the new default.
+const COMMENT_MODE_PREVIEW_KEY = 'diff-approval:comment-mode-preview'
 const WRAP_PREFIX = 'diff-approval:wrap:'
 
 /** Where the review panel shows: floating over the app, or docked as a tab in the
@@ -397,6 +408,29 @@ export function mdPreviewEnabled(): boolean {
 /** Persist the Markdown-preview default preference. */
 export function setMdPreviewEnabled(value: boolean): void {
   localStorage.setItem(MD_PREVIEW_KEY, value ? '1' : '0')
+}
+
+/**
+ * Whether commenting on a diff range is offered: the selection frame's comment button,
+ * and the chord that stands for it. Defaults to off while the mode is a preview (see
+ * {@link COMMENT_MODE_PREVIEW_KEY}); only an explicit `'1'` enables it. This gates
+ * STARTING a thread, not the threads themselves — one already written keeps rendering,
+ * so turning the mode off never hides work or interrupts an answer on its way back.
+ * @returns whether comment mode is on.
+ */
+export function commentModeEnabled(): boolean {
+  return localStorage.getItem(COMMENT_MODE_PREVIEW_KEY) === '1'
+}
+
+/** Window event: comment mode was toggled (see {@link setCommentModeEnabled}). */
+export const COMMENT_MODE_CHANGED_EVENT = 'diff-approval:comment-mode'
+
+/** Persist the comment-mode preference. */
+export function setCommentModeEnabled(value: boolean): void {
+  localStorage.setItem(COMMENT_MODE_PREVIEW_KEY, value ? '1' : '0')
+  // The panel and the Settings section are separate mounts, so the event is how a switch
+  // flipped in one reaches the other straight away — the same hand-off the cover uses.
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(COMMENT_MODE_CHANGED_EVENT))
 }
 
 /**

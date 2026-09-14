@@ -72,7 +72,7 @@ npx @deepseek-ai/dsh plugin --profile web add dsh-diff-approval
 
 ## 🚀 用法
 
-1. 照常和 agent 对话——成功的 `edit` / `write` / 编辑器（`str_replace_editor`）调用会自动记录。
+1. 照常和智能体对话——成功的 `edit` / `write` / 编辑器（`str_replace_editor`）调用会自动记录。
 2. 点击侧边栏底部的 **待处理改动** 入口，逐文件查看差异并 **保留 / 回退**。
 3. 列表为空时，点 **导入工作区改动**，把工作区的 Git / SVN / Perforce 本地改动拉入。
 

@@ -2,7 +2,7 @@
 // PendingPanel: badge, per-path grouping, per-operation rows, actions, jump
 // navigation, live-state warnings, and the line-selection copy toolbar.
 
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -12,6 +12,7 @@ import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingFileDiff } from '../src/types.ts'
 import { PendingPanel, frameInsets } from '../src/client/PendingPanel.tsx'
 import { lastPanelFile, panelFileOffset, resetPanelMemory } from '../src/client/panel-memory.ts'
+import { setCommentModeEnabled } from '../src/client/settings.ts'
 import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
 import { DiffApprovalHeaderEntry } from '../src/client/header-entry.tsx'
 import { DiffApprovalSettingsTab } from '../src/client/SettingsTab.tsx'
@@ -36,6 +37,10 @@ afterEach(resetPanelMemory)
 // only: the panel focuses the first one it finds, so a leftover would silently
 // redirect the next test's caret assertion.
 afterEach(() => { for (const stale of document.querySelectorAll('[data-composer-input]')) stale.remove() })
+// Comment mode is a preview that ships OFF (see `commentModeEnabled`). The commenting
+// tests are about what the mode does once it is on, so the suite switches it on here; the
+// default and the off-state behaviour are asserted on their own below.
+beforeEach(() => { localStorage.setItem('diff-approval:comment-mode-preview', '1') })
 
 beforeAll(() => {
   // jsdom has no scrolling; the jump effect centers rows through it.
@@ -4476,6 +4481,57 @@ describe('PendingPanel', () => {
     expect(wheel(body, { deltaY: 100 }).defaultPrevented).toBe(false)
     expect(wheel(block, { deltaY: 100 }).defaultPrevented).toBe(false)
     expect(scrolled).toBe(500)
+  })
+
+  it('offers no comment at all until comment mode is switched on', () => {
+    // Comment mode ships OFF (it is a preview, see `commentModeEnabled`): no comment button
+    // and no chord behind it - and, for a range whose only action would have been the
+    // comment, no frame at all. Keep/revert over change blocks is untouched.
+    localStorage.removeItem('diff-approval:comment-mode-preview')
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+    Object.defineProperty(body, 'scrollTop', { configurable: true, value: 0 })
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const kindOf = (row: HTMLElement): string => row.querySelector('[data-diff-code]')?.getAttribute('data-diff-code-line') ?? ''
+    const select = (from: HTMLElement, to: HTMLElement = from): void => {
+      const node = (row: HTMLElement): Node => (row.querySelector('[data-diff-code]') ?? row).firstChild ?? row
+      const startNode = node(from)
+      const endNode = node(to)
+      vi.spyOn(window, 'getSelection').mockReturnValue({
+        isCollapsed: false,
+        anchorNode: startNode,
+        focusNode: endNode,
+        rangeCount: 1,
+        getRangeAt: () => ({ startContainer: startNode, startOffset: 0, endContainer: endNode, endOffset: 1 }),
+        removeAllRanges: () => {},
+      } as unknown as Selection)
+      act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    }
+
+    select(rows.find(row => kindOf(row) === 'context')!)
+    expect(document.querySelector('[data-diff-selection-actions]')).toBeNull()
+    expect(document.querySelector('[data-diff-selection-comment]')).toBeNull()
+    expect(fireEvent.keyDown(document.body, { key: 'k', ctrlKey: true })).toBe(true)
+    expect(document.querySelector('[data-diff-discussion]')).toBeNull()
+
+    // A range over the whole of a change block still offers keep/revert: the mode withholds
+    // the comment half of the frame, not the frame.
+    const changed = rows.find(row => kindOf(row) === 'add' || kindOf(row) === 'del')!
+    select(changed, rows[rows.indexOf(changed) + 1]!)
+    expect(document.querySelector('[data-diff-selection-actions]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-selection-comment]')).toBeNull()
+    expect(document.querySelector('[data-diff-selection-divider]')).toBeNull()
+    expect((document.querySelector('[data-diff-selection-keep]') as HTMLButtonElement).hidden).toBe(false)
+
+    // Switching it on in Settings (a different mount) reaches the open panel at once.
+    act(() => { setCommentModeEnabled(true) })
+    expect(document.querySelector('[data-diff-selection-comment]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-selection-divider]')).not.toBeNull()
   })
 
   it('comments on the selection from the keyboard, for as long as the button is up', () => {
