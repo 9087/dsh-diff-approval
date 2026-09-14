@@ -82,7 +82,12 @@ export const DISCUSSION_HEADER_ROWS = 1
 /** Rows the compose area occupies: 0.3 + 1.4 + 0.3 of a code row. */
 export const DISCUSSION_COMPOSE_ROWS = 2
 
-/** The most rows an answer may take before it would swamp the diff it annotates. */
+/**
+ * The body budget for the turns a block shows: how many rows of older turns it is worth
+ * carrying before the diff it annotates is swamped. It is spent in WHOLE turns — see
+ * `discussionTail` — so a single turn that needs more than this is shown in full rather
+ * than sliced in half (which is what a hard cap on the body's row count did).
+ */
 export const DISCUSSION_MAX_BODY_ROWS = 12
 
 /**
@@ -155,7 +160,10 @@ export function discussionText(message: DiscussionMessage): string {
  */
 export function discussionRows(discussion: Discussion): number {
   if (discussion.collapsed) return DISCUSSION_HEADER_ROWS
-  const body = Math.max(1, Math.min(discussion.bodyRows ?? DISCUSSION_COMPOSE_ROWS, DISCUSSION_MAX_BODY_ROWS))
+  // The body is taken as measured. It is already the sum of whole turns (the tail drops
+  // older ones entirely), so clamping it here would only make the box shorter than the text
+  // inside it — which the block clips, leaving the last turn cut off mid-paragraph.
+  const body = Math.max(1, discussion.bodyRows ?? DISCUSSION_COMPOSE_ROWS)
   return DISCUSSION_HEADER_ROWS + body
 }
 

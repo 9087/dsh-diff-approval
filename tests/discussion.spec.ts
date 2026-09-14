@@ -24,9 +24,10 @@ describe('discussions in the diff row stream', () => {
     // a measured body it holds the compose area; a measured body replaces that.
     expect(discussionRows(discussion('a', 1, 1))).toBe(DISCUSSION_HEADER_ROWS + DISCUSSION_COMPOSE_ROWS)
     expect(discussionRows({ ...discussion('a', 1, 1), bodyRows: 4 })).toBe(DISCUSSION_HEADER_ROWS + 4)
-    // An answer longer than the cap is clipped to it, so one block cannot swamp
-    // the diff it annotates.
-    expect(discussionRows({ ...discussion('a', 1, 1), bodyRows: 99 })).toBe(DISCUSSION_HEADER_ROWS + DISCUSSION_MAX_BODY_ROWS)
+    // A body longer than the cap is carried in full: the cap is spent on whole older turns
+    // (see `discussionTail`), and a box shorter than the text it holds is what cut the last
+    // turn off mid-paragraph - the text was rendered whole inside it and clipped.
+    expect(discussionRows({ ...discussion('a', 1, 1), bodyRows: 99 })).toBe(DISCUSSION_HEADER_ROWS + 99)
     expect(discussionRows(discussion('a', 1, 1, true))).toBe(DISCUSSION_HEADER_ROWS)
   })
 

@@ -3141,7 +3141,11 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     return {
       messages: tail.messages,
       hidden: tail.hidden,
-      rows: Math.min(DISCUSSION_MAX_BODY_ROWS, Math.ceil(tail.rows + trailing)),
+      // The cap is spent on whole older turns by the tail above; the newest piece (an
+      // answer, a note, the compose area) is always carried in full, even when it is
+      // longer than the cap. Clamping the total here is what cut the last paragraph in
+      // half: the text was rendered whole inside a box too short for it.
+      rows: Math.ceil(tail.rows + trailing),
     }
   }, [messageSizeOf])
 
