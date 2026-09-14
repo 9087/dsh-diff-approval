@@ -19,10 +19,11 @@ import { CoverageControl, CoverageNotice, COVER_NOTICE_MS } from './coverage-con
 import { closeHint, summonHint, withChord } from './chords.ts'
 import { blockRangesOf, changeBlocksOf, computeIntraLineDiff, computeWholeFileDiff } from './whole-file-diff.ts'
 import {
-  DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, DISCUSSION_MAX_BODY_ROWS, discussionOverlapping, discussionPlacements,
+  DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, DISCUSSION_MAX_BODY_ROWS, discussionOverlapping,
   discussionRowExtras, discussionRows, discussionTail, discussionText, remapDiscussion, selectionFrame, stripBlankLines,
 } from './discussion.ts'
 import type { Discussion, DiscussionMessage } from './discussion.ts'
+import { frameFollowKeyframes } from './scroll-follow.ts'
 import type { ChatView } from './chat-bridge.ts'
 import { renderMarkdownPreview } from './markdown-preview.ts'
 import { resolvePreviewImages } from './markdown-images.ts'
@@ -2329,6 +2330,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   /** The scroll box's non-scrolling parent, which carries the chrome painted over
    *  it (discussion blocks, action frames, the search bar) — see the wheel effect. */
   const bodyWrapRef = useRef<HTMLDivElement>(null)
+  // The floating action frame (whichever of the two it is): the element the follow
+  // animation is attached to.
+  const frameRef = useRef<HTMLDivElement>(null)
   const [focus, setFocus] = useState(0)
   const [scrollTick, setScrollTick] = useState(0)
   const [scrollTop, setScrollTop] = useState(0)
@@ -3039,11 +3043,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     const scrollbarWidth = scroller.offsetWidth - scroller.clientWidth
     return scrollbarWidth > 0 ? 0 : OVERVIEW_RULER_WIDTH_PX
   })()
-  // The scroller's own horizontal offset, for the same DOM-reading reason: the
-  // blocks are laid out in content coordinates, so this is what puts them back at
-  // the viewport's left edge. `placeRef` keeps it current between renders, in the
-  // same frame as the scroll.
-  const scrollLeftNow = bodyRef.current?.scrollLeft ?? 0
+  // The block's own horizontal placement is the browser's job now: it is mounted
+  // under a zero-width `position: sticky` pin in its row (`.discussionPin`), which
+  // holds the panel's left edge while the code slides sideways. Nothing here has to
+  // read `scrollLeft`, and no scroll event has to place anything.
 
   /**
    * How many code rows one message occupies when the block renders it, at the code's
@@ -3166,13 +3169,19 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     () => discussionRowExtras(laidDiscussions, rows.length),
     [laidDiscussions, rows.length],
   )
-  // Blocks sharing a row stack in insertion order; the reserved rows belong to
-  // the row they hang below, so each block's own position adds what is already
-  // reserved under that row (see the render).
-  const discussionPlacement = useMemo(
-    () => discussionPlacements(laidDiscussions, rows.length),
-    [laidDiscussions, rows.length],
-  )
+  // Blocks sharing a row render in insertion order, one row each, so their reserved
+  // rows never overlap: the row a block hangs below is its range's last row, clamped
+  // to the diff (a stale anchor after an edit keeps the block at the end of the file).
+  const discussionsAtRow = useMemo(() => {
+    const byRow = new Map<number, Discussion[]>()
+    for (const discussion of laidDiscussions) {
+      const row = Math.max(0, Math.min(discussion.anchor.end, Math.max(0, rows.length - 1)))
+      const list = byRow.get(row)
+      if (list === undefined) byRow.set(row, [discussion])
+      else list.push(discussion)
+    }
+    return byRow
+  }, [laidDiscussions, rows.length])
   /**
    * The rows a discussion annotates. They carry their own wash, so the mark scrolls with
    * the code in both axes with no positioning at all — the overlay this replaces had to
@@ -3436,35 +3445,13 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     })
   }, [model, file.id])
 
-  // The block elements, so the sideways half of their placement happens in the SAME frame
-  // as the scroll itself. They sit in the scroller's CONTENT coordinates, which the
-  // browser scrolls vertically by itself — no main-thread work there and no lag — so the
-  // counter-translation that keeps them in view while the code moves sideways is all this
-  // has to write. (A scroll-driven CSS animation would move that half to the compositor,
-  // which is the standard fix; measured against this browser build, a scroll timeline
-  // parses and reports support but never advances — `0%` while a plain animation runs —
-  // so it would leave the block unpinned. Hence the scripted fallback.)
-  const discussionEls = useRef(new Map<string, HTMLDivElement>())
-  const placeRef = useRef<() => void>(() => {})
-  placeRef.current = (): void => {
-    const left = bodyRef.current?.scrollLeft ?? 0
-    const shift = `translateX(${left}px)`
-    for (const discussion of laidDiscussions) {
-      const placement = discussionPlacement.get(discussion.id)
-      const row = placement?.row ?? discussion.anchor.end
-      const below = (placement?.belowRows ?? 0) * ROW_HEIGHT_PX
-      const block = discussionEls.current.get(discussion.id)
-      if (block !== undefined) {
-        block.style.top = `${offsetOf(row) + ROW_HEIGHT_PX + below}px`
-        block.style.transform = shift
-      }
-    }
-  }
-  // Re-run after every render that can move a block: a rebuilt row model
-  // (`laidDiscussions`/`discussionPlacement`) or a new scroll offset. The offset
-  // only has to be read here because a render can happen between two scroll
-  // events; the scroll path itself calls `placeRef` directly.
-  useLayoutEffect(() => { placeRef.current() }, [laidDiscussions, discussionPlacement, scrollTop])
+  // Nothing places a block: each one is a row in the code's own stream, so the browser
+  // scrolls it vertically with the code, and its zero-width sticky pin (`.discussionPin`)
+  // holds the panel's left edge while the code slides sideways. Both axes are the
+  // compositor's, and `setScrollTop` only has to re-render the window. (A scroll-driven
+  // animation would do the sideways half too, but the pin needs no keyframes at all; the
+  // action frame, whose clamp is not a plain translation, uses one — see
+  // `frameFollowKeyframes`.)
 
   // Put the caret in a just-created block's input, so commenting is one gesture
   // (pick rows → 评论 → type) rather than two. Runs after the commit, so the
@@ -3722,21 +3709,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     live: splitView ? splitVisible?.live ?? false : viewportHeight > 0,
   })
 
-  // The floating Keep/Revert frame anchors to the hovered block's bottom edge.
-  // It lives in the non-scrolling wrapper (viewport coordinates), so subtract
-  // scrollTop, and clamp it so its own bottom never passes the visible diff
-  // area's bottom (`viewportHeight - FRAME_PX`) — a block near the viewport
-  // bottom would otherwise push the frame off into the status bar/composer.
-  // Never clamps past 0.
-  const blockEnd = hoveredBlock === undefined ? undefined : model.blocks[hoveredBlock]?.end
-  const blockActionsTop = blockEnd === undefined
-    ? 0
-    : Math.max(0, Math.min(offsetOf(blockEnd + 1) - scrollTop - 2, Math.max(0, viewportHeight - BLOCK_ACTIONS_FRAME_PX)))
-
-  // The selection frame anchors to the last covered block's bottom edge - the
-  // same spot that block's own hover frame would use. A selection that covers no
-  // change block (comment-only) has no such block, so it anchors to its own last
-  // row instead: the frame sits under the rows the user selected either way.
+  // The floating action frame anchors to the bottom edge of the hovered block, or of
+  // the last block a selection covers. A selection that covers no change block
+  // (comment-only) has no such block, so it anchors to its own last row instead.
+  const hoveredBlockEnd = hoveredBlock === undefined ? undefined : model.blocks[hoveredBlock]?.end
   const selectionBlockEnd = ((): number | undefined => {
     if (coveredBlockIndices.length > 0) {
       const lastIndex = coveredBlockIndices[coveredBlockIndices.length - 1]
@@ -3747,9 +3723,6 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     }
     return selection?.end
   })()
-  const selectionActionsTop = selectionBlockEnd === undefined
-    ? 0
-    : Math.max(0, Math.min(offsetOf(selectionBlockEnd + 1) - scrollTop - 2, Math.max(0, viewportHeight - BLOCK_ACTIONS_FRAME_PX)))
 
   // Widest line in the file, in characters: pins the table's width so the
   // added/deleted tint spans the same width at every scroll position (the
@@ -4034,11 +4007,6 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     if (body === null) return
     setScrollTop(body.scrollTop)
     setViewportHeight(body.clientHeight)
-    // The discussion overlays' horizontal offset is placed here, in the same frame
-    // as the scroll, instead of waiting for the render that `setScrollTop`
-    // schedules. Their vertical position needs no placement at all: they are laid
-    // out in the scroller's content coordinates and scroll natively.
-    placeRef.current()
     // Re-anchor the "current diff" (`focus`) to the block under the viewport
     // anchor, so a manual scroll updates which block prev/next walk from instead
     // of a stale last-jumped-to block. Updating focus does NOT recenter — the
@@ -4461,6 +4429,44 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     </div>
   ) : null
 
+  // Which of the two frames is on screen: they are exclusive, and both hang off the
+  // bottom edge of the row their anchor ends on.
+  const selectionFrameVisible = !splitView && selection !== undefined
+    && selectionFrame({ coversBlocks: selectionRange !== undefined, hasDiscussion: discussionOverlapping(discussions, selection) !== undefined }).visible
+  const frameAnchorEnd = selectionFrameVisible ? selectionBlockEnd : hoveredBlockEnd
+  // The anchor in the scroller's CONTENT coordinates: the row's bottom edge, less the 2px
+  // that tuck the frame against it. The frame's POSITION is not written from here — see
+  // the follow animation below — only this row-anchored number is.
+  const frameAnchorTop = frameAnchorEnd === undefined ? 0 : offsetOf(frameAnchorEnd + 1) - 2
+  const frameLimit = Math.max(0, viewportHeight - BLOCK_ACTIONS_FRAME_PX)
+  // With scroll-driven animations the browser owns the frame's position: it interpolates
+  // the clamp over the scroll range off the main thread, so the frame cannot trail the
+  // code the compositor has already moved. Without them the same clamp is evaluated here,
+  // from the render that `setScrollTop` schedules — a frame late, but correct. The range
+  // is the row model's own height (the scroller has no padding or border), so it needs no
+  // measurement and follows a discussion that just reserved rows.
+  const maxScroll = Math.max(0, totalHeight - viewportHeight)
+  const frameFollowsScroll = typeof ScrollTimeline !== 'undefined'
+  const frameTop = frameFollowsScroll ? 0 : Math.max(0, Math.min(frameAnchorTop - scrollTop, frameLimit))
+
+  // Start (and restart) the follow animation whenever what it maps changes: the anchor,
+  // the scrollable range, the box it is clamped into, or which of the two frames is up.
+  // `fill: both` so the frame is already in place before the first scroll, and a layout
+  // effect because until the animation exists the frame would sit at the wrapper's top
+  // edge — a one-frame flash at the wrong end of the screen.
+  useLayoutEffect(() => {
+    const element = frameRef.current
+    const body = bodyRef.current
+    if (!frameFollowsScroll || frameAnchorEnd === undefined || element === null || body === null) return
+    const keyframes = frameFollowKeyframes(frameAnchorTop, maxScroll, viewportHeight, BLOCK_ACTIONS_FRAME_PX)
+      .map(stop => ({ offset: stop.offset, transform: `translateY(${stop.y}px)` }))
+    const animation = element.animate(keyframes, { duration: 1000, fill: 'both' })
+    // Reading the scroll offset is the browser's job now: the animation's clock IS the
+    // scroller's scroll progress, on the compositor.
+    animation.timeline = new ScrollTimeline({ source: body })
+    return () => { animation.cancel() }
+  }, [frameFollowsScroll, frameAnchorEnd, frameAnchorTop, maxScroll, viewportHeight])
+
   return (
     <div
       className={css.diff}
@@ -4775,7 +4781,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
             )}
             {visibleRows.map((row, offset) => {
               const index = start + offset
-              const reserved = discussionExtras.get(index) ?? 0
+              const blocks = discussionsAtRow.get(index) ?? []
               return (
                 <Fragment key={index}>
                   <DiffRow
@@ -4791,20 +4797,163 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                     onRowHover={onRowHover}
                     wrappedLines={rowWrapped?.[index]}
                   />
-                  {/* A discussion block's rows, reserved in the height table. The
-                      DOM has to carry them too: a reserved row that is inside the
-                      rendered window would otherwise be drawn over instead of
-                      pushing the rows after it down. Outside the window the
-                      spacers already account for it, so this is exactly the
-                      in-window half of the same reservation. */}
-                  {reserved > 0 && (
-                    <div
-                      className={css.vSpacer}
-                      data-diff-discussion-space={reserved}
-                      style={{ height: reserved * ROW_HEIGHT_PX }}
-                      aria-hidden="true"
-                    />
-                  )}
+                  {/* A discussion block hangs in a row of its own, right below the rows
+                      it annotates. The DOM has to carry the reserved rows, and being in
+                      the row stream is what lets the browser scroll the block with the
+                      code on both axes - natively, on the compositor (see
+                      `.discussionRow` and `.discussionPin`). */}
+                  {blocks.map(discussion => {
+                    const rows = discussionRows(discussion)
+                    return (
+                      <div
+                        key={discussion.id}
+                        className={css.discussionRow}
+                        data-diff-discussion-space={rows}
+                        style={{ height: rows * ROW_HEIGHT_PX }}
+                      >
+                        <div className={css.gutter} aria-hidden="true" />
+                        <div className={css.gutter} aria-hidden="true" />
+                        <div className={css.discussionCell}>
+                          {/* Zero-width, so it never widens the code column (`max-content`
+                              sizing); sticky, so the block keeps the panel's left edge while
+                              the code slides sideways; the negative gutter margin starts it at
+                              the table's left edge instead of the code column's. */}
+                          <div className={css.discussionPin} style={{ marginLeft: -WRAP_GUTTERS_PX }}>
+                              <div
+                                key={discussion.id}
+                                className={css.discussion}
+                                data-diff-discussion
+                                data-lost={discussion.lost === true ? '' : undefined}
+                                style={{
+                                  // The panel's own width: the pin is zero-width, so the block cannot
+                                  // take a width from it, and the ruler strip (when there is no bar to
+                                  // clear it) is not ours to paint over.
+                                  width: Math.max(0, bodyWidth - discussionRightInsetPx),
+                                  height: rows * ROW_HEIGHT_PX,
+                                }}
+                              >
+                                <div className={css.discussionHead}>
+                                  <button
+                                    type="button"
+                                    className={css.discussionToggle}
+                                    data-diff-discussion-toggle
+                                    aria-expanded={!discussion.collapsed}
+                                    aria-label={t(discussion.collapsed ? 'action.discussionExpand' : 'action.discussionCollapse')}
+                                    onClick={() => { toggleDiscussion(discussion.id) }}
+                                  >
+                                    {discussion.collapsed
+                                      ? <IconChevronDownOutline14 size={12} />
+                                      : <IconChevronUpOutline14 size={12} />}
+                                  </button>
+                                  <span className={css.discussionRangeWrap}>
+                                    <span className={css.discussionRange} data-diff-discussion-range>
+                                      {discussionLineRange(discussion.anchor)}
+                                    </span>
+                                  </span>
+                                  <span className={css.flexSpacer} />
+                                  <Menu
+                                    open={discussionMenuFor === discussion.id}
+                                    portal
+                                    compact
+                                    align="end"
+                                    items={discussionMenuItems}
+                                    onSelect={(id) => {
+                                      if (id === 'delete') removeDiscussion(discussion.id)
+                                      setDiscussionMenuFor(undefined)
+                                    }}
+                                    onClose={() => { setDiscussionMenuFor(undefined) }}
+                                    anchor={(
+                                      <button
+                                        type="button"
+                                        className={css.discussionToggle}
+                                        data-diff-discussion-menu
+                                        aria-label={t('action.more')}
+                                        onClick={() => {
+                                          setDiscussionMenuFor(current => (current === discussion.id ? undefined : discussion.id))
+                                        }}
+                                      >
+                                        {'\u22ef'}
+                                      </button>
+                                    )}
+                                  />
+                                </div>
+                                {!discussion.collapsed && (
+                                  <div className={css.discussionBody}>
+                                    {discussion.lost === true && (
+                                      <p className={css.discussionNote} data-diff-discussion-lost>{t('discussion.lost')}</p>
+                                    )}
+                                    {discussion.hidden !== undefined && discussion.hidden > 0 && (
+                                      <p className={css.discussionNote} data-diff-discussion-hidden>
+                                        {t('discussion.hidden', { count: discussion.hidden })}
+                                      </p>
+                                    )}
+                                    {/* The turn was stopped: the question stays in the thread, the note
+                                        says why there is no answer, and the writing row below comes
+                                        back so it can be asked again. */}
+                                    {discussion.stopped === true && (discussion.reply === undefined || discussion.reply === '') && discussion.failed !== true && (
+                                      <p className={css.discussionNote} data-diff-discussion-stopped>{t('discussion.stopped')}</p>
+                                    )}
+                                    {discussion.messages.map((message, index) => (
+                                      message.role === 'user' ? (
+                                        <p className={css.discussionUser} data-diff-discussion-user key={`u${index}`}>{message.text}</p>
+                                      ) : (
+                                        <p className={css.discussionAnswer} data-diff-discussion-reply key={`a${index}`}>{message.text}</p>
+                                      )
+                                    ))}
+                                    {discussion.reply !== undefined && discussion.reply !== '' ? (
+                                      <p className={css.discussionAnswer} data-diff-discussion-reply>{discussion.reply}</p>
+                                    ) : discussion.lost === true ? null : discussion.failed === true ? (
+                                      <p className={css.discussionNote} data-diff-discussion-failed>{t('discussion.failed')}</p>
+                                    ) : discussion.asking === true ? (
+                                      <p className={css.discussionNote} data-diff-discussion-asking>
+                                        {discussion.queued === true ? t('discussion.queued') : t('discussion.thinking')}
+                                      </p>
+                                    ) : (
+                                      <div className={css.discussionCompose}>
+                                        <input
+                                          className={css.discussionInput}
+                                          data-diff-discussion-input
+                                          ref={(element) => {
+                                            if (element === null) discussionInputEls.current.delete(discussion.id)
+                                            else discussionInputEls.current.set(discussion.id, element)
+                                          }}
+                                          value={discussion.draft}
+                                          placeholder={t('discussion.placeholder')}
+                                          onChange={(event) => {
+                                            const value = event.target.value
+                                            setDiscussions(current => current.map(entry => (
+                                              entry.id === discussion.id ? { ...entry, draft: value } : entry
+                                            )))
+                                          }}
+                                          onKeyDown={(event) => {
+                                            if (event.key !== 'Enter') return
+                                            // An IME's "confirm the candidate" Enter must not send:
+                                            // composing is the signal for it, and 229 is the code
+                                            // some engines send when they will not say so.
+                                            if (event.nativeEvent.isComposing || event.keyCode === 229) return
+                                            event.preventDefault()
+                                            sendDiscussion(discussion.id)
+                                          }}
+                                        />
+                                        <button
+                                          type="button"
+                                          className={`${css.action} ${css.actionPrimary} ${css.discussionSend}`}
+                                          data-diff-discussion-send
+                                          onClick={() => { sendDiscussion(discussion.id) }}
+                                        >
+                                          {t('action.comment')}
+                                          <ReturnIcon />
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
                 </Fragment>
               )
             })}
@@ -4812,254 +4961,104 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
               <div className={css.vSpacer} style={{ height: totalHeight - offsetOf(end) }} aria-hidden="true" />
             )}
           </div>
-        {/* Discussions are painted INSIDE the scroller, in CONTENT coordinates: a block
-            then scrolls with the code natively, on the compositor, instead of being
-            re-placed from the scroll event on the main thread - which is what made it
-            trail the code by a frame. The rows they annotate carry their own wash
-            (`.rowDiscussed`), so nothing has to be positioned for them at all. */}
-        {laidDiscussions.map(discussion => {
-            const rows = discussionRows(discussion)
-            const placement = discussionPlacement.get(discussion.id)
-            const row = placement?.row ?? discussion.anchor.end
-            const below = (placement?.belowRows ?? 0) * ROW_HEIGHT_PX
-            // The row's own code height, then whatever block rows are already
-            // reserved under it, then this block: the reservation stays inside
-            // the height table, so the rows after it are pushed by exactly this.
-            return (
-              <div
-                key={discussion.id}
-                className={css.discussion}
-                data-diff-discussion
-                data-lost={discussion.lost === true ? '' : undefined}
-                ref={(element) => {
-                  if (element === null) discussionEls.current.delete(discussion.id)
-                  else discussionEls.current.set(discussion.id, element)
-                }}
-                style={{
-                  top: offsetOf(row) + ROW_HEIGHT_PX + below,
-                  right: discussionRightInsetPx,
-                  height: rows * ROW_HEIGHT_PX,
-                  // Content coordinates: the scroller moves this box vertically by
-                  // itself, and this is the horizontal half `placeRef` keeps in step
-                  // with the scroll.
-                  transform: `translateX(${scrollLeftNow}px)`,
-                }}
-              >
-                <div className={css.discussionHead}>
-                  <button
-                    type="button"
-                    className={css.discussionToggle}
-                    data-diff-discussion-toggle
-                    aria-expanded={!discussion.collapsed}
-                    aria-label={t(discussion.collapsed ? 'action.discussionExpand' : 'action.discussionCollapse')}
-                    onClick={() => { toggleDiscussion(discussion.id) }}
-                  >
-                    {discussion.collapsed
-                      ? <IconChevronDownOutline14 size={12} />
-                      : <IconChevronUpOutline14 size={12} />}
-                  </button>
-                  <span className={css.discussionRangeWrap}>
-                    <span className={css.discussionRange} data-diff-discussion-range>
-                      {discussionLineRange(discussion.anchor)}
-                    </span>
-                  </span>
-                  <span className={css.flexSpacer} />
-                  <Menu
-                    open={discussionMenuFor === discussion.id}
-                    portal
-                    compact
-                    align="end"
-                    items={discussionMenuItems}
-                    onSelect={(id) => {
-                      if (id === 'delete') removeDiscussion(discussion.id)
-                      setDiscussionMenuFor(undefined)
-                    }}
-                    onClose={() => { setDiscussionMenuFor(undefined) }}
-                    anchor={(
-                      <button
-                        type="button"
-                        className={css.discussionToggle}
-                        data-diff-discussion-menu
-                        aria-label={t('action.more')}
-                        onClick={() => {
-                          setDiscussionMenuFor(current => (current === discussion.id ? undefined : discussion.id))
-                        }}
-                      >
-                        {'\u22ef'}
-                      </button>
-                    )}
-                  />
-                </div>
-                {!discussion.collapsed && (
-                  <div className={css.discussionBody}>
-                    {discussion.lost === true && (
-                      <p className={css.discussionNote} data-diff-discussion-lost>{t('discussion.lost')}</p>
-                    )}
-                    {discussion.hidden !== undefined && discussion.hidden > 0 && (
-                      <p className={css.discussionNote} data-diff-discussion-hidden>
-                        {t('discussion.hidden', { count: discussion.hidden })}
-                      </p>
-                    )}
-                    {/* The turn was stopped: the question stays in the thread, the note
-                        says why there is no answer, and the writing row below comes
-                        back so it can be asked again. */}
-                    {discussion.stopped === true && (discussion.reply === undefined || discussion.reply === '') && discussion.failed !== true && (
-                      <p className={css.discussionNote} data-diff-discussion-stopped>{t('discussion.stopped')}</p>
-                    )}
-                    {discussion.messages.map((message, index) => (
-                      message.role === 'user' ? (
-                        <p className={css.discussionUser} data-diff-discussion-user key={`u${index}`}>{message.text}</p>
-                      ) : (
-                        <p className={css.discussionAnswer} data-diff-discussion-reply key={`a${index}`}>{message.text}</p>
-                      )
-                    ))}
-                    {discussion.reply !== undefined && discussion.reply !== '' ? (
-                      <p className={css.discussionAnswer} data-diff-discussion-reply>{discussion.reply}</p>
-                    ) : discussion.lost === true ? null : discussion.failed === true ? (
-                      <p className={css.discussionNote} data-diff-discussion-failed>{t('discussion.failed')}</p>
-                    ) : discussion.asking === true ? (
-                      <p className={css.discussionNote} data-diff-discussion-asking>
-                        {discussion.queued === true ? t('discussion.queued') : t('discussion.thinking')}
-                      </p>
-                    ) : (
-                      <div className={css.discussionCompose}>
-                        <input
-                          className={css.discussionInput}
-                          data-diff-discussion-input
-                          ref={(element) => {
-                            if (element === null) discussionInputEls.current.delete(discussion.id)
-                            else discussionInputEls.current.set(discussion.id, element)
-                          }}
-                          value={discussion.draft}
-                          placeholder={t('discussion.placeholder')}
-                          onChange={(event) => {
-                            const value = event.target.value
-                            setDiscussions(current => current.map(entry => (
-                              entry.id === discussion.id ? { ...entry, draft: value } : entry
-                            )))
-                          }}
-                          onKeyDown={(event) => {
-                            if (event.key !== 'Enter') return
-                            // An IME's "confirm the candidate" Enter must not send:
-                            // composing is the signal for it, and 229 is the code
-                            // some engines send when they will not say so.
-                            if (event.nativeEvent.isComposing || event.keyCode === 229) return
-                            event.preventDefault()
-                            sendDiscussion(discussion.id)
-                          }}
-                        />
-                        <button
-                          type="button"
-                          className={`${css.action} ${css.actionPrimary} ${css.discussionSend}`}
-                          data-diff-discussion-send
-                          onClick={() => { sendDiscussion(discussion.id) }}
-                        >
-                          {t('action.comment')}
-                          <ReturnIcon />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )
-          })}
         </div>
         {!splitView && selection !== undefined && selectionFrame({ coversBlocks: selectionRange !== undefined, hasDiscussion: discussionOverlapping(discussions, selection) !== undefined }).visible ? (
           <div
+            ref={frameRef}
             className={css.blockActions}
             data-diff-selection-actions
-            style={{ top: selectionActionsTop }}
+            style={{ top: frameTop }}
           >
-            <button
-              type="button"
-              className={`${css.action} ${css.actionPrimary}`}
-              data-diff-selection-keep
-              hidden={selectionRange === undefined}
-              disabled={busy}
-              onClick={() => { void handleSelectionAction('keep') }}
-            >
-              {t('action.keep')}
-            </button>
-            <button
-              type="button"
-              className={css.action}
-              data-diff-selection-revert
-              hidden={selectionRange === undefined}
-              disabled={busy}
-              onClick={() => { void handleSelectionAction('revert') }}
-            >
-              {t('action.revert')}
-            </button>
-            {/* The frame holds two groups: what may be kept or reverted on the
-                covered change blocks, and the comment on the range. The hairline
-                appears only when both are there - keep/revert are hidden over a
-                range with no covered blocks (their `hidden` attribute takes them
-                out of the layout), and a divider with nothing on one side of it
-                would read as a rendering fault. */}
-            {selectionRange !== undefined && (
-              <span className={css.blockActionsDivider} data-diff-selection-divider aria-hidden="true" />
-            )}
-            {/* Always offered: a range without change blocks can still be
-                discussed. A range that already has a discussion does not offer a
-                second one - `selectionFrame` decides, and a frame with no visible
-                action is not rendered at all. */}
-            <button
-              type="button"
-              className={css.action}
-              data-diff-selection-comment
-              onClick={addDiscussion}
-            >
-              {t('action.comment')}
-            </button>
+          <button
+            type="button"
+            className={`${css.action} ${css.actionPrimary}`}
+            data-diff-selection-keep
+            hidden={selectionRange === undefined}
+            disabled={busy}
+            onClick={() => { void handleSelectionAction('keep') }}
+          >
+            {t('action.keep')}
+          </button>
+          <button
+            type="button"
+            className={css.action}
+            data-diff-selection-revert
+            hidden={selectionRange === undefined}
+            disabled={busy}
+            onClick={() => { void handleSelectionAction('revert') }}
+          >
+            {t('action.revert')}
+          </button>
+          {/* The frame holds two groups: what may be kept or reverted on the
+              covered change blocks, and the comment on the range. The hairline
+              appears only when both are there - keep/revert are hidden over a
+              range with no covered blocks (their `hidden` attribute takes them
+              out of the layout), and a divider with nothing on one side of it
+              would read as a rendering fault. */}
+          {selectionRange !== undefined && (
+            <span className={css.blockActionsDivider} data-diff-selection-divider aria-hidden="true" />
+          )}
+          {/* Always offered: a range without change blocks can still be
+              discussed. A range that already has a discussion does not offer a
+              second one - `selectionFrame` decides, and a frame with no visible
+              action is not rendered at all. */}
+          <button
+            type="button"
+            className={css.action}
+            data-diff-selection-comment
+            onClick={addDiscussion}
+          >
+            {t('action.comment')}
+          </button>
           </div>
         ) : hoveredBlock !== undefined && model.blocks[hoveredBlock] !== undefined ? (
           <div
+            ref={frameRef}
             className={css.blockActions}
             data-diff-block-actions
-            style={{ top: blockActionsTop }}
+            style={{ top: frameTop }}
           >
-            <span className={css.blockPosition} data-diff-block-position>
-              {t('panel.blockPosition', { current: hoveredBlock + 1, total: model.blocks.length })}
-            </span>
-            <button
-              type="button"
-              className={`${css.action} ${css.iconAction}`}
-              data-diff-block-prev
-              aria-label={t('action.prevDiff')}
-              disabled={busy}
-              onClick={() => { stepBlock(-1) }}
-            >
-              <IconChevronUpOutline14 size={14} />
-            </button>
-            <button
-              type="button"
-              className={`${css.action} ${css.iconAction}`}
-              data-diff-block-next
-              aria-label={t('action.nextDiff')}
-              disabled={busy}
-              onClick={() => { stepBlock(1) }}
-            >
-              <IconChevronDownOutline14 size={14} />
-            </button>
-            <button
-              type="button"
-              className={`${css.action} ${css.actionPrimary}`}
-              data-diff-block-keep
-              disabled={busy}
-              onClick={() => { void handleBlockAction('keep') }}
-            >
-              {t('action.keep')}
-            </button>
-            <button
-              type="button"
-              className={css.action}
-              data-diff-block-revert
-              disabled={busy}
-              onClick={() => { void handleBlockAction('revert') }}
-            >
-              {t('action.revert')}
-            </button>
+          <span className={css.blockPosition} data-diff-block-position>
+            {t('panel.blockPosition', { current: hoveredBlock + 1, total: model.blocks.length })}
+          </span>
+          <button
+            type="button"
+            className={`${css.action} ${css.iconAction}`}
+            data-diff-block-prev
+            aria-label={t('action.prevDiff')}
+            disabled={busy}
+            onClick={() => { stepBlock(-1) }}
+          >
+            <IconChevronUpOutline14 size={14} />
+          </button>
+          <button
+            type="button"
+            className={`${css.action} ${css.iconAction}`}
+            data-diff-block-next
+            aria-label={t('action.nextDiff')}
+            disabled={busy}
+            onClick={() => { stepBlock(1) }}
+          >
+            <IconChevronDownOutline14 size={14} />
+          </button>
+          <button
+            type="button"
+            className={`${css.action} ${css.actionPrimary}`}
+            data-diff-block-keep
+            disabled={busy}
+            onClick={() => { void handleBlockAction('keep') }}
+          >
+            {t('action.keep')}
+          </button>
+          <button
+            type="button"
+            className={css.action}
+            data-diff-block-revert
+            disabled={busy}
+            onClick={() => { void handleBlockAction('revert') }}
+          >
+            {t('action.revert')}
+          </button>
           </div>
         ) : null}
         {focusedBlock !== undefined && flashKey > 0 && (

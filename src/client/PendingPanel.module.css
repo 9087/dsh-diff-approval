@@ -1877,8 +1877,8 @@
   /* What is left floating over the code lives in this box and must stay in it:
      the selection band's Keep/Revert frame, the per-block frame, the search bar,
      the block flash, the ruler. (The discussion blocks and their bands are NOT
-     here any more — they are painted inside the scroller, in content coordinates,
-     so the browser scrolls them with the code; see `.discussion`.) `overflow:
+     here any more: a block hangs in a row of the code's own stream, so the browser
+     scrolls it with the code on both axes; see `.discussionRow`.) `overflow:
      hidden` clips the frames at the code view's own edges instead of letting them
      draw over the status bar, and `isolation` keeps their z-indexes inside, so
      they can only rank above the code and never above the bars around it. */
@@ -1918,10 +1918,11 @@
 }
 
 /* Per-block Keep/Revert, shown at the hovered block's bottom-right edge,
-   framed on the file-list surface. Positioned in the diff scroller (the rows'
-   containing block) so it tracks the block as the file scrolls. The buttons
-   themselves are plain `.action`s, so they share the whole-file buttons'
-   height. */
+   framed on the file-list surface. It lives in the non-scrolling wrapper, one
+   right-aligned column away from the code; its vertical position is a
+   scroll-driven animation (see `frameFollowKeyframes`), so the code and the
+   frame never disagree about the offset. The buttons themselves are plain
+   `.action`s, so they share the whole-file buttons' height. */
 .blockActions {
   position: absolute;
   right: 8px;
@@ -2079,21 +2080,47 @@
   animation: diffFlashShake 0.7s ease-out forwards;
 }
 
-/* A discussion block: in the row stream's arithmetic (its rows are reserved in
-   the height table, see `rowHeights`) but painted absolutely in CONTENT
-   coordinates INSIDE the scroller, so the browser scrolls it with the code it
-   annotates — natively, on the compositor, which is the whole point: re-placing
-   it from the scroll event left it a frame behind the code. The CSS table never
-   has to span columns for it, and its height is set from JS in whole code rows;
-   the content is clipped, so it can never grow past its reservation and desync
-   the offsets. Only the horizontal axis needs JS: `placeRef` translates the block
-   by the scroller's `scrollLeft`, since a content-coordinate box would otherwise
-   slide out of view when the code is scrolled sideways. */
+/* A discussion block's own row, right below the range's last row. Being IN the row
+   stream is the whole point: the browser scrolls the block vertically with the code
+   it annotates — natively, on the compositor — instead of it being re-placed from
+   the scroll event on the main thread, which is what left it a frame behind. Its
+   rows are reserved in the height table (see `rowHeights`), so the row carries the
+   whole reservation and the rows after it are pushed by exactly that. */
+.discussionRow {
+  display: table-row;
+}
+
+/* The block row's own cell, and deliberately NOT `.code`: that cell is `pre` and
+   selectable, and the block's prose has to wrap normally — while every selection
+   helper resolves a node through `[data-diff-code]`, which must never find the
+   comment's text and read it as code. The two empty cells keep the pin in the third
+   column, so the block's own left edge lines up with what the code column does. */
+.discussionCell {
+  display: table-cell;
+}
+
+/* The pin the block is mounted under, inside the row's code cell. Zero-sized, so it
+   neither widens the code column (the table is `max-content`, and the block itself is
+   as wide as the panel) nor adds height (the row has it). The negative gutter margin
+   starts it at the table's left edge instead of at the code column's, which is what
+   lines the block up with the panel's left edge while nothing has been scrolled
+   sideways; `sticky` then holds that edge as the code slides underneath it. That is
+   the horizontal half done by the browser too - no main-thread work on either axis. */
+.discussionPin {
+  position: sticky;
+  left: 0;
+  width: 0;
+  height: 0;
+}
+
 .discussion {
   position: absolute;
+  top: 0;
   left: 0;
-  /* `right` is set from JS: the scroller's own padding box, less the ruler strip
-     when there is no vertical bar to clear it. */
+  /* `width` is set from JS: the scroller's own padding box, less the ruler strip
+     when there is no vertical bar to clear it. The block's height is set from JS in
+     whole code rows; the content is clipped, so it can never grow past its
+     reservation and desync the offsets. */
   z-index: 2;
   overflow: hidden;
   box-sizing: border-box;

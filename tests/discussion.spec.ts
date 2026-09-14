@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, DISCUSSION_MAX_BODY_ROWS, discussionOnRange, discussionOverlapping,
-  discussionPlacements, discussionRowExtras, discussionRows, discussionTail, discussionText, remapDiscussion,
+  discussionRowExtras, discussionRows, discussionTail, discussionText, remapDiscussion,
   selectionFrame, stripBlankLines,
 } from '../src/client/discussion.ts'
 import type { Discussion } from '../src/client/discussion.ts'
@@ -43,12 +43,6 @@ describe('discussions in the diff row stream', () => {
     expect(stale.get(4)).toBe(DISCUSSION_HEADER_ROWS + DISCUSSION_COMPOSE_ROWS)
 
     expect(discussionRowExtras([], 5).size).toBe(0)
-  })
-
-  it('stacks blocks that share a row instead of overlapping them', () => {
-    const placements = discussionPlacements([discussion('a', 1, 2), discussion('b', 1, 2, true)], 10)
-    expect(placements.get('a')).toEqual({ row: 2, belowRows: 0 })
-    expect(placements.get('b')).toEqual({ row: 2, belowRows: DISCUSSION_HEADER_ROWS + DISCUSSION_COMPOSE_ROWS })
   })
 
   it('matches a range exactly, and sees any overlap as already discussed', () => {

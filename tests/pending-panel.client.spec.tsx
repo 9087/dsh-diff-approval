@@ -1440,6 +1440,27 @@ describe('PendingPanel', () => {
     expect(block).toContain('white-space: nowrap')
   })
 
+  it('pins a block sideways with a zero-width sticky box instead of a transform', () => {
+    // The whole point of the row-mounted block: `sticky` holds the panel's left edge while
+    // the code slides sideways, on the compositor, so no scroll event has to write a
+    // transform. Zero-sized, or the `max-content` table would widen the diff to the
+    // panel's width and the pin would have no slack left to move in.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const pin = /\.discussionPin \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(pin).toContain('position: sticky')
+    expect(pin).toContain('left: 0')
+    expect(pin).toContain('width: 0')
+    expect(pin).toContain('height: 0')
+    const row = /\.discussionRow \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(row).toContain('display: table-row')
+    // The block itself is absolute, so it fills the pin's own (zero-width) column: its
+    // width comes from the render, and the previous row-offset/translate pair is gone.
+    const block = /\.discussion \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(block).toContain('position: absolute')
+    expect(block).toContain('top: 0')
+    expect(block).toContain('left: 0')
+  })
+
   it('resizes the file list by dragging the divider within its bounds', () => {
     const second = entry({ id: 'entry-2', path: '/repo/b.txt' })
     const props = panelProps({ read: true, files: [FILE, second], busy: new Set() })
@@ -2176,10 +2197,9 @@ describe('PendingPanel', () => {
   })
 
   it('anchors the block frame to the block bottom and clamps it inside the viewport', () => {
-    // Last row of the file is the changed row, so the floating frame would be
-    // pushed off the viewport bottom unless clamped up to fit. The frame lives
-    // in the non-scrolling wrapper (viewport coordinates), so its `top` is the
-    // block-bottom offset minus scrollTop, clamped to the viewport bottom.
+    // Last row of the file is the changed row, so the frame would be pushed off the
+    // viewport bottom unless clamped up to fit: with a 120px viewport and a 40px frame,
+    // the clamp is `120 - 40 = 80`, and the frame (which starts at 86) is held there.
     const clientHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight')
     Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get: () => 120 })
     try {
@@ -2195,9 +2215,7 @@ describe('PendingPanel', () => {
 
       const actions = document.querySelector('[data-diff-block-actions]') as HTMLElement
       expect(actions).not.toBeNull()
-      // 4 rows = 88px content; the block's last row is the content bottom, so
-      // the frame cannot sit below it. With a 120px viewport and a 40px frame,
-      // it clamps up to `120 - 40 = 80px` so its own bottom stays on-screen.
+      // The animation's clamp, evaluated at scroll 0 — the fallback jsdom exercises.
       expect(actions.style.top).toBe('80px')
     } finally {
       if (clientHeight !== undefined) Object.defineProperty(HTMLElement.prototype, 'clientHeight', clientHeight)
@@ -4428,9 +4446,9 @@ describe('PendingPanel', () => {
     const block = document.querySelector('[data-diff-discussion]') as HTMLElement
     // Inside the scroller: the browser scrolls it with the code, no JS placement.
     expect(block.closest('[data-diff-body]')).toBe(body)
-    // ...and it is laid out in CONTENT coordinates, with the horizontal offset
-    // carried by a transform, so a vertical scroll needs nothing from JS.
-    expect(block.style.transform).toBe('translateX(0px)')
+    // ...and inside a row of the code's own stream, under the zero-width pin, which
+    // is what keeps a wheel over the block scrolling the box natively.
+    expect(block.closest('[data-diff-discussion-space]')).not.toBeNull()
 
     const wheel = (target: Element, init: WheelEventInit): WheelEvent => {
       const event = new WheelEvent('wheel', { bubbles: true, cancelable: true, ...init })
@@ -4460,11 +4478,12 @@ describe('PendingPanel', () => {
     expect(scrolled).toBe(500)
   })
 
-  it('leaves a block\'s vertical position to the browser and only pins it sideways', () => {
-    // The point of painting a block inside the scroller: a vertical scroll must
-    // need NOTHING from JS, because that is what made it trail the code by a frame.
-    // The horizontal axis is the one thing left, since a content-coordinate box
-    // would otherwise slide out of view when the code is scrolled sideways.
+  it('hangs a block in a row of its own, with neither axis placed by script', () => {
+    // A block used to be painted in the scroller's CONTENT coordinates: the vertical
+    // half was then the browser's, but the sideways half had to be re-written from the
+    // scroll event, which is what made it trail the code by a frame. It is now a ROW in
+    // the code's stream, under a zero-width sticky pin, so both axes are the browser's
+    // and the scroll path writes nothing at all.
     const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [multi], busy: new Set() })
     render(<PendingPanel {...props} />)
@@ -4489,28 +4508,36 @@ describe('PendingPanel', () => {
     fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
     const block = document.querySelector('[data-diff-discussion]') as HTMLElement
     // The annotated rows carry the wash THEMSELVES, so there is no overlay for the panel
-    // to place: it scrolls with the code in both axes with no script at all (the overlay
-    // this replaces had to be counter-translated sideways and trailed the text).
+    // to place: it scrolls with the code in both axes with no script at all.
     const banded = [...document.querySelectorAll('[data-diff-discussion-band]')]
     expect(banded).toEqual([rows[5]])
     expect(rows[5]!.closest('[data-diff-body]')).toBe(body)
-    const top = block.style.top
-    // Content coordinates: no scroll offset in the value at all. The block hangs below
-    // the row it annotates (row 5 ends at 110px).
-    expect(top).toBe('132px')
 
+    // The block's own row sits immediately after the row it annotates, and carries the
+    // whole reservation (a header plus the compose area: three code rows).
+    const space = block.closest('[data-diff-discussion-space]') as HTMLElement
+    expect(space).not.toBeNull()
+    expect(space.previousElementSibling).toBe(rows[5])
+    expect(space.style.height).toBe(`${3 * 22}px`)
+    expect(space.closest('[data-diff-body]')).toBe(body)
+
+    // Nothing about the block's position is written from JS: no content-coordinate
+    // `top`, no counter-translation, only the width (the pin has none to inherit).
+    expect(block.style.top).toBe('')
+    expect(block.style.transform).toBe('')
+    expect(block.style.width).not.toBe('')
+
+    // Scrolling does not touch the block's own styles at all, in either direction.
     Object.defineProperty(body, 'scrollTop', { configurable: true, value: 220 })
     fireEvent.scroll(body)
-    expect(block.style.top).toBe(top)
-    // The sideways half is scripted: the standard fix (a scroll-driven CSS animation) is
-    // measured as broken in this browser build, so the pin stays in the scroll path.
-    expect(block.style.transform).toBe('translateX(0px)')
+    expect(block.style.top).toBe('')
+    expect(block.style.transform).toBe('')
 
     Object.defineProperty(body, 'scrollLeft', { configurable: true, value: 120 })
     fireEvent.scroll(body)
-    expect(block.style.transform).toBe('translateX(120px)')
-    expect(block.style.top).toBe(top)
-    // The wash needs no transform: it moved with its row.
+    expect(block.style.transform).toBe('')
+    expect(block.style.top).toBe('')
+    // The wash needs no transform either: it moved with its row.
     expect(rows[5]!.style.transform).toBe('')
   })
 

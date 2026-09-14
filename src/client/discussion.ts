@@ -181,30 +181,6 @@ export function discussionRowExtras(
 }
 
 /**
- * Where each block sits relative to the row it hangs below: which row owns it,
- * and how many block rows are already reserved under that row. Blocks sharing a
- * row stack in insertion order, so their reserved rows never overlap.
- *
- * @param discussions - the blocks currently attached to this file.
- * @param rowCount - how many rows the diff has (clamps a stale anchor).
- * @returns a map from discussion id to its placement.
- */
-export function discussionPlacements(
-  discussions: readonly Discussion[],
-  rowCount: number,
-): Map<string, { row: number; belowRows: number }> {
-  const placements = new Map<string, { row: number; belowRows: number }>()
-  const used = new Map<number, number>()
-  for (const discussion of discussions) {
-    const row = Math.max(0, Math.min(discussion.anchor.end, Math.max(0, rowCount - 1)))
-    const belowRows = used.get(row) ?? 0
-    used.set(row, belowRows + discussionRows(discussion))
-    placements.set(discussion.id, { row, belowRows })
-  }
-  return placements
-}
-
-/**
  * The discussion attached to exactly this range, if there is one.
  *
  * @param discussions - the blocks currently attached to this file.
