@@ -121,6 +121,10 @@ function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
     onOpen: vi.fn(async () => {}),
     onPreviewImage: vi.fn(async (_sessionId: SessionId, _path: string) => undefined),
     onPasteReference: vi.fn(),
+    // The chat bridge, as the panel sees it: a send verb that works, and a
+    // watcher the test drives to deliver an answer.
+    onAskAgent: vi.fn(() => true),
+    watchChat: vi.fn(() => () => {}),
     onUndo: vi.fn(),
     onRedo: vi.fn(),
     onImportVcs: vi.fn(async () => ({ imported: 0, detected: false })),
@@ -1225,6 +1229,215 @@ describe('PendingPanel', () => {
       expect(hover, name).toContain('background-color: var(--dsw-alias-bg-base)')
       expect(hover, name).toContain('background-image: linear-gradient(')
     }
+  })
+
+  it('drops the path row\'s code surface when docked in the sidebar', () => {
+    // Docked, the path row should read as part of the sidebar rather than as a band
+    // of code surface above the diff: the card's code-block tint stays with the code,
+    // and the row takes the panel's own background — which is what "transparent"
+    // shows behind it, since the docked panel paints that surface over the pane.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const docked = /^\.panelDocked \.diffHeader \{([^}]*)\}/m.exec(css)?.[1] ?? ''
+    expect(docked).toContain('background: var(--dsw-alias-bg-base)')
+    // ...and only when docked: the floating card keeps one surface for header and code.
+    const header = /^\.diffHeader \{([^}]*)\}/m.exec(css)?.[1] ?? ''
+    expect(header).not.toContain('background')
+  })
+
+  it('separates the selection frame\'s two groups with a hairline', () => {
+    // The frame holds keep/revert on the covered change blocks and the comment on
+    // the range. The divider between them is a 1px rule stretched to the frame's
+    // inner height rather than a fixed tall box, and the panel renders it only while
+    // both groups are there (see the selection tests for that half).
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const block = /^\.blockActionsDivider \{([^}]*)\}/m.exec(css)?.[1] ?? ''
+    expect(block).toContain('width: 1px')
+    expect(block).toContain('align-self: stretch')
+    expect(block).toContain('background: var(--dsw-alias-border-l2)')
+  })
+
+  it('marks the commented rows in place, so the wash cannot trail the code', () => {
+    // The wash rides the rows themselves: no overlay to place, so it scrolls with the code
+    // in both axes with no script — the overlay this replaced had to be counter-translated
+    // on every horizontal scroll and visibly trailed the text.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const tint = /^\.rowDiscussed \{([^}]*)\}/m.exec(css)?.[1] ?? ''
+    expect(tint).toContain('background-image: linear-gradient')
+    expect(tint).toContain('var(--dsw-alias-label-secondary) 14%')
+    expect(css).not.toContain('.discussionBand')
+  })
+
+  it('keeps everything drawn over the code inside the code view', () => {
+    // The discussion blocks, the selection band and its Keep/Revert frame, the
+    // block flash, the search bar and the ruler all live in the non-scrolling
+    // wrapper around the scroller, where their z-indexes used to escape to the
+    // panel: a block hanging below the last visible rows drew straight over the
+    // status bar and the path row. Three properties keep them where they belong —
+    // the box clips them at the code view's edges, and `isolation` makes it the
+    // stacking context those z-indexes are resolved in, so they can only rank
+    // above the code. Each view that hosts such chrome needs all of it.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    for (const host of ['diffBodyWrap', 'splitRoot', 'mdPreviewWrap']) {
+      const block = new RegExp(`^\\.${host} \\{([^}]*)\\}`, 'm').exec(css)?.[1] ?? ''
+      expect(block, host).toContain('position: relative')
+      expect(block, host).toContain('overflow: hidden')
+      expect(block, host).toContain('isolation: isolate')
+    }
+  })
+
+  it('fills what the user said with the chat\'s own bubble colour', () => {
+    // A discussion reads as a small chat, so the user's turns carry the fill the
+    // conversation's own bubbles use (`--dsw-specific-bubble`, the token the chat's
+    // message bubble is painted with). The generic surface token this started with
+    // reads as no fill at all inside the code view, which loses the "the user is
+    // speaking" cue the bubble is there for.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const block = /\.discussionUser \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(block).toContain('background: var(--dsw-specific-bubble')
+    // A rounded rectangle, at the panel's 8px: the bubble is the one soft shape in
+    // the block, and the fill is what makes it read as "the user said this".
+    expect(block).toContain('border-radius: 8px')
+    // It hugs its text, sits on the RIGHT — the `auto` has to be the last of the
+    // four margin values: the three-value shorthand would set the bottom margin
+    // instead and leave the bubble on the left, which is where it was — and it is
+    // capped at a share of the thread, so a long annotation wraps in its own column
+    // instead of running the width of the block.
+    expect(block).toMatch(/margin: calc\([^;]*\) auto;/)
+    expect(block).toContain('width: fit-content')
+    expect(block).toContain('max-width: 82%')
+    // The thread carries the one side inset every turn starts from (mirrors
+    // `DISCUSSION_BODY_INSET_PX` in the panel, which subtracts it before applying
+    // the bubble's percentage), and no turn adds one of its own. `.discussionBody`
+    // is declared twice (once with the header for the shared code font), so take
+    // the rule that is the block's own box.
+    const bodyRule = [...css.matchAll(/^\.discussionBody \{([^}]*)\}/gm)]
+      .map(match => match[1] ?? '')
+      .find(rule => rule.includes('overflow: hidden')) ?? ''
+    expect(bodyRule).toContain('padding: 0 12px')
+    // No vertical chrome either — a message is exactly its lines — so the whole
+    // thread stays on the code's row grid (see the height test below), and the
+    // transparent answer keeps no side inset of its own.
+    const own = (name: string): string => new RegExp(`^\\.${name} \\{([^}]*)\\}`, 'm').exec(css)?.[1] ?? ''
+    // The bubble's fill is the text plus 0.2 of a row above and below, with 0.3 more
+    // of a row as margin outside it: half a row per side, one whole row of height.
+    // Horizontally it pads by half a row and carries no margin, so the fill stays
+    // flush with the thread's right column and only the text is inset.
+    expect(own('discussionUser')).toContain(
+      'padding: calc(var(--dsh-diff-line-height, 22px) * 0.2) calc(var(--dsh-diff-line-height, 22px) * 0.5)',
+    )
+    expect(own('discussionUser')).toContain(
+      'margin: calc(var(--dsh-diff-line-height, 22px) * 0.3) 0 calc(var(--dsh-diff-line-height, 22px) * 0.3) auto',
+    )
+    // The thread is a flex column so those margins cannot collapse into each other:
+    // the row budget counts every one of them.
+    expect(bodyRule).toContain('flex-direction: column')
+    // The writing row is wider than the turns: a negative inline margin takes back
+    // half of the thread's inset, so the field is not boxed in by the prose column.
+    expect(own('discussionCompose')).toContain('margin: 0 -6px')
+    expect(/padding: 0;\s/.test(own('discussionAnswer'))).toBe(true)
+    expect(/padding: 0;\s/.test(own('discussionNote'))).toBe(true)
+    // The "older turns omitted" line is quieter than a status note: it is about the
+    // thread's length, not about the turn, so it sits one label lighter.
+    const noteColor = /color: ?([^;]+);/.exec(own('discussionNote'))?.[1]?.trim()
+    const hiddenColor = /\.discussionNote\[data-diff-discussion-hidden\] \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(hiddenColor).toContain('color: var(--dsw-alias-label-tertiary)')
+    expect(hiddenColor).not.toContain(noteColor ?? 'never')
+  })
+
+  it('sizes the writing field and its button like the toolbar\'s own buttons', () => {
+    // The field and 评论 should be one toolbar button tall — the same 26px chrome the
+    // selection frame's 保留 uses — so the writing row does not read as a different
+    // control family. That height is the `.action` recipe (vertical padding + line,
+    // plus the 1px borders), and neither control is stretched to fill the row: the
+    // leftover of the two-row area is the space they are centred in.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const rule = (name: string): string => new RegExp(`^\\.${name} \\{([^}]*)\\}`, 'm').exec(css)?.[1] ?? ''
+    const vertical = (block: string): string => /padding:\s*([^;]*);/.exec(block)?.[1]?.trim().split(/\s+/)[0] ?? ''
+    const line = (block: string): string => /line-height:\s*([^;]+);/.exec(block)?.[1]?.trim() ?? ''
+    const action = rule('action')
+    const input = rule('discussionInput')
+    expect(action).not.toBe('')
+    expect(vertical(input)).toBe(vertical(action))
+    expect(line(input)).toBe(line(action))
+    expect(input).toContain('box-sizing: border-box')
+    expect(input).not.toContain('height: 100%')
+    // The button reaches that height by itself: nothing stretches it to the row.
+    expect(rule('discussionSend')).not.toContain('align-self: stretch')
+    // ...and the row is still exactly two code rows, with no padding of its own.
+    const compose = rule('discussionCompose')
+    expect(compose).toContain('height: calc(var(--dsh-diff-line-height, 22px) * 2)')
+    expect(compose).toContain('padding: 0')
+  })
+
+  it('points a comment at the skill when the host can deliver it', () => {
+    // With the capability the prompt is the marker, the question and a pointer: the rules
+    // live in the skill (and in the summary its catalogue shows), so a long rule stops
+    // riding every comment. Without it the same rules ride the message — which is why the
+    // panel asks the host instead of guessing.
+    const askPrompt = (snapshot: PendingDiffSnapshot): string => {
+      const props = panelProps(snapshot)
+      const view = render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      fireEvent.click(screen.getByText('m.txt'))
+      const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+      const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
+      vi.spyOn(window, 'getSelection').mockReturnValue({
+        isCollapsed: false,
+        anchorNode: node,
+        focusNode: node,
+        rangeCount: 1,
+        getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+        removeAllRanges: () => {},
+      } as unknown as Selection)
+      act(() => { document.dispatchEvent(new Event('selectionchange')) })
+      fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+      fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+      fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+      const prompt = (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]?.[1] ?? ''
+      view.unmount()
+      return prompt
+    }
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+
+    const withSkill = askPrompt({ read: true, files: [multi], busy: new Set(), commentSkill: 'dsh-diff-approval-comment' })
+    expect(withSkill.startsWith('discussion.marker (/repo/m.txt:4)\nwhy?')).toBe(true)
+    // The stub translator returns the key plus its parameters, so the pointer shape is
+    // recognisable — and the long rules are NOT in the message.
+    expect(withSkill).toContain('discussion.promptRuleSkill {"skill":"dsh-diff-approval-comment"}')
+    expect(withSkill.endsWith('discussion.promptRule')).toBe(false)
+
+    const withoutSkill = askPrompt({ read: true, files: [multi], busy: new Set() })
+    expect(withoutSkill.endsWith('discussion.promptRule')).toBe(true)
+    expect(withoutSkill).not.toContain('promptRuleSkill')
+  })
+
+  it('shows the return glyph on the comment button, so Enter is discoverable', () => {
+    // Enter in the input sends the comment; the button that does the same click is
+    // where that shortcut is announced. jsdom renders the markup but no stylesheet,
+    // so the presence of the glyph is the assertion, and the module is read for the
+    // flex row that keeps the label and the glyph on one line.
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const node = rows[0]!.querySelector('[data-diff-code]')?.firstChild ?? rows[0]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    const send = document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement
+    expect(send.querySelector('svg')).not.toBeNull()
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const block = /\.discussionSend \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(block).toContain('display: inline-flex')
+    expect(block).toContain('white-space: nowrap')
   })
 
   it('resizes the file list by dragging the divider within its bounds', () => {
@@ -3694,6 +3907,663 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-copy]')).toBeNull()
   })
 
+  it('comments on a selection that covers no change block', async () => {
+    // 'a\nb\nc\nd\n' -> 'A\nb\nC\nd\n' renders six rows; row 5 is unchanged
+    // context, so a selection over it covers no change block. Keep/revert must
+    // disappear (nothing to keep) while commenting stays available, and the block
+    // it creates has to reserve whole rows so the rows below it are pushed down.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    expect(rows.length).toBe(6)
+    const code = rows[5]!.querySelector('[data-diff-code]') ?? rows[5]!
+    const node = code.firstChild ?? code
+    const selection = {
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      // The toolbar's comment action consumes the selection, so the double must
+      // support the verb a real Selection does.
+      removeAllRanges: () => {},
+    } as unknown as Selection
+    vi.spyOn(window, 'getSelection').mockReturnValue(selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    const frame = document.querySelector('[data-diff-selection-actions]')
+    expect(frame).not.toBeNull()
+    expect((document.querySelector('[data-diff-selection-keep]') as HTMLButtonElement).hidden).toBe(true)
+    expect((document.querySelector('[data-diff-selection-revert]') as HTMLButtonElement).hidden).toBe(true)
+    // Nothing to keep, so the frame holds one group: no divider with nothing on its
+    // left, which would read as a broken frame.
+    expect(document.querySelector('[data-diff-selection-divider]')).toBeNull()
+
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+
+    // The commented rows are washed with the discussion's band, and the block
+    // hangs below them: three rows open (an integer multiple of the 22px code
+    // row), one row folded. The live selection is consumed by the block, so the
+    // toolbar goes with it and only the band marks the rows.
+    expect(document.querySelector('[data-diff-discussion-band]')).not.toBeNull()
+    const block = document.querySelector('[data-diff-discussion]') as HTMLElement
+    expect(block).not.toBeNull()
+    expect(block.style.height).toBe('66px')
+    // The rows the block reserves are in the DOM, which is what pushes the code
+    // after it down instead of letting the block float over it.
+    const space = document.querySelector('[data-diff-discussion-space]') as HTMLElement
+    expect(space).not.toBeNull()
+    expect(space.style.height).toBe('66px')
+    expect(document.querySelector('[data-diff-discussion-range]')?.textContent).toBe('/repo/m.txt:4')
+    expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-selection-actions]')).toBeNull()
+
+    // The user asked to comment, so the caret is already in the new block's input.
+    expect(document.activeElement).toBe(document.querySelector('[data-diff-discussion-input]'))
+
+    // A selection that merely TOUCHES the commented rows offers no second
+    // comment either: those rows already belong to that annotation.
+    const overlapping = {
+      isCollapsed: false,
+      anchorNode: (rows[4]!.querySelector('[data-diff-code]') ?? rows[4]!).firstChild ?? rows[4]!,
+      focusNode: (rows[5]!.querySelector('[data-diff-code]') ?? rows[5]!).firstChild ?? rows[5]!,
+      rangeCount: 1,
+      getRangeAt: () => ({
+        startContainer: (rows[4]!.querySelector('[data-diff-code]') ?? rows[4]!).firstChild ?? rows[4]!,
+        startOffset: 0,
+        endContainer: (rows[5]!.querySelector('[data-diff-code]') ?? rows[5]!).firstChild ?? rows[5]!,
+        endOffset: 1,
+      }),
+      removeAllRanges: () => {},
+    } as unknown as Selection
+    vi.spyOn(window, 'getSelection').mockReturnValue(overlapping)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    expect(document.querySelector('[data-diff-selection-actions]')).toBeNull()
+
+    // Enter in the input sends the comment, like the composer's own field.
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+    fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    expect(props.onPasteReference).not.toHaveBeenCalled()
+    // The prompt carries the marker and the range, so the answer can be matched
+    // back to this block even while the session is doing other things.
+    const asked = (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]
+    expect(asked?.[0]).toBe('session-1')
+    expect(asked?.[1].startsWith('discussion.marker (/repo/m.txt:4)\nwhy?')).toBe(true)
+    // The block stays open and says it is thinking, with no compose row left.
+    expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-discussion-input]')).toBeNull()
+
+    // The answer arrives through the watcher: it lands in the block, on the file
+    // the question was about, and the block grows to hold its wrapped lines. The
+    // prompt is in the transcript by then - that is what marks the turn as ours.
+    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
+    expect(listener).toBeDefined()
+    const prompt = { kind: 'user', text: asked?.[1] ?? '' }
+    act(() => {
+      listener!({ running: true, nodes: [prompt], partial: 'the answer', error: undefined })
+    })
+    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('the answer')
+    act(() => {
+      listener!({ running: false, nodes: [prompt, { kind: 'assistant', text: 'the final answer' }], partial: '', error: undefined })
+    })
+    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('the final answer')
+    // The answer settled into the thread, so the compose row is back for a
+    // follow-up: the conversation continues instead of ending with one answer.
+    expect(document.querySelector('[data-diff-discussion-user]')?.textContent).toBe('why?')
+    expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'and then?' } })
+    fireEvent.click(document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement)
+    expect(document.querySelectorAll('[data-diff-discussion-user]').length).toBe(2)
+    expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
+    expect((props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls.length).toBe(2)
+
+    // The block can be discarded from its overflow menu; its rows leave the
+    // height table with it, and the same rows become commentable once more.
+    fireEvent.click(document.querySelector('[data-diff-discussion-menu]') as HTMLButtonElement)
+    // The stub translator returns the key, so the menu item is found by its key.
+    fireEvent.click(screen.getByText('action.delete'))
+    expect(document.querySelector('[data-diff-discussion]')).toBeNull()
+    expect(document.querySelector('[data-diff-discussion-band]')).toBeNull()
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    expect(document.querySelector('[data-diff-selection-comment]')).not.toBeNull()
+  })
+
+  it('matches a comment answer to the prompt that asked, not to the session tail', async () => {
+    // A session is often busy with the user's own turn when a comment is sent. The
+    // comment is queued behind it, and the text streaming there belongs to that
+    // other turn: putting it in the block would attribute someone else's words to
+    // the annotation. The marker the prompt starts with is what keeps them apart.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
+    const otherUser = { kind: 'user', text: 'unrelated question' }
+    const otherAnswer = { kind: 'assistant', text: 'other answer' }
+    act(() => { listener!({ running: true, nodes: [otherUser], partial: 'other partial', error: undefined }) })
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const code = rows[5]!.querySelector('[data-diff-code]') ?? rows[5]!
+    const node = code.firstChild ?? code
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+    fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    const prompt = (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]?.[1]
+
+    // Nothing in the transcript is ours yet, so the block says it is waiting
+    // instead of borrowing the running turn's partial text.
+    act(() => { listener!({ running: true, nodes: [otherUser], partial: 'other partial', error: undefined }) })
+    expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toBe('discussion.queued')
+    expect(document.querySelector('[data-diff-discussion-reply]')).toBeNull()
+
+    // With the prompt in the transcript, the answer that follows it is ours.
+    act(() => {
+      listener!({ running: true, nodes: [otherUser, otherAnswer, { kind: 'user', text: prompt }], partial: 'our answer', error: undefined })
+    })
+    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('our answer')
+    expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
+
+    act(() => {
+      listener!({
+        running: false,
+        nodes: [otherUser, otherAnswer, { kind: 'user', text: prompt }, { kind: 'assistant', text: 'final answer' }],
+        partial: '',
+        error: undefined,
+      })
+    })
+    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('final answer')
+    expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
+  })
+
+  it('waits only while the session still holds the queued question', () => {
+    // "Queued" has to mean something: the session's own queue (or its local submission
+    // echo) must still name our prompt. Once neither holds it and it never became a
+    // turn — a stopped turn that dropped the queue, say — the block hands the writing
+    // row back, after a grace so a round-trip gap cannot take it back early.
+    vi.useFakeTimers()
+    try {
+      const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+      const props = panelProps({ read: true, files: [multi], busy: new Set() })
+      render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      fireEvent.click(screen.getByText('m.txt'))
+      const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
+      act(() => { listener!({ running: true, nodes: [], partial: '', error: undefined, queued: [] }) })
+
+      const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+      const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
+      vi.spyOn(window, 'getSelection').mockReturnValue({
+        isCollapsed: false,
+        anchorNode: node,
+        focusNode: node,
+        rangeCount: 1,
+        getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+        removeAllRanges: () => {},
+      } as unknown as Selection)
+      act(() => { document.dispatchEvent(new Event('selectionchange')) })
+      fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+      fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+      fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+      const prompt = (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]?.[1] ?? ''
+
+      act(() => { listener!({ running: true, nodes: [], partial: '', error: undefined, queued: [prompt] }) })
+      expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toBe('discussion.queued')
+
+      // The session has let it go and no turn took it. The row comes back only once
+      // the grace has passed - a submission echo and the host's queue row are a round
+      // trip apart, so the first idle notification is not proof.
+      act(() => { listener!({ running: false, nodes: [], partial: '', error: undefined, queued: [] }) })
+      expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toBe('discussion.queued')
+      act(() => { vi.advanceTimersByTime(5000) })
+      expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
+      expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
+      expect(document.querySelector('[data-diff-discussion-user]')?.textContent).toBe('why?')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('never lets an older comment\'s answer into a new question on the same rows', () => {
+    // Follow-ups ARE comments on the same rows, so their marker line is identical —
+    // and the words can be too ("再试一次"). Matching by the tail of the transcript
+    // therefore handed the block the PREVIOUS answer, which the real one then replaced
+    // when it arrived. The search now starts at our own baseline, so nothing that was
+    // already in the transcript when we sent can be taken for the prompt we wait on.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    const type = (value: string): void => {
+      fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value } })
+      fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    }
+    const calls = (): [string, string][] => (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls
+    const lastReply = (): string | undefined =>
+      [...document.querySelectorAll('[data-diff-discussion-reply]')].at(-1)?.textContent ?? undefined
+
+    // First turn settles: its prompt and answer are the transcript's tail from now on.
+    type('why?')
+    const firstPrompt = calls()[0]?.[1] ?? ''
+    act(() => {
+      listener!({
+        running: false,
+        nodes: [{ kind: 'user', text: firstPrompt }, { kind: 'assistant', text: 'previous answer' }],
+        partial: '',
+        error: undefined,
+      })
+    })
+    expect(lastReply()).toBe('previous answer')
+
+    // Second turn asks the SAME words on the SAME rows while the session is busy. Its
+    // prompt is queued, so the transcript still ends with the previous turn: the block
+    // must wait, and the streaming text of the running turn must not touch it.
+    type('why?')
+    act(() => {
+      listener!({
+        running: true,
+        nodes: [{ kind: 'user', text: firstPrompt }, { kind: 'assistant', text: 'previous answer' }],
+        partial: 'previous answer streaming',
+        error: undefined,
+        queued: [calls()[1]?.[1] ?? ''],
+      })
+    })
+    expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toBe('discussion.queued')
+    expect(lastReply()).toBe('previous answer')
+
+    // Our own prompt is in the transcript: from here the answer is ours.
+    const secondPrompt = { kind: 'user', text: calls()[1]?.[1] ?? '' }
+    act(() => {
+      listener!({
+        running: true,
+        nodes: [{ kind: 'user', text: firstPrompt }, { kind: 'assistant', text: 'previous answer' }, secondPrompt],
+        partial: 'our answer',
+        error: undefined,
+        queued: [],
+      })
+    })
+    expect(lastReply()).toBe('our answer')
+
+    act(() => {
+      listener!({
+        running: false,
+        nodes: [
+          { kind: 'user', text: firstPrompt },
+          { kind: 'assistant', text: 'previous answer' },
+          secondPrompt,
+          { kind: 'assistant', text: 'our answer' },
+        ],
+        partial: '',
+        error: undefined,
+        queued: [],
+      })
+    })
+    expect(document.querySelectorAll('[data-diff-discussion-user]').length).toBe(2)
+    expect(lastReply()).toBe('our answer')
+  })
+
+  it('closes a stopped comment instead of taking the next turn\'s answer', () => {
+    // Pressing Stop while a comment is being answered used to leave the block waiting: the
+    // turn was frozen with nothing written, the pending ask stayed armed, and the NEXT
+    // turn's answer then settled into the comment. Two things fix it — a turn's own
+    // segment (nothing after the next human message belongs to this question) and the
+    // frozen node that ends the wait.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+    fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    const prompt = { kind: 'user', text: (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]?.[1] ?? '' }
+    const lastReply = (): string | undefined =>
+      [...document.querySelectorAll('[data-diff-discussion-reply]')].at(-1)?.textContent ?? undefined
+
+    // The turn runs, then the user stops it: the runtime freezes it with nothing written.
+    act(() => { listener!({ running: true, nodes: [prompt], partial: '', error: undefined, queued: [] }) })
+    expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
+    const frozen = { kind: 'assistant', text: '', interrupted: true }
+    act(() => { listener!({ running: false, nodes: [prompt, frozen], partial: '', error: undefined, queued: [] }) })
+    expect(document.querySelector('[data-diff-discussion-stopped]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
+    // The writing row is back, and the question is still there to ask again.
+    expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-discussion-user]')?.textContent).toBe('why?')
+
+    // A later turn - the user's own next message - must not land in this block.
+    const nextUser = { kind: 'user', text: 'another question' }
+    act(() => {
+      listener!({ running: true, nodes: [prompt, frozen, nextUser], partial: 'the new answer', error: undefined, queued: [] })
+    })
+    expect(lastReply()).toBeUndefined()
+    act(() => {
+      listener!({
+        running: false,
+        nodes: [prompt, frozen, nextUser, { kind: 'assistant', text: 'the new answer' }],
+        partial: '',
+        error: undefined,
+        queued: [],
+      })
+    })
+    expect(lastReply()).toBeUndefined()
+    expect(document.querySelector('[data-diff-discussion-stopped]')).not.toBeNull()
+  })
+
+  it('keeps the partial an interrupted turn had written, and says it was stopped', () => {
+    // Stop after some text arrived: that text is what the user was reading, so it stays as
+    // the answer — but it is marked stopped, and the writing row comes back.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+    fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    const prompt = { kind: 'user', text: (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]?.[1] ?? '' }
+
+    act(() => {
+      listener!({
+        running: false,
+        nodes: [prompt, { kind: 'assistant', text: 'half an answer', interrupted: true }],
+        partial: '',
+        error: undefined,
+        queued: [],
+      })
+    })
+    expect([...document.querySelectorAll('[data-diff-discussion-reply]')].at(-1)?.textContent).toBe('half an answer')
+    expect(document.querySelector('[data-diff-discussion-stopped]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
+  })
+
+  it('hands the caret back when the compose row returns, unless the user moved on', async () => {
+    // Sending hides the compose row while the turn runs, so the caret has nowhere
+    // to be. It belongs in the input the moment that row is back — a conversation
+    // is typed turn after turn — but not if the user has clicked or typed
+    // elsewhere in the meantime: then the caret is where they put it.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+
+    const type = (value: string): void => {
+      fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value } })
+      fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    }
+    type('why?')
+    expect(document.querySelector('[data-diff-discussion-input]')).toBeNull()
+    const prompt = (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]?.[1] ?? ''
+    act(() => {
+      listener!({ running: false, nodes: [{ kind: 'user', text: prompt }, { kind: 'assistant', text: 'first answer' }], partial: '', error: undefined })
+    })
+    expect(document.activeElement).toBe(document.querySelector('[data-diff-discussion-input]'))
+
+    // Second turn: this time the user clicks away while the answer runs. Its prompt
+    // carries the second question, which is what tells the two turns apart.
+    type('and then?')
+    const secondPrompt = (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[1]?.[1] ?? ''
+    act(() => { document.dispatchEvent(new Event('pointerdown', { bubbles: true })) })
+    act(() => {
+      listener!({
+        running: false,
+        nodes: [
+          { kind: 'user', text: prompt },
+          { kind: 'assistant', text: 'first answer' },
+          { kind: 'user', text: secondPrompt },
+          { kind: 'assistant', text: 'second answer' },
+        ],
+        partial: '',
+        error: undefined,
+      })
+    })
+    const input = document.querySelector('[data-diff-discussion-input]')
+    expect(input).not.toBeNull()
+    expect(document.activeElement).not.toBe(input)
+  })
+
+  it('scrolls with the code from a wheel over a discussion block', () => {
+    // A block is painted INSIDE the scroller, in content coordinates, so the wheel
+    // over it is the browser's own business — that is what makes it scroll with the
+    // code instead of trailing it by a frame. The chrome that still floats in the
+    // non-scrolling wrapper (the action frames, the search bar) has no scroller
+    // under it at all, so its wheel is forwarded by hand.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+    let scrolled = 0
+    Object.defineProperty(body, 'scrollTop', {
+      configurable: true,
+      get: () => scrolled,
+      // Clamped, the way a real box behaves at either end of its range.
+      set: (value: number) => { scrolled = Math.max(0, Math.min(2000, value)) },
+    })
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    const block = document.querySelector('[data-diff-discussion]') as HTMLElement
+    // Inside the scroller: the browser scrolls it with the code, no JS placement.
+    expect(block.closest('[data-diff-body]')).toBe(body)
+    // ...and it is laid out in CONTENT coordinates, with the horizontal offset
+    // carried by a transform, so a vertical scroll needs nothing from JS.
+    expect(block.style.transform).toBe('translateX(0px)')
+
+    const wheel = (target: Element, init: WheelEventInit): WheelEvent => {
+      const event = new WheelEvent('wheel', { bubbles: true, cancelable: true, ...init })
+      target.dispatchEvent(event)
+      return event
+    }
+
+    // The bar floats over the code in the wrapper, so its wheel is ours.
+    fireEvent.click(screen.getByLabelText('action.search'))
+    const searchBar = document.querySelector('[data-diff-searchbar]') as HTMLElement
+    expect(wheel(searchBar, { deltaY: 100 }).defaultPrevented).toBe(true)
+    expect(scrolled).toBe(100)
+
+    // Line-mode deltas (Firefox) arrive in whole rows, not pixels.
+    wheel(searchBar, { deltaY: 1, deltaMode: 1 })
+    expect(scrolled).toBe(122)
+
+    scrolled = 2000
+    expect(wheel(searchBar, { deltaY: 100 }).defaultPrevented).toBe(false)
+    expect(scrolled).toBe(2000)
+
+    // A wheel over the code or over a block scrolls the box natively: forwarding it
+    // here too would move twice as far as the user asked for.
+    scrolled = 500
+    expect(wheel(body, { deltaY: 100 }).defaultPrevented).toBe(false)
+    expect(wheel(block, { deltaY: 100 }).defaultPrevented).toBe(false)
+    expect(scrolled).toBe(500)
+  })
+
+  it('leaves a block\'s vertical position to the browser and only pins it sideways', () => {
+    // The point of painting a block inside the scroller: a vertical scroll must
+    // need NOTHING from JS, because that is what made it trail the code by a frame.
+    // The horizontal axis is the one thing left, since a content-coordinate box
+    // would otherwise slide out of view when the code is scrolled sideways.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+    Object.defineProperty(body, 'scrollTop', { configurable: true, value: 0 })
+    Object.defineProperty(body, 'scrollLeft', { configurable: true, value: 0 })
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    const block = document.querySelector('[data-diff-discussion]') as HTMLElement
+    // The annotated rows carry the wash THEMSELVES, so there is no overlay for the panel
+    // to place: it scrolls with the code in both axes with no script at all (the overlay
+    // this replaces had to be counter-translated sideways and trailed the text).
+    const banded = [...document.querySelectorAll('[data-diff-discussion-band]')]
+    expect(banded).toEqual([rows[5]])
+    expect(rows[5]!.closest('[data-diff-body]')).toBe(body)
+    const top = block.style.top
+    // Content coordinates: no scroll offset in the value at all. The block hangs below
+    // the row it annotates (row 5 ends at 110px).
+    expect(top).toBe('132px')
+
+    Object.defineProperty(body, 'scrollTop', { configurable: true, value: 220 })
+    fireEvent.scroll(body)
+    expect(block.style.top).toBe(top)
+    // The sideways half is scripted: the standard fix (a scroll-driven CSS animation) is
+    // measured as broken in this browser build, so the pin stays in the scroll path.
+    expect(block.style.transform).toBe('translateX(0px)')
+
+    Object.defineProperty(body, 'scrollLeft', { configurable: true, value: 120 })
+    fireEvent.scroll(body)
+    expect(block.style.transform).toBe('translateX(120px)')
+    expect(block.style.top).toBe(top)
+    // The wash needs no transform: it moved with its row.
+    expect(rows[5]!.style.transform).toBe('')
+  })
+
+  it('keeps a thread on the code row grid', () => {
+    // A block is a whole number of code rows: one header, one row per line the
+    // thread shows, two for the compose area. The turns used to carry vertical
+    // chrome of their own (a bubble's padding, a paragraph's bottom margin), which
+    // left a gap between the question and its answer and put every line below the
+    // first a few pixels off the code's 22px grid.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    const block = (): HTMLElement => document.querySelector('[data-diff-discussion]') as HTMLElement
+    const space = (): HTMLElement => document.querySelector('[data-diff-discussion-space]') as HTMLElement
+    // An empty block: the header plus the two compose rows.
+    expect(block().style.height).toBe('66px')
+
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+    fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    const prompt = { kind: 'user', text: (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]?.[1] ?? '' }
+    act(() => {
+      // jsdom measures no glyphs, so a message's rows are its line count — plus the
+      // bubble's own half-row padding twice, which is what the user's turn adds. The
+      // blank line is the other point: it is the agent's paragraph gap, and it must
+      // cost neither a row nor a line in the render, since a blank line in a thread
+      // reads as a gap in the code it annotates. The prompt is in the transcript, which
+      // is what makes the answer ours.
+      listener!({ running: false, nodes: [prompt, { kind: 'assistant', text: 'first answer\n\nsecond line' }], partial: '', error: undefined })
+    })
+    // 1 header + (1 line of question + its 1 row of bubble padding) + 2 rows of
+    // answer + 2 compose rows, and the reservation the rows after it are pushed by
+    // says the same.
+    expect(block().style.height).toBe('154px')
+    expect(space().style.height).toBe('154px')
+    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('first answer\nsecond line')
+  })
+
   it('shows the selection frame for a single covered block too', async () => {
     // 'a\n' -> 'b\n' has one block (both rows).
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
@@ -3721,6 +4591,9 @@ describe('PendingPanel', () => {
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
 
     expect(document.querySelector('[data-diff-selection-actions]')).not.toBeNull()
+    // Both groups are there (keep/revert over the covered block, comment on the
+    // range), so the hairline between them is too.
+    expect(document.querySelector('[data-diff-selection-divider]')).not.toBeNull()
     fireEvent.click(document.querySelector('[data-diff-selection-keep]') as HTMLButtonElement)
     // A single covered block is the file's last change: the action prompts for
     // remove-or-keep instead of firing the block RPC directly.

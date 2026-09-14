@@ -1,6 +1,6 @@
 /** Sidebar-foot pending-edit review action and the split review panel it opens. */
 
-import { Component, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Component, Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconListPenOutline16, IconPanelLeftOutline16, IconPlusOutline16, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -18,6 +18,12 @@ import { CoverageControl, CoverageNotice, COVER_NOTICE_MS } from './coverage-con
 // hint this panel's close button spells, so both hint builders live in chords.ts.
 import { closeHint, summonHint, withChord } from './chords.ts'
 import { blockRangesOf, changeBlocksOf, computeIntraLineDiff, computeWholeFileDiff } from './whole-file-diff.ts'
+import {
+  DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, DISCUSSION_MAX_BODY_ROWS, discussionOverlapping, discussionPlacements,
+  discussionRowExtras, discussionRows, discussionTail, discussionText, remapDiscussion, selectionFrame, stripBlankLines,
+} from './discussion.ts'
+import type { Discussion, DiscussionMessage } from './discussion.ts'
+import type { ChatView } from './chat-bridge.ts'
 import { renderMarkdownPreview } from './markdown-preview.ts'
 import { resolvePreviewImages } from './markdown-images.ts'
 import type { ChangeBlock, IntraRun, WholeFileDiffRow } from './whole-file-diff.ts'
@@ -220,8 +226,20 @@ function MarkdownModeIcon({ preview, size = 14 }: { preview: boolean; size?: num
     </svg>
   )
 }
+/** Return/enter glyph for the comment button: the key's own corner arrow, drawn on
+ *  MarkdownModeIcon's 14-grid so the two read at the same weight. It is what tells
+ *  the user that Enter sends the comment, without spending a row on the hint. */
+function ReturnIcon({ size = 12 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      {/* Shaft in from the right, then down; the head sits at the foot of it. */}
+      <path d="M11.5 3.5 H4.5 V10.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
+      <path d="M2.5 8.5 L4.5 10.5 L6.5 8.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
+    </svg>
+  )
+}
 /** Total width of the two line-number gutters, subtracted from the code width
- * when measuring wrapped line heights. */
+ *  when measuring wrapped line heights. */
 const WRAP_GUTTERS_PX = 88
 /** The dsh shell's sidebar auto-collapse breakpoint (ui-layout columns.ts):
  * below it the sidebar auto-collapses, and the file list floats on the same
@@ -404,11 +422,36 @@ function makeMeasurer(font: string | undefined): ((text: string) => number) | un
   if (font !== undefined) ctx.font = font
   return text => ctx.measureText(text).width
 }
+/** How long a question the session has let go stays "queued" before the block hands
+ * its writing row back. The local submission echo and the host's queue row are a
+ * round trip apart, so releasing on the first idle notification would take the row
+ * back while the prompt is still on its way. */
+const DISCUSSION_RELEASE_GRACE_MS = 2500
 /** The overview ruler's width in px (mirrors `.overviewRuler`). The flash is
  * kept off it even when the scroller has no vertical scrollbar. */
 const OVERVIEW_RULER_WIDTH_PX = 4
+/** The cap on a user bubble, as a share of the thread's width (mirrors
+ * `.discussionUser`'s `max-width`, which is the chat's own `.userStack` cap). The
+ * wrap measurement has to know it, since the bubble wraps at its cap, not at the
+ * width of the block. */
+const DISCUSSION_BUBBLE_MAX_WIDTH = 0.82
+/** A user bubble's own vertical padding, as a share of a code row (mirrors
+ * `.discussionUser`): the fill is the text plus 0.2 above and below. */
+const DISCUSSION_BUBBLE_PADDING_ROWS = 0.2
+/** The bubble's horizontal padding, as a share of a code row (mirrors
+ * `.discussionUser`): its own 0.5 per side, and no margin outside it, so the fill is
+ * flush with the thread's right column and this is what comes off the wrap width. */
+const DISCUSSION_BUBBLE_SIDE_PADDING_ROWS = 0.5
+/** The bubble's vertical margin, outside its fill (mirrors `.discussionUser`): with
+ * the 0.2 padding above, half a row per side — one whole row of height. */
+const DISCUSSION_BUBBLE_MARGIN_ROWS = 0.3
+/** The thread's own side inset in px (mirrors `.discussionBody`'s padding): the one
+ * column every turn starts from, so no turn carries a side inset of its own. */
+const DISCUSSION_BODY_INSET_PX = 12
 /** Rows rendered beyond the visible window in each direction. */
 const OVERSCAN_ROWS = 8
+/** The identity a file with no discussions shares, so memos stay stable. */
+const EMPTY_DISCUSSIONS: readonly Discussion[] = []
 /** Height of the floating per-block Keep/Revert frame in px: 26px actions +
  * 5px frame padding on each side + 1px border on each side, plus a little
  * breathing room so the bottom padding never sits flush against it. */
@@ -652,8 +695,17 @@ interface PendingDiffProps {  file: PendingFileDiff
   landingTick?: number | undefined
   /** The last keep/revert failure for this file, shown as an inline banner. */
   failedMessage?: string | undefined
+  /**
+   * The answer-rules skill this host can deliver. With it, a comment prompt points at
+   * the skill and carries no rules of its own; without it, the prompt carries them.
+   */
+  commentSkill?: string | undefined
   /** Paste a copied reference into the session's chat input and focus it. */
   onPasteReference: (sessionId: SessionId, reference: string) => void
+  /** Send one prompt into the session as a real turn (false = no send verb). */
+  onAskAgent: (sessionId: SessionId, text: string) => boolean
+  /** Watch a session's transcript and turn state for a discussion's answer. */
+  watchChat: (sessionId: SessionId, listener: (view: ChatView) => void) => () => void
   /** Show a transient toast (used when a reference is copied to the clipboard). */
   onToast: (text: string) => void
   t: Translator
@@ -910,6 +962,8 @@ const DiffRow = memo(function DiffRow(props: {
   row: WholeFileDiffRow
   runs: HighlightSides | undefined
   focused: boolean
+  /** Whether this row is one a discussion annotates: it carries the wash itself. */
+  discussed: boolean
   /** Whether this row contains a search hit, and if so whether it is current. */
   searchHit: boolean
   searchCurrent: boolean
@@ -921,7 +975,7 @@ const DiffRow = memo(function DiffRow(props: {
   /** Visual sub-lines when auto-wrap is on, else undefined (single line). */
   wrappedLines: string[] | undefined
 }) {
-  const { index, row, runs, focused, searchHit, searchCurrent, searchQuery, searchOptions, onRowHover, wrappedLines } = props
+  const { index, row, runs, focused, discussed, searchHit, searchCurrent, searchQuery, searchOptions, onRowHover, wrappedLines } = props
   const lineNumber = row.kind === 'del' ? row.oldLine : row.newLine
   const sideRuns = row.kind === 'del' ? runs?.oldRuns : runs?.newRuns
   const lineRuns = lineNumber === undefined ? undefined : sideRuns?.[lineNumber - 1]
@@ -941,9 +995,10 @@ const DiffRow = memo(function DiffRow(props: {
 
   return (
     <div
-      className={`${css.line} ${ROW_CLASS[row.kind]}`}
+      className={`${css.line} ${ROW_CLASS[row.kind]}${discussed ? ` ${css.rowDiscussed}` : ''}`}
       data-diff-line={row.kind}
       data-diff-row={index}
+      data-diff-discussion-band={discussed ? '' : undefined}
       data-diff-focused={focused ? '' : undefined}
       data-diff-search={searchHit ? (searchCurrent ? 'current' : 'hit') : undefined}
       onMouseEnter={() => { onRowHover(index) }}
@@ -1998,6 +2053,27 @@ interface PreviewRulerMarker {
 }
 
 /**
+ * Convert row-run ruler markers to the preview's fraction-of-rows shape. The
+ * preview has no discussion blocks (they are a code-view feature), so a fraction
+ * of the row count is exact there and stays the cheap conversion.
+ *
+ * @param markers - row runs, as the shared computation returns them.
+ * @param rowCount - how many rows the diff has.
+ * @returns markers positioned as percentages of the row count.
+ */
+function previewRulerMarkersOf(
+  markers: readonly { start: number; end: number; kind: 'del' | 'add' }[],
+  rowCount: number,
+): PreviewRulerMarker[] {
+  if (rowCount === 0) return []
+  return markers.map(marker => ({
+    top: (marker.start / rowCount) * 100,
+    height: ((marker.end - marker.start + 1) / rowCount) * 100,
+    kind: marker.kind,
+  }))
+}
+
+/**
  * Measure the single-column preview's change blocks to position its ruler
  * markers by RENDERED height, so a tall block (an inline image, a large code
  * fence) is not miscounted by source-line fractions. `offsetTop`/`offsetHeight`
@@ -2053,7 +2129,7 @@ function PendingFileRow({ file, selected, failedMessage, t, onSelect }: PendingF
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, failedMessage, onPasteReference, onToast, t, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, failedMessage, commentSkill, onPasteReference, onAskAgent, watchChat, onToast, t, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -2187,20 +2263,18 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       .then(() => setMdImageTick(tick => tick + 1))
   }, [previewActive, splitView, file.path, file.sessionId, workspacePath, onPreviewImage])
 
-  // Overview-ruler markers: one per maximal run of same-kind changed rows,
-  // positioned as a fraction of the whole file so the scrollbar strip mirrors
-  // where each added/deleted run sits. Percentage positioning keeps the strip
-  // correct for any diff-body height.
+  // Overview-ruler markers: one per maximal run of same-kind changed rows, as
+  // row runs. Each surface converts them: the code view reads the height table
+  // (discussion blocks reserve rows, so a row-count fraction would misplace
+  // them), the preview keeps the row-count fraction for its fallback markers.
   const rulerMarkers = useMemo(() => {
     const rows = model.diff.rows
-    const total = rows.length
-    if (total === 0) return []
-    const markers: { top: number; height: number; kind: 'del' | 'add' }[] = []
+    if (rows.length === 0) return []
+    const markers: { start: number; end: number; kind: 'del' | 'add' }[] = []
     let runStart = -1
     let runKind: 'del' | 'add' = 'del'
     const flush = (end: number) => {
-      const span = end - runStart + 1
-      markers.push({ top: (runStart / total) * 100, height: (span / total) * 100, kind: runKind })
+      markers.push({ start: runStart, end, kind: runKind })
     }
     rows.forEach((row, index) => {
       if (row.kind === 'context') {
@@ -2233,7 +2307,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     const body = mdPreviewBodyRef.current
     if (body === null) return
     const measured = markdownPreviewMarkers(body)
-    setMdRulerMarkers(measured.length > 0 ? measured : rulerMarkers)
+    setMdRulerMarkers(measured.length > 0 ? measured : previewRulerMarkersOf(rulerMarkers, model.diff.rows.length))
   }, [previewActive, splitView, file.oldText, file.newText, mdImageTick, rulerMarkers])
 
   // Syntax highlighting is windowed (see the hook): only the lines near the
@@ -2252,6 +2326,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   const [splitVisible, setSplitVisible] = useState<VisibleLines | undefined>(undefined)
 
   const bodyRef = useRef<HTMLDivElement>(null)
+  /** The scroll box's non-scrolling parent, which carries the chrome painted over
+   *  it (discussion blocks, action frames, the search bar) — see the wheel effect. */
+  const bodyWrapRef = useRef<HTMLDivElement>(null)
   const [focus, setFocus] = useState(0)
   const [scrollTick, setScrollTick] = useState(0)
   const [scrollTop, setScrollTop] = useState(0)
@@ -2260,6 +2337,40 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   const [hScrollbarPx, setHScrollbarPx] = useState(0)
   const [hoveredBlock, setHoveredBlock] = useState<number | undefined>(undefined)
   const [selection, setSelection] = useState<RowRange | undefined>(undefined)
+  // Discussions attached to a row range, kept per file so switching files (and
+  // coming back) does not lose them. Each one reserves rows in the height table
+  // (see `discussionRowExtras`) and paints its block below the range, so the code
+  // after it is pushed down rather than covered — the block is part of the row
+  // stream's arithmetic, not an overlay. Durable storage arrives later; this is
+  // the page's memory of them.
+  const [discussionsByFile, setDiscussionsByFile] = useState<Readonly<Record<string, readonly Discussion[]>>>({})
+  const discussions = discussionsByFile[file.id] ?? EMPTY_DISCUSSIONS
+  const setDiscussions = (update: (current: readonly Discussion[]) => readonly Discussion[]): void => {
+    setDiscussionsByFile(all => ({ ...all, [file.id]: update(all[file.id] ?? EMPTY_DISCUSSIONS) }))
+  }
+  /** Which block's overflow menu is open, if any. */
+  const [discussionMenuFor, setDiscussionMenuFor] = useState<string | undefined>(undefined)
+  const discussionMenuItems = useMemo<MenuEntry[]>(() => [{ id: 'delete', label: t('action.delete') }], [t])
+  /** The session's chat, watched so a discussion can show the answer it asked for. */
+  const [chat, setChat] = useState<ChatView>({ running: false, nodes: [], partial: '', error: undefined, queued: undefined })
+  /** The same view, readable from a timer callback (which closes over nothing fresh). */
+  const chatRef = useRef(chat)
+  chatRef.current = chat
+  /** The armed "the session let our prompt go" release, if any. */
+  const releaseTimerRef = useRef<number | undefined>(undefined)
+  /** The discussion waiting for an answer, and the transcript length it started at. */
+  const pendingAskRef = useRef<{ id: string; baseline: number; needle: string } | undefined>(undefined)
+  /** The compose inputs, so a freshly created block can take the caret. */
+  const discussionInputEls = useRef(new Map<string, HTMLInputElement>())
+  /** The block whose input should be focused once it is on screen. */
+  const focusPendingRef = useRef<string | undefined>(undefined)
+  /**
+   * The block whose input should take the caret back when the compose row returns
+   * after a send. The row is gone while the turn runs, so the caret has nowhere to
+   * live; this is cleared by the first thing the user does anywhere, because that
+   * means they moved on and the caret is not ours to move again.
+   */
+  const discussionRefocusRef = useRef<string | undefined>(undefined)
   // The Markdown preview has no fixed row grid, so its block frames are placed by
   // measuring the tagged elements and the preview content instead: the hovered
   // block's frame, and the blocks a native selection fully covers (with their own
@@ -2915,10 +3026,179 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     const tabPx = tabWidthSpaces * measure(' ')
     return rows.map(row => wrapInto(row.text, wrapping, measure, tabPx))
   }, [langWrap, bodyWidth, rows, tabWidthSpaces])
+  // Discussions and their bands are painted INSIDE the scroller, so `right` is
+  // measured against the scroller's padding box — which already excludes its
+  // vertical bar. A bar therefore needs no inset of its own (its left edge is
+  // where the code area ends, exactly like `flashWidth`); only a bar-less
+  // scroller leaves the ruler sitting in the content area, and that is reserved.
+  // Declared here, above the thread's row measurement, because that measurement
+  // needs the same number to know how wide the block's body is.
+  const discussionRightInsetPx = (() => {
+    const scroller = bodyRef.current
+    if (scroller === null) return OVERVIEW_RULER_WIDTH_PX
+    const scrollbarWidth = scroller.offsetWidth - scroller.clientWidth
+    return scrollbarWidth > 0 ? 0 : OVERVIEW_RULER_WIDTH_PX
+  })()
+  // The scroller's own horizontal offset, for the same DOM-reading reason: the
+  // blocks are laid out in content coordinates, so this is what puts them back at
+  // the viewport's left edge. `placeRef` keeps it current between renders, in the
+  // same frame as the scroll.
+  const scrollLeftNow = bodyRef.current?.scrollLeft ?? 0
+
+  /**
+   * How many code rows one message occupies when the block renders it, at the code's
+   * own font and the width that turn actually gets — the same canvas measurement the
+   * diff's own wrap mode uses, so the block's height stays exact and the last line is
+   * never clipped. A bubble's own padding counts too: half a row above and below add
+   * up to a whole one.
+   *
+   * @param text - the message text.
+   * @param role - who said it: the two sides wrap at different widths.
+   * @returns the occupied row count (whole: a bubble's chrome is a whole row).
+   */
+  const messageRowsOf = useCallback((text: string, role: DiscussionMessage['role']): number => {
+    const lines = text.split('\n')
+    // A bubble pads its text by 0.2 of a row above and below and sits 0.3 of a row
+    // inside its own margin, so its two vertical sides are exactly one more row; the
+    // horizontal padding comes off the wrap width below (there is no horizontal
+    // margin, so only the padding narrows the text).
+    const bubble = role === 'user'
+    const chrome = bubble ? 2 * (DISCUSSION_BUBBLE_PADDING_ROWS + DISCUSSION_BUBBLE_MARGIN_ROWS) : 0
+    const measure = makeMeasurer(codeFontOf())
+    if (measure === undefined || bodyWidth === 0) return lines.length + chrome
+    // The block spans the scroller's client box, so its body is that less the
+    // block's own 3px border and the thread's own side inset — and that body is
+    // then what a turn wraps inside. Measuring at the CODE column's width instead
+    // (what this used to do) over-reserved, since the code starts two gutters in
+    // and the block does not — but a bubble capped at a percentage of the body is
+    // narrower than both, and there the same shortcut would under-reserve and clip.
+    // So measure each side where it actually wraps. The percentage resolves against
+    // the body, which is why the inset is subtracted before it is taken.
+    const body = Math.max(0, bodyWidth - discussionRightInsetPx - 3 - 2 * DISCUSSION_BODY_INSET_PX)
+    const width = bubble
+      ? body * DISCUSSION_BUBBLE_MAX_WIDTH - 2 * DISCUSSION_BUBBLE_SIDE_PADDING_ROWS * ROW_HEIGHT_PX
+      : body
+    // One character of slack, like the diff's own wrap: canvas metrics and the DOM's
+    // glyph advances can differ by a fraction, and a row too few clips.
+    const wrapping = width - measure('0')
+    if (wrapping <= 0) return lines.length + chrome
+    const tabPx = tabWidthSpaces * measure(' ')
+    return chrome + lines.reduce((rows, line) => rows + Math.max(1, wrapInto(line, wrapping, measure, tabPx).length), 0)
+  }, [bodyWidth, tabWidthSpaces, discussionRightInsetPx])
+
+  /**
+   * The size one rendered message needs in code rows: its wrapped lines plus its own
+   * padding — which for a bubble is exactly one row (half a row above, half below).
+   * Every turn is therefore a whole number of rows and the thread stays on the code's
+   * own grid.
+   *
+   * @param message - the message to size.
+   * @returns its size in code rows.
+   */
+  const messageSizeOf = useCallback((message: DiscussionMessage): number => {
+    return messageRowsOf(discussionText(message), message.role)
+  }, [messageRowsOf])
+
+  /**
+   * The thread as the block will render it, plus the body height that follows from
+   * it: the newest turns that fit the cap, an optional "older" note, the answer in
+   * flight (or the failure note), and the compose row the user writes in.
+   *
+   * @param discussion - the block to lay out.
+   * @returns the messages to render, the hidden count, and the body height.
+   */
+  const layoutDiscussion = useCallback((discussion: Discussion): { messages: readonly DiscussionMessage[]; hidden: number; rows: number } => {
+    // Every trailing piece is a whole number of rows: a status note is one row, the
+    // compose area two, an answer as many as its wrapped lines. There is no chrome
+    // left to round away, which is what keeps the thread on the code's grid. The
+    // answer in flight is stripped of blank lines here, once, so the emptiness test,
+    // the size and the render below all speak about the same text.
+    const answer = discussion.reply === undefined ? undefined : stripBlankLines(discussion.reply)
+    // A stopped turn adds a note of its own above the writing row it hands back, so its
+    // budget is that note plus the compose area.
+    const stoppedNote = discussion.stopped === true && (answer === undefined || answer === '') && discussion.failed !== true
+    const trailing = discussion.lost === true
+      ? 1
+      : answer !== undefined && answer !== ''
+        ? messageSizeOf({ role: 'assistant', text: answer })
+        : discussion.failed === true || discussion.asking === true
+          ? 1
+          : DISCUSSION_COMPOSE_ROWS + (stoppedNote ? 1 : 0)
+    // A lost block carries two notes: why it is lost, and the "older turns omitted"
+    // line the tail may add. Both are part of the budget.
+    const tailCap = DISCUSSION_MAX_BODY_ROWS - trailing - (discussion.lost === true ? 1 : 0)
+    const tail = discussionTail(discussion.messages, messageSizeOf, Math.max(1, tailCap))
+    return {
+      messages: tail.messages,
+      hidden: tail.hidden,
+      rows: Math.min(DISCUSSION_MAX_BODY_ROWS, Math.ceil(tail.rows + trailing)),
+    }
+  }, [messageSizeOf])
+
+  /**
+   * The discussions as the render will draw them: the body height the measurement
+   * above arrived at, the turns it kept, and the text those turns actually show.
+   * The text goes through `discussionText` here as well as in the measurement, so
+   * an answer with a blank line is drawn without one AND counted without one — the
+   * two can never disagree (see `stripBlankLines`).
+   */
+  const laidDiscussions = useMemo(
+    () => discussions.map(discussion => {
+      const laid = layoutDiscussion(discussion)
+      return {
+        ...discussion,
+        bodyRows: laid.rows,
+        hidden: laid.hidden,
+        messages: laid.messages.map(message => ({ ...message, text: discussionText(message) })),
+        // Only set when there IS an answer in flight: both the type and the render
+        // read the absence of `reply` as "nothing streamed yet".
+        ...(discussion.reply === undefined ? {} : { reply: stripBlankLines(discussion.reply) }),
+      }
+    }),
+    [discussions, layoutDiscussion],
+  )
+
+  // Discussion blocks reserve whole rows in the same height table the wrap model
+  // uses: a block hangs below its range's last row, so its rows are added to that
+  // row's entry. With nothing reserved the table stays null and the cheap
+  // uniform-row path is unchanged.
+  const discussionExtras = useMemo(
+    () => discussionRowExtras(laidDiscussions, rows.length),
+    [laidDiscussions, rows.length],
+  )
+  // Blocks sharing a row stack in insertion order; the reserved rows belong to
+  // the row they hang below, so each block's own position adds what is already
+  // reserved under that row (see the render).
+  const discussionPlacement = useMemo(
+    () => discussionPlacements(laidDiscussions, rows.length),
+    [laidDiscussions, rows.length],
+  )
+  /**
+   * The rows a discussion annotates. They carry their own wash, so the mark scrolls with
+   * the code in both axes with no positioning at all — the overlay this replaces had to
+   * be counter-translated on every horizontal scroll and trailed the text.
+   */
+  const discussedRows = useMemo(() => {
+    const set = new Set<number>()
+    for (const discussion of laidDiscussions) {
+      for (let row = Math.max(0, discussion.anchor.start); row <= Math.min(discussion.anchor.end, rowCount - 1); row++) {
+        set.add(row)
+      }
+    }
+    return set
+  }, [laidDiscussions, rowCount])
   const rowHeights = useMemo(() => {
-    if (rowWrapped === null) return null
-    return rowWrapped.map(lines => lines.length * ROW_HEIGHT_PX)
-  }, [rowWrapped])
+    const wrapped = rowWrapped === null ? null : rowWrapped.map(lines => lines.length * ROW_HEIGHT_PX)
+    if (discussionExtras.size === 0) return wrapped
+    const heights = wrapped === null
+      ? new Array<number>(rows.length).fill(ROW_HEIGHT_PX)
+      : [...wrapped]
+    for (const [after, extra] of discussionExtras) {
+      const index = Math.max(0, Math.min(after, heights.length - 1))
+      heights[index] = (heights[index] ?? ROW_HEIGHT_PX) + extra * ROW_HEIGHT_PX
+    }
+    return heights
+  }, [rowWrapped, discussionExtras, rows.length])
   const rowOffsets = useMemo(() => {
     if (rowHeights === null) return null
     const offs = new Array<number>(rowHeights.length + 1)
@@ -2936,6 +3216,466 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     if (rowOffsets === null) return (to - from + 1) * ROW_HEIGHT_PX
     return Math.max(0, offsetOf(to + 1) - offsetOf(from))
   }
+  /**
+   * Whether the height table carries measured (wrapped) row heights. It is the
+   * signal the landing effect waits for; a discussion's reserved rows are a table
+   * of their own and must not read as "the measurement just became ready".
+   */
+  const offsetsFromWrap = rowWrapped !== null
+  // The code view's ruler markers: once a block reserves rows the strip's
+  // denominator is the real height, so positions come from the height table.
+  const rulerMarkersNow: PreviewRulerMarker[] = totalHeight <= 0
+    ? []
+    : rowOffsets === null
+      ? previewRulerMarkersOf(rulerMarkers, rowCount)
+      : rulerMarkers.map(marker => ({
+          top: (offsetOf(marker.start) / totalHeight) * 100,
+          height: ((offsetOf(marker.end + 1) - offsetOf(marker.start)) / totalHeight) * 100,
+          kind: marker.kind,
+        }))
+
+  // A block that changes height above the viewport shifts every row below it, so
+  // the scroll offset has to follow or the code under the user's eyes jumps. The
+  // shift is applied in a layout effect, once the height table has been rebuilt.
+  const pendingScrollShiftRef = useRef(0)
+  useLayoutEffect(() => {
+    const shift = pendingScrollShiftRef.current
+    pendingScrollShiftRef.current = 0
+    const body = bodyRef.current
+    if (shift === 0 || body === null) return
+    body.scrollTop += shift
+    setScrollTop(body.scrollTop)
+  }, [discussions])
+  /** Patch one discussion in place, without touching the others or the file key. */
+  const updateDiscussion = useCallback((id: string, patch: Partial<Discussion>): void => {
+    setDiscussionsByFile(all => {
+      const list = all[file.id] ?? EMPTY_DISCUSSIONS
+      return { ...all, [file.id]: list.map(entry => (entry.id === id ? { ...entry, ...patch } : entry)) }
+    })
+  }, [file.id])
+
+  // Watch the session's chat while this file is open, so an answer can land in the
+  // discussion that asked for it. The subscriber is read through a ref: the face
+  // hands the panel fresh closures on every plugin render, and re-subscribing on
+  // each of those would fight the target activation the first subscription did.
+  const watchChatRef = useRef(watchChat)
+  watchChatRef.current = watchChat
+  useEffect(() => {
+    let stop: (() => void) | undefined
+    try {
+      stop = watchChatRef.current(file.sessionId, setChat)
+    } catch {
+      // A build without the chat surfaces simply never reports an answer.
+    }
+    return () => { stop?.() }
+  }, [file.sessionId])
+
+  // Move the watched chat into the discussion that is waiting for it: the streamed
+  // partial while the turn runs, then the finalized assistant text once it settles.
+  useEffect(() => {
+    const pending = pendingAskRef.current
+    if (pending === undefined) return
+    // Find our own prompt: the marker plus the range reference plus what we asked is
+    // what tells the annotation's turn apart from anything else the session is doing
+    // - including an EARLIER comment on the same rows, whose marker line is identical.
+    // The search starts at our own baseline, so nothing that was in the transcript
+    // before we sent can ever be mistaken for the prompt we are waiting on.
+    let asked = -1
+    for (let index = chat.nodes.length - 1; index >= pending.baseline; index--) {
+      const node = chat.nodes[index]!
+      if (node.kind === 'user' && node.text.includes(pending.needle)) { asked = index; break }
+    }
+    // Until that prompt is in the transcript there is nothing to show but the wait:
+    // the text streaming in the session belongs to whatever turn is running, and
+    // taking it would put someone else's words in this block.
+    const ours = asked >= 0
+    // ...and whether the session still holds our prompt at all. `undefined` means this
+    // build does not publish its queue, so the only honest thing is to keep waiting.
+    const held = chat.queued === undefined
+      ? undefined
+      : chat.queued.some(text => text.includes(pending.needle))
+    // Our turn's own segment: the nodes after our prompt, UP TO the next human turn. A
+    // later message - the user typing on, or the next comment - starts a new segment,
+    // and its answer can never be read as the answer to this one. That is exactly how a
+    // stopped comment used to swallow the next answer: the turn was cancelled, nothing
+    // was written, and the following turn's reply settled into this block.
+    let segmentEnd = chat.nodes.length
+    for (let index = Math.max(0, asked + 1); index < chat.nodes.length; index++) {
+      if (chat.nodes[index]?.kind === 'user') { segmentEnd = index; break }
+    }
+    const tail = asked >= 0 ? chat.nodes.slice(asked + 1, segmentEnd) : []
+    const answers = tail.filter(node => node.kind === 'assistant' && node.text !== '')
+    const settled = answers.at(-1)?.text ?? ''
+    // The runtime froze this turn when it was stopped: it is over, and it will not write
+    // anything more. A frozen node with text is still an answer (the partial that had
+    // arrived), so this only decides the empty case.
+    const stopped = ours && tail.some(node => node.kind === 'assistant' && node.interrupted === true)
+    // The question is over: no answer is coming. Clears the pending ask and closes the
+    // block out - with a "stopped" note when the turn actually ran and was cut off, and
+    // silently when the prompt never became a turn at all (the writing row simply comes
+    // back). Reads the LIVE view, because the timer fires after the render that armed it.
+    const closeOut = (): void => {
+      const current = pendingAskRef.current
+      if (current === undefined || current.id !== pending.id) return
+      const view = chatRef.current
+      if (view.running) return
+      let found = -1
+      for (let index = view.nodes.length - 1; index >= current.baseline; index--) {
+        const node = view.nodes[index]
+        if (node !== undefined && node.kind === 'user' && node.text.includes(current.needle)) { found = index; break }
+      }
+      if (found < 0) {
+        // Still in the session's hands: the round trip is not over, so keep waiting.
+        if (view.queued === undefined || view.queued.some(text => text.includes(current.needle))) return
+      } else if (view.nodes.slice(found + 1).some(node => node.kind === 'assistant' && node.text !== '')) {
+        // An answer did arrive after all; the effect will settle it.
+        return
+      }
+      pendingAskRef.current = undefined
+      updateDiscussion(current.id, found >= 0
+        ? { asking: false, queued: false, failed: false, reply: '', stopped: true }
+        : { asking: false, queued: false, failed: false, reply: '' })
+    }
+    // The question is alive again (its prompt is in the transcript, or the session is
+    // busy with it): any armed close-out is stale.
+    const clearRelease = (): void => {
+      if (releaseTimerRef.current === undefined) return
+      window.clearTimeout(releaseTimerRef.current)
+      releaseTimerRef.current = undefined
+    }
+    /** Arm the one "no answer is coming" timer, if it is not already running. */
+    const armCloseOut = (): void => {
+      if (releaseTimerRef.current !== undefined) return
+      releaseTimerRef.current = window.setTimeout(() => {
+        releaseTimerRef.current = undefined
+        closeOut()
+      }, DISCUSSION_RELEASE_GRACE_MS)
+    }
+    if (chat.error !== undefined) {
+      clearRelease()
+      pendingAskRef.current = undefined
+      updateDiscussion(pending.id, { asking: false, queued: false, failed: true, reply: '' })
+      return
+    }
+    if (chat.running) {
+      if (!ours) {
+        updateDiscussion(pending.id, { asking: true, queued: true, failed: false, reply: '' })
+        return
+      }
+      clearRelease()
+      const streaming = chat.partial !== '' ? chat.partial : settled
+      if (streaming !== '') updateDiscussion(pending.id, { asking: true, queued: false, failed: false, reply: streaming })
+      return
+    }
+    if (settled === '') {
+      if (stopped) {
+        // Definitive: the runtime froze the turn, so nothing else is coming for it.
+        clearRelease()
+        closeOut()
+        return
+      }
+      if (!ours) {
+        // The session has let our prompt go without it ever becoming a turn - a turn
+        // stopped while the question was still queued, say. Waiting on would leave the
+        // block saying "queued" for a prompt that is not coming, so hand the writing
+        // row back. Not at once, though: the local submission echo and the host's own
+        // queue row are a round trip apart, so the first idle notification can arrive
+        // while the question is still on its way. The re-check reads the live view, so
+        // a prompt that turned up in the meantime keeps its block.
+        if (held === false) armCloseOut()
+        else clearRelease()
+        updateDiscussion(pending.id, { asking: true, queued: true, failed: false, reply: '' })
+        return
+      }
+      // Our turn is in the transcript but has written nothing yet: the same grace, so a
+      // turn that is merely between two steps is not pronounced dead, and one that was
+      // stopped (with no frozen node to prove it) still closes out.
+      armCloseOut()
+      return
+    }
+    // The answer settles into the thread as a real message, so the next question
+    // continues the conversation instead of replacing the last answer. A turn the runtime
+    // froze still gets its text kept - it is what the user was reading - but is marked
+    // stopped, so the block says the answer was cut off rather than presenting it whole.
+    clearRelease()
+    pendingAskRef.current = undefined
+    setDiscussionsByFile(all => {
+      const list = all[file.id] ?? EMPTY_DISCUSSIONS
+      return {
+        ...all,
+        [file.id]: list.map(entry => (
+          entry.id === pending.id
+            ? {
+                ...entry, asking: false, queued: false, failed: false, reply: '', stopped,
+                messages: [...entry.messages, { role: 'assistant' as const, text: settled }],
+              }
+            : entry
+        )),
+      }
+    })
+  }, [chat, updateDiscussion, file.id])
+
+  /**
+   * Re-anchor every block whenever the rows are rebuilt (a keep/revert or an edit
+   * rewrites them). The anchor's new-file lines are what survive; a block whose
+   * lines are all gone keeps the rows it last matched and is marked lost, so it
+   * stays where the user last saw it.
+   */
+  useEffect(() => {
+    setDiscussionsByFile(all => {
+      const list = all[file.id] ?? EMPTY_DISCUSSIONS
+      const next = list.map(discussion => remapDiscussion(
+        discussion,
+        (row) => {
+          const entry = model.diff.rows[row]
+          return entry?.newLine ?? entry?.oldLine
+        },
+        model.diff.rows.length,
+      ))
+      return next.some((discussion, index) => discussion !== list[index]) ? { ...all, [file.id]: next } : all
+    })
+  }, [model, file.id])
+
+  // The block elements, so the sideways half of their placement happens in the SAME frame
+  // as the scroll itself. They sit in the scroller's CONTENT coordinates, which the
+  // browser scrolls vertically by itself — no main-thread work there and no lag — so the
+  // counter-translation that keeps them in view while the code moves sideways is all this
+  // has to write. (A scroll-driven CSS animation would move that half to the compositor,
+  // which is the standard fix; measured against this browser build, a scroll timeline
+  // parses and reports support but never advances — `0%` while a plain animation runs —
+  // so it would leave the block unpinned. Hence the scripted fallback.)
+  const discussionEls = useRef(new Map<string, HTMLDivElement>())
+  const placeRef = useRef<() => void>(() => {})
+  placeRef.current = (): void => {
+    const left = bodyRef.current?.scrollLeft ?? 0
+    const shift = `translateX(${left}px)`
+    for (const discussion of laidDiscussions) {
+      const placement = discussionPlacement.get(discussion.id)
+      const row = placement?.row ?? discussion.anchor.end
+      const below = (placement?.belowRows ?? 0) * ROW_HEIGHT_PX
+      const block = discussionEls.current.get(discussion.id)
+      if (block !== undefined) {
+        block.style.top = `${offsetOf(row) + ROW_HEIGHT_PX + below}px`
+        block.style.transform = shift
+      }
+    }
+  }
+  // Re-run after every render that can move a block: a rebuilt row model
+  // (`laidDiscussions`/`discussionPlacement`) or a new scroll offset. The offset
+  // only has to be read here because a render can happen between two scroll
+  // events; the scroll path itself calls `placeRef` directly.
+  useLayoutEffect(() => { placeRef.current() }, [laidDiscussions, discussionPlacement, scrollTop])
+
+  // Put the caret in a just-created block's input, so commenting is one gesture
+  // (pick rows → 评论 → type) rather than two. Runs after the commit, so the
+  // input exists; the caret goes to the end for a pre-filled draft. The same pass
+  // hands the caret back to a block that just sent a comment and whose compose row
+  // has returned - but only while the user has not touched anything since (see the
+  // listeners below), so a caret that was moved on purpose stays where it is.
+  useEffect(() => {
+    const fresh = focusPendingRef.current
+    const id = fresh ?? discussionRefocusRef.current
+    if (id === undefined) return
+    const input = discussionInputEls.current.get(id)
+    // No input yet means the turn is still running and the compose row is not on
+    // screen: the want stays pending until the row comes back.
+    if (input === undefined) return
+    if (fresh !== undefined) focusPendingRef.current = undefined
+    else discussionRefocusRef.current = undefined
+    input.focus()
+    try {
+      input.setSelectionRange(input.value.length, input.value.length)
+    } catch {
+      // Selection verbs are optional on some input embeddings; focus still lands.
+    }
+  }, [laidDiscussions])
+
+  // Any pointer or key event anywhere is the user acting on their own: drop the
+  // pending caret hand-back. Both listeners run in the capture phase, which is what
+  // lets the send itself (a keydown, or the click on the comment button) still set
+  // the want *after* its own event has passed through.
+  useEffect(() => {
+    const drop = (): void => { discussionRefocusRef.current = undefined }
+    document.addEventListener('pointerdown', drop, true)
+    document.addEventListener('keydown', drop, true)
+    return () => {
+      document.removeEventListener('pointerdown', drop, true)
+      document.removeEventListener('keydown', drop, true)
+    }
+  }, [])
+
+  // The discussion blocks — and the action frames and the search bar with them —
+  // are painted in the NON-scrolling wrapper, over the scroll box. A wheel over one
+  // of them therefore never reaches that box and the code view sits still under the
+  // pointer, which reads as a dead zone exactly where the user is reading. Forward
+  // the wheel by hand, but only the part the box can actually take: at either end
+  // the event is left alone so it chains outward, the same as a wheel over the code.
+  useEffect(() => {
+    const wrap = bodyWrapRef.current
+    if (wrap === null) return
+    const onWheel = (event: WheelEvent): void => {
+      const body = bodyRef.current
+      const target = event.target
+      if (body === null || !(target instanceof Element)) return
+      // Over the code itself the browser already scrolls the box; only the chrome
+      // floating above it needs this.
+      if (target.closest('[data-diff-body]') !== null) return
+      const per = event.deltaMode === 1 ? ROW_HEIGHT_PX : event.deltaMode === 2 ? body.clientHeight : 1
+      const top = body.scrollTop
+      const left = body.scrollLeft
+      body.scrollTop = top + event.deltaY * per
+      body.scrollLeft = left + event.deltaX * per
+      if (body.scrollTop !== top || body.scrollLeft !== left) event.preventDefault()
+    }
+    // Not passive: this handler is the only thing that can stop the wheel from
+    // scrolling whatever is outside the panel instead.
+    wrap.addEventListener('wheel', onWheel, { passive: false })
+    return () => { wrap.removeEventListener('wheel', onWheel) }
+  }, [ROW_HEIGHT_PX])
+
+  /** Start a discussion on the current selection (no-op on a range that has one). */
+  const addDiscussion = (): void => {
+    if (selection === undefined) return
+    // A row belongs to one annotation at most, so any overlap refuses a second.
+    if (discussionOverlapping(discussions, selection) !== undefined) return
+    const first = model.diff.rows[selection.start]
+    const last = model.diff.rows[selection.end] ?? first
+    // The anchor is stored as new-file lines: those are what survive the model
+    // being rebuilt (a keep/revert, a later edit), and they are also what the
+    // reference label shows.
+    const startLine = first?.newLine ?? first?.oldLine
+    if (startLine === undefined) return
+    const endLine = last?.newLine ?? last?.oldLine ?? startLine
+    // A new block reserves rows below the anchored row. When that row sits above
+    // the viewport, everything the user is reading moves down by the same amount,
+    // so the scroll offset follows it - the same rule folding and removal use.
+    const body = bodyRef.current
+    if (body !== null && offsetOf(selection.start) - body.scrollTop < 0) {
+      pendingScrollShiftRef.current += (DISCUSSION_HEADER_ROWS + DISCUSSION_COMPOSE_ROWS) * ROW_HEIGHT_PX
+    }
+    const id = `discussion-${Date.now().toString(36)}-${discussions.length}`
+    setDiscussions(current => [...current, {
+      id,
+      anchor: { start: selection.start, end: selection.end, startLine, endLine },
+      messages: [],
+      draft: '',
+      collapsed: false,
+    }])
+    // The user asked to comment, so the caret belongs in the new block's input
+    // once it is on screen (the effect below runs after the commit).
+    focusPendingRef.current = id
+    // The selection has become an object: drop the browser's own highlight so
+    // only the discussion's band marks those rows, and so the toolbar (which is
+    // about a live selection) goes away with it. Guarded: a partial Selection
+    // implementation (some embeddings, test doubles) has no range verbs.
+    const live = window.getSelection()
+    if (typeof live?.removeAllRanges === 'function') live.removeAllRanges()
+    selectionTextRef.current = ''
+    setSelection(undefined)
+  }
+
+  /**
+   * Fold or unfold one block, keeping the code the user is reading in place.
+   * @param id - the block to fold.
+   * @param collapsed - the state to set (defaults to the opposite of the current).
+   */
+  const setDiscussionCollapsed = (id: string, collapsed?: boolean): void => {
+    const discussion = discussions.find(entry => entry.id === id)
+    if (discussion === undefined) return
+    const next = collapsed ?? !discussion.collapsed
+    if (next === discussion.collapsed) return
+    const nextRows = next ? DISCUSSION_HEADER_ROWS : discussionRows(discussion)
+    const shift = (nextRows - discussionRows(discussion)) * ROW_HEIGHT_PX
+    const body = bodyRef.current
+    // Only compensate when the block sits above the viewport: at or below it the
+    // block grows downwards, and nothing the user is reading moves.
+    if (body !== null && offsetOf(discussion.anchor.start) - body.scrollTop < 0) {
+      pendingScrollShiftRef.current += shift
+    }
+    setDiscussions(current => current.map(entry => entry.id === id ? { ...entry, collapsed: next } : entry))
+  }
+
+  /** Fold or unfold one block from its header arrow. */
+  const toggleDiscussion = (id: string): void => { setDiscussionCollapsed(id) }
+
+  /**
+   * Send one turn of a discussion to the agent.
+   *
+   * The first turn is the annotation: the `(path:lines)` reference, the user's
+   * words and the length policy. Later turns are follow-ups in the same thread -
+   * the reference rides along so the agent keeps answering about these rows, and
+   * the answer is appended rather than replacing the previous one. When this build
+   * has no send verb, the text goes to the composer instead (the route the copy
+   * reference already used).
+   *
+   * @param id - the discussion to ask in.
+   */
+  const sendDiscussion = (id: string): void => {
+    const discussion = discussions.find(entry => entry.id === id)
+    if (discussion === undefined || discussion.lost === true) return
+    const text = discussion.draft.trim()
+    if (text === '') return
+    const reference = `(${discussionLineRange(discussion.anchor)})`
+    const marker = `${t('discussion.marker')} ${reference}`
+    // The needle is the marker AND the first line of what was asked. The marker alone
+    // is not unique: two comments on the same rows - which is exactly what a thread's
+    // follow-ups are - produce the same one, so an older prompt would match and its
+    // answer would land in this block.
+    const needle = `${marker}\n${text.split('\n')[0] ?? ''}`
+    // The rules ride the message only when this host cannot deliver the skill: with a
+    // skill the prompt is the marker, the question and a pointer at it, so a long rule
+    // never costs tokens again (the catalog advertises the skill's own summary, and the
+    // body is loaded on demand — see `src/comment-skill.ts`).
+    const rule = commentSkill === undefined
+      ? t('discussion.promptRule')
+      : t('discussion.promptRuleSkill', { skill: commentSkill })
+    const prompt = `${marker}\n${text}\n\n${rule}`
+    const asked: DiscussionMessage = { role: 'user', text }
+    const sent = onAskAgent(file.sessionId, prompt)
+    if (!sent) {
+      onPasteReference(file.sessionId, `${reference}\n${text}`)
+      setDiscussions(current => current.map(entry => (
+        entry.id === id ? { ...entry, messages: [...entry.messages, asked], draft: '' } : entry
+      )))
+      return
+    }
+    // Remember which turn asked, and where the transcript stood: the answer is the
+    // text of OUR prompt's turn, and nothing that was already there when we sent can
+    // be it.
+    pendingAskRef.current = { id, baseline: chat.nodes.length, needle }
+    // The compose row goes away while the answer runs, which drops the caret; ask
+    // for it back when the row returns, unless the user has moved on by then.
+    discussionRefocusRef.current = id
+    setDiscussions(current => current.map(entry => (
+      entry.id === id
+        ? { ...entry, messages: [...entry.messages, asked], draft: '', asking: true, queued: false, failed: false, reply: '', collapsed: false }
+        : entry
+    )))
+  }
+
+  /** Discard one block, keeping the code the user is reading in place. */
+  const removeDiscussion = (id: string): void => {
+    const discussion = discussions.find(entry => entry.id === id)
+    if (discussion === undefined) return
+    const shift = discussionRows(discussion) * ROW_HEIGHT_PX * -1
+    const body = bodyRef.current
+    // Same rule as folding: only a block above the viewport moves what is below it.
+    if (body !== null && offsetOf(discussion.anchor.start) - body.scrollTop < 0) {
+      pendingScrollShiftRef.current += shift
+    }
+    setDiscussions(current => current.filter(entry => entry.id !== id))
+  }
+
+  /**
+   * The commented rows as a `path:lines` label - the same reference vocabulary the
+   * copy control uses, so a discussion names where it sits in the file. It reads
+   * the stored lines rather than the current rows, so a block whose lines are gone
+   * still says what it was about.
+   * @param anchor - the discussion's anchor.
+   * @returns the reference label.
+   */
+  const discussionLineRange = (anchor: Discussion['anchor']): string =>
+    referenceLabelOf(file.path, workspacePath, anchor.startLine, anchor.endLine)
   const rowAtY = (y: number): number => {
     if (rowOffsets === null) return Math.floor(y / ROW_HEIGHT_PX)
     if (y <= 0) return 0
@@ -2993,13 +3733,19 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     ? 0
     : Math.max(0, Math.min(offsetOf(blockEnd + 1) - scrollTop - 2, Math.max(0, viewportHeight - BLOCK_ACTIONS_FRAME_PX)))
 
-  // The selection frame anchors to the last covered block's bottom edge — the
-  // same spot that block's own hover frame would use.
+  // The selection frame anchors to the last covered block's bottom edge - the
+  // same spot that block's own hover frame would use. A selection that covers no
+  // change block (comment-only) has no such block, so it anchors to its own last
+  // row instead: the frame sits under the rows the user selected either way.
   const selectionBlockEnd = ((): number | undefined => {
-    if (coveredBlockIndices.length === 0) return undefined
-    const lastIndex = coveredBlockIndices[coveredBlockIndices.length - 1]
-    if (lastIndex === undefined) return undefined
-    return model.blocks[lastIndex]?.end
+    if (coveredBlockIndices.length > 0) {
+      const lastIndex = coveredBlockIndices[coveredBlockIndices.length - 1]
+      if (lastIndex !== undefined) {
+        const end = model.blocks[lastIndex]?.end
+        if (end !== undefined) return end
+      }
+    }
+    return selection?.end
   })()
   const selectionActionsTop = selectionBlockEnd === undefined
     ? 0
@@ -3111,9 +3857,13 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     // block under the viewport (see `onScroll`), and that must NOT recenter and
     // fight the user's scroll. Only a jump/keep/switch (which bump `scrollTick`)
     // recenters the focused block.
-    // NOTE: `model`/`rowCount` are deliberately NOT deps — a content refresh
+    // NOTE: `model`/`rowCount` are deliberately NOT deps - a content refresh
     // would otherwise re-center the view and lose the user's scroll position.
-  }, [scrollTick, rowOffsets === null, previewActive])
+    // The readiness flag is the WRAP measurement (the initial render guesses the
+    // fixed row height), not `rowOffsets === null`: a discussion block reserving
+    // rows also materializes that table, and recentering the view when the user
+    // simply annotates a line would be a jump they did not ask for.
+  }, [scrollTick, offsetsFromWrap, previewActive])
 
   // At the wrap boundary (last block + down, first block + up) a guarded press
   // (keyboard or toolbar) only toasts; the next press in the same direction
@@ -3284,6 +4034,11 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     if (body === null) return
     setScrollTop(body.scrollTop)
     setViewportHeight(body.clientHeight)
+    // The discussion overlays' horizontal offset is placed here, in the same frame
+    // as the scroll, instead of waiting for the render that `setScrollTop`
+    // schedules. Their vertical position needs no placement at all: they are laid
+    // out in the scroller's content coordinates and scroll natively.
+    placeRef.current()
     // Re-anchor the "current diff" (`focus`) to the block under the viewport
     // anchor, so a manual scroll updates which block prev/next walk from instead
     // of a stale last-jumped-to block. Updating focus does NOT recenter — the
@@ -4002,7 +4757,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
           onVisibleLines={onSplitVisibleLines}
         />
       ) : (
-      <div className={css.diffBodyWrap} onMouseLeave={() => { setHoveredBlock(undefined) }}>
+      <div className={css.diffBodyWrap} ref={bodyWrapRef} onMouseLeave={() => { setHoveredBlock(undefined) }}>
         <div
           className={css.diffBody}
           ref={bodyRef}
@@ -4020,28 +4775,197 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
             )}
             {visibleRows.map((row, offset) => {
               const index = start + offset
+              const reserved = discussionExtras.get(index) ?? 0
               return (
-                <DiffRow
-                  key={index}
-                  index={index}
-                  row={row}
-                  runs={runs}
-                  focused={inFocusedBlock(index)}
-                  searchHit={searchHitSet.has(index)}
-                  searchCurrent={index === currentSearchRow}
-                  searchQuery={searchQuery}
-                  searchOptions={search.options}
-                  onRowHover={onRowHover}
-                  wrappedLines={rowWrapped?.[index]}
-                />
+                <Fragment key={index}>
+                  <DiffRow
+                    index={index}
+                    row={row}
+                    runs={runs}
+                    focused={inFocusedBlock(index)}
+                    discussed={discussedRows.has(index)}
+                    searchHit={searchHitSet.has(index)}
+                    searchCurrent={index === currentSearchRow}
+                    searchQuery={searchQuery}
+                    searchOptions={search.options}
+                    onRowHover={onRowHover}
+                    wrappedLines={rowWrapped?.[index]}
+                  />
+                  {/* A discussion block's rows, reserved in the height table. The
+                      DOM has to carry them too: a reserved row that is inside the
+                      rendered window would otherwise be drawn over instead of
+                      pushing the rows after it down. Outside the window the
+                      spacers already account for it, so this is exactly the
+                      in-window half of the same reservation. */}
+                  {reserved > 0 && (
+                    <div
+                      className={css.vSpacer}
+                      data-diff-discussion-space={reserved}
+                      style={{ height: reserved * ROW_HEIGHT_PX }}
+                      aria-hidden="true"
+                    />
+                  )}
+                </Fragment>
               )
             })}
             {end < rowCount && (
               <div className={css.vSpacer} style={{ height: totalHeight - offsetOf(end) }} aria-hidden="true" />
             )}
           </div>
+        {/* Discussions are painted INSIDE the scroller, in CONTENT coordinates: a block
+            then scrolls with the code natively, on the compositor, instead of being
+            re-placed from the scroll event on the main thread - which is what made it
+            trail the code by a frame. The rows they annotate carry their own wash
+            (`.rowDiscussed`), so nothing has to be positioned for them at all. */}
+        {laidDiscussions.map(discussion => {
+            const rows = discussionRows(discussion)
+            const placement = discussionPlacement.get(discussion.id)
+            const row = placement?.row ?? discussion.anchor.end
+            const below = (placement?.belowRows ?? 0) * ROW_HEIGHT_PX
+            // The row's own code height, then whatever block rows are already
+            // reserved under it, then this block: the reservation stays inside
+            // the height table, so the rows after it are pushed by exactly this.
+            return (
+              <div
+                key={discussion.id}
+                className={css.discussion}
+                data-diff-discussion
+                data-lost={discussion.lost === true ? '' : undefined}
+                ref={(element) => {
+                  if (element === null) discussionEls.current.delete(discussion.id)
+                  else discussionEls.current.set(discussion.id, element)
+                }}
+                style={{
+                  top: offsetOf(row) + ROW_HEIGHT_PX + below,
+                  right: discussionRightInsetPx,
+                  height: rows * ROW_HEIGHT_PX,
+                  // Content coordinates: the scroller moves this box vertically by
+                  // itself, and this is the horizontal half `placeRef` keeps in step
+                  // with the scroll.
+                  transform: `translateX(${scrollLeftNow}px)`,
+                }}
+              >
+                <div className={css.discussionHead}>
+                  <button
+                    type="button"
+                    className={css.discussionToggle}
+                    data-diff-discussion-toggle
+                    aria-expanded={!discussion.collapsed}
+                    aria-label={t(discussion.collapsed ? 'action.discussionExpand' : 'action.discussionCollapse')}
+                    onClick={() => { toggleDiscussion(discussion.id) }}
+                  >
+                    {discussion.collapsed
+                      ? <IconChevronDownOutline14 size={12} />
+                      : <IconChevronUpOutline14 size={12} />}
+                  </button>
+                  <span className={css.discussionRangeWrap}>
+                    <span className={css.discussionRange} data-diff-discussion-range>
+                      {discussionLineRange(discussion.anchor)}
+                    </span>
+                  </span>
+                  <span className={css.flexSpacer} />
+                  <Menu
+                    open={discussionMenuFor === discussion.id}
+                    portal
+                    compact
+                    align="end"
+                    items={discussionMenuItems}
+                    onSelect={(id) => {
+                      if (id === 'delete') removeDiscussion(discussion.id)
+                      setDiscussionMenuFor(undefined)
+                    }}
+                    onClose={() => { setDiscussionMenuFor(undefined) }}
+                    anchor={(
+                      <button
+                        type="button"
+                        className={css.discussionToggle}
+                        data-diff-discussion-menu
+                        aria-label={t('action.more')}
+                        onClick={() => {
+                          setDiscussionMenuFor(current => (current === discussion.id ? undefined : discussion.id))
+                        }}
+                      >
+                        {'\u22ef'}
+                      </button>
+                    )}
+                  />
+                </div>
+                {!discussion.collapsed && (
+                  <div className={css.discussionBody}>
+                    {discussion.lost === true && (
+                      <p className={css.discussionNote} data-diff-discussion-lost>{t('discussion.lost')}</p>
+                    )}
+                    {discussion.hidden !== undefined && discussion.hidden > 0 && (
+                      <p className={css.discussionNote} data-diff-discussion-hidden>
+                        {t('discussion.hidden', { count: discussion.hidden })}
+                      </p>
+                    )}
+                    {/* The turn was stopped: the question stays in the thread, the note
+                        says why there is no answer, and the writing row below comes
+                        back so it can be asked again. */}
+                    {discussion.stopped === true && (discussion.reply === undefined || discussion.reply === '') && discussion.failed !== true && (
+                      <p className={css.discussionNote} data-diff-discussion-stopped>{t('discussion.stopped')}</p>
+                    )}
+                    {discussion.messages.map((message, index) => (
+                      message.role === 'user' ? (
+                        <p className={css.discussionUser} data-diff-discussion-user key={`u${index}`}>{message.text}</p>
+                      ) : (
+                        <p className={css.discussionAnswer} data-diff-discussion-reply key={`a${index}`}>{message.text}</p>
+                      )
+                    ))}
+                    {discussion.reply !== undefined && discussion.reply !== '' ? (
+                      <p className={css.discussionAnswer} data-diff-discussion-reply>{discussion.reply}</p>
+                    ) : discussion.lost === true ? null : discussion.failed === true ? (
+                      <p className={css.discussionNote} data-diff-discussion-failed>{t('discussion.failed')}</p>
+                    ) : discussion.asking === true ? (
+                      <p className={css.discussionNote} data-diff-discussion-asking>
+                        {discussion.queued === true ? t('discussion.queued') : t('discussion.thinking')}
+                      </p>
+                    ) : (
+                      <div className={css.discussionCompose}>
+                        <input
+                          className={css.discussionInput}
+                          data-diff-discussion-input
+                          ref={(element) => {
+                            if (element === null) discussionInputEls.current.delete(discussion.id)
+                            else discussionInputEls.current.set(discussion.id, element)
+                          }}
+                          value={discussion.draft}
+                          placeholder={t('discussion.placeholder')}
+                          onChange={(event) => {
+                            const value = event.target.value
+                            setDiscussions(current => current.map(entry => (
+                              entry.id === discussion.id ? { ...entry, draft: value } : entry
+                            )))
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key !== 'Enter') return
+                            // An IME's "confirm the candidate" Enter must not send:
+                            // composing is the signal for it, and 229 is the code
+                            // some engines send when they will not say so.
+                            if (event.nativeEvent.isComposing || event.keyCode === 229) return
+                            event.preventDefault()
+                            sendDiscussion(discussion.id)
+                          }}
+                        />
+                        <button
+                          type="button"
+                          className={`${css.action} ${css.actionPrimary} ${css.discussionSend}`}
+                          data-diff-discussion-send
+                          onClick={() => { sendDiscussion(discussion.id) }}
+                        >
+                          {t('action.comment')}
+                          <ReturnIcon />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
-        {selectionRange !== undefined ? (
+        {!splitView && selection !== undefined && selectionFrame({ coversBlocks: selectionRange !== undefined, hasDiscussion: discussionOverlapping(discussions, selection) !== undefined }).visible ? (
           <div
             className={css.blockActions}
             data-diff-selection-actions
@@ -4051,6 +4975,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
               type="button"
               className={`${css.action} ${css.actionPrimary}`}
               data-diff-selection-keep
+              hidden={selectionRange === undefined}
               disabled={busy}
               onClick={() => { void handleSelectionAction('keep') }}
             >
@@ -4060,10 +4985,32 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
               type="button"
               className={css.action}
               data-diff-selection-revert
+              hidden={selectionRange === undefined}
               disabled={busy}
               onClick={() => { void handleSelectionAction('revert') }}
             >
               {t('action.revert')}
+            </button>
+            {/* The frame holds two groups: what may be kept or reverted on the
+                covered change blocks, and the comment on the range. The hairline
+                appears only when both are there - keep/revert are hidden over a
+                range with no covered blocks (their `hidden` attribute takes them
+                out of the layout), and a divider with nothing on one side of it
+                would read as a rendering fault. */}
+            {selectionRange !== undefined && (
+              <span className={css.blockActionsDivider} data-diff-selection-divider aria-hidden="true" />
+            )}
+            {/* Always offered: a range without change blocks can still be
+                discussed. A range that already has a discussion does not offer a
+                second one - `selectionFrame` decides, and a frame with no visible
+                action is not rendered at all. */}
+            <button
+              type="button"
+              className={css.action}
+              data-diff-selection-comment
+              onClick={addDiscussion}
+            >
+              {t('action.comment')}
             </button>
           </div>
         ) : hoveredBlock !== undefined && model.blocks[hoveredBlock] !== undefined ? (
@@ -4140,7 +5087,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
             aria-hidden="true"
             style={{ bottom: hScrollbarPx }}
           >
-            {rulerMarkers.map((marker, index) => (
+            {rulerMarkersNow.map((marker, index) => (
               <div
                 key={index}
                 className={`${css.overviewMarker} ${marker.kind === 'del' ? css.markerDel : css.markerAdd}`}
@@ -4248,7 +5195,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onRevertAll, onAckRedoCleared, collapseSidebar, t,
+  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onAskAgent, watchChat, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onRevertAll, onAckRedoCleared, collapseSidebar, t,
   docked = false, dockHost, onOpenDock, closeDock, useDock,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
@@ -5559,7 +6506,10 @@ export function PendingPanel({
                     landingTop={landing !== undefined && landing.fileId === selectedFile.id ? landing.top : undefined}
                     landingTick={landing !== undefined && landing.fileId === selectedFile.id ? landing.n : 0}
                     failedMessage={failed.get(selectedFile.id)}
+                    commentSkill={snapshot.commentSkill}
                     onPasteReference={onPasteReference}
+                    onAskAgent={onAskAgent}
+                    watchChat={watchChat}
                     onToast={showCopyToast}
                     t={t}
                     onKeep={keepWithPrompt}

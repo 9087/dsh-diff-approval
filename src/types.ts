@@ -65,6 +65,12 @@ export interface DiffApprovalListValue {
    * redo history was pending, so the panel can surface that the redo stack was
    * superseded. */
   redoCleared?: boolean | undefined
+  /**
+   * The name of the answer-rules skill this deployment can actually deliver, or absent
+   * when it cannot. The client sends a comment prompt that points at the skill when this
+   * is set, and carries the same rules inline when it is not.
+   */
+  commentSkill?: string | undefined
 }
 
 /** What the open endpoint asks the OS to do with a file. */

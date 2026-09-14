@@ -61,6 +61,19 @@ describe('list', () => {
     await expect(createDiffApprovalPort(seam.rpc).list(S1)).resolves.toEqual({ workspacePath: undefined, files: [] })
   })
 
+  it('passes the host\'s skill capability through', async () => {
+    // The value is narrowed field by field, so a new host field reaches the panel only
+    // once it is read here — and the comment prompt's shape depends on this one.
+    const seam = fakeRpc({ list: { ok: true, value: { files: [], commentSkill: 'dsh-diff-approval-comment' } } })
+    await expect(createDiffApprovalPort(seam.rpc).list(S1))
+      .resolves.toMatchObject({ commentSkill: 'dsh-diff-approval-comment' })
+
+    // Malformed is treated as absent, like every other field.
+    const bad = fakeRpc({ list: { ok: true, value: { files: [], commentSkill: 42 } } })
+    await expect(createDiffApprovalPort(bad.rpc).list(S1))
+      .resolves.toMatchObject({ commentSkill: undefined })
+  })
+
   it('folds a transport error into a rejection', async () => {
     const seam = fakeRpc({
       list: { ok: false, error: { code: 'internal', message: 'down', details: {} } },

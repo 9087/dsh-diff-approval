@@ -159,16 +159,18 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
         return
       }
       try {
-        const { files, workspacePath, redoCleared: cleared } = await port.list(sessionId)
+        const { files, workspacePath, redoCleared: cleared, commentSkill } = await port.list(sessionId)
         if (cleared) redoCleared = true
         // Carry the failure markers through: a hint must survive the poll
-        // (auto-clears on its own timer) rather than vanish a second later.
-        publish({ read: true, files, workspacePath, busy: EMPTY_BUSY, failed: failedOf(snapshot) })
+        // (auto-clears on its own timer) rather than vanish a second later. The skill
+        // capability rides the same way: a failed poll must not change the prompt shape.
+        publish({ read: true, files, workspacePath, commentSkill, busy: EMPTY_BUSY, failed: failedOf(snapshot) })
       } catch (error: unknown) {
         publish({
           read: true,
           files: snapshot.files,
           workspacePath: snapshot.workspacePath,
+          commentSkill: snapshot.commentSkill,
           error: error instanceof Error ? error.message : String(error),
           busy: snapshot.busy,
           failed: failedOf(snapshot),

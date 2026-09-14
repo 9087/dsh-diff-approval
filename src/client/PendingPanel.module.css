@@ -650,6 +650,11 @@
   min-height: 0;
   min-width: 0;
   display: flex;
+  /* Same rule as `.diffBodyWrap`: the block frames and the flash drawn over the
+     rendered Markdown are clipped to this box and cannot outrank the bars around
+     it. */
+  overflow: hidden;
+  isolation: isolate;
 }
 .mdPreviewBody {
   position: relative;
@@ -1679,6 +1684,16 @@
   border-bottom: 1px solid var(--dsw-alias-border-l2);
 }
 
+/* Docked into the app's right sidebar, the path row stops standing out as a band of
+   code surface: it takes the panel's own background, which is exactly what a
+   transparent row would show (the card's code-block tint is painted by `.diff`, and
+   the sidebar pane behind the docked panel is this same surface). Only the docked
+   presentation changes — floating, the card reads as one block and the row keeps the
+   tint with the code below it. */
+.panelDocked .diffHeader {
+  background: var(--dsw-alias-bg-base);
+}
+
 .diffPath {
   min-width: 0;
   flex: 1;
@@ -1859,6 +1874,16 @@
   flex: 1;
   min-height: 0;
   display: flex;
+  /* What is left floating over the code lives in this box and must stay in it:
+     the selection band's Keep/Revert frame, the per-block frame, the search bar,
+     the block flash, the ruler. (The discussion blocks and their bands are NOT
+     here any more — they are painted inside the scroller, in content coordinates,
+     so the browser scrolls them with the code; see `.discussion`.) `overflow:
+     hidden` clips the frames at the code view's own edges instead of letting them
+     draw over the status bar, and `isolation` keeps their z-indexes inside, so
+     they can only rank above the code and never above the bars around it. */
+  overflow: hidden;
+  isolation: isolate;
 }
 
 .diffBody {
@@ -1910,6 +1935,17 @@
   background: var(--dsw-alias-markdown-code-block);
   box-shadow: var(--dsw-shadow-lv1);
   z-index: 2;
+}
+
+/* The hairline between the frame's two groups (keep/revert, then comment). It is
+   rendered only while both are there, so it never stands with nothing on one side;
+   `align-self` stretches it to the frame's inner height. */
+.blockActionsDivider {
+  flex: none;
+  align-self: stretch;
+  width: 1px;
+  margin: 2px 0;
+  background: var(--dsw-alias-border-l2);
 }
 
 /* Which block of the file this hovered block is, inside the actions frame.
@@ -2041,6 +2077,284 @@
    "you are pinned here" rather than a bare opacity flash. */
 .blockFlashShake {
   animation: diffFlashShake 0.7s ease-out forwards;
+}
+
+/* A discussion block: in the row stream's arithmetic (its rows are reserved in
+   the height table, see `rowHeights`) but painted absolutely in CONTENT
+   coordinates INSIDE the scroller, so the browser scrolls it with the code it
+   annotates — natively, on the compositor, which is the whole point: re-placing
+   it from the scroll event left it a frame behind the code. The CSS table never
+   has to span columns for it, and its height is set from JS in whole code rows;
+   the content is clipped, so it can never grow past its reservation and desync
+   the offsets. Only the horizontal axis needs JS: `placeRef` translates the block
+   by the scroller's `scrollLeft`, since a content-coordinate box would otherwise
+   slide out of view when the code is scrolled sideways. */
+.discussion {
+  position: absolute;
+  left: 0;
+  /* `right` is set from JS: the scroller's own padding box, less the ruler strip
+     when there is no vertical bar to clear it. */
+  z-index: 2;
+  overflow: hidden;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  background: var(--dsw-alias-bg-base);
+  /* Neutral, NOT the change-highlight colour: a discussed range and a change
+     run can sit on the same rows, and two tinted markers of the same hue read as
+     one broken frame. Grey is also what keeps the frame from competing with the
+     colours that mean "added" / "deleted". */
+  border-left: 3px solid var(--dsw-alias-label-secondary);
+}
+
+/* The code cells' font, applied where the body is declared so `1em` resolves
+   against the theme's code size - the same two-step the rows use (`.diffBody`
+   shorthand + `.lines` scale). */
+.discussionHead,
+.discussionBody {
+  font: var(--dsw-font-markdown-code-block);
+}
+
+/* Everything under the header: the compose row while the annotation is written,
+   or the answer once there is one. Clipped to the rows the block reserved, so it
+   can never grow past them and desync the height table. The 12px side padding is
+   the thread's own inset — the one margin every turn starts from, so the header's
+   range label and the turns share a column — and it is why the turns themselves
+   carry no side inset of their own. */
+.discussionBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 12px;
+  /* A flex column, so the turns' own margins never collapse into each other: the
+     row budget counts every one of them, and collapsing would leave the block
+     reserving air it never draws. */
+  display: flex;
+  flex-direction: column;
+}
+
+/* A block whose anchor no longer exists in the file: it stays where it last
+   matched, states why, and offers only removal. */
+.discussion[data-lost] {
+  border-left-color: var(--dsw-alias-state-warn-primary, var(--dsw-alias-label-tertiary));
+}
+
+.discussion[data-lost] .discussionAnswer {
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* The answer, at the code's own size. No inset of its own: the thread's own
+   padding (`.discussionBody`) is the whole margin a turn needs, so a transparent
+   answer spans exactly the column the bubble is right-aligned to. No vertical
+   chrome either: a message's line boxes ARE its height, so every line in the
+   thread lands on the same 22px grid the code rows use. */
+.discussionAnswer {
+  margin: 0;
+  padding: 0;
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: calc(1em * var(--dsh-diff-font-scale, 1));
+  line-height: var(--dsh-diff-line-height, 22px);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* What the user said, as a bubble: the chat's own bubble fill, but square and a
+   step smaller, so a thread stays readable inside a code row budget. It hugs its
+   text (`fit-content`) and sits on the RIGHT — the auto left margin is what pushes
+   it there, and this is a four-value shorthand, so the `auto` has to stay last
+   (a three-value one would set the BOTTOM margin instead and leave the bubble
+   left-aligned). Capped at the chat's own 82% (`.userStack` in ui-chat) so a long
+   annotation wraps in its own column instead of running the width of the block,
+   and measured against the thread's own width, which is where the percentage
+   resolves. The 12px the turns start from is the thread's padding, not this margin.
+   A first-person turn is therefore one row taller than its lines — still whole rows
+   (see `.discussionBody`, which is a flex column precisely so these margins cannot
+   collapse away and leave the height table over-reserving). */
+.discussionUser {
+  /* Vertically the fill is the text plus 0.2 of a row, with 0.3 more of a row as
+     margin OUTSIDE it: half a row per side, exactly one row of height, so the turn
+     stays whole rows while the fill itself reads tight. Horizontally the fill takes
+     half a row of its own and no margin at all, so the bubble sits flush with the
+     thread's right column and only its fill is inset. */
+  padding: calc(var(--dsh-diff-line-height, 22px) * 0.2) calc(var(--dsh-diff-line-height, 22px) * 0.5);
+  margin: calc(var(--dsh-diff-line-height, 22px) * 0.3) 0 calc(var(--dsh-diff-line-height, 22px) * 0.3) auto;
+  width: fit-content;
+  /* A percentage, so the cap follows the block: never the whole width, never zero
+     either — `fit-content` is what keeps a one-word annotation from collapsing. */
+  max-width: 82%;
+  box-sizing: border-box;
+  /* Rounded, at the panel's own 8px (the block's buttons use it, the input 6px).
+     The chat's bubble is rounder still — 22px, which on a one-line turn is a pill —
+     but a thread that lives between two code rows reads better as a rounded
+     rectangle than as a capsule. */
+  border-radius: 8px;
+  background: var(--dsw-specific-bubble, var(--dsw-alias-bg-layer-2, var(--dsw-alias-interactive-bg-hover)));
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: calc(1em * var(--dsh-diff-font-scale, 1));
+  line-height: var(--dsh-diff-line-height, 22px);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Status lines: the lost-anchor note, failures, thinking. One code row each and no
+   inset of their own — the thread's padding is the column they share — so a note
+   can never push the thread off the grid either. */
+.discussionNote {
+  margin: 0;
+  padding: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-family: inherit;
+  font-size: calc(1em * var(--dsh-diff-font-scale, 1));
+  line-height: var(--dsh-diff-line-height, 22px);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* "Older turns omitted" is not a status: it says something about the thread's own
+   length, so it steps one label lighter than the notes above and stays out of the
+   way of the turns it is summarising. */
+.discussionNote[data-diff-discussion-hidden] {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* Exactly one code row: the folded header, and the head of the open block. */
+.discussionHead {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  height: var(--dsh-diff-line-height, 22px);
+  padding: 0 12px;
+  /* The header holds controls and a path, so it keeps the UI size even though the
+     family follows the code font. */
+  font-size: 12px;
+  line-height: 16px;
+}
+
+/* The writing row: two code rows tall, which with the one-row header is the three
+   rows the block reserves. It also sits a little wider than the turns: the field is a
+   control rather than prose, so a negative inline margin takes back half of the
+   thread's 12px inset on each side and the input gets that width. The field and its
+   button are one toolbar button tall — the same chrome as the selection frame's 保留,
+   see `.action` — and the rest of the row is the space they are centred in, NOT more
+   height inside either control. */
+.discussionCompose {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  height: calc(var(--dsh-diff-line-height, 22px) * 2);
+  /* Horizontally the wider row above; vertically the leftover around the controls. */
+  margin: 0 -6px;
+  padding: 0;
+}
+
+/* The writing field, whose box is exactly one toolbar button (26px: 3px of padding,
+   an 18px line and a 1px border on each side — the recipe `.action` uses, so the two
+   cannot drift apart). An `<input>` centres its text in the box by itself, so the
+   vertical padding is only about the height. */
+.discussionInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 3px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  /* Family from the compose row, size scaled by the same setting as the code. */
+  font-family: inherit;
+  font-size: calc(1em * var(--dsh-diff-font-scale, 1));
+  line-height: 18px;
+}
+
+/* The fold control is an arrow, not a label: it takes no horizontal room from
+   the range the block is about. */
+.discussionToggle {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.discussionToggle:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* The range label reads as code, at the code's own size: the wrapper carries the
+   theme's code font shorthand so the label's `1em` resolves against the code size
+   (the header itself is UI-sized for its buttons), and the label then applies the
+   same `--dsh-diff-font-scale` the rows do. */
+.discussionRangeWrap {
+  flex: none;
+  font: var(--dsw-font-markdown-code-block);
+}
+
+.discussionRange {
+  color: var(--dsw-alias-label-tertiary);
+  font-family: inherit;
+  font-size: calc(1em * var(--dsh-diff-font-scale, 1));
+}
+
+.discussionInput:focus {
+  outline: none;
+  border-color: var(--dsw-alias-state-business-primary);
+}
+
+/* The placeholder takes the input's own face and scale: the app styles
+   `::placeholder` globally, which would otherwise put the UI font (and its size)
+   in a box that is meant to read as code. */
+.discussionInput::placeholder {
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* The comment action is the field's height because it IS the same chrome: one
+   toolbar button (`.action`), not a stretched box, and it carries the return glyph —
+   Enter in the input sends, and the label says what the click does, so the two
+   together are the whole hint. */
+.discussionSend {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  box-sizing: border-box;
+  /* CJK may break between any two characters; the label and its glyph are one unit. */
+  white-space: nowrap;
+  /* The glyph takes part of the padding's job, so the button stays narrow. */
+  padding-left: 9px;
+  padding-right: 9px;
+}
+
+/* What is being commented on: a translucent wash over those rows rather than a frame —
+   a frame draws four edges across rows that already carry the diff's own add/remove tint,
+   and a wash marks the range without competing with it. It rides the ROWS themselves
+   (`.rowDiscussed`), exactly like that add/remove tint does, instead of floating above
+   them: an overlay had to be counter-translated by script on every horizontal scroll and
+   visibly trailed the text, while a row's own background scrolls with it in both axes for
+   free. */
+.rowDiscussed {
+  /* A flat gradient rather than a background-color, so the diff's own tint still shows
+     through underneath it (both properties paint: the image over the colour). */
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--dsw-alias-label-secondary) 14%, transparent),
+    color-mix(in srgb, var(--dsw-alias-label-secondary) 14%, transparent)
+  );
 }
 
 @keyframes diffFlashFade {
@@ -2524,6 +2838,10 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* Same rule as `.diffBodyWrap`: the frames, the flash and the search bar drawn
+     over the code are clipped to this box and their z-indexes stay inside it. */
+  overflow: hidden;
+  isolation: isolate;
 }
 
 .diffBodySplit {

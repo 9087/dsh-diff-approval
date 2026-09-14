@@ -3,6 +3,7 @@
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { DockSnapshot } from './dock.tsx'
+import type { ChatView } from './chat-bridge.ts'
 import type { DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalOpenAction, DiffApprovalRefreshValue, PendingFileDiff, VcsImportValue } from '../types.ts'
 
 /** What the panel reads and drives: the pending list plus in-flight entries. */
@@ -19,6 +20,12 @@ export interface PendingDiffSnapshot {
   failed?: ReadonlyMap<string, string> | undefined
   /** The viewing session's workspace root (when it has one); enables workspace-relative references. */
   workspacePath?: string | undefined
+  /**
+   * The answer-rules skill this host can deliver, or absent when it cannot (see the
+   * wire type). A comment prompt points at the skill when it is here, and carries the
+   * same rules inline when it is not.
+   */
+  commentSkill?: string | undefined
   /** Latched when an external change created a fresh undo checkpoint that
    * superseded the redo history; the panel surfaces it once (deferred if the
    * panel is closed) via a bottom-right notice. */
@@ -65,6 +72,15 @@ export interface PendingPanelFace {
   onPreviewImage: (sessionId: SessionId, path: string) => Promise<string | undefined>
   /** Paste a copied reference into the session's chat input and focus it. */
   onPasteReference: (sessionId: SessionId, reference: string) => void
+  /**
+   * Send one prompt into the session as a real turn (the discussion's answer
+   * comes back through `watchChat`).
+   * @returns whether a send verb was available; false means the caller should
+   * fall back to the composer route.
+   */
+  onAskAgent: (sessionId: SessionId, text: string) => boolean
+  /** Watch a session's transcript and turn state for a discussion's answer. */
+  watchChat: (sessionId: SessionId, listener: (view: ChatView) => void) => () => void
   /** Undo the session's last keep/revert, then refresh the list; resolves to the affected entry id when it is still pending. */
   onUndo: (sessionId: SessionId) => Promise<string | undefined>
   /** Redo the session's last undone keep/revert, then refresh the list; resolves to the affected entry id when it is still pending. */

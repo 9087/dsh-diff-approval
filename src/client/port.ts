@@ -152,7 +152,14 @@ function listValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): 
     if (file !== undefined) files.push(file)
   }
   const redoCleared = (value as Record<string, unknown>).redoCleared
-  return redoCleared === true ? { files, workspacePath, redoCleared: true } : { files, workspacePath }
+  // The skill this host can deliver. Narrowing rebuilds the value field by field, so a
+  // new host field is invisible until it is read here — which is exactly how the skill
+  // pointer stayed out of the comment prompt after the host started sending it.
+  const skill = (value as Record<string, unknown>).commentSkill
+  const commentSkill = typeof skill === 'string' && skill.length > 0 ? skill : undefined
+  return redoCleared === true
+    ? { files, workspacePath, redoCleared: true, commentSkill }
+    : { files, workspacePath, commentSkill }
 }
 
 /** Narrow one action endpoint's value; a malformed wire value is an action failure. */
