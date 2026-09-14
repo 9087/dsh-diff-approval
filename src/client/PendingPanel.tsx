@@ -23,7 +23,7 @@ import {
   discussionRowExtras, discussionRows, discussionTail, discussionText, remapDiscussion, selectionFrame, stripBlankLines,
 } from './discussion.ts'
 import type { Discussion, DiscussionMessage } from './discussion.ts'
-import { frameFollowKeyframes } from './scroll-follow.ts'
+import { frameFollowIsAnimated, frameFollowKeyframes } from './scroll-follow.ts'
 import type { ChatView } from './chat-bridge.ts'
 import { renderMarkdownPreview } from './markdown-preview.ts'
 import { resolvePreviewImages } from './markdown-images.ts'
@@ -3560,6 +3560,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     selectionTextRef.current = ''
     setSelection(undefined)
   }
+  // The shortcut effect below runs while the comment button is on screen, but must not
+  // re-register on every render: the same hand-off the search bar uses.
+  const addDiscussionRef = useRef(addDiscussion)
+  addDiscussionRef.current = addDiscussion
 
   /**
    * Fold or unfold one block, keeping the code the user is reading in place.
@@ -4163,6 +4167,33 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
   }, [copySelection])
 
+  // What the frame offers for the current selection (see `selectionFrame`). The render
+  // needs `visible`; the comment chord is live exactly while `comment` is, so a frame
+  // showing only keep/revert leaves Ctrl+K to the browser. Declared here, above the key
+  // handlers, because the chord lives as long as the button it stands for.
+  const frameForSelection = !splitView && selection !== undefined
+    ? selectionFrame({ coversBlocks: selectionRange !== undefined, hasDiscussion: discussionOverlapping(discussions, selection) !== undefined })
+    : undefined
+  const selectionFrameVisible = frameForSelection?.visible === true
+  const selectionCommentOffered = frameForSelection?.comment === true
+
+  // Ctrl/Cmd+K comments on the selection - but only while the button that does it is on
+  // screen: the chord is bound to the affordance, so it can never start a comment the
+  // user had no way to click. Window capture with `preventDefault`, because Ctrl+K is the
+  // browser's own address-bar search on the page; the chat composer and the panel's own
+  // text fields keep their keys, and the file-picker dialog is a modal this panel owns.
+  useEffect(() => {
+    if (!selectionCommentOffered) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!matchesShortcut(event, keybindingOf('addComment'))) return
+      if (isTextFieldEvent(event) || pathPickerOpen()) return
+      event.preventDefault()
+      addDiscussionRef.current()
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true) }
+  }, [selectionCommentOffered])
+
   // Ctrl/Cmd+F opens the search bar and focuses its query box. The detail
   // pane is mounted only while a file is open, so this intercepts globally
   // while the diff is shown — browser find stays available whenever no file
@@ -4429,10 +4460,6 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     </div>
   ) : null
 
-  // Which of the two frames is on screen: they are exclusive, and both hang off the
-  // bottom edge of the row their anchor ends on.
-  const selectionFrameVisible = !splitView && selection !== undefined
-    && selectionFrame({ coversBlocks: selectionRange !== undefined, hasDiscussion: discussionOverlapping(discussions, selection) !== undefined }).visible
   const frameAnchorEnd = selectionFrameVisible ? selectionBlockEnd : hoveredBlockEnd
   // The anchor in the scroller's CONTENT coordinates: the row's bottom edge, less the 2px
   // that tuck the frame against it. The frame's POSITION is not written from here — see
@@ -4446,7 +4473,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   // is the row model's own height (the scroller has no padding or border), so it needs no
   // measurement and follows a discussion that just reserved rows.
   const maxScroll = Math.max(0, totalHeight - viewportHeight)
-  const frameFollowsScroll = typeof ScrollTimeline !== 'undefined'
+  // A scroller with nothing to scroll cannot drive the animation at all (its timeline is
+  // inactive), so the render places the frame instead; with no range, that clamp is exact.
+  const frameFollowsScroll = frameFollowIsAnimated(typeof ScrollTimeline !== 'undefined', viewportHeight, maxScroll)
   const frameTop = frameFollowsScroll ? 0 : Math.max(0, Math.min(frameAnchorTop - scrollTop, frameLimit))
 
   // Start (and restart) the follow animation whenever what it maps changes: the anchor,
@@ -4962,7 +4991,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
             )}
           </div>
         </div>
-        {!splitView && selection !== undefined && selectionFrame({ coversBlocks: selectionRange !== undefined, hasDiscussion: discussionOverlapping(discussions, selection) !== undefined }).visible ? (
+        {selectionFrameVisible ? (
           <div
             ref={frameRef}
             className={css.blockActions}
@@ -5001,15 +5030,19 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
           {/* Always offered: a range without change blocks can still be
               discussed. A range that already has a discussion does not offer a
               second one - `selectionFrame` decides, and a frame with no visible
-              action is not rendered at all. */}
-          <button
-            type="button"
-            className={css.action}
-            data-diff-selection-comment
-            onClick={addDiscussion}
-          >
-            {t('action.comment')}
-          </button>
+              action is not rendered at all. The chord is shown the way the other
+              chord-bearing buttons show theirs, and it is live exactly while this
+              button is. */}
+          <Tooltip label={withChord(t('action.comment'), 'addComment')} side="bottom" delayMs={500}>
+            <button
+              type="button"
+              className={css.action}
+              data-diff-selection-comment
+              onClick={addDiscussion}
+            >
+              {t('action.comment')}
+            </button>
+          </Tooltip>
           </div>
         ) : hoveredBlock !== undefined && model.blocks[hoveredBlock] !== undefined ? (
           <div

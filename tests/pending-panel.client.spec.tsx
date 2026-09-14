@@ -4478,6 +4478,78 @@ describe('PendingPanel', () => {
     expect(scrolled).toBe(500)
   })
 
+  it('comments on the selection from the keyboard, for as long as the button is up', () => {
+    // The chord is bound to the affordance: it works exactly while the comment button is
+    // on screen, so it can never start a comment the user had no way to click - and it
+    // takes Ctrl+K from the browser only then.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+    Object.defineProperty(body, 'scrollTop', { configurable: true, value: 0 })
+
+    // No selection, so no button: the key belongs to the browser.
+    fireEvent.keyDown(document.body, { key: 'k', ctrlKey: true })
+    expect(document.querySelector('[data-diff-discussion]')).toBeNull()
+
+    const selectRows = (from: HTMLElement, to: HTMLElement = from): void => {
+      const node = (row: HTMLElement): Node => (row.querySelector('[data-diff-code]') ?? row).firstChild ?? row
+      const startNode = node(from)
+      const endNode = node(to)
+      vi.spyOn(window, 'getSelection').mockReturnValue({
+        isCollapsed: false,
+        anchorNode: startNode,
+        focusNode: endNode,
+        rangeCount: 1,
+        getRangeAt: () => ({ startContainer: startNode, startOffset: 0, endContainer: endNode, endOffset: 1 }),
+        removeAllRanges: () => {},
+      } as unknown as Selection)
+      act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    }
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const kindOf = (row: HTMLElement): string => row.querySelector('[data-diff-code]')?.getAttribute('data-diff-code-line') ?? ''
+    const changed = rows.find(row => kindOf(row) === 'add' || kindOf(row) === 'del')
+    const free = rows.find(row => row !== changed && kindOf(row) === 'context')
+    expect(changed).toBeDefined()
+    expect(free).toBeDefined()
+    selectRows(changed!)
+    expect(document.querySelector('[data-diff-selection-actions]')).not.toBeNull()
+
+    // The chord does what the button does: the block appears, the caret lands in its
+    // input, and the frame leaves with the selection it acted on.
+    fireEvent.keyDown(document.body, { key: 'k', ctrlKey: true })
+    const input = document.querySelector('[data-diff-discussion-input]') as HTMLInputElement
+    expect(input).not.toBeNull()
+    expect(document.activeElement).toBe(input)
+    expect(document.querySelector('[data-diff-selection-actions]')).toBeNull()
+
+    // With the frame back up, a chord typed into a text field stays the field's: not
+    // prevented, and no second comment.
+    selectRows(free!)
+    expect(document.querySelector('[data-diff-selection-actions]')).not.toBeNull()
+    expect(fireEvent.keyDown(input, { key: 'k', ctrlKey: true })).toBe(true)
+    expect(document.querySelectorAll('[data-diff-discussion]').length).toBe(1)
+
+    // The chord follows a rebind, like every other action's: the handler reads the
+    // binding when the key arrives, so no re-registration is needed for it to take.
+    localStorage.setItem('diff-approval:key:addComment', 'Ctrl+J')
+    fireEvent.keyDown(document.body, { key: 'k', ctrlKey: true })
+    expect(document.querySelectorAll('[data-diff-discussion]').length).toBe(1)
+    fireEvent.keyDown(document.body, { key: 'j', ctrlKey: true })
+    expect(document.querySelectorAll('[data-diff-discussion]').length).toBe(2)
+
+    // A selection over the whole of the discussed change block (a removed line and the
+    // added one it replaces) still offers keep/revert, so the frame is up - but with no
+    // comment to offer. The chord is the browser's there: the event is left alone, which
+    // fireEvent reports as true only when nothing called preventDefault.
+    selectRows(changed!, rows[rows.indexOf(changed!) + 1]!)
+    expect(document.querySelector('[data-diff-selection-actions]')).not.toBeNull()
+    expect(fireEvent.keyDown(document.body, { key: 'j', ctrlKey: true })).toBe(true)
+    expect(document.querySelectorAll('[data-diff-discussion]').length).toBe(2)
+  })
+
   it('hangs a block in a row of its own, with neither axis placed by script', () => {
     // A block used to be painted in the scroller's CONTENT coordinates: the vertical
     // half was then the browser's, but the sideways half had to be re-written from the

@@ -205,6 +205,8 @@ describe('matchesShortcut', () => {
     expect(DEFAULT_KEYBINDINGS.coverComposer).toBe('Ctrl+Shift+ArrowDown')
     expect(DEFAULT_KEYBINDINGS.coverRight).toBe('Ctrl+Shift+ArrowRight')
     expect(DEFAULT_KEYBINDINGS.coverTop).toBe('Ctrl+Shift+ArrowUp')
+    // The comment chord, which is live only while the comment button is on screen.
+    expect(DEFAULT_KEYBINDINGS.addComment).toBe('Ctrl+K')
     const chords = Object.values(DEFAULT_KEYBINDINGS)
     expect(new Set(chords).size).toBe(chords.length)
   })

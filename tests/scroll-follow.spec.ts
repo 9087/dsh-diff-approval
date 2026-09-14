@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { frameFollowKeyframes } from '../src/client/scroll-follow.ts'
+import { frameFollowIsAnimated, frameFollowKeyframes } from '../src/client/scroll-follow.ts'
 
 /** The clamp the animation has to reproduce, straight from its definition. */
 function clampAt(anchorTop: number, maxScroll: number, viewportHeight: number, frameHeight: number, progress: number): number {
@@ -22,6 +22,20 @@ function interpolate(stops: { offset: number; y: number }[], progress: number): 
   }
   return last.y
 }
+
+describe('when the follow animation can place the frame', () => {
+  it('leaves it to the render when the code does not scroll', () => {
+    // A scroller with no range has an inactive timeline: an animation on it reports a
+    // null current time and is never applied, which parked the frame at the wrapper's
+    // top edge — the top of the viewport — on a file short enough not to scroll.
+    expect(frameFollowIsAnimated(true, 300, 0)).toBe(false)
+    // The same before the box has been measured, and where there is no scroll timeline.
+    expect(frameFollowIsAnimated(true, 0, 900)).toBe(false)
+    expect(frameFollowIsAnimated(false, 300, 900)).toBe(false)
+    // A measured box with a real range is the case the animation is for.
+    expect(frameFollowIsAnimated(true, 300, 900)).toBe(true)
+  })
+})
 
 describe('the action frame\'s follow animation', () => {
   it('reproduces the clamped follow exactly, whatever the anchor', () => {

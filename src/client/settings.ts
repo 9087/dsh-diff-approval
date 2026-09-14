@@ -461,6 +461,7 @@ export const DEFAULT_KEYBINDINGS: Record<string, string> = {
   jumpUp: 'Ctrl+ArrowUp',
   jumpDown: 'Ctrl+ArrowDown',
   copyRef: 'Ctrl+L',
+  addComment: 'Ctrl+K',
   openSearch: 'Ctrl+F',
   searchNext: 'F3',
   searchPrev: 'Shift+F3',

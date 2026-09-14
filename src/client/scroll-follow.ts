@@ -1,4 +1,23 @@
 /**
+ * Whether the follow animation can drive the frame, or the render has to place it.
+ *
+ * A scroller with nothing to scroll has an INACTIVE timeline. Measured in a browser: the
+ * animation reports a null current time and its transform is never applied at all, which
+ * left the frame wherever the render had put it — the wrapper's top edge, i.e. the top of
+ * the viewport — on a file short enough that the code does not scroll. There is nothing
+ * to follow in that case either, so the clamp at rest is already exact; the same holds
+ * before the box has been measured, and where the browser has no scroll timelines.
+ *
+ * @param hasTimeline - whether the browser supports scroll-driven animations.
+ * @param viewportHeight - the scroller's client height (0 before it is measured).
+ * @param maxScroll - the scroller's maximum `scrollTop` (0 when it does not scroll).
+ * @returns whether the animation, rather than the render, places the frame.
+ */
+export function frameFollowIsAnimated(hasTimeline: boolean, viewportHeight: number, maxScroll: number): boolean {
+  return hasTimeline && viewportHeight > 0 && maxScroll > 0
+}
+
+/**
  * The floating action frame's vertical position, as scroll-driven keyframes.
  *
  * The frame follows the row its anchor ends on — a point in the scroller's CONTENT
