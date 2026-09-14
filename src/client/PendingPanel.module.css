@@ -1549,7 +1549,10 @@
 
 .rowHead {
   display: flex;
-  align-items: baseline;
+  /* Centred, not baseline-aligned: the row mixes the name with 11px metadata and a tag
+     whose padding sits above and below the text, and on the baseline the name read high
+     against both. */
+  align-items: center;
   gap: 8px;
   width: 100%;
   padding: 6px 8px;
@@ -1576,6 +1579,10 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font: var(--dsw-font-markdown-code-block);
+  /* A step down from the code block's own size: this row is a label among 11px metadata,
+     and the code font at full size made the name the loudest thing in the list. */
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .kindTag {
