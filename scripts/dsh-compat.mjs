@@ -100,21 +100,38 @@ function parseArgs(argv) {
 async function ensureInstalled(version) {
   const dir = join(compatRoot, version)
   const installedManifest = join(dir, 'node_modules', '@deepseek-ai', 'dsh-client-connection', 'package.json')
-  if (existsSync(installedManifest)) {
+  const skillsManifest = join(dir, 'node_modules', '@deepseek-ai', 'dsh-skill', 'package.json')
+  if (existsSync(installedManifest) && existsSync(skillsManifest)) {
     const manifest = JSON.parse(await readFile(installedManifest, 'utf8'))
     if (manifest.version === version) return { dir }
   }
   await mkdir(dir, { recursive: true })
   await writeFile(join(dir, 'package.json'), `${JSON.stringify({ name: `dsh-compat-${version}`, private: true, type: 'module' }, null, 2)}\n`)
   try {
+    // The skill registry rides along: the comment rules are registered as a RUNTIME skill,
+    // so the probe has to load the release's real registry to prove that works there. A
+    // release without the package still boots (the plugin feature-detects it).
     await runNpm([
       'install', '--no-audit', '--no-fund', '--silent',
       `@deepseek-ai/cordis@${CORDIS}`,
       `@deepseek-ai/dsh-client-connection@${version}`,
+      `@deepseek-ai/dsh-skill@${version}`,
     ], dir)
     return { dir }
   } catch (error) {
-    return { dir, installError: (error.stderr || error.message || String(error)).trim().split('\n').slice(-4).join(' ').slice(0, 400) }
+    const detail = (error.stderr || error.message || String(error)).trim().split('\n').slice(-4).join(' ').slice(0, 400)
+    // Without the skill package the run can still be meaningful: retry with just the
+    // connection release, and let the boot probe report `skills: 'absent'`.
+    try {
+      await runNpm([
+        'install', '--no-audit', '--no-fund', '--silent',
+        `@deepseek-ai/cordis@${CORDIS}`,
+        `@deepseek-ai/dsh-client-connection@${version}`,
+      ], dir)
+      return { dir, skillsAbsent: detail }
+    } catch (retryError) {
+      return { dir, installError: (retryError.stderr || retryError.message || String(retryError)).trim().split('\n').slice(-4).join(' ').slice(0, 400) }
+    }
   }
 }
 
@@ -183,10 +200,13 @@ for (const version of targets) {
     console.log(`  ${version.padEnd(14)} PROBE FAILED    ${probed.detail}${note}`)
     continue
   }
-  const { activated, mounted, error, routes } = probed.result
+  const { activated, mounted, error, routes, skills, skillBody } = probed.result
   if (activated && mounted) {
-    rows.push({ version, status: 'ok', routes })
-    console.log(`  ${version.padEnd(14)} ok              channel mounted (routes: ${(routes ?? []).join(', ')})${note}`)
+    rows.push({ version, status: 'ok', routes, skills, skillBody })
+    const skillNote = (skills ?? []).length > 0
+      ? `, skill: ${skills.join(', ')}${skillBody === true ? ' (body loaded)' : ' (NO BODY)'}`
+      : ', no skill registry'
+    console.log(`  ${version.padEnd(14)} ok              channel mounted (routes: ${(routes ?? []).join(', ')}${skillNote})${note}`)
   } else {
     if (supported) failed += 1
     else outOfScopeFailures += 1

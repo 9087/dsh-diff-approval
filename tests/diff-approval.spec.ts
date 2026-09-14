@@ -13,6 +13,8 @@ import type { Workspace, WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import type { ConnectionRpcHandler, ConnectionRpcHandlerOptions, HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { PendingFileDiff } from '../src/types.ts'
 import { apply, DIFF_APPROVAL_CHANNEL } from '../src/index.ts'
+import { COMMENT_SKILL, COMMENT_SKILL_NAME } from '../src/comment-skill.ts'
+import { en, zh } from '../src/client/locales.ts'
 import { PendingPersistence } from '../src/persist.ts'
 import { removeTempDir } from './cleanup.ts'
 
@@ -190,6 +192,86 @@ describe('channel registration', () => {
     expect(channel).toBe(DIFF_APPROVAL_CHANNEL)
     expect(options).toEqual({ authority: 'trusted-host' })
     expect(handleCalls).toBe(1)
+  })
+})
+
+describe('the comment-answering skill', () => {
+  it('contributes the answer rules to the skill registry, and survives one that refuses', async () => {
+    // The rules live in a skill rather than the system prompt: the harness's own
+    // `skill` tool advertises the catalog and loads the body on demand, so this must
+    // be registered (and cleanly disposed), while a build without a registry — or a
+    // registry that rejects the name — must leave the plugin working.
+    const registered: unknown[] = []
+    const disposers = vi.fn()
+    const accepting = await harness({
+      prepare: (ctx) => {
+        ctx.provide('skills', {
+          register: (skill: unknown) => { registered.push(skill); return disposers },
+        } as never)
+      },
+    })
+    expect(registered).toHaveLength(1)
+    expect(registered[0]).toMatchObject({
+      name: COMMENT_SKILL_NAME,
+      source: 'runtime',
+    })
+    expect((registered[0] as { content: string }).content).toContain('不要空行')
+    expect((registered[0] as { description: string }).description.length).toBeGreaterThan(0)
+
+    // Disposal reaches the registry, so a reloaded plugin does not leave the skill behind.
+    await accepting.dispose()
+    expect(disposers).toHaveBeenCalled()
+
+    // No registry at all: no throw, and the channel still mounts.
+    const withoutRegistry = await harness()
+    expect(withoutRegistry.channel).toBe(DIFF_APPROVAL_CHANNEL)
+
+    // A registry that refuses the contribution is equally harmless.
+    const refusing = await harness({
+      prepare: (ctx) => {
+        ctx.provide('skills', { register: () => { throw new Error('reserved name') } } as never)
+      },
+    })
+    expect(refusing.channel).toBe(DIFF_APPROVAL_CHANNEL)
+  })
+
+  it('is the skill the comment prompt tells the agent to load', () => {
+    // The prompt carries the short rules for builds without a registry and names the
+    // skill for the full ones; the two halves must not drift apart.
+    for (const dictionary of [zh, en]) {
+      expect(dictionary['discussion.promptRule']).toContain(COMMENT_SKILL_NAME)
+      expect(dictionary['discussion.promptRule']).toContain('3')
+      // The skill-only shape names it too, as a parameter the panel fills in.
+      expect(dictionary['discussion.promptRuleSkill']).toContain('{skill}')
+      expect(dictionary['discussion.promptRuleSkill'].length)
+        .toBeLessThan(dictionary['discussion.promptRule'].length)
+    }
+    expect(COMMENT_SKILL.whenToUse).toContain('[评论]')
+  })
+
+  it('reports the skill to the client as soon as it is registered, and not otherwise', async () => {
+    // The client asks the host which prompt shape to send: pointing at a skill the
+    // deployment cannot load would leave the agent with no rules at all, so the answer is
+    // "yes" only when the contribution actually landed. That is the half this plugin
+    // performs; the `skill` tool that advertises the catalog belongs to `dsh-base`, which
+    // mounts it in every release — asking the tool registry about it was tried and read
+    // absent in a live session whose catalog worked, so it is not consulted.
+    const accepted = await harness({ prepare: (ctx) => { ctx.provide('skills', { register: () => () => {} } as never) } })
+    expect(await accepted.handle('list', { sessionId: 'session-1' }))
+      .toMatchObject({ ok: true, value: { commentSkill: COMMENT_SKILL_NAME } })
+    // Stable across requests: the panel polls this.
+    expect(await accepted.handle('list', { sessionId: 'session-1' }))
+      .toMatchObject({ ok: true, value: { commentSkill: COMMENT_SKILL_NAME } })
+
+    // No registry at all, and a registry that refuses the name: the rules stay inline.
+    const none = await harness()
+    expect(await none.handle('list', { sessionId: 'session-1' }))
+      .toMatchObject({ ok: true, value: { commentSkill: undefined } })
+    const refusing = await harness({
+      prepare: (ctx) => { ctx.provide('skills', { register: () => { throw new Error('reserved name') } } as never) },
+    })
+    expect(await refusing.handle('list', { sessionId: 'session-1' }))
+      .toMatchObject({ ok: true, value: { commentSkill: undefined } })
   })
 })
 

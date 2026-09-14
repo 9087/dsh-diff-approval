@@ -65,6 +65,16 @@ try {
     constructor(ctx) { super(ctx, 'sessions') }
     get() { return undefined }
   }
+  // The real skill registry of this release, when it is installed: the comment rules are
+  // registered as a RUNTIME skill, so only the release's own registry proves that works.
+  // Without the package the plugin's feature detection leaves the inline rules in charge.
+  let skills = null
+  let SkillRegistry
+  try {
+    SkillRegistry = (await import(pathToFileURL(resolveEntry('@deepseek-ai/dsh-skill', 'lib/index.js')).href)).default
+  } catch {
+    SkillRegistry = null
+  }
 
   // HostConnectionService only touches browser auth while serving a request.
   const browserAuth = {
@@ -77,6 +87,7 @@ try {
   for (const ServiceClass of [WebServer, Credentials, Fs, WorkspaceRegistry, Sessions]) {
     await app.plugin(ServiceClass)
   }
+  if (SkillRegistry !== null) await app.plugin(SkillRegistry)
 
   // The connection plugin, declaring its own real inject list.
   await app.plugin({
@@ -92,6 +103,18 @@ try {
   outcome.mounted = routes.includes(plugin.DIFF_APPROVAL_CHANNEL)
   outcome.channel = plugin.DIFF_APPROVAL_CHANNEL
   outcome.routes = routes
+  // Read the skill back out of the release's own catalog: registered, loadable, and
+  // carrying a body.
+  if (SkillRegistry !== null) {
+    try {
+      const loaded = await app.skills.get(plugin.COMMENT_SKILL_NAME)
+      outcome.skills = loaded === undefined ? [] : [loaded.name]
+      outcome.skillBody = typeof loaded?.content === 'string' && loaded.content.length > 0
+    } catch (error) {
+      outcome.skills = []
+      outcome.error = `skill lookup failed: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
 
   await app.fiber.dispose()
 } catch (error) {

@@ -25,6 +25,7 @@
     "tsBuildInfoFile": "lib/tsconfig.host.tsbuildinfo"
   },
   "files": [
+    "src/comment-skill.ts",
     "src/index.ts",
     "src/open.ts",
     "src/pending.ts",

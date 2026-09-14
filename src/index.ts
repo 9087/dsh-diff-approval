@@ -50,6 +50,7 @@ import { PendingDiffStore } from './pending.ts'
 import { PendingPersistence, defaultStorageDir } from './persist.ts'
 import { defaultOpenPath } from './open.ts'
 import type { OpenAction } from './open.ts'
+import { COMMENT_SKILL, COMMENT_SKILL_NAME } from './comment-skill.ts'
 import { detectVcsRoot, listVcsChanges } from './vcs.ts'
 import type { VcsChange, VcsImportInput, ShellExecutorLike } from './vcs.ts'
 import type {
@@ -80,6 +81,92 @@ export const inject = ['fs', 'connection', 'webServer', 'workspaceRegistry', 'se
 
 /** The connection RPC channel this plugin serves. */
 export const DIFF_APPROVAL_CHANNEL = '/diff-approval'
+
+export { COMMENT_SKILL_NAME } from './comment-skill.ts'
+
+/**
+ * The skill to name in a comment prompt on this deployment, or `undefined` when the
+ * harness cannot deliver it.
+ *
+ * The prompt has two shapes: the short rules inline (always works), or nothing but a
+ * pointer at this skill (the rules then cost nothing until a comment is answered). Which
+ * one the client sends is the HOST's answer, because the host is the only side that knows
+ * whether the contribution landed.
+ *
+ * The answer turns on the registration alone — the half this plugin performs and can be
+ * sure of. The other half, the `skill` tool that advertises the catalog and loads the
+ * body, belongs to the harness: `dsh-base` mounts `@deepseek-ai/dsh-tool-skill` beside
+ * `dsh-skill`, and both have shipped in every release since `0.0.1-rc.1`. Asking the tool
+ * registry for it instead was tried and reads absent in a live session whose catalog was
+ * demonstrably working — a false negative that kept the rules inline. The registration is
+ * the honest signal.
+ *
+ * @param _ctx - the plugin's host context (kept for the shape of the question).
+ * @param registered - whether {@link registerCommentSkill} got the skill in.
+ * @returns the skill name to point the prompt at, or undefined for the inline rules.
+ */
+function commentSkillCapability(_ctx: Context, registered: boolean): string | undefined {
+  return registered ? COMMENT_SKILL_NAME : undefined
+}
+
+/**
+ * The answer to {@link commentSkillCapability}, asked no earlier than the first list
+ * request — applying is too early for anything that reads another plugin's services. A
+ * positive is kept; a negative is re-checked on the next request, since it costs two
+ * property lookups.
+ *
+ * @param ctx - the plugin's host context.
+ * @param registered - whether the skill is in the registry.
+ * @returns a memo that answers with the skill name or undefined.
+ */
+function lazyCommentSkill(ctx: Context, registered: boolean): () => string | undefined {
+  let resolved: string | undefined
+  let reported = false
+  return () => {
+    if (resolved !== undefined) return resolved
+    resolved = commentSkillCapability(ctx, registered)
+    if (!reported) {
+      // One line, once: whether this deployment's comment prompts point at the skill. A
+      // deployment that keeps the rules inline is otherwise indistinguishable from one
+      // whose client dropped the field.
+      reported = true
+      ctx.logger.info(`diff-approval: comment skill ${resolved ?? 'not used'} (registered=${registered})`)
+    }
+    return resolved
+  }
+}
+
+/**
+ * Register the comment-answering skill with the harness's skill registry, when it has
+ * one. The registry's own `skill` tool advertises the catalog and loads the body on
+ * demand, so this costs nothing until a comment is answered — and unlike a
+ * system-prompt section, a global registration here cannot shape unrelated turns.
+ *
+ * Feature-detected and contained: a build without the registry, or a registry that
+ * refuses the contribution, simply leaves the short rules the comment prompt already
+ * carries as the whole policy.
+ *
+ * @param ctx - the plugin's host context.
+ * @returns whether the skill is now in the registry.
+ */
+function registerCommentSkill(ctx: Context): boolean {
+  if (typeof (ctx.get('skills') as { register?: unknown } | undefined)?.register !== 'function') return false
+  let registered = false
+  ctx.effect(() => {
+    const skills = ctx.get('skills') as { register?: (skill: unknown) => unknown } | undefined
+    if (typeof skills?.register !== 'function') return () => {}
+    try {
+      const dispose = skills.register(COMMENT_SKILL)
+      registered = true
+      return typeof dispose === 'function' ? dispose as () => void : () => {}
+    } catch {
+      // A registry that rejects the name (a reserved or duplicate one) is not a reason
+      // to fail the plugin: the prompt's inline rules still stand on their own.
+      return () => {}
+    }
+  })
+  return registered
+}
 
 /**
  * Plugin configuration overridable from the profile's `cordis.patch.yml`.
@@ -373,6 +460,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   const store = new PendingDiffStore()
   const persistence = new PendingPersistence(resolve(expandHomePath(storageDir ?? defaultStorageDir())))
   const launchPath = config?.openPath ?? defaultOpenPath
+  // What a comment prompt may point the agent at. Asked lazily, on the first list
+  // request: the tool registry is still filling up while plugins mount (see
+  // `lazyCommentSkill`).
+  const commentSkill = lazyCommentSkill(ctx, registerCommentSkill(ctx))
   /** Hydrate the globally-unique store once from the single persistence file. */
   let loadPromise: Promise<void> | undefined
   const ensureLoaded = (): Promise<void> => {
@@ -911,7 +1002,14 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
         await ensureLoaded()
         const { files, redoCleared } = await listWithState(sessionId)
-        const value: DiffApprovalListValue = { files, workspacePath: workspaceOf(sessionId)?.path, redoCleared: redoCleared || undefined }
+        const value: DiffApprovalListValue = {
+          files,
+          workspacePath: workspaceOf(sessionId)?.path,
+          redoCleared: redoCleared || undefined,
+          // The skill a comment prompt may point at, so the client knows which prompt
+          // shape to send (see `lazyCommentSkill`).
+          commentSkill: commentSkill(),
+        }
         return { ok: true, value }
       }
       case 'keep': {
