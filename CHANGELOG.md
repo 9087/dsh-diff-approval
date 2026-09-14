@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.23.0](https://github.com/9087/dsh-diff-approval/compare/v0.22.2...v0.23.0) (2026-09-14)
+
+### Features
+
+* **comment:** review a diff in place with inline comment threads ([818be9e](https://github.com/9087/dsh-diff-approval/commit/818be9e5480a0a98cd9836b4dec058f465ed630e))
+* **host:** serve the comment-answering rules as a runtime skill ([2fe44f3](https://github.com/9087/dsh-diff-approval/commit/2fe44f3c27afdf1e84e1ca592ced7e3296eff3d6))
+* **panel:** comment on the selection with Ctrl+K ([bfa4078](https://github.com/9087/dsh-diff-approval/commit/bfa4078d71761f15625c09f2b61c2c8f7d18b991))
+* **panel:** give the folded file list a heavier glow and a soft fold ([465af4e](https://github.com/9087/dsh-diff-approval/commit/465af4eee393e2c1b5cb8d107c5ef3cceeb2758c))
+* **panel:** put commenting behind a comment-mode preview switch ([5751220](https://github.com/9087/dsh-diff-approval/commit/57512206292182f4dfd53f98411f99b059766a22))
+* **panel:** scroll the diff's own overlays on the compositor ([d9b1fc6](https://github.com/9087/dsh-diff-approval/commit/d9b1fc6f8f8169fbd2f43359102f3b8ae55d15ee))
+
+### Bug Fixes
+
+* **panel:** label the paths in the app font and restart the reveal ([7e1daad](https://github.com/9087/dsh-diff-approval/commit/7e1daad8da8dac0071cfb2fc4d8bc48981820353))
+* **panel:** quiet the file-list row name and centre the row ([4a04a11](https://github.com/9087/dsh-diff-approval/commit/4a04a114eca7896ed9f95c617ae9e1a3299c44a3))
+
 ## [0.22.2](https://github.com/9087/dsh-diff-approval/compare/v0.22.1...v0.22.2) (2026-09-13)
 
 ### Bug Fixes
