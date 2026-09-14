@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.1](https://github.com/9087/dsh-diff-approval/compare/v0.23.0...v0.23.1) (2026-09-14)
+
+### Bug Fixes
+
+* **panel:** carry a long turn whole instead of clipping it mid-paragraph ([acf1332](https://github.com/9087/dsh-diff-approval/commit/acf1332f7e596675fcf76bc9ef88529304f10f82))
+* **panel:** re-measure the code box when the view mode changes ([87c659b](https://github.com/9087/dsh-diff-approval/commit/87c659b448af4b617e4f91a129e7d29ee145ec5e))
+
 ## [0.23.0](https://github.com/9087/dsh-diff-approval/compare/v0.22.2...v0.23.0) (2026-09-14)
 
 ### Features
