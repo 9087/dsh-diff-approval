@@ -3769,6 +3769,13 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   // already delivers at most one callback per frame, so "immediate" here is
   // per-frame, not per-pixel — no extra coalescing is needed. Also track the
   // horizontal scrollbar's height so the overview ruler stops above it.
+  //
+  // `splitView` belongs in the dependency list for the same reason the viewport
+  // measurement above carries it: the split view unmounts this scroller, so a wrap toggle
+  // flipped while that view is up has no box to measure and the last figure stands. For a
+  // file opened in split mode that figure is zero, and coming back to one column left the
+  // unified view wrapping against it — the setting was on and nothing wrapped, until some
+  // other dependency happened to change.
   useEffect(() => {
     const body = bodyRef.current
     if (body === null) return
@@ -3780,7 +3787,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
     observer?.observe(body)
     return () => { observer?.disconnect() }
-  }, [file.id, langWrap, previewActive])
+  }, [file.id, langWrap, previewActive, splitView])
 
   // Scroll the focused change block into view after focus, content changes, or
   // a jump. The block's top edge lands two rows below the viewport top so a

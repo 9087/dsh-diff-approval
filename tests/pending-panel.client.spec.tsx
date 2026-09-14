@@ -1578,6 +1578,20 @@ describe('PendingPanel', () => {
     expect(list.style.width).toBe('560px')
   })
 
+  it('re-measures the code box when the view mode changes', () => {
+    // Leaving the split view mounts a fresh scroller. Its width is what wrapped line heights
+    // are computed against, and it used to be measured only for the file, the wrap toggle
+    // and the preview — so a wrap switched on while the split view was up measured no box at
+    // all, and coming back to one column wrapped against the figure that was left (zero, for
+    // a file opened in split mode): the setting was on and nothing wrapped.
+    const source = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.tsx'), 'utf8')
+    const marker = source.indexOf('setHScrollbarPx(Math.max(0, body.offsetHeight - body.clientHeight))')
+    expect(marker).toBeGreaterThan(0)
+    const tail = source.slice(marker, marker + 500)
+    const deps = tail.slice(tail.indexOf('}, ['))
+    expect(deps.slice(0, deps.indexOf(')'))).toContain('splitView')
+  })
+
   it('scrolls the path bar without putting a scrollbar inside it', () => {
     // The path row is one 18px line of text. It pans, so a long path is never
     // truncated into an ellipsis — but it draws no bar of its own, because the
