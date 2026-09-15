@@ -5708,17 +5708,13 @@ export function PendingPanel({
   const toggleForceFloat = (): void => {
     startListOpenRef.current = false
     const next = !forceFloat
-    const apply = (): void => {
-      setForceFloat(next)
-      setFileListFloat(next)
-      // Folding it away means the card starts closed: the knob opens it again.
-      if (next) setFloatOpen(false)
-    }
-    // Folding the list for good with the card open plays the same corner fold, and only
-    // then hands over to the folded mode — so the switch does not make the card vanish
-    // under the pointer.
-    if (next && floatOpen) { foldCardAway(apply); return }
-    apply()
+    setForceFloat(next)
+    setFileListFloat(next)
+    // The switch says where the list lives, not whether it is there: folding it for good leaves
+    // the card up — the list the reader was just looking at stays on screen, and the knob is the
+    // gesture that folds it away — while turning the fold off puts the list back in its column,
+    // which needs no card at all.
+    if (next) setFloatOpen(true)
   }
 
   // Track the window's size for the breakpoint above and the panel's floor.

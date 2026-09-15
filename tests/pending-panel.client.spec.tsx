@@ -2306,10 +2306,11 @@ describe('PendingPanel', () => {
     }
   })
 
-  it('folds the card away with the switch beside Add, through the same corner fold', async () => {
-    // The other way to fold the list: while the card is open, the switch folds it for good.
-    // Same gesture as the knob's, so the same fold plays, and only then does the folded mode
-    // take over.
+  it('keeps the list on screen when the switch beside Add folds it for good', async () => {
+    // The switch says where the list lives, not whether it is there. Pressed while the card is up
+    // (a narrow panel opens with it up), the card stays exactly where it is — only the stored
+    // preference changes, so the next open starts folded too — and the knob is the gesture that
+    // folds the card away.
     const originalWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth')
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 600 })
     try {
@@ -2320,20 +2321,21 @@ describe('PendingPanel', () => {
       expect(card()).not.toBeNull()
 
       fireEvent.click(document.querySelector('[data-diff-file-list-float]') as HTMLElement)
-      // Still there — folding — and the preference is not written yet, so nothing unmounts
-      // the card out from under the animation.
+      // Still the list, still open, and now remembered as folded-for-good.
       expect(card()).not.toBeNull()
-      expect(localStorage.getItem('diff-approval:file-list-float')).toBe('0')
-      await waitFor(() => { expect(card()).toBeNull() })
       expect(localStorage.getItem('diff-approval:file-list-float')).toBe('1')
       expect(document.querySelector('[data-diff-file-list-toggle]')).not.toBeNull()
+
+      // The knob is what folds it away.
+      fireEvent.click(document.querySelector('[data-diff-file-list-toggle]') as HTMLElement)
+      await waitFor(() => { expect(card()).toBeNull() })
     } finally {
       if (originalWidth !== undefined) Object.defineProperty(window, 'innerWidth', originalWidth)
       else delete (window as { innerWidth?: unknown }).innerWidth
     }
   })
 
-  it('folds the file list for good from the switch beside Add, and remembers it', () => {
+  it('folds the file list for good from the switch beside Add, and remembers it', async () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     const first = render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
@@ -2344,11 +2346,14 @@ describe('PendingPanel', () => {
     const toggle = document.querySelector('[data-diff-file-list-float]') as HTMLElement
     expect(toggle.getAttribute('aria-pressed')).toBe('false')
     fireEvent.click(toggle)
-    // Folded for good, with the knob that opens the floating card…
+    // Folded for good — the column is gone and the list is the floating card, still on screen —
+    // and stored, so the next open starts folded too.
     expect(document.querySelector('[data-diff-approval-file-list]')).toBeNull()
-    expect(document.querySelector('[data-diff-file-list-toggle]')).not.toBeNull()
-    // …and stored, so the next open starts folded too.
+    expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
     expect(localStorage.getItem('diff-approval:file-list-float')).toBe('1')
+    // The knob folds the card away; the list is then carried by the knob alone.
+    fireEvent.click(document.querySelector('[data-diff-file-list-toggle]') as HTMLElement)
+    await waitFor(() => { expect(document.querySelector('[data-diff-floating-file-list]')).toBeNull() })
     first.unmount()
 
     render(<PendingPanel {...props} />)
