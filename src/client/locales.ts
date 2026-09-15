@@ -176,7 +176,7 @@ export const zh = {
   'panel.fileKeptAsk': '「{file}」的改动已全部保留，是否从列表移除？',
   'panel.fileRevertedAsk': '「{file}」的改动已全部回退，是否从列表移除？',
   'panel.confirmFileRemove': '处理整文件后询问是否移出列表',
-  'panel.confirmFileRemoveDesc': '对单个文件执行整文件 Keep/Revert 后，弹窗询问是否把该文件移出列表。关闭后直接移出（不影响批量 Keep All / Revert All）。',
+  'panel.confirmFileRemoveDesc': '对单个文件执行整文件保留 / 回退后，弹窗询问是否把该文件移出列表。关闭后直接移出（不影响全部保留 / 全部回退）。',
   'action.refreshVcs': '刷新差异',
   'action.matchCase': '区分大小写',
   'action.matchWholeWord': '全字匹配',
