@@ -1090,11 +1090,12 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  /* The right inset mirrors the docked list exactly: 8px here, the same as the
-     left, with the scroller's own scroll strip (see `.listScroll`) inside it — so
-     the rows and the bulk footer land on the same 16px line, and the strip sits in
-     the middle of the margin instead of hard against the card's edge. */
-  padding: 6px 8px 10px 8px;
+  /* No right inset of its own: the rows already end at the scroller's own scroll strip (see
+     `.listScroll`), which is the same 8px the left side is inset by — so the card's content is
+     symmetric, and the header and the bulk footer keep their own 8px (they sit outside the
+     scroller, so they would otherwise come out flush against the border). The docked list keeps
+     its frame inset: its rows line up with the footer's buttons at 16px there. */
+  padding: 6px 0 10px 8px;
   box-sizing: border-box;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 12px;
@@ -1652,10 +1653,9 @@
      metadata rather than among code. The size is a step down from the default too, since
      that metadata is what it has to sit level with. The small inset keeps the name off the
      card's edge — on the row rather than in the row's padding, so the hover fill still
-     spans the whole row — and the nudge drops it onto that metadata's line. */
+     spans the whole row. Vertically the row centres it (see `.rowHead`), with no nudge of its
+     own: a pixel of it here only pushed the name below the line it is meant to sit on. */
   margin-left: 4px;
-  position: relative;
-  top: 1px;
   font-size: 12px;
   line-height: 18px;
 }
@@ -1736,6 +1736,10 @@
   font-size: 12px;
   line-height: 16px;
   font-variant-numeric: tabular-nums;
+  /* No vertical nudge: the row centres this and the name on the same line, and a shorter line
+     box does not move the text inside it — the extra leading splits above and below — so the two
+     share a baseline with no offset on either side. The 1px nudges this row has carried in the
+     past only pushed one of them off that line (see `.rowPath`). */
 }
 
 /* Per-row change counts share the hue of the diff kind backgrounds, blended

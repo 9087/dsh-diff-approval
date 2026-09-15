@@ -1281,28 +1281,36 @@ describe('PendingPanel', () => {
     expect(block('rowPath')).toContain('font-size: 12px')
     expect(block('rowPath')).toContain('line-height: 18px')
     expect(block('rowPath')).toContain('margin-left: 4px')
-    expect(block('rowPath')).toContain('top: 1px')
+    // The row centres it: no pixel nudge of its own, which only pushed the name below the
+    // metadata line it is meant to sit on.
+    expect(block('rowPath')).not.toContain('top:')
+    expect(block('rowPath')).not.toContain('position: relative')
     // A file name is a label, not code: it takes the app's own font rather than the code
     // block's monospace one.
     expect(block('rowPath')).not.toContain('--dsw-font-markdown-code-block')
     expect(block('rowHead')).toContain('align-items: center')
     expect(block('rowHead')).not.toContain('align-items: baseline')
+    // Neither the name nor the counts carries a vertical offset: the row centres both, and a
+    // shorter line box does not move the text inside it, so they already share a baseline. The
+    // 1px nudges this row has carried before only pushed one of the two off that line.
+    expect(block('rowMeta')).not.toContain('top:')
+    expect(block('rowMeta')).not.toContain('position: relative')
   })
 
-  it('gives the folded list the docked list\'s right inset', () => {
-    // The two lists hold the same rows, so their right insets have to match: an 8px
-    // right padding — the same as the left one — with the scroller's own scroll
-    // strip (8px) inside it puts the rows, the heading's buttons and the bulk footer
-    // on the same 16px line, and leaves the strip sitting in the middle of the
-    // margin rather than hard against the frame's edge.
+  it('keeps the folded list symmetric, on the scroller\'s own strip', () => {
+    // The two lists hold the same rows, but their frames differ. The docked one carries an 8px
+    // right padding — the same as its left — with the scroller's own scroll strip (8px) inside
+    // it, which lines its rows, the heading's buttons and the bulk footer up at 16px. The
+    // floating card takes no right padding at all: its rows end at the scroller's own strip,
+    // which is the same 8px the card insets its left side by, so the card reads symmetric
+    // instead of carrying 16px on one side and 8px on the other. The heading and the footer sit
+    // outside the scroller and keep their own 8px, or they would come out flush against the
+    // border.
     const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const block = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
     const rightPadding = (name: string): string => /padding:\s*([^;]*);/.exec(block(name))?.[1]?.trim().split(/\s+/)[1] ?? ''
     expect(rightPadding('fileList')).toBe('8px')
-    expect(rightPadding('fileListFloat')).toBe('8px')
-    // The heading and the footer sit outside the scroller, so each carries a right
-    // inset of its own that has to reach that same line: the footer's own 8px, and
-    // the heading's, which is what lands its buttons on the rows' right edge.
+    expect(rightPadding('fileListFloat')).toBe('0')
     expect(/padding:\s*8px 8px 0 0;/.test(block('bulkActions'))).toBe(true)
     expect(/padding-right:\s*8px;/.test(block('groupHead'))).toBe(true)
     // Both dividers keep the gesture for themselves: without `touch-action: none`
