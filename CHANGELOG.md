@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.23.2](https://github.com/9087/dsh-diff-approval/compare/v0.23.1...v0.23.2) (2026-09-15)
+
+### Bug Fixes
+
+* **panel:** paint the comment thread's surface on its row, not on the block ([2c0921e](https://github.com/9087/dsh-diff-approval/commit/2c0921e9cf0ea6a30ed8333f2c1b39557bb0439a))
+
 ## [0.23.1](https://github.com/9087/dsh-diff-approval/compare/v0.23.0...v0.23.1) (2026-09-14)
 
 ### Bug Fixes
