@@ -4322,6 +4322,54 @@ describe('PendingPanel', () => {
     expect(quote.querySelector('span[style*="--shiki-"]')).not.toBeNull()
   })
 
+  it('stacks two comments that end up on the same row instead of overlapping them', async () => {
+    // Every block reserves rows of its own in the row stream, and the heights of several blocks
+    // hanging off one row add up — so two comments that land on the same row (here: both of their
+    // ranges vanish when the file is rewritten, and both anchors clamp to the same row) are two
+    // rows, one under the other, in the order they were made. Nothing overlaps.
+    const file = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    const comment = (row: number): void => {
+      const line = ([...document.querySelectorAll('[data-diff-row]')] as HTMLElement[])[row]!
+      const node = line.querySelector('[data-diff-code]')?.firstChild ?? line
+      vi.spyOn(window, 'getSelection').mockReturnValue({
+        isCollapsed: false,
+        anchorNode: node,
+        focusNode: node,
+        rangeCount: 1,
+        getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+        removeAllRanges: () => {},
+      } as unknown as Selection)
+      act(() => { document.dispatchEvent(new Event('selectionchange')) })
+      fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    }
+    // Two ranges that do not touch: the '+A' row and the '+C' row.
+    comment(1)
+    comment(4)
+    expect(document.querySelectorAll('[data-diff-discussion]').length).toBe(2)
+
+    // Rewritten down to two rows, so neither range is in the model any more: the '+A' thread
+    // keeps the row it last matched (row 1), the '+C' one is put back where its range used to be
+    // — which is the same row here — and both hang off it.
+    view.rerender(<PendingPanel {...panelProps({ read: true, files: [entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'x\n', newText: 'y\n' })], busy: new Set() })} />)
+    expect(document.querySelectorAll('[data-diff-discussion]').length).toBe(2)
+    expect([...document.querySelectorAll('[data-diff-discussion-outdated]')].length).toBe(2)
+    // The original ranges are still what the headers say, so the two are still told apart.
+    expect([...document.querySelectorAll('[data-diff-discussion-range]')].map(node => node.textContent))
+      .toEqual(['/repo/m.txt:1', '/repo/m.txt:3'])
+
+    const spaces = [...document.querySelectorAll('[data-diff-discussion-space]')] as HTMLElement[]
+    expect(spaces.map(space => space.style.height)).toEqual(['110px', '110px'])
+    // Both hang in the row stream right below the row they clamp to, one after the other.
+    const order = [...document.querySelectorAll('[data-diff-row], [data-diff-discussion-space]')]
+      .map(node => node.hasAttribute('data-diff-discussion-space') ? 'space' : node.getAttribute('data-diff-row'))
+    expect(order).toEqual(['0', '1', 'space', 'space'])
+  })
+
   it('wraps an outdated comment\'s quote only when the code view wraps', async () => {
     // The quote is the file's own code, so it follows the wrap switch: with it off a long
     // quoted line stays one line (and one row of the block), with it on the cell wraps.

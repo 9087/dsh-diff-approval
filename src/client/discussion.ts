@@ -302,8 +302,10 @@ function clearOutdated(discussion: Discussion): Discussion {
  * in the model and the thread follows it, nearest occurrence first when the same code shows up
  * more than once. When nothing matches, the block keeps the rows it last matched and is marked
  * outdated: it says so and keeps its quote for the reader, rather than being silently moved
- * onto whatever took those lines. The mark is derived, not sticky — the lines coming back with
- * their quote clears it (GitHub recomputes `isOutdated` the same way).
+ * onto whatever took those lines. Only when the whole range is gone from the model does the
+ * block move, and then by line number, back to where the range used to be (see `gone`). The mark
+ * is derived, not sticky — the lines coming back with their quote clears it (GitHub recomputes
+ * `isOutdated` the same way).
  *
  * @param discussion - the block to re-anchor.
  * @param lineOf - the new-file line number of a row, or `undefined` for a row that has none.
@@ -320,9 +322,17 @@ export function remapDiscussion(
   const { startLine, endLine } = discussion.anchor
   let start = -1
   let end = -1
+  // The last row that still reads before the range: where a block whose whole range is gone
+  // belongs (see `gone`).
+  let before = -1
   for (let row = 0; row < rowCount; row++) {
     const line = lineOf(row)
-    if (line === undefined || line < startLine || line > endLine) continue
+    if (line === undefined) continue
+    if (line < startLine) {
+      before = row
+      continue
+    }
+    if (line > endLine) continue
     if (start === -1) start = row
     end = row
   }
@@ -335,10 +345,27 @@ export function remapDiscussion(
     }
     return parts.join('\n')
   }
+  /**
+   * The block with no row of its range left in the model: marked outdated, and hung where the
+   * range used to be — just below the last row that still reads before its first line.
+   *
+   * The row index it last matched is not used for that: it is a row index, so every edit above
+   * the block shifts what it points at, and the panel clamps it to the file's last row once the
+   * file is shorter than it — which is how a comment ends up at the bottom of the file with
+   * nothing to do with where it was written. The line numbers stay exactly as they were: they are
+   * the original position, and the header keeps showing them.
+   *
+   * @returns the block, marked and re-hung (the same object when it was already there).
+   */
+  const gone = (): Discussion => {
+    const row = Math.max(0, before)
+    if (discussion.lost === true && discussion.anchor.start === row && discussion.anchor.end === row) return discussion
+    return markOutdated({ ...discussion, anchor: { ...discussion.anchor, start: row, end: row } })
+  }
   // Nothing to check against, or the numbers still hold what the comment was about: the line
   // numbers are the answer, and that is the ordinary case (an edit above the block).
   if (quote === undefined || quote === '' || (start !== -1 && textAt(start) === quote)) {
-    if (start === -1) return markOutdated(discussion)
+    if (start === -1) return gone()
     if (start === discussion.anchor.start && end === discussion.anchor.end) return clearOutdated(discussion)
     return clearOutdated({ ...discussion, anchor: { ...discussion.anchor, start, end } })
   }
@@ -349,7 +376,7 @@ export function remapDiscussion(
     if (textAt(row) !== quote) continue
     if (found === -1 || Math.abs(row - start) < Math.abs(found - start)) found = row
   }
-  if (found === -1) return markOutdated(discussion)
+  if (found === -1) return start === -1 ? gone() : markOutdated(discussion)
   return clearOutdated({
     ...discussion,
     anchor: {

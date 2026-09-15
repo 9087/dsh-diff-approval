@@ -141,6 +141,16 @@ describe('discussions in the diff row stream', () => {
     expect(gone.lost).toBe(true)
     expect(gone.anchor).toEqual(original.anchor)
     expect(gone.quote).toBe('one\ntwo')
+    // The whole range gone from the model is the one case where the block moves, and it moves by
+    // line number: back to where the range used to be — under the last row that still reads
+    // before it — rather than on the row index it last matched (which drifts with every edit
+    // above the block, and lands at the file's end once the file is shorter).
+    const removed = { ...original, anchor: { start: 5, end: 6, startLine: 10, endLine: 11 } }
+    const rehung = remap(removed, rows([1, 2, 3], ['a', 'b', 'c']))
+    expect(rehung.lost).toBe(true)
+    expect(rehung.anchor).toEqual({ start: 2, end: 2, startLine: 10, endLine: 11 })
+    // Already there: the same object, no churn.
+    expect(remap(rehung, rows([1, 2, 3], ['a', 'b', 'c']))).toBe(rehung)
     // The lines are gone from the model entirely (a revert took the hunk out).
     expect(remap(original, rows([1, 2], ['a', 'b'])).lost).toBe(true)
     // Outdated is derived, not sticky: a keep bringing the lines back with their quote
@@ -148,8 +158,12 @@ describe('discussions in the diff row stream', () => {
     const back = remap(gone, rows([10, 11], ['one', 'two']))
     expect(back.lost).toBeUndefined()
     expect(back.anchor).toMatchObject({ start: 0, end: 1 })
-    // Already outdated and still matching nothing: the same object, no churn.
-    expect(remap(gone, rows([1, 2], ['a', 'b']))).toBe(gone)
+    // Already outdated, and its range is gone from this model too: it is put back where the range
+    // used to be — once — and then stays there, the same object on the next rebuild.
+    const rehungAgain = remap(gone, rows([1, 2], ['a', 'b']))
+    expect(rehungAgain.lost).toBe(true)
+    expect(rehungAgain.anchor).toEqual({ start: 1, end: 1, startLine: 10, endLine: 11 })
+    expect(remap(rehungAgain, rows([1, 2], ['a', 'b']))).toBe(rehungAgain)
   })
 
   it('trusts the line numbers for a thread with no quote to check against', () => {
