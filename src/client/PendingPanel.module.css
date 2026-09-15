@@ -1832,6 +1832,15 @@
   cursor: default;
 }
 
+/* The chord printed inside a frame button beside its label. A step smaller and in the
+   tertiary label colour, so it reads as a hint about the button rather than as part of what
+   the button says — the button is a chip, and the chord has to sit inside it. */
+.actionChord {
+  margin-left: 6px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+}
+
 /* Accent (Keep) action: filled with the brand blue and white text, like the
    composer's send button. Keeps the `.action` geometry and disabled cursor. */
 .actionPrimary {

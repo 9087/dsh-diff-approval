@@ -4737,6 +4737,54 @@ describe('PendingPanel', () => {
     expect(document.querySelectorAll('[data-diff-discussion]').length).toBe(2)
   })
 
+  it('prints the comment chord on the button, live from the binding', () => {
+    // The frame cannot carry a tooltip: it is moved by a scroll-driven transform, and a
+    // transformed element is the containing block for the kit's fixed-position bubble. The
+    // chord rides on the label instead - read where the button renders, so a rebind shows on
+    // the next selection, and left out entirely when the action has been unbound.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    render(<PendingPanel {...panelProps({ read: true, files: [multi], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+    Object.defineProperty(body, 'scrollTop', { configurable: true, value: 0 })
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const select = (row: HTMLElement): void => {
+      const node = (row.querySelector('[data-diff-code]') ?? row).firstChild ?? row
+      vi.spyOn(window, 'getSelection').mockReturnValue({
+        isCollapsed: false,
+        anchorNode: node,
+        focusNode: node,
+        rangeCount: 1,
+        getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+        removeAllRanges: () => {},
+      } as unknown as Selection)
+      act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    }
+    const chord = (): HTMLElement | null => document.querySelector('[data-diff-selection-comment-chord]')
+
+    select(rows[0]!)
+    expect(chord()?.textContent).toBe('Ctrl+K')
+
+    // A rebind is picked up where the button renders.
+    localStorage.setItem('diff-approval:key:addComment', 'Ctrl+J')
+    select(rows[1]!)
+    expect(chord()?.textContent).toBe('Ctrl+J')
+
+    // Unbound: the hint is dropped, not left blank.
+    localStorage.setItem('diff-approval:key:addComment', '')
+    select(rows[2]!)
+    expect(document.querySelector('[data-diff-selection-comment]')).not.toBeNull()
+    expect(chord()).toBeNull()
+
+    // It reads as a hint about the button rather than as part of its name.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const hint = /\.actionChord \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(hint).toContain('color: var(--dsw-alias-label-tertiary)')
+    expect(hint).toContain('font-size: 11px')
+  })
+
   it('hangs a block in a row of its own, with neither axis placed by script', () => {
     // A block used to be painted in the scroller's CONTENT coordinates: the vertical
     // half was then the browser's, but the sideways half had to be re-written from the

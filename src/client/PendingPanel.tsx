@@ -16,7 +16,7 @@ import { PresentationMenu } from './presentation-menu.tsx'
 import { CoverageControl, CoverageNotice, COVER_NOTICE_MS } from './coverage-control.tsx'
 // The chord vocabulary is shared: the header entry advertises the same summon
 // hint this panel's close button spells, so both hint builders live in chords.ts.
-import { closeHint, summonHint, withChord } from './chords.ts'
+import { chordLabel, closeHint, summonHint, withChord } from './chords.ts'
 import { blockRangesOf, changeBlocksOf, computeIntraLineDiff, computeWholeFileDiff } from './whole-file-diff.ts'
 import {
   DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, DISCUSSION_MAX_BODY_ROWS, discussionOverlapping,
@@ -4206,6 +4206,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   const selectionCommentOffered = commentMode && frameForSelection?.comment === true
   const selectionFrameVisible = frameForSelection !== undefined
     && (frameForSelection.keepRevert || selectionCommentOffered)
+  // The comment chord, as the button prints it (that frame cannot carry a tooltip — see the
+  // render). Read at render rather than cached, so a rebind in Settings shows on the next
+  // selection, and empty when the action has been left unbound, so no hint is drawn at all.
+  const commentChord = chordLabel('addComment')
 
   // Ctrl/Cmd+K comments on the selection - but only while the button that does it is on
   // screen: the chord is bound to the affordance, so it can never start a comment the
@@ -5061,19 +5065,23 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
           {/* Offered when the range has no discussion yet and comment mode is on
               (`selectionFrame`, plus the mode): a range without change blocks can
               still be discussed, and a range that already has one gets no second.
-              The chord is shown the way the other chord-bearing buttons show
-              theirs, and it is live exactly while this button is. */}
+              Its chord is printed on the label rather than shown as a tooltip: this frame is
+              moved by a scroll-driven transform (see `frameFollowKeyframes`), and a
+              transformed element is the containing block for the kit's `position: fixed`
+              bubble, so a tooltip here would land wherever that transform puts it instead of
+              beside the button. */}
           {selectionCommentOffered && (
-            <Tooltip label={withChord(t('action.comment'), 'addComment')} side="bottom" delayMs={500}>
-              <button
-                type="button"
-                className={css.action}
-                data-diff-selection-comment
-                onClick={addDiscussion}
-              >
-                {t('action.comment')}
-              </button>
-            </Tooltip>
+            <button
+              type="button"
+              className={css.action}
+              data-diff-selection-comment
+              onClick={addDiscussion}
+            >
+              {t('action.comment')}
+              {commentChord !== '' && (
+                <span className={css.actionChord} data-diff-selection-comment-chord>{commentChord}</span>
+              )}
+            </button>
           )}
           </div>
         ) : hoveredBlock !== undefined && model.blocks[hoveredBlock] !== undefined ? (
