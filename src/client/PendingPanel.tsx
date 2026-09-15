@@ -2418,7 +2418,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   }
   /** Which block's overflow menu is open, if any. */
   const [discussionMenuFor, setDiscussionMenuFor] = useState<string | undefined>(undefined)
-  const discussionMenuItems = useMemo<MenuEntry[]>(() => [{ id: 'delete', label: t('action.delete') }], [t])
+  // The thread's one action: finishing it takes the block (and its rows) away. It says what the
+  // reader is doing with the comment, not what happens to the row underneath — "delete" read
+  // like it was about the code.
+  const discussionMenuItems = useMemo<MenuEntry[]>(() => [{ id: 'delete', label: t('action.discussionEnd') }], [t])
   /** The session's chat, watched so a discussion can show the answer it asked for. */
   const [chat, setChat] = useState<ChatView>({ running: false, nodes: [], partial: '', error: undefined, queued: undefined })
   /** The same view, readable from a timer callback (which closes over nothing fresh). */

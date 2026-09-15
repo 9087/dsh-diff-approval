@@ -2286,11 +2286,12 @@
      either — `fit-content` is what keeps a one-word annotation from collapsing. */
   max-width: 82%;
   box-sizing: border-box;
-  /* Rounded, at the panel's own 8px (the block's buttons use it, the input 6px).
-     The chat's bubble is rounder still — 22px, which on a one-line turn is a pill —
-     but a thread that lives between two code rows reads better as a rounded
-     rectangle than as a capsule. */
-  border-radius: 8px;
+  /* Rounded, at the panel's own 8px (the block's buttons use it, the input 6px), except the
+     top-right corner: the bubble is the user's own turn and sits on the right, so squaring the
+     corner it "speaks from" is what makes it read as speech rather than as a panel. The chat's
+     bubble is rounder still — 22px, which on a one-line turn is a pill — but a thread that
+     lives between two code rows reads better as a rounded rectangle than as a capsule. */
+  border-radius: 8px 0 8px 8px;
   background: var(--dsw-specific-bubble, var(--dsw-alias-bg-layer-2, var(--dsw-alias-interactive-bg-hover)));
   color: var(--dsw-alias-label-primary);
   font-family: inherit;

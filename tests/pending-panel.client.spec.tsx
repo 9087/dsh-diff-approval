@@ -4202,11 +4202,11 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
     expect((props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls.length).toBe(2)
 
-    // The block can be discarded from its overflow menu; its rows leave the
+    // The block can be finished from its overflow menu; its rows leave the
     // height table with it, and the same rows become commentable once more.
     fireEvent.click(document.querySelector('[data-diff-discussion-menu]') as HTMLButtonElement)
     // The stub translator returns the key, so the menu item is found by its key.
-    fireEvent.click(screen.getByText('action.delete'))
+    fireEvent.click(screen.getByText('action.discussionEnd'))
     expect(document.querySelector('[data-diff-discussion]')).toBeNull()
     expect(document.querySelector('[data-diff-discussion-band]')).toBeNull()
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
