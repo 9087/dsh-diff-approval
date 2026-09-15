@@ -2321,6 +2321,32 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
+/* The live status's ellipsis, a dot at a time. While a turn runs this note is the only thing
+   moving in the thread, and three dots filling in sequence say "still working" in a way one
+   static glyph cannot. Three spans rather than the `…` character, so each dot can carry its own
+   delay; they are `aria-hidden` (the note's own words carry the meaning), and the stagger is
+   short enough that the note never reads as a different length from one frame to the next. */
+.discussionDots {
+  margin-left: 1px;
+}
+
+.discussionDots > span {
+  animation: discussionDot 1.2s ease-in-out infinite;
+}
+
+.discussionDots > span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.discussionDots > span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes discussionDot {
+  0%, 60%, 100% { opacity: 0.25; }
+  30% { opacity: 1; }
+}
+
 /* The code an outdated thread was written about, laid out as the file's own rows are: the same
    two 44px gutters (reused from `.gutter`, so the numbers land on the file's columns) and then
    the code column, at the same row height. No box: the quotation is put back on the file's grid

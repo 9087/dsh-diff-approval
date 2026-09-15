@@ -5136,6 +5136,11 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                                     ) : discussion.asking === true ? (
                                       <p className={css.discussionNote} data-diff-discussion-asking>
                                         {discussion.queued === true ? t('discussion.queued') : t('discussion.thinking')}
+                                        {/* Decorative: the words above say it all, and a screen
+                                            reader should not read the dots. */}
+                                        <span className={css.discussionDots} data-diff-discussion-dots aria-hidden="true">
+                                          <span>.</span><span>.</span><span>.</span>
+                                        </span>
                                       </p>
                                     ) : (
                                       <div className={css.discussionCompose}>

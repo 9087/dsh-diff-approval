@@ -1181,6 +1181,18 @@ describe('PendingPanel', () => {
     expect(/\.fileListKnob\[data-open\] \{[^}]*opacity: 0/.test(css)).toBe(true)
   })
 
+  it('animates the asking note\'s ellipsis one dot at a time', () => {
+    // The note is the only thing moving while a turn runs, and three dots filling in sequence
+    // say "still working" where one static glyph reads as a finished sentence. The dots are
+    // spans rather than the `…` character precisely so each can carry its own delay, which is
+    // what makes them a sequence — the stylesheet is the only place that lives.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    expect(/\.discussionDots > span \{[^}]*animation: discussionDot 1\.2s ease-in-out infinite/.test(css)).toBe(true)
+    expect(/@keyframes discussionDot \{/.test(css)).toBe(true)
+    expect(/\.discussionDots > span:nth-child\(2\) \{[^}]*animation-delay: 0\.15s/.test(css)).toBe(true)
+    expect(/\.discussionDots > span:nth-child\(3\) \{[^}]*animation-delay: 0\.3s/.test(css)).toBe(true)
+  })
+
   it('lays a quote of the code out on the file\'s own columns', () => {
     // A quote of the code no longer wears a box: it is laid out on the file's own columns, and
     // an unwrapped long line is clipped inside the quote instead of giving the thread's body a
@@ -4387,7 +4399,9 @@ describe('PendingPanel', () => {
     // Nothing in the transcript is ours yet, so the block says it is waiting
     // instead of borrowing the running turn's partial text.
     act(() => { listener!({ running: true, nodes: [otherUser], partial: 'other partial', error: undefined }) })
-    expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toBe('discussion.queued')
+    expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toContain('discussion.queued')
+    // The ellipsis after it is three dots of its own, so they can fill in one at a time.
+    expect(document.querySelectorAll('[data-diff-discussion-dots] span').length).toBe(3)
     expect(document.querySelector('[data-diff-discussion-reply]')).toBeNull()
 
     // With the prompt in the transcript, the answer that follows it is ours.
@@ -4491,26 +4505,26 @@ describe('PendingPanel', () => {
       const prompt = (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]?.[1] ?? ''
 
       act(() => { listener!({ running: true, nodes: [], partial: '', error: undefined, queued: [prompt] }) })
-      expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toBe('discussion.queued')
+      expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toContain('discussion.queued')
 
       // The session has taken it (the queue no longer names it) and is writing: the block
       // must stop saying it is queued. This is the phase where nothing has streamed yet and
       // the answer is being thought about.
       act(() => { listener!({ running: true, nodes: [], partial: '', error: undefined, queued: [] }) })
-      expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toBe('discussion.thinking')
+      expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toContain('discussion.thinking')
 
       // Same once the prompt is in the transcript with the turn still running, and still
       // nothing written.
       act(() => {
         listener!({ running: true, nodes: [{ kind: 'user', text: prompt }], partial: '', error: undefined, queued: [] })
       })
-      expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toBe('discussion.thinking')
+      expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toContain('discussion.thinking')
 
       // The session has let it go and no turn took it. The row comes back only once
       // the grace has passed - a submission echo and the host's queue row are a round
       // trip apart, so the first idle notification is not proof.
       act(() => { listener!({ running: false, nodes: [], partial: '', error: undefined, queued: [] }) })
-      expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toBe('discussion.queued')
+      expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toContain('discussion.queued')
       act(() => { vi.advanceTimersByTime(5000) })
       expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
       expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
@@ -4579,7 +4593,7 @@ describe('PendingPanel', () => {
         queued: [calls()[1]?.[1] ?? ''],
       })
     })
-    expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toBe('discussion.queued')
+    expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toContain('discussion.queued')
     expect(lastReply()).toBe('previous answer')
 
     // Our own prompt is in the transcript: from here the answer is ours.
