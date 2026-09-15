@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.24.0](https://github.com/9087/dsh-diff-approval/compare/v0.23.2...v0.24.0) (2026-09-15)
+
+### Features
+
+* **panel:** fill in a waiting comment's ellipsis one dot at a time ([cd498d6](https://github.com/9087/dsh-diff-approval/commit/cd498d60efc1898031e61ef951942097925a1b97))
+* **panel:** hold back the browser's selection menu over the panel ([f5d2c5f](https://github.com/9087/dsh-diff-approval/commit/f5d2c5f8247040caecc6659124beae2c885db01e))
+* **panel:** keep comment threads for the life of the page ([96f0391](https://github.com/9087/dsh-diff-approval/commit/96f039192d8fbee81de67dcf31409e78a906ba58))
+* **panel:** let the panel's content be selected, and nothing else ([4567fcf](https://github.com/9087/dsh-diff-approval/commit/4567fcf08d6d38f86818a33ba09a78921031f886))
+* **panel:** mark a comment outdated when the code it named is gone ([8514954](https://github.com/9087/dsh-diff-approval/commit/8514954c3ccbe55db072ba019cc1e8086139277c))
+
+### Bug Fixes
+
+* **panel:** line the file list's card and row up ([7334696](https://github.com/9087/dsh-diff-approval/commit/7334696e2d5a47ee0dd6d9b0c3d158ee7bd2931f))
+* **panel:** name keep and revert in Chinese in the settings description ([f646a3b](https://github.com/9087/dsh-diff-approval/commit/f646a3b1f1b924f19859fdab19623af14d211545))
+* **panel:** print the comment chord on the button instead of a tooltip ([98db61c](https://github.com/9087/dsh-diff-approval/commit/98db61c0083274ef7e5840bd1b779983673136df))
+* **panel:** put a comment back where its code was when its range is gone ([e2aeca8](https://github.com/9087/dsh-diff-approval/commit/e2aeca8d69bc871516898ac9795ce029aeae4a5b))
+* **panel:** show the list when it is folded for good ([82e3374](https://github.com/9087/dsh-diff-approval/commit/82e3374765d45a8e8cad7c2edceed7dc5c5d3502))
+* **panel:** stop saying a comment is queued once the session takes it ([aa55f8c](https://github.com/9087/dsh-diff-approval/commit/aa55f8c593a1af0a5e7713a77d83a982172e2d71))
+
 ## [0.23.2](https://github.com/9087/dsh-diff-approval/compare/v0.23.1...v0.23.2) (2026-09-15)
 
 ### Bug Fixes
