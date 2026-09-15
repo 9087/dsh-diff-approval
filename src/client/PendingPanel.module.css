@@ -263,6 +263,32 @@
   /* Only `.body` scrolls; the header remains fixed above it. */
   --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
   --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+  /* The panel's text is chrome: titles, paths, buttons, hints, status lines and the list are
+     labels, not something to copy out, and a drag across them should only ever be a drag (a
+     stray selection also wakes the browser's own selection UI). What IS content turns the
+     selection back on — see the block below. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* The panel's content, and the only things a reader can select: the code (the diff's rows and
+   the code a comment quotes), the rendered Markdown preview, the thread's own turns — what the
+   user said and what the agent answered — and the file paths, which are values a reader copies
+   out by hand as often as by the row's own copy action. Fields keep it too, always: a caret in a
+   field whose text cannot be selected is a worse trap than an accidental selection, and the
+   panel holds both our own fields and the kit's. */
+.panel .code,
+.panel .mdPreviewBody,
+.panel .discussionUser,
+.panel .discussionAnswer,
+.panel .quoteText,
+.panel .diffPath,
+.panel .rowPath,
+.panel input,
+.panel textarea,
+.panel [contenteditable] {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 /* Docked in the app's right sidebar: the tab body owns the size, so the panel
@@ -1754,8 +1780,9 @@
   min-width: 0;
   flex: 1;
   /* The full path is shown in full: an over-long path scrolls horizontally so
-     nothing is hidden behind a truncation ellipsis, and the text is selectable
-     by drag so the path can be copied. */
+     nothing is hidden behind a truncation ellipsis. It is text to copy out — the
+     panel's content whitelist keeps it selectable (see `.panel`) — and the row's
+     own copy action is the shortcut for the same thing. */
   overflow-x: auto;
   overflow-y: hidden;
   white-space: nowrap;
@@ -1776,8 +1803,6 @@
   top: 1px;
   font-size: 12px;
   line-height: 18px;
-  user-select: text;
-  -webkit-user-select: text;
 }
 
 .diffPath::-webkit-scrollbar {
@@ -2210,6 +2235,13 @@
      one broken frame. Grey is also what keeps the frame from competing with the
      colours that mean "added" / "deleted". */
   border-left: 3px solid var(--dsw-alias-label-secondary);
+  /* The code surface hands the whole area the text beam (see `.diffBody`), and a thread is not
+     that: only its writing field is text. Taking the arrow back here covers the header's range
+     label, the outdated mark, the notes, the turns' prose and the quoted code at once — so a
+     pointer over the block never promises a selection the reader has no use for. The controls
+     set their own pointer (`.discussionToggle`, `.action`) and the field asks for the beam
+     again (`.discussionInput`), which is what the disabled field's rule then turns back off. */
+  cursor: default;
 }
 
 /* The code cells' font, applied where the body is declared so `1em` resolves
@@ -2461,6 +2493,9 @@
   font-family: inherit;
   font-size: calc(1em * var(--dsh-diff-font-scale, 1));
   line-height: 18px;
+  /* The block takes the text beam back (see `.discussion`); the field asks for it again, and
+     its disabled rule turns it off once there is nothing to type. */
+  cursor: text;
 }
 
 /* The fold control is an arrow, not a label: it takes no horizontal room from

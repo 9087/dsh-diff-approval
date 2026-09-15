@@ -1205,6 +1205,31 @@ describe('PendingPanel', () => {
     expect(/\.quoteLines \{[^}]*min-width: 0;/.test(css)).toBe(true)
   })
 
+  it('keeps the panel\'s chrome out of a text selection, and its content in', () => {
+    // Titles, buttons, hints, status lines and the list's metadata are labels, not things to copy
+    // out, and a stray selection over them also wakes the browser's own selection UI. What IS
+    // content stays selectable — the code, the rendered preview, the thread's own turns, the code
+    // a comment quotes and the file paths (values a reader copies out by hand) — and every field
+    // keeps its text, caret and selection included.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const root = /\.panel \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(root).toContain('user-select: none;')
+    const content = css.slice(css.indexOf('.panel .code,')).split('}')[0] ?? ''
+    for (const selector of ['.panel .code', '.panel .mdPreviewBody', '.panel .discussionUser', '.panel .discussionAnswer', '.panel .quoteText', '.panel .diffPath', '.panel .rowPath', '.panel input', '.panel textarea']) {
+      expect(content).toContain(selector)
+    }
+    expect(content).toContain('user-select: text;')
+    // Inside a thread, the diff surface's text beam is taken back — the code surface hands the
+    // whole area the I-beam (see `.diffBody`) — and only the writing field asks for it again.
+    // Buttons carry their own pointer, and the disabled field's rule turns the beam off.
+    expect(/\.discussion \{[^}]*cursor: default;/.test(css)).toBe(true)
+    expect(/\.discussionInput \{[^}]*cursor: text;/.test(css)).toBe(true)
+    expect(/\.discussionInput:disabled \{[^}]*cursor: default;/.test(css)).toBe(true)
+    // A path's own rule leaves both to the whitelist: one place lists what content is.
+    expect(/\.diffPath \{[^}]*\}/.exec(css)?.[0] ?? '').not.toContain('user-select')
+    expect(/\.rowPath \{[^}]*\}/.exec(css)?.[0] ?? '').not.toContain('user-select')
+  })
+
   it('folds the floating card away softly, toward the knob\'s corner', () => {
     // The card used to grow in on every open and vanish on the press. The entrance is gone
     // — pressing the knob puts the card there — and the exit is a gentle version of it: the
