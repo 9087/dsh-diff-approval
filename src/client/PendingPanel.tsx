@@ -3379,12 +3379,20 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     }
     if (chat.running) {
       if (!ours) {
-        updateDiscussion(pending.id, { asking: true, queued: true, failed: false, reply: '' })
+        // The session is busy and our prompt is not in the transcript yet. The queue is what
+        // says whether it is still waiting its turn: while it holds ours the block waits,
+        // and once it has let go the session has taken it and is writing - calling that
+        // "queued" left the block waiting behind itself with the answer already coming.
+        // `undefined` is a build that does not publish its queue, so it still waits.
+        updateDiscussion(pending.id, { asking: true, queued: held !== false, failed: false, reply: '' })
         return
       }
+      // Ours, and the turn is running: it is being answered now, whether or not anything has
+      // streamed yet. Only writing this when text had arrived is what left a stale "queued"
+      // on the block for the whole thinking phase.
       clearRelease()
       const streaming = chat.partial !== '' ? chat.partial : settled
-      if (streaming !== '') updateDiscussion(pending.id, { asking: true, queued: false, failed: false, reply: streaming })
+      updateDiscussion(pending.id, { asking: true, queued: false, failed: false, reply: streaming })
       return
     }
     if (settled === '') {

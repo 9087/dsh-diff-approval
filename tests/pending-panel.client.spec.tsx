@@ -4278,6 +4278,19 @@ describe('PendingPanel', () => {
       act(() => { listener!({ running: true, nodes: [], partial: '', error: undefined, queued: [prompt] }) })
       expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toBe('discussion.queued')
 
+      // The session has taken it (the queue no longer names it) and is writing: the block
+      // must stop saying it is queued. This is the phase where nothing has streamed yet and
+      // the answer is being thought about.
+      act(() => { listener!({ running: true, nodes: [], partial: '', error: undefined, queued: [] }) })
+      expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toBe('discussion.thinking')
+
+      // Same once the prompt is in the transcript with the turn still running, and still
+      // nothing written.
+      act(() => {
+        listener!({ running: true, nodes: [{ kind: 'user', text: prompt }], partial: '', error: undefined, queued: [] })
+      })
+      expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toBe('discussion.thinking')
+
       // The session has let it go and no turn took it. The row comes back only once
       // the grace has passed - a submission echo and the host's queue row are a round
       // trip apart, so the first idle notification is not proof.
