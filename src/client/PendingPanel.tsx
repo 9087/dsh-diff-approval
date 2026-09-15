@@ -142,6 +142,10 @@ const MIN_LIST_WIDTH_PX = 160
 const MAX_LIST_WIDTH_PX = 560
 /** Inset of the floating file-list card from the code scroll box, in px. */
 const FLOAT_LIST_MARGIN_PX = 12
+/** How far the list's rows sit from the right edge of whichever card holds them, in px — a fixed
+ *  number on every platform, which is why the scroller's own padding makes up whatever the
+ *  platform's scrollbar has already taken (see `applyListInset`). */
+const LIST_RIGHT_INSET_PX = 8
 /** The folded card's width grip: how wide its hit strip is, and how much of it
  *  lies over the card (the rest overhangs the code view, so the card's own
  *  scrollbar strip stays clear). */
@@ -5818,6 +5822,34 @@ export function PendingPanel({
     }
   }, [floatMode, floatOpen, panelWidth, selected])
 
+  // The list's rows sit a fixed 8px from the right edge of whichever card holds them, with the
+  // scrollbar inside that 8px rather than added to it. A classic bar is laid out in that very
+  // band (the theme's bar is 8px wide), so a desktop is already right — but a platform that
+  // overlays its bars (touch browsers, macOS with "show scrollbars when scrolling") reserves no
+  // space at all, and there the rows came out flush against the card. The scroller's own padding
+  // makes up the difference, measured rather than assumed: `offsetWidth - clientWidth` is the bar
+  // the platform actually reserved, so the two insets always add up to the same 8px. (The docked
+  // list's own frame inset is on top of this, which is what keeps it on its 16px line.)
+  const applyListInset = useCallback((scroller: HTMLDivElement | null): void => {
+    if (scroller === null) return
+    const bar = Math.max(0, scroller.offsetWidth - scroller.clientWidth)
+    scroller.style.paddingRight = `${Math.max(0, LIST_RIGHT_INSET_PX - bar)}px`
+  }, [])
+  /** The scroller, for the re-measure below; the inset itself is applied on attach. */
+  const listScrollRef = useRef<HTMLDivElement | null>(null)
+  // Applied from the ref rather than only from an effect: the docked column and the floating card
+  // mount at different moments (the card needs the box it is measured into first), so an effect
+  // keyed on the layout would leave whichever of them arrived later without its inset.
+  const attachListScroll = useCallback((scroller: HTMLDivElement | null): void => {
+    listScrollRef.current = scroller
+    applyListInset(scroller)
+  }, [applyListInset])
+  // And re-measured whenever the list's own geometry can have changed: a resize, a drag of the
+  // list's width, or a row count that changes whether the platform shows a bar at all.
+  useLayoutEffect(() => {
+    applyListInset(listScrollRef.current)
+  }, [applyListInset, open, docked, floatMode, floatOpen, listWidth, panelWidth, snapshot.files.length])
+
   // Surface a detected external change that superseded the redo history. The
   // notice is deferred until the panel is open, and the store latches the flag
   // so a change observed while closed is still shown once the panel reopens.
@@ -6385,7 +6417,7 @@ export function PendingPanel({
           </Tooltip>
         </div>
       )}
-      <div className={css.listScroll} data-diff-list-scroll>
+      <div className={css.listScroll} data-diff-list-scroll ref={attachListScroll}>
         {files.length > 0 && <ul className={css.rows}>{files.map(renderEntry)}</ul>}
       </div>
       {files.length > 0 && (

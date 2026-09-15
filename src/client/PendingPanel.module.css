@@ -1090,11 +1090,11 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  /* No right inset of its own: the rows already end at the scroller's own scroll strip (see
-     `.listScroll`), which is the same 8px the left side is inset by — so the card's content is
-     symmetric, and the header and the bulk footer keep their own 8px (they sit outside the
-     scroller, so they would otherwise come out flush against the border). The docked list keeps
-     its frame inset: its rows line up with the footer's buttons at 16px there. */
+  /* No right inset of its own: the rows keep their 8px through the scroller's own padding,
+     measured so that a platform which reserves no scrollbar strip still leaves them 8px in
+     (see `.listScroll`), while the header and the bulk footer carry their own 8px — they sit
+     outside the scroller, so they would otherwise come out flush against the border. The
+     docked list adds its frame's 8px on top, which is what keeps it on its 16px line. */
   padding: 6px 0 10px 8px;
   box-sizing: border-box;
   border: 1px solid var(--dsw-alias-border-l2);
@@ -1152,19 +1152,19 @@
   border-right: 1px solid var(--dsw-alias-border-l2);
 }
 
-/* The file rows scroll; the Keep-all / Revert-all footer stays pinned. The strip
-   the scrollbar lives in is reserved unconditionally, so the rows keep exactly the
-   same width with a bar, without one, and across the moment one appears: the bar
-   sits inside that strip instead of taking width away from the content, and the
-   strip plus the frame's own 8px right padding is the list's right margin.
-   Asking for the scrollbar outright is what reserves the strip. `scrollbar-gutter:
-   stable` also reserves it, but only where the engine honours that property
-   alongside a classic bar: the engines that ignore it (Safari before 18.2, which
-   styles this very 8px bar through the theme's `::-webkit-scrollbar` all the same)
-   left the strip out whenever the list did not overflow, so the folded card's rows
-   sat flush against its edge and the card read 8px narrower than the same card
-   holding a bar. A bar that is always there cannot be missed; with nothing to
-   scroll, the theme's transparent track paints nothing. */
+/* The file rows scroll; the Keep-all / Revert-all footer stays pinned. Asking for the
+   scrollbar outright is what reserves its strip whether or not the list overflows:
+   `scrollbar-gutter: stable` would do it too, but only where the engine honours that
+   property alongside a classic bar — the engines that ignore it (Safari before 18.2,
+   which styles this very 8px bar through the theme's `::-webkit-scrollbar` all the same)
+   left the strip out whenever the list did not overflow, so the folded card's rows sat
+   flush against its edge. A bar that is always there cannot be missed; with nothing to
+   scroll, the theme's transparent track paints nothing.
+   The rows' right inset is NOT set here: the panel measures the strip the platform
+   actually reserved and pads this element by whatever is left of the 8px the rows are
+   meant to keep, so the inset is the same number on a desktop with a classic bar (the bar
+   is the whole 8px) and on a touch browser that overlays its bars (nothing is reserved, so
+   the padding is the whole 8px). See `LIST_RIGHT_INSET_PX`. */
 .listScroll {
   flex: 1;
   min-height: 0;

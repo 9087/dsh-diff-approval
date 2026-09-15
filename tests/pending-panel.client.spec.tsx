@@ -1299,13 +1299,11 @@ describe('PendingPanel', () => {
 
   it('keeps the folded list symmetric, on the scroller\'s own strip', () => {
     // The two lists hold the same rows, but their frames differ. The docked one carries an 8px
-    // right padding — the same as its left — with the scroller's own scroll strip (8px) inside
-    // it, which lines its rows, the heading's buttons and the bulk footer up at 16px. The
-    // floating card takes no right padding at all: its rows end at the scroller's own strip,
-    // which is the same 8px the card insets its left side by, so the card reads symmetric
-    // instead of carrying 16px on one side and 8px on the other. The heading and the footer sit
-    // outside the scroller and keep their own 8px, or they would come out flush against the
-    // border.
+    // right padding — the same as its left — and the rows keep their 8px inside it, which lines
+    // its rows, the heading's buttons and the bulk footer up at 16px. The floating card takes no
+    // right padding at all, so its rows keep the same 8px and the card reads symmetric instead of
+    // carrying 16px on one side and 8px on the other. The heading and the footer sit outside the
+    // scroller and keep their own 8px, or they would come out flush against the border.
     const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const block = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
     const rightPadding = (name: string): string => /padding:\s*([^;]*);/.exec(block(name))?.[1]?.trim().split(/\s+/)[1] ?? ''
@@ -1313,10 +1311,33 @@ describe('PendingPanel', () => {
     expect(rightPadding('fileListFloat')).toBe('0')
     expect(/padding:\s*8px 8px 0 0;/.test(block('bulkActions'))).toBe(true)
     expect(/padding-right:\s*8px;/.test(block('groupHead'))).toBe(true)
+    // The rows' own inset is measured at runtime rather than declared, so nothing here may pin a
+    // right padding on the scroller (see the test below).
+    expect(block('listScroll')).not.toContain('padding')
     // Both dividers keep the gesture for themselves: without `touch-action: none`
     // the browser takes a finger drag as a page pan and cancels the pointer stream.
     expect(block('resizeHandle')).toContain('touch-action: none')
     expect(block('floatResizeHandle')).toContain('touch-action: none')
+  })
+
+  it('keeps the list\'s rows 8px in, whatever the platform reserves for a scrollbar', () => {
+    // A classic bar is laid out in the card's own right band, so on a desktop the rows are already
+    // 8px in; a platform that overlays its bars (a touch browser, macOS with "show scrollbars when
+    // scrolling") reserves nothing, and the rows came out flush against the card. So the scroller
+    // is padded with whatever is left of the 8px after the strip the platform actually reserved —
+    // measured, not assumed. jsdom reserves nothing, so the padding is the whole 8px here.
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const scroller = (): HTMLElement => document.querySelector('[data-diff-list-scroll]') as HTMLElement
+    // A wide panel: the list is its own column, and its rows keep the same 8px there.
+    expect(document.querySelector('[data-diff-approval-file-list]')).not.toBeNull()
+    expect(scroller().style.paddingRight).toBe('8px')
+
+    // Fold it for good: the card takes over, and the rows keep the very same inset.
+    fireEvent.click(document.querySelector('[data-diff-file-list-float]') as HTMLElement)
+    expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
+    expect(scroller().style.paddingRight).toBe('8px')
   })
 
   it('reserves the scroll strip of a list that is not overflowing', () => {
