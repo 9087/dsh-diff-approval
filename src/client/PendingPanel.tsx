@@ -6548,6 +6548,26 @@ export function PendingPanel({
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
   }, [docked, open, dockShowing, closeDock, collapseSidebar])
 
+  // Edge floats its own "mini menu" (copy / search / define) over a text selection once the
+  // mouse is released. It is browser chrome — not an element, and it ignores `contextmenu`'s
+  // preventDefault — but it does wait on the release's default action, so taking that away
+  // inside our own surface holds it back while leaving selection itself untouched. Only our
+  // surface: the app's own DOM is not ours to change, and a field the reader may be selecting
+  // text in keeps the browser's own UI (a menu over an input is not in the way of anything).
+  useEffect(() => {
+    const onMouseUp = (event: MouseEvent): void => {
+      const target = event.target
+      const panel = panelRef.current
+      if (panel === null || !(target instanceof Node) || !panel.contains(target)) return
+      if (target instanceof Element && target.closest('input, textarea, [contenteditable]') !== null) return
+      event.preventDefault()
+    }
+    // Capture, so the release is marked handled before anything downstream can act on it, and
+    // on the window, because the panel is portalled into the page rather than nested in us.
+    window.addEventListener('mouseup', onMouseUp, true)
+    return () => { window.removeEventListener('mouseup', onMouseUp, true) }
+  }, [])
+
   // Escape dismisses the panel (a modal-close convention). A press inside the
   // panel while a search bar is on screen is the bar's instead: the bar is the
   // innermost dismissible and its own handler closes it, so the panel yields and

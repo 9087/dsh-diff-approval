@@ -4113,6 +4113,29 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-copy]')).toBeNull()
   })
 
+  it('holds back the browser\'s selection menu on its own surface, and nowhere else', () => {
+    // Edge floats a mini menu (copy / search / define) over a text selection once the mouse is
+    // released. It is browser chrome, so the panel cannot style it — but it waits on the
+    // release's default action, and the panel takes that action away for releases inside its own
+    // surface. Selection itself is untouched, which is why this is done rather than making the
+    // text unselectable. `fireEvent` reports false when an event's default was prevented.
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    // Over the code, and over the panel's own chrome (the file list): prevented.
+    expect(fireEvent.mouseUp(document.querySelector('[data-diff-code]') as HTMLElement)).toBe(false)
+    expect(fireEvent.mouseUp(document.querySelector('[data-diff-approval-file-list]') as HTMLElement)).toBe(false)
+
+    // A field the reader selects text in keeps the browser's own UI.
+    fireEvent.click(screen.getByLabelText('action.search'))
+    expect(fireEvent.mouseUp(document.querySelector('[data-diff-search-input]') as HTMLElement)).toBe(true)
+
+    // Outside the panel is the app's DOM, not ours to change.
+    expect(fireEvent.mouseUp(document.body)).toBe(true)
+  })
+
   it('comments on a selection that covers no change block', async () => {
     // 'a\nb\nc\nd\n' -> 'A\nb\nC\nd\n' renders six rows; row 5 is unchanged
     // context, so a selection over it covers no change block. Keep/revert must
