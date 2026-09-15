@@ -2149,6 +2149,11 @@
    whole reservation and the rows after it are pushed by exactly that. */
 .discussionRow {
   display: table-row;
+  /* The block's own colour, carried by the row it hangs in rather than by the block: the
+     thread then reads as a band across the code — the same surface the rows above and below
+     it are painted on — instead of as a card floating over it. The block itself stays
+     transparent (see `.discussion`), the way its own content area already was. */
+  background: var(--dsw-alias-bg-base);
 }
 
 /* The block row's own cell, and deliberately NOT `.code`: that cell is `pre` and
@@ -2187,7 +2192,10 @@
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  background: var(--dsw-alias-bg-base);
+  /* Transparent: the colour the block used to paint is on the row it occupies now (see
+     `.discussionRow`), so the thread is part of the code's own surface rather than a panel
+     laid over it. The turns inside keep their own fills. */
+  background: transparent;
   /* Neutral, NOT the change-highlight colour: a discussed range and a change
      run can sit on the same rows, and two tinted markers of the same hue read as
      one broken frame. Grey is also what keeps the frame from competing with the

@@ -1535,12 +1535,16 @@ describe('PendingPanel', () => {
     expect(pin).toContain('height: 0')
     const row = /\.discussionRow \{([^}]*)\}/.exec(css)?.[1] ?? ''
     expect(row).toContain('display: table-row')
+    // The colour lives on the row, not on the block: the thread is a band across the code
+    // (the surface the rows around it are painted on) rather than a panel laid over it.
+    expect(row).toContain('background: var(--dsw-alias-bg-base)')
     // The block itself is absolute, so it fills the pin's own (zero-width) column: its
     // width comes from the render, and the previous row-offset/translate pair is gone.
     const block = /\.discussion \{([^}]*)\}/.exec(css)?.[1] ?? ''
     expect(block).toContain('position: absolute')
     expect(block).toContain('top: 0')
     expect(block).toContain('left: 0')
+    expect(block).toContain('background: transparent')
   })
 
   it('resizes the file list by dragging the divider within its bounds', () => {
