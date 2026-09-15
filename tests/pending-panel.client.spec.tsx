@@ -1488,6 +1488,9 @@ describe('PendingPanel', () => {
     expect(withSkill).toContain('discussion.promptRuleSkill {"skill":"dsh-diff-approval-comment"}')
     expect(withSkill.endsWith('discussion.promptRule')).toBe(false)
 
+    // The second case asks on a fresh page: threads now outlive a mount (see the page's
+    // memory), and what is under test here is the prompt's shape rather than persistence.
+    resetPanelMemory()
     const withoutSkill = askPrompt({ read: true, files: [multi], busy: new Set() })
     expect(withoutSkill.endsWith('discussion.promptRule')).toBe(true)
     expect(withoutSkill).not.toContain('promptRuleSkill')
@@ -4241,6 +4244,56 @@ describe('PendingPanel', () => {
       })
     })
     expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('final answer')
+    expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
+  })
+
+  it('carries its threads, and a waiting question, across a remount', () => {
+    // The panel unmounts whenever it is closed or its presentation changes, and the page's
+    // memory is what brings the threads back. A question still waiting for its answer has to
+    // come with them, or the answer that arrives afterwards has nowhere to land.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    const first = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+    fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    const prompt = {
+      kind: 'user',
+      text: (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls.at(-1)?.[1] ?? '',
+    }
+    expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
+
+    // Closed and reopened: a fresh mount, holding what the page remembered.
+    first.unmount()
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+    expect(document.querySelector('[data-diff-discussion-user]')?.textContent).toBe('why?')
+    // Still waiting, so still no writing row.
+    expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-discussion-input]')).toBeNull()
+
+    // The answer arrives after the remount and still finds its block.
+    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } })
+      .mock.calls.at(-1)?.[1]
+    act(() => {
+      listener!({ running: false, nodes: [prompt, { kind: 'assistant', text: 'because' }], partial: '', error: undefined, queued: [] })
+    })
+    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('because')
     expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
   })
 

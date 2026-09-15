@@ -14,6 +14,8 @@
  * @module dsh-diff-approval/client/panel-memory
  */
 
+import type { Discussion } from './discussion.ts'
+
 /** One session's remembered view: its last file, and how far down each file was. */
 interface SessionView {
   /** The pending entry that was open when this session's panel last closed. */
@@ -23,6 +25,42 @@ interface SessionView {
 }
 
 const views = new Map<string, SessionView>()
+
+/**
+ * One session's comment threads, by pending entry id.
+ *
+ * A thread is not a preference and not the host's to keep: it is what this visit put on the
+ * diff, and the panel unmounts whenever it is closed or its presentation changes (the
+ * floating overlay and the docked tab are two mounts). Module state gives them one memory,
+ * so the threads are still there when the panel comes back, and a page reload starts clean -
+ * which is the lifetime the comments are supposed to have.
+ */
+const threads = new Map<string, Readonly<Record<string, readonly Discussion[]>>>()
+
+/**
+ * The comment threads a session's panel is holding.
+ * @param sessionId - the session, if any.
+ * @returns the threads by pending entry id; empty when there are none.
+ */
+export function rememberedDiscussions(
+  sessionId: string | undefined,
+): Readonly<Record<string, readonly Discussion[]>> {
+  return sessionId === undefined ? {} : threads.get(sessionId) ?? {}
+}
+
+/**
+ * Remember the comment threads a session's panel holds. Called on every change, so a mount
+ * that appears later (another presentation, or the panel reopened) starts from them.
+ * @param sessionId - the session the panel is reviewing; nothing is recorded without one.
+ * @param byFile - the threads, by pending entry id.
+ */
+export function rememberDiscussions(
+  sessionId: string | undefined,
+  byFile: Readonly<Record<string, readonly Discussion[]>>,
+): void {
+  if (sessionId === undefined) return
+  threads.set(sessionId, byFile)
+}
 
 /** This session's record, created on first use. */
 function viewOf(sessionId: string): SessionView {
@@ -80,4 +118,5 @@ export function panelFileOffset(sessionId: string | undefined, fileId: string): 
  */
 export function resetPanelMemory(): void {
   views.clear()
+  threads.clear()
 }

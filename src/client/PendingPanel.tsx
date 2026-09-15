@@ -42,7 +42,7 @@ import { OPEN_FILE_EVENT } from './produced-diff.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
 import { OPEN_PANEL_FILE_EVENT, PANEL_STATE_EVENT, SHOW_PANEL_EVENT, TOGGLE_PANEL_EVENT } from './dock.tsx'
 import type { PanelFileDetail, PanelStateDetail } from './dock.tsx'
-import { lastPanelFile, panelFileOffset, rememberPanelView } from './panel-memory.ts'
+import { lastPanelFile, panelFileOffset, rememberDiscussions, rememberedDiscussions, rememberPanelView } from './panel-memory.ts'
 import { composerCoveredByPanel, leaveComposerCaret } from './composer-cover.ts'
 import { commentModeEnabled, COMMENT_MODE_CHANGED_EVENT, confirmFileRemoveEnabled, COVER_CHANGED_EVENT, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
@@ -2354,7 +2354,11 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   // after it is pushed down rather than covered — the block is part of the row
   // stream's arithmetic, not an overlay. Durable storage arrives later; this is
   // the page's memory of them.
-  const [discussionsByFile, setDiscussionsByFile] = useState<Readonly<Record<string, readonly Discussion[]>>>({})
+  const [discussionsByFile, setDiscussionsByFile] = useState<Readonly<Record<string, readonly Discussion[]>>>(
+    // The threads this visit has put on the diff outlive any one mount of the panel: closing
+    // it, or switching between the overlay and the docked tab, is not "done commenting".
+    () => rememberedDiscussions(file.sessionId),
+  )
   const discussions = discussionsByFile[file.id] ?? EMPTY_DISCUSSIONS
   const setDiscussions = (update: (current: readonly Discussion[]) => readonly Discussion[]): void => {
     setDiscussionsByFile(all => ({ ...all, [file.id]: update(all[file.id] ?? EMPTY_DISCUSSIONS) }))
@@ -3266,6 +3270,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     body.scrollTop += shift
     setScrollTop(body.scrollTop)
   }, [discussions])
+  // Whatever the threads become, the page's memory gets them: the panel is unmounted by
+  // every close and by a presentation switch, and it has to come back holding the same ones.
+  useEffect(() => {
+    rememberDiscussions(file.sessionId, discussionsByFile)
+  }, [file.sessionId, discussionsByFile])
+
   /** Patch one discussion in place, without touching the others or the file key. */
   const updateDiscussion = useCallback((id: string, patch: Partial<Discussion>): void => {
     setDiscussionsByFile(all => {
@@ -3273,6 +3283,27 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       return { ...all, [file.id]: list.map(entry => (entry.id === id ? { ...entry, ...patch } : entry)) }
     })
   }, [file.id])
+
+  // A question that was still waiting when the panel went away is picked up again: the
+  // block, its turns and the transcript mark all came back from the page's memory, so the
+  // answer has somewhere to land. The needle is rebuilt exactly the way the send built it —
+  // the marker line plus the question's first line — and the stored baseline keeps an older,
+  // identical-looking prompt from being mistaken for this one.
+  useEffect(() => {
+    if (pendingAskRef.current !== undefined) return
+    const waiting = discussions.filter(entry => entry.asking === true).at(-1)
+    if (waiting === undefined) return
+    const baseline = waiting.baseline
+    if (baseline === undefined) return
+    const question = [...waiting.messages].reverse().find(message => message.role === 'user')
+    if (question === undefined) return
+    const marker = `${t('discussion.marker')} (${discussionLineRange(waiting.anchor)})`
+    pendingAskRef.current = {
+      id: waiting.id,
+      baseline,
+      needle: `${marker}\n${question.text.split('\n')[0] ?? ''}`,
+    }
+  }, [])
 
   // Watch the session's chat while this file is open, so an answer can land in the
   // discussion that asked for it. The subscriber is read through a ref: the face
@@ -3661,7 +3692,19 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     discussionRefocusRef.current = id
     setDiscussions(current => current.map(entry => (
       entry.id === id
-        ? { ...entry, messages: [...entry.messages, asked], draft: '', asking: true, queued: false, failed: false, reply: '', collapsed: false }
+        ? {
+            ...entry,
+            messages: [...entry.messages, asked],
+            draft: '',
+            asking: true,
+            queued: false,
+            failed: false,
+            reply: '',
+            collapsed: false,
+            // Kept on the block as well as in the ref below, so this ask can be picked up
+            // again if the panel is closed while the answer is still on its way.
+            baseline: chat.nodes.length,
+          }
         : entry
     )))
   }

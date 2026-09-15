@@ -51,6 +51,15 @@ export interface Discussion {
   lost?: boolean
   /** The answer being streamed for the question in flight. */
   reply?: string
+  /**
+   * Where the session's transcript stood when the last question was sent — its node count.
+   *
+   * Kept with the block rather than only in the panel's refs, so a question still waiting
+   * for its answer can be picked up again after the panel is closed and reopened: the search
+   * for our own prompt starts here, which is what keeps an older, identical-looking prompt
+   * from being mistaken for it.
+   */
+  baseline?: number
   /** The turn for the last question is running. */
   asking?: boolean
   /**
