@@ -17,6 +17,18 @@ function discussion(id: string, start: number, end: number, collapsed = false): 
   }
 }
 
+/** One model to re-anchor against: new-file lines (an old-side row has none) and texts. */
+function rows(lines: readonly (number | undefined)[], texts: readonly string[]) {
+  const lineOf = (row: number): number | undefined => lines[row]
+  const textOf = (row: number): string => texts[row] ?? ''
+  return { lineOf, textOf, rowCount: lines.length }
+}
+
+/** Re-anchor one discussion against a model, the way the panel's rebuild effect does. */
+function remap(discussion: Discussion, model: ReturnType<typeof rows>): Discussion {
+  return remapDiscussion(discussion, model.lineOf, model.textOf, model.rowCount)
+}
+
 describe('discussions in the diff row stream', () => {
   it('reserves whole rows for a block, folded or open', () => {
     // The block's height is an integer number of code rows, which is what keeps
@@ -55,6 +67,11 @@ describe('discussions in the diff row stream', () => {
     expect(discussionOverlapping(discussions, { start: 4, end: 9 })?.id).toBe('a')
     expect(discussionOverlapping(discussions, { start: 3, end: 3 })?.id).toBe('a')
     expect(discussionOverlapping(discussions, { start: 5, end: 9 })).toBeUndefined()
+    // An outdated thread owns no rows: the code under its numbers is not what it was about
+    // any more, so the rows are free for an annotation of the code that is there now.
+    const outdated = [{ ...discussion('b', 2, 4), lost: true }]
+    expect(discussionOverlapping(outdated, { start: 3, end: 3 })).toBeUndefined()
+    expect(discussionOverlapping([...discussions, ...outdated], { start: 3, end: 3 })?.id).toBe('a')
   })
 
   it('keeps the newest turns that fit the row cap, and says what it left out', () => {
@@ -85,26 +102,69 @@ describe('discussions in the diff row stream', () => {
     expect(discussionTail(thread, () => 2, 6).rows).toBe(5)
   })
 
-  it('re-anchors to the rows the annotation lines landed on', () => {
+  it('re-anchors by line numbers while they hold the quote, and by quote when they do not', () => {
+    // An annotation on new-file lines 10-11, quoted as the two lines read then.
+    const original: Discussion = {
+      ...discussion('a', 0, 0),
+      anchor: { start: 1, end: 2, startLine: 10, endLine: 11 },
+      quote: 'one\ntwo',
+    }
+    // Two context rows were inserted above: the numbers move, the code under them does
+    // not, so the line numbers are the answer and nothing else has to be searched.
+    const moved = remap(original, rows([1, 2, 3, 10, 11], ['a', 'b', 'c', 'one', 'two']))
+    expect(moved.anchor).toMatchObject({ start: 3, end: 4 })
+    expect(moved.lost).toBeUndefined()
+    // Nothing moved: the very same object comes back, so a rebuild that changed nothing
+    // does not churn the blocks (the panel reads state identity as its change signal).
+    expect(remap(original, rows([9, 10, 11, 12], ['a', 'one', 'two', 'b']))).toBe(original)
+    // An edit split the last line in two: a third row joined the range, and the content
+    // under the numbers still starts with the quote, so the numbers are followed.
+    const grown = remap(original, rows([10, 11, 11], ['one', 'two', 'two']))
+    expect(grown.anchor).toMatchObject({ start: 0, end: 2 })
+    expect(grown.lost).toBeUndefined()
+    // The old numbers now sit over other code, and the quote is elsewhere: the thread
+    // follows the code it was written about - nearest occurrence first.
+    const followed = remap(original, rows([1, 2, 3, 10, 11], ['x', 'one', 'two', 'y', 'z']))
+    expect(followed.anchor).toMatchObject({ start: 1, end: 2, startLine: 2, endLine: 3 })
+    expect(followed.lost).toBeUndefined()
+  })
+
+  it('marks a thread outdated when the code it was about is gone, and clears the mark when it returns', () => {
+    const original: Discussion = {
+      ...discussion('a', 1, 2),
+      anchor: { start: 1, end: 2, startLine: 10, endLine: 11 },
+      quote: 'one\ntwo',
+    }
+    // Nothing of the range holds the quote and the quote is nowhere else: the block keeps
+    // the rows it last matched, says it is outdated, and keeps its quote for the reader.
+    const gone = remap(original, rows([1, 2, 10, 12], ['a', 'b', 'y', 'z']))
+    expect(gone.lost).toBe(true)
+    expect(gone.anchor).toEqual(original.anchor)
+    expect(gone.quote).toBe('one\ntwo')
+    // The lines are gone from the model entirely (a revert took the hunk out).
+    expect(remap(original, rows([1, 2], ['a', 'b'])).lost).toBe(true)
+    // Outdated is derived, not sticky: a keep bringing the lines back with their quote
+    // clears it, so a thread is not condemned by one rebuild.
+    const back = remap(gone, rows([10, 11], ['one', 'two']))
+    expect(back.lost).toBeUndefined()
+    expect(back.anchor).toMatchObject({ start: 0, end: 1 })
+    // Already outdated and still matching nothing: the same object, no churn.
+    expect(remap(gone, rows([1, 2], ['a', 'b']))).toBe(gone)
+  })
+
+  it('trusts the line numbers for a thread with no quote to check against', () => {
+    // A comment from a build that did not store one (or one whose rows made an empty
+    // quote): the numbers are all there is, so they are followed as they always were.
     const original: Discussion = {
       ...discussion('a', 0, 0),
       anchor: { start: 1, end: 2, startLine: 10, endLine: 11 },
     }
-    // The two rows moved down by one.
-    const moved = remapDiscussion(original, (row) => [9, 10, 11, 12][row], 4)
-    expect(moved.anchor.start).toBe(1)
-    expect(moved.anchor.end).toBe(2)
-    // A third row joined the range (the edit split a line in two).
-    const grown = remapDiscussion(original, (row) => [10, 10, 11][row], 3)
-    expect(grown.anchor).toMatchObject({ start: 0, end: 2 })
-    expect(grown.lost).toBeUndefined()
-    // Nothing of the range is in the file any more: stay put and say so.
-    const lost = remapDiscussion(original, () => 40, 5)
-    expect(lost.lost).toBe(true)
-    expect(lost.anchor.start).toBe(1)
-    expect(lost.anchor.end).toBe(2)
-    // A lost block is not re-anchored again.
-    expect(remapDiscussion(lost, (row) => [9, 10, 11, 12][row], 4)).toBe(lost)
+    const moved = remap(original, rows([9, 10, 11, 12], ['a', 'b', 'c', 'd']))
+    expect(moved.anchor).toMatchObject({ start: 1, end: 2 })
+    expect(moved.lost).toBeUndefined()
+    // With those numbers gone there is nothing left to anchor on, so the thread is
+    // outdated rather than sitting silently on whatever rows now exist.
+    expect(remap(original, rows([1, 2], ['a', 'b'])).lost).toBe(true)
   })
 
   it('offers keep/revert only over change blocks, and never a second discussion', () => {

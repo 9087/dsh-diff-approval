@@ -28,6 +28,20 @@ export interface DiscussionMessage {
   text: string
 }
 
+/**
+ * The gutter pair of one quoted line: the numbers the file showed beside it.
+ *
+ * Kept per line with the quote so an outdated thread can put the code back on the file's own
+ * columns — the numbers are what the reader navigates by, and the two sides of a hunk do not
+ * simply count up from the range's first line, so they cannot be derived from the anchor.
+ */
+export interface DiscussionQuoteLine {
+  /** Old-file number, `undefined` on a row the old side does not have (an added line). */
+  old: number | undefined
+  /** New-file number — the second gutter — `undefined` on a removed line. */
+  new: number | undefined
+}
+
 /** One discussion bound to a row range. */
 export interface Discussion {
   /** Stable identity for keys and toggles. */
@@ -44,9 +58,26 @@ export interface Discussion {
   /** Folded to the one-row header. */
   collapsed: boolean
   /**
-   * No line of the anchor exists in the file any more (the code was changed or
-   * removed under it). The block stays where it last matched, cannot be commented
-   * on again, and is the user's to delete.
+   * The anchored lines as they read when the thread was created.
+   *
+   * The line numbers are what a rebuild moves; this is what says whether they still hold the
+   * code the comment was written about. When they do not, the thread is re-anchored on the
+   * quote (see `remapDiscussion`), and when even that finds nothing the block is marked
+   * outdated and the quote is what the reader is shown to know what it had been about.
+   */
+  quote?: string
+  /**
+   * The gutter numbers of `quote`'s lines, in the same order, so an outdated block can lay the
+   * quote out exactly as the file lays code out. See `DiscussionQuoteLine`.
+   */
+  quoteLines?: readonly DiscussionQuoteLine[]
+  /**
+   * The anchor no longer holds the code the thread was written about — the lines were edited
+   * under it, or they are gone from the file. The block stays where it last matched, says so,
+   * keeps its quote and its turns, and owns no rows: it is read-only (nothing current to write
+   * about), it washes no lines, and a new annotation may take the rows under it. Removal is the
+   * user's call. The mark is derived from the current model, so the lines coming back with their
+   * quote clears it.
    */
   lost?: boolean
   /** The answer being streamed for the question in flight. */
@@ -216,6 +247,12 @@ export function discussionOnRange(
  * annotation at most, so a selection that touches an existing block offers no
  * second one - otherwise two blocks would describe the same line.
  *
+ * An outdated thread owns no rows: the code under its numbers is no longer what the
+ * comment was written about, so it cannot hold the range against a new annotation of the
+ * code that is there now. Nothing marks those rows for it either (see the panel's band),
+ * which is the same rule seen from the other side: a thread that no longer matches is
+ * kept for its quote and its turns, not for its position.
+ *
  * @param discussions - the blocks currently attached to this file.
  * @param anchor - the candidate range.
  * @returns the overlapping discussion, or `undefined`.
@@ -224,41 +261,105 @@ export function discussionOverlapping(
   discussions: readonly Discussion[],
   anchor: { start: number; end: number },
 ): Discussion | undefined {
-  return discussions.find(entry => entry.anchor.start <= anchor.end && anchor.start <= entry.anchor.end)
+  return discussions.find(entry => entry.lost !== true
+    && entry.anchor.start <= anchor.end && anchor.start <= entry.anchor.end)
 }
 
 /**
- * Re-anchor one discussion against the current rows: the rows whose new-file line
- * falls inside the annotation's line range. When no line matches any more, the
- * block keeps the rows it last matched and is marked lost, so it stays where the
- * user last saw it and can only be deleted.
+ * The same thread, marked as no longer sitting on the code it was written about.
+ *
+ * Overdue for nothing but the mark: the anchor, the quote and the turns all stay, so the
+ * reader can still see what the comment meant. What goes is the writing row and the ownership
+ * of the rows — there is no current code for an answer to be about.
+ *
+ * @param discussion - the block to mark.
+ * @returns the marked block (the same object when it already carried the mark).
+ */
+function markOutdated(discussion: Discussion): Discussion {
+  return discussion.lost === true ? discussion : { ...discussion, lost: true }
+}
+
+/**
+ * The same thread with the outdated mark cleared, once the code it names holds its quote
+ * again (a revert followed by a keep brings the lines back).
+ *
+ * @param discussion - the block to clear.
+ * @returns the cleared block (the same object when it carried no mark).
+ */
+function clearOutdated(discussion: Discussion): Discussion {
+  if (discussion.lost !== true) return discussion
+  const next: Discussion = { ...discussion }
+  delete next.lost
+  return next
+}
+
+/**
+ * Re-anchor one discussion against the current rows.
+ *
+ * The anchor's new-file line numbers are what a rebuild moves; the quote the thread carries
+ * is what says whether they still hold the code the comment was written about. When they do
+ * not — the lines were edited under it, or the hunk moved — the quote is looked for elsewhere
+ * in the model and the thread follows it, nearest occurrence first when the same code shows up
+ * more than once. When nothing matches, the block keeps the rows it last matched and is marked
+ * outdated: it says so and keeps its quote for the reader, rather than being silently moved
+ * onto whatever took those lines. The mark is derived, not sticky — the lines coming back with
+ * their quote clears it (GitHub recomputes `isOutdated` the same way).
  *
  * @param discussion - the block to re-anchor.
  * @param lineOf - the new-file line number of a row, or `undefined` for a row that has none.
+ * @param textOf - the text of a row, for the quote comparison.
  * @param rowCount - how many rows the current model has.
  * @returns the re-anchored discussion (the same object when nothing moved).
  */
 export function remapDiscussion(
   discussion: Discussion,
   lineOf: (row: number) => number | undefined,
+  textOf: (row: number) => string,
   rowCount: number,
 ): Discussion {
-  if (discussion.lost === true) return discussion
+  const { startLine, endLine } = discussion.anchor
   let start = -1
   let end = -1
   for (let row = 0; row < rowCount; row++) {
     const line = lineOf(row)
-    if (line === undefined || line < discussion.anchor.startLine || line > discussion.anchor.endLine) continue
+    if (line === undefined || line < startLine || line > endLine) continue
     if (start === -1) start = row
     end = row
   }
-  if (start === -1) {
-    // Nothing of the annotation is in the file any more: keep the last rows, stop
-    // offering the compose action, and leave removal to the user.
-    return { ...discussion, lost: true }
+  const quote = discussion.quote
+  const span = Math.max(0, endLine - startLine)
+  const textAt = (row: number): string => {
+    const parts: string[] = []
+    for (let index = row; index <= row + span; index++) {
+      parts.push(index < rowCount ? textOf(index) : '')
+    }
+    return parts.join('\n')
   }
-  if (start === discussion.anchor.start && end === discussion.anchor.end) return discussion
-  return { ...discussion, anchor: { ...discussion.anchor, start, end } }
+  // Nothing to check against, or the numbers still hold what the comment was about: the line
+  // numbers are the answer, and that is the ordinary case (an edit above the block).
+  if (quote === undefined || quote === '' || (start !== -1 && textAt(start) === quote)) {
+    if (start === -1) return markOutdated(discussion)
+    if (start === discussion.anchor.start && end === discussion.anchor.end) return clearOutdated(discussion)
+    return clearOutdated({ ...discussion, anchor: { ...discussion.anchor, start, end } })
+  }
+  // They do not hold it: follow the quote instead. Where the same code appears more than once
+  // the nearest occurrence wins, since that is where the reader last saw it.
+  let found = -1
+  for (let row = 0; row + span < rowCount; row++) {
+    if (textAt(row) !== quote) continue
+    if (found === -1 || Math.abs(row - start) < Math.abs(found - start)) found = row
+  }
+  if (found === -1) return markOutdated(discussion)
+  return clearOutdated({
+    ...discussion,
+    anchor: {
+      ...discussion.anchor,
+      start: found,
+      end: found + span,
+      startLine: lineOf(found) ?? startLine,
+      endLine: lineOf(found + span) ?? endLine,
+    },
+  })
 }
 
 /** What the selection frame shows for the current selection. */

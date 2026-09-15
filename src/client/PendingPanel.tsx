@@ -22,7 +22,7 @@ import {
   DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, DISCUSSION_MAX_BODY_ROWS, discussionOverlapping,
   discussionRowExtras, discussionRows, discussionTail, discussionText, remapDiscussion, selectionFrame, stripBlankLines,
 } from './discussion.ts'
-import type { Discussion, DiscussionMessage } from './discussion.ts'
+import type { Discussion, DiscussionMessage, DiscussionQuoteLine } from './discussion.ts'
 import { frameFollowIsAnimated, frameFollowKeyframes } from './scroll-follow.ts'
 import type { ChatView } from './chat-bridge.ts'
 import { renderMarkdownPreview } from './markdown-preview.ts'
@@ -36,6 +36,7 @@ import { useWindowedHighlight } from './windowed-highlight.ts'
 import type { LineRange, VisibleLines } from './windowed-highlight.ts'
 import type { DockSnapshot } from './dock.tsx'
 import type { HighlightSpan } from './highlight.ts'
+import { highlightWindow } from './highlight.ts'
 import { langFromPath, suffixOfPath } from './lang.ts'
 import { referenceLabelOf } from './reference.ts'
 import { OPEN_FILE_EVENT } from './produced-diff.ts'
@@ -751,6 +752,58 @@ function clipRuns(runs: readonly HighlightSpan[], start: number, end: number): R
     nodes.push(<span key={nodes.length} style={run.style}>{text}</span>)
   }
   return nodes.length === 0 ? '\u00a0' : nodes
+}
+
+/**
+ * The code an outdated thread was written about.
+ *
+ * Laid out as the file's own rows are: the same two 44px gutters — with the numbers the lines
+ * had — then the code column, so the quote sits on the file's columns rather than in a box of
+ * its own. Highlighted with the same highlighter the rows use, on the language the file is read
+ * in: a quote of code that renders as grey prose three rows under coloured code reads as a
+ * different kind of thing. No search hits either — those belong to the file, and the quote is
+ * not in it. The tokenize is memoised per quote and language, and the window is exactly the
+ * quote, so a long one is one bounded job; an unknown language comes back plain.
+ *
+ * @param props.quote - the code, one line per `\n`.
+ * @param props.lines - each line's gutter pair, in the same order.
+ * @param props.lang - the grammar id the file is read in, or `undefined` for plain text.
+ * @param props.wrap - the code view's wrap setting: off, the quote is one line per quoted line,
+ * as the file renders it.
+ */
+function DiscussionQuote({ quote, lines, lang, wrap }: {
+  quote: string
+  lines: readonly DiscussionQuoteLine[] | undefined
+  lang: string | undefined
+  wrap: boolean
+}) {
+  const rows = useMemo(() => {
+    const texts = quote.split('\n')
+    const runs = highlightWindow(texts, lang, 0, texts.length)?.runs
+    return texts.map((text, index) => {
+      const lineRuns = runs?.[index]
+      const content: ReactNode[] = []
+      if (lineRuns === undefined) content.push(text)
+      else for (const run of lineRuns) content.push(<span key={content.length} style={run.style}>{run.text}</span>)
+      return { content, gutter: lines?.[index] }
+    })
+  }, [quote, lines, lang])
+  return (
+    <div className={`${css.quoteLines}${wrap ? '' : ' ' + css.quoteNoWrap}`} data-diff-discussion-quote>
+      {rows.map((row, index) => (
+        // One code row each, in the file's own two gutter columns: the numbers are what the
+        // reader navigates by, and a quote without them cannot be looked up.
+        <div className={css.quoteLine} key={index}>
+          <span className={css.gutter} data-diff-quote-gutter>{row.gutter?.old ?? ''}</span>
+          <span className={css.gutter} data-diff-quote-gutter>{row.gutter?.new ?? ''}</span>
+          {/* The text is a block of its own so an unwrapped long line is clipped here rather
+              than overflowing the block: an ancestor that can scroll sideways is one a jump or
+              a focus can scroll, which is what pushed the whole thread left in a narrow panel. */}
+          <span className={css.quoteCode}><span className={css.quoteText} data-diff-quote-text>{row.content}</span></span>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 /** Chip styling for each intra-line run: removed chars and added chars stand out. */
@@ -3068,9 +3121,13 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
    *
    * @param text - the message text.
    * @param role - who said it: the two sides wrap at different widths.
+   * @param widthPx - the exact width the text wraps in, when the caller lays it out somewhere
+   * other than the thread's own column (the quote's code cell, which sits behind the file's two
+   * gutters). Omitted, the turn's own column is used — and a bubble ignores it, since a bubble
+   * wraps at its own percentage regardless.
    * @returns the occupied row count (whole: a bubble's chrome is a whole row).
    */
-  const messageRowsOf = useCallback((text: string, role: DiscussionMessage['role']): number => {
+  const messageRowsOf = useCallback((text: string, role: DiscussionMessage['role'], widthPx?: number): number => {
     const lines = text.split('\n')
     // A bubble pads its text by 0.2 of a row above and below and sits 0.3 of a row
     // inside its own margin, so its two vertical sides are exactly one more row; the
@@ -3089,9 +3146,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     // So measure each side where it actually wraps. The percentage resolves against
     // the body, which is why the inset is subtracted before it is taken.
     const body = Math.max(0, bodyWidth - discussionRightInsetPx - 3 - 2 * DISCUSSION_BODY_INSET_PX)
-    const width = bubble
+    const width = widthPx ?? (bubble
       ? body * DISCUSSION_BUBBLE_MAX_WIDTH - 2 * DISCUSSION_BUBBLE_SIDE_PADDING_ROWS * ROW_HEIGHT_PX
-      : body
+      : body)
     // One character of slack, like the diff's own wrap: canvas metrics and the DOM's
     // glyph advances can differ by a fraction, and a row too few clips.
     const wrapping = width - measure('0')
@@ -3099,6 +3156,22 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     const tabPx = tabWidthSpaces * measure(' ')
     return chrome + lines.reduce((rows, line) => rows + Math.max(1, wrapInto(line, wrapping, measure, tabPx).length), 0)
   }, [bodyWidth, tabWidthSpaces, discussionRightInsetPx])
+
+  /**
+   * How many rows the quote of an outdated thread occupies: the code as it wraps in its own
+   * code cell, which is the block's full width less the two gutters the quote lays out in. It
+   * carries no chrome of its own — no box, no padding — so the count is the wrapped lines.
+   *
+   * @param quote - the code the thread was written about.
+   * @param wrap - the code view's wrap setting: off, no line wraps, so the quote is exactly one
+   * row per quoted line whatever the width.
+   * @returns the occupied row count (whole).
+   */
+  const quoteRowsOf = useCallback((quote: string, wrap: boolean): number => {
+    if (!wrap) return quote.split('\n').length
+    const width = Math.max(0, bodyWidth - discussionRightInsetPx) - WRAP_GUTTERS_PX
+    return messageRowsOf(quote, 'assistant', width)
+  }, [bodyWidth, discussionRightInsetPx, messageRowsOf])
 
   /**
    * The size one rendered message needs in code rows: its wrapped lines plus its own
@@ -3116,7 +3189,8 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   /**
    * The thread as the block will render it, plus the body height that follows from
    * it: the newest turns that fit the cap, an optional "older" note, the answer in
-   * flight (or the failure note), and the compose row the user writes in.
+   * flight (or the failure note), and the compose row the user writes in. An outdated
+   * block's note and quote count as part of the trailing piece, above the turns.
    *
    * @param discussion - the block to lay out.
    * @returns the messages to render, the hidden count, and the body height.
@@ -3131,16 +3205,19 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     // A stopped turn adds a note of its own above the writing row it hands back, so its
     // budget is that note plus the compose area.
     const stoppedNote = discussion.stopped === true && (answer === undefined || answer === '') && discussion.failed !== true
-    const trailing = discussion.lost === true
-      ? 1
-      : answer !== undefined && answer !== ''
-        ? messageSizeOf({ role: 'assistant', text: answer })
-        : discussion.failed === true || discussion.asking === true
-          ? 1
-          : DISCUSSION_COMPOSE_ROWS + (stoppedNote ? 1 : 0)
-    // A lost block carries two notes: why it is lost, and the "older turns omitted"
-    // line the tail may add. Both are part of the budget.
-    const tailCap = DISCUSSION_MAX_BODY_ROWS - trailing - (discussion.lost === true ? 1 : 0)
+    // An outdated thread carries the code it was written about below the turns' label — the
+    // state itself rides the header, beside the range. It is budgeted like any other turn, so
+    // the block still reserves exactly what it draws, and the writing row below is still there
+    // (disabled) and still costs its two rows.
+    const outdatedRows = discussion.lost === true && discussion.quote !== undefined && discussion.quote !== ''
+      ? 1 + quoteRowsOf(discussion.quote, langWrap)
+      : 0
+    const trailing = outdatedRows + (answer !== undefined && answer !== ''
+      ? messageSizeOf({ role: 'assistant', text: answer })
+      : discussion.failed === true || discussion.asking === true
+        ? 1
+        : DISCUSSION_COMPOSE_ROWS + (stoppedNote ? 1 : 0))
+    const tailCap = DISCUSSION_MAX_BODY_ROWS - trailing
     const tail = discussionTail(discussion.messages, messageSizeOf, Math.max(1, tailCap))
     return {
       messages: tail.messages,
@@ -3151,7 +3228,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       // half: the text was rendered whole inside a box too short for it.
       rows: Math.ceil(tail.rows + trailing),
     }
-  }, [messageSizeOf])
+  }, [langWrap, quoteRowsOf, messageSizeOf])
 
   /**
    * The discussions as the render will draw them: the body height the measurement
@@ -3200,11 +3277,16 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   /**
    * The rows a discussion annotates. They carry their own wash, so the mark scrolls with
    * the code in both axes with no positioning at all — the overlay this replaces had to
-   * be counter-translated on every horizontal scroll and trailed the text.
+   * be counter-translated on every horizontal scroll and trailed the text. An outdated
+   * block washes nothing: the rows under its numbers are no longer the code the comment
+   * was written about, so a band there would claim them as annotated (GitHub drops the
+   * position of an outdated thread the same way). It says it is outdated and shows the
+   * code it was about instead.
    */
   const discussedRows = useMemo(() => {
     const set = new Set<number>()
     for (const discussion of laidDiscussions) {
+      if (discussion.lost === true) continue
       for (let row = Math.max(0, discussion.anchor.start); row <= Math.min(discussion.anchor.end, rowCount - 1); row++) {
         set.add(row)
       }
@@ -3476,9 +3558,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
 
   /**
    * Re-anchor every block whenever the rows are rebuilt (a keep/revert or an edit
-   * rewrites them). The anchor's new-file lines are what survive; a block whose
-   * lines are all gone keeps the rows it last matched and is marked lost, so it
-   * stays where the user last saw it.
+   * rewrites them). The anchor's new-file lines are what survive, and the block's quote
+   * is what says whether they still hold the code it was written about: when they do
+   * not, the thread follows the quote instead, and when even that finds nothing it is
+   * marked outdated — it stays where the user last saw it, says so, and keeps the quote.
    */
   useEffect(() => {
     setDiscussionsByFile(all => {
@@ -3489,6 +3572,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
           const entry = model.diff.rows[row]
           return entry?.newLine ?? entry?.oldLine
         },
+        (row) => model.diff.rows[row]?.text ?? '',
         model.diff.rows.length,
       ))
       return next.some((discussion, index) => discussion !== list[index]) ? { ...all, [file.id]: next } : all
@@ -3594,9 +3678,18 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       pendingScrollShiftRef.current += (DISCUSSION_HEADER_ROWS + DISCUSSION_COMPOSE_ROWS) * ROW_HEIGHT_PX
     }
     const id = `discussion-${Date.now().toString(36)}-${discussions.length}`
+    // What those lines read like right now, and the numbers the file showed beside them. The
+    // anchor is line numbers, and the quote is what tells a later rebuild whether they still
+    // point at the same code — see `remapDiscussion`. The gutter pair rides along so an
+    // outdated block can show the quote where the file showed it.
+    const quoted = model.diff.rows.slice(selection.start, selection.end + 1)
+    const quote = quoted.map(row => row.text).join('\n')
+    const quoteLines = quoted.map(row => ({ old: row.oldLine, new: row.newLine }))
     setDiscussions(current => [...current, {
       id,
       anchor: { start: selection.start, end: selection.end, startLine, endLine },
+      quote,
+      quoteLines,
       messages: [],
       draft: '',
       collapsed: false,
@@ -3656,6 +3749,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
    */
   const sendDiscussion = (id: string): void => {
     const discussion = discussions.find(entry => entry.id === id)
+    // An outdated thread's writing row is disabled; this is the belt to that pair of braces.
     if (discussion === undefined || discussion.lost === true) return
     const text = discussion.draft.trim()
     if (text === '') return
@@ -3673,6 +3767,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     const rule = commentSkill === undefined
       ? t('discussion.promptRule')
       : t('discussion.promptRuleSkill', { skill: commentSkill })
+    // The prompt is the marker, the question and the rules. An outdated thread's quote stays
+    // on the block for the reader and never rides a prompt: its writing row is disabled, so no
+    // prompt of ours can be sent from it (the guard above is the belt to that).
     const prompt = `${marker}\n${text}\n\n${rule}`
     const asked: DiscussionMessage = { role: 'user', text }
     const sent = onAskAgent(file.sessionId, prompt)
@@ -4963,6 +5060,14 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                                     <span className={css.discussionRange} data-diff-discussion-range>
                                       {discussionLineRange(discussion.anchor)}
                                     </span>
+                                    {/* The state rides the position it is about, so the header
+                                        reads "path:22-29（已过期）" — what the thread is attached
+                                        to and what happened to it in one label. */}
+                                    {discussion.lost === true && (
+                                      <span className={css.discussionOutdated} data-diff-discussion-outdated>
+                                        {t('discussion.outdated')}
+                                      </span>
+                                    )}
                                   </span>
                                   <span className={css.flexSpacer} />
                                   <Menu
@@ -4993,8 +5098,18 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                                 </div>
                                 {!discussion.collapsed && (
                                   <div className={css.discussionBody}>
-                                    {discussion.lost === true && (
-                                      <p className={css.discussionNote} data-diff-discussion-lost>{t('discussion.lost')}</p>
+                                    {/* What the thread was written about. The lines it named are
+                                        gone or rewritten, so this is the only way to see what it
+                                        meant — the mature review tools keep the same quote with an
+                                        outdated thread. The state itself is on the header, beside
+                                        the position it applies to. */}
+                                    {discussion.lost === true && discussion.quote !== undefined && discussion.quote !== '' && (
+                                      <>
+                                        <p className={css.discussionNote} data-diff-discussion-quote-label>
+                                          {t('discussion.quote')}
+                                        </p>
+                                        <DiscussionQuote quote={discussion.quote} lines={discussion.quoteLines} lang={lang} wrap={langWrap} />
+                                      </>
                                     )}
                                     {discussion.hidden !== undefined && discussion.hidden > 0 && (
                                       <p className={css.discussionNote} data-diff-discussion-hidden>
@@ -5016,7 +5131,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                                     ))}
                                     {discussion.reply !== undefined && discussion.reply !== '' ? (
                                       <p className={css.discussionAnswer} data-diff-discussion-reply>{discussion.reply}</p>
-                                    ) : discussion.lost === true ? null : discussion.failed === true ? (
+                                    ) : discussion.failed === true ? (
                                       <p className={css.discussionNote} data-diff-discussion-failed>{t('discussion.failed')}</p>
                                     ) : discussion.asking === true ? (
                                       <p className={css.discussionNote} data-diff-discussion-asking>
@@ -5024,15 +5139,20 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                                       </p>
                                     ) : (
                                       <div className={css.discussionCompose}>
+                                        {/* An outdated thread keeps its writing row, disabled
+                                            rather than gone: the state is visible where the
+                                            writing would happen, and the thread's own shape does
+                                            not change under the reader when the code moves on. */}
                                         <input
                                           className={css.discussionInput}
                                           data-diff-discussion-input
+                                          disabled={discussion.lost === true}
                                           ref={(element) => {
                                             if (element === null) discussionInputEls.current.delete(discussion.id)
                                             else discussionInputEls.current.set(discussion.id, element)
                                           }}
                                           value={discussion.draft}
-                                          placeholder={t('discussion.placeholder')}
+                                          placeholder={t(discussion.lost === true ? 'discussion.placeholderOutdated' : 'discussion.placeholder')}
                                           onChange={(event) => {
                                             const value = event.target.value
                                             setDiscussions(current => current.map(entry => (
@@ -5053,6 +5173,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                                           type="button"
                                           className={`${css.action} ${css.actionPrimary} ${css.discussionSend}`}
                                           data-diff-discussion-send
+                                          disabled={discussion.lost === true}
                                           onClick={() => { sendDiscussion(discussion.id) }}
                                         >
                                           {t('action.comment')}

@@ -1181,6 +1181,18 @@ describe('PendingPanel', () => {
     expect(/\.fileListKnob\[data-open\] \{[^}]*opacity: 0/.test(css)).toBe(true)
   })
 
+  it('lays a quote of the code out on the file\'s own columns', () => {
+    // A quote of the code no longer wears a box: it is laid out on the file's own columns, and
+    // an unwrapped long line is clipped inside the quote instead of giving the thread's body a
+    // horizontal scroll range (which is what dragged the block left in a narrow panel).
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    expect(/\.quoteNoWrap \.quoteText \{[^}]*white-space: pre;/.test(css)).toBe(true)
+    expect(/\.quoteNoWrap \.quoteText \{[^}]*overflow: hidden;/.test(css)).toBe(true)
+    expect(/\.quoteText \{[^}]*white-space: pre-wrap;/.test(css)).toBe(true)
+    expect(/\.quoteLines \{[^}]*table-layout: fixed;/.test(css)).toBe(true)
+    expect(/\.quoteLines \{[^}]*min-width: 0;/.test(css)).toBe(true)
+  })
+
   it('folds the floating card away softly, toward the knob\'s corner', () => {
     // The card used to grow in on every open and vanish on the press. The entrance is gone
     // — pressing the knob puts the card there — and the exit is a gentle version of it: the
@@ -4187,6 +4199,156 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-discussion-band]')).toBeNull()
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
     expect(document.querySelector('[data-diff-selection-comment]')).not.toBeNull()
+  })
+
+  it('marks a comment outdated when the code it was about is gone, and takes it back when it returns', async () => {
+    // A comment stores the lines it was written about. When a later rebuild of the diff
+    // no longer holds them, the thread is not silently re-hung on whatever took their
+    // place: it says it is outdated, shows that code, and stops taking input — those rows
+    // are not annotated any more, so there is no current line to write about.
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    // 'a\n' -> 'b\n': the comment goes on the added row, so the line it quotes is
+    // new-file line 1, and that is what the block must keep showing it was about.
+    const node = rows[1]!.querySelector('[data-diff-code]')?.firstChild ?? rows[1]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    expect(document.querySelector('[data-diff-discussion-outdated]')).toBeNull()
+    // A live comment washes the rows it is about.
+    expect(document.querySelector('[data-diff-discussion-band]')).not.toBeNull()
+
+    // The file is rewritten under the comment: the line numbers are still in the model,
+    // but they hold other code and the quote is nowhere to be found.
+    view.rerender(<PendingPanel {...panelProps({ read: true, files: [entry({ oldText: 'x\n', newText: 'y\n' })], busy: new Set() })} />)
+    const block = document.querySelector('[data-diff-discussion]') as HTMLElement
+    expect(block.hasAttribute('data-lost')).toBe(true)
+    // The state rides the position label it applies to, in the header.
+    expect(document.querySelector('[data-diff-discussion-outdated]')?.textContent).toBe('discussion.outdated')
+    expect(document.querySelector('[data-diff-discussion-range]')?.parentElement?.textContent).toContain('discussion.outdated')
+    // No row is washed any more: the rows under those numbers are not the commented code,
+    // so a band there would claim them for a thread that says it no longer matches.
+    expect(document.querySelector('[data-diff-discussion-band]')).toBeNull()
+    // What the comment was about keeps it readable now that the rows have moved on, laid out
+    // the way the file lays its own rows out: the numbers in the file's two gutters, the code
+    // in the column beside them, one row each.
+    expect(document.querySelector('[data-diff-discussion-quote-label]')?.textContent).toBe('discussion.quote')
+    const quote = document.querySelector('[data-diff-discussion-quote]') as HTMLElement
+    expect(quote.textContent).toBe('1b')
+    // The added line the comment was made on has no old-side number, exactly as in the file.
+    expect([...quote.querySelectorAll('[data-diff-quote-gutter]')].map(cell => cell.textContent)).toEqual(['', '1'])
+    // It stays where it last matched, so the range label is still the original one, and it
+    // reserves what it draws: the quote label and the quoted code row, then the two compose
+    // rows under the header.
+    expect(document.querySelector('[data-diff-discussion-range]')?.textContent).toBe('/repo/a.txt:1')
+    expect(block.style.height).toBe('110px')
+    expect((block.closest('[data-diff-discussion-space]') as HTMLElement).style.height).toBe('110px')
+
+    // The writing row stays in place but takes no input: the block does not change shape
+    // under the reader when the code moves on, and nothing can be sent from it.
+    const input = document.querySelector('[data-diff-discussion-input]') as HTMLInputElement
+    expect(input).not.toBeNull()
+    expect(input.disabled).toBe(true)
+    // The field says why it is dead instead of inviting a comment it would drop.
+    expect(input.placeholder).toBe('discussion.placeholderOutdated')
+    expect((document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.change(input, { target: { value: 'and now?' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(props.onAskAgent).not.toHaveBeenCalled()
+
+    // The code comes back (a keep restores the lines), and the mark is derived rather
+    // than sticky: it clears instead of condemning the thread for one rebuild — the rows it
+    // is about are washed again and the writing row takes input.
+    view.rerender(<PendingPanel {...props} />)
+    expect(document.querySelector('[data-diff-discussion-outdated]')).toBeNull()
+    expect(document.querySelector('[data-diff-discussion]')?.hasAttribute('data-lost')).toBe(false)
+    expect(document.querySelector('[data-diff-discussion-band]')).not.toBeNull()
+    expect((document.querySelector('[data-diff-discussion-input]') as HTMLInputElement).disabled).toBe(false)
+  })
+
+  it('highlights an outdated comment\'s quote with the language the file is read in', async () => {
+    // The quote is code, and it sits a few rows under code that IS coloured: rendered plain it
+    // reads as a different kind of thing. It takes the same highlighter and the same language,
+    // and the same two gutter columns the file itself uses.
+    const file = entry({ path: '/repo/a.ts', oldText: 'const before = 1\n', newText: 'const after = 2\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.ts'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const node = rows[1]!.querySelector('[data-diff-code]')?.firstChild ?? rows[1]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+
+    // Rewritten, so the quote no longer matches anything and the thread goes outdated.
+    view.rerender(<PendingPanel {...panelProps({ read: true, files: [entry({ path: '/repo/a.ts', oldText: 'let x = 3\n', newText: 'let y = 4\n' })], busy: new Set() })} />)
+    const quote = document.querySelector('[data-diff-discussion-quote]') as HTMLElement
+    expect(quote.textContent).toContain('const after = 2')
+    expect([...quote.querySelectorAll('[data-diff-quote-gutter]')].map(cell => cell.textContent)).toEqual(['', '1'])
+    // Shiki's colours ride inline styles (the theme's `--shiki-*` custom properties), which is
+    // how the code rows are coloured too.
+    expect(quote.querySelector('span[style*="--shiki-"]')).not.toBeNull()
+  })
+
+  it('wraps an outdated comment\'s quote only when the code view wraps', async () => {
+    // The quote is the file's own code, so it follows the wrap switch: with it off a long
+    // quoted line stays one line (and one row of the block), with it on the cell wraps.
+    const long = 'const value = compute(alpha, beta, gamma, delta, epsilon, zeta)'
+    const file = entry({ path: '/repo/w.ts', oldText: `${long}\n`, newText: 'const other = 1\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('w.ts'))
+
+    // Comment on the removed row, so the quote is that whole long line.
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const node = rows[0]!.querySelector('[data-diff-code]')?.firstChild ?? rows[0]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+
+    view.rerender(<PendingPanel {...panelProps({ read: true, files: [entry({ path: '/repo/w.ts', oldText: 'let x = 1\n', newText: 'let y = 2\n' })], busy: new Set() })} />)
+    const quote = document.querySelector('[data-diff-discussion-quote]') as HTMLElement
+    expect(quote.textContent).toContain(long)
+    // The removed line's number is the old side's, the second gutter stays empty.
+    expect([...quote.querySelectorAll('[data-diff-quote-gutter]')].map(cell => cell.textContent)).toEqual(['1', ''])
+    const cell = quote.querySelector('[data-diff-quote-text]') as HTMLElement
+    // Wrap is off by default: one line, one row, however long.
+    expect(getComputedStyle(cell).whiteSpace).toBe('pre')
+
+    fireEvent.click(document.querySelector('[data-diff-wrap]') as HTMLElement)
+    expect(getComputedStyle(cell).whiteSpace).toBe('pre-wrap')
+    // And the block's reserved height follows the same switch (jsdom measures no glyphs, so
+    // the wrapped count is one either way — what this pins is that the row still counts).
+    const block = document.querySelector('[data-diff-discussion]') as HTMLElement
+    expect(block.style.height).toBe('110px')
   })
 
   it('matches a comment answer to the prompt that asked, not to the session tail', async () => {

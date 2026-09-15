@@ -2238,15 +2238,12 @@
   flex-direction: column;
 }
 
-/* A block whose anchor no longer exists in the file: it stays where it last
-   matched, states why, and offers only removal. */
-.discussion[data-lost] {
-  border-left-color: var(--dsw-alias-state-warn-primary, var(--dsw-alias-label-tertiary));
-}
-
-.discussion[data-lost] .discussionAnswer {
-  color: var(--dsw-alias-label-secondary);
-}
+/* A block whose anchor no longer holds the code it was written about: it stays where it
+   last matched, states why, shows the code it was about, and has nothing to write in — its
+   rows are not annotated any more (see `discussionOverlapping`), so there is no current line
+   for an answer to be about. Nothing is styled here on purpose: the block keeps its ordinary
+   left rule, its plate and its text colours. The code moving on is not a warning, and a
+   recoloured rule would read as one. */
 
 /* The answer, at the code's own size. No inset of its own: the thread's own
    padding (`.discussionBody`) is the whole margin a turn needs, so a transparent
@@ -2322,6 +2319,68 @@
    way of the turns it is summarising. */
 .discussionNote[data-diff-discussion-hidden] {
   color: var(--dsw-alias-label-tertiary);
+}
+
+/* The code an outdated thread was written about, laid out as the file's own rows are: the same
+   two 44px gutters (reused from `.gutter`, so the numbers land on the file's columns) and then
+   the code column, at the same row height. No box: the quotation is put back on the file's grid
+   rather than framed off it.
+   The negative margins are what makes that alignment exact: the thread's body is inset 12px and
+   the block wears a 3px left rule, while the file's table starts at the block's border box — so
+   the quote is pulled 15px left and 12px right, which gives it the block's full width, and the
+   code column is then that less the two gutters, exactly as the file's is.
+   `table-layout: fixed` (plus `min-width: 0`, so the flex item cannot be held open by its
+   content) keeps a long unwrapped line from widening the table past the block: the quote clips
+   inside itself instead of giving the thread's body a horizontal scroll range — an ancestor that
+   can scroll sideways is one a jump or a focus can scroll, which is what dragged the whole block
+   left in a narrow panel. */
+.quoteLines {
+  display: table;
+  table-layout: fixed;
+  min-width: 0;
+  width: calc(100% + 27px);
+  margin: 0 -12px 0 -15px;
+  border-spacing: 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: calc(1em * var(--dsh-diff-font-scale, 1));
+  line-height: var(--dsh-diff-line-height, 22px);
+}
+
+/* One quoted line: a code row of the file's height. A line long enough to wrap grows its row,
+   the same way the file's own wrapped rows do (and the block reserved that height). */
+.quoteLine {
+  display: table-row;
+  height: var(--dsh-diff-line-height, 22px);
+}
+
+/* The code cell of a quoted line: the block's width less the two gutters, the numbers beside it
+   being the file's own. */
+.quoteCode {
+  display: table-cell;
+}
+
+/* The text itself, one block so it clips where the code column ends. */
+.quoteText {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Wrap off, as in the file's own rows: a quoted line is one line, however long, and it is cut
+   off at the code column's edge — which is where the file's rows run under the scroller's edge. */
+.quoteNoWrap .quoteText {
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow: hidden;
+}
+
+/* The outdated mark, riding the range label it applies to: same size as the rest of the header
+   and the same tertiary tone as the path beside it, so it reads as part of that label rather
+   than as a second control. */
+.discussionOutdated {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 16px;
 }
 
 /* Exactly one code row: the folded header, and the head of the open block. */
@@ -2417,6 +2476,19 @@
 .discussionInput:focus {
   outline: none;
   border-color: var(--dsw-alias-state-business-primary);
+}
+
+/* An outdated thread's field: it stays where the writing would happen and keeps its shape, so
+   the block does not change under the reader when the code moves on, but it takes no input. It
+   also takes the muted surface a dead field wears — the same one the code surfaces use — and
+   its own placeholder says why (see `discussion.placeholderOutdated`). The border does not
+   brighten on focus either: a field that drops keystrokes should not look like it is taking
+   them. */
+.discussionInput:disabled {
+  border-color: var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-markdown-code-block);
+  color: var(--dsw-alias-label-tertiary);
+  cursor: default;
 }
 
 /* The placeholder takes the input's own face and scale: the app styles
