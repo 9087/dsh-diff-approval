@@ -412,7 +412,9 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   // The theme's current added/removed base colors, shown as the palette default.
   const addDefault = currentDiffAddColor()
   const delDefault = currentDiffDelColor()
-  const [diffOpen, setDiffOpen] = useState(true)
+  // Folded on open, like the two groups below it: the diff-view group is the longest one, and the
+  // switches a reader reaches for while reviewing are on the panel's own toolbar.
+  const [diffOpen, setDiffOpen] = useState(false)
   const [cover, setCoverState] = useState<DiffApprovalCover>(panelCover)
   const [coverOpen, setCoverOpen] = useState(false)
   // The panel's own popover flips the same switches: follow it, so neither

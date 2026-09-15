@@ -5535,6 +5535,8 @@ describe('PendingPanel', () => {
   it('the DSH Settings tab toggles the auto-paste preference in localStorage', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)
+    // The row lives in the diff-view group, which opens folded.
+    fireEvent.click(document.querySelector('[data-diff-view-toggle]') as HTMLButtonElement)
     // Re-query the switch each time: re-rendering can replace the node.
     const toggle = () => document.querySelector('[data-diff-paste-on-copy-select]') as HTMLButtonElement
     expect(toggle()).not.toBeNull()
@@ -5587,6 +5589,8 @@ describe('PendingPanel', () => {
   it('the DSH Settings tab steps the block-jump lead rows and clamps to the bounds', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)
+    // The row lives in the diff-view group, which opens folded.
+    fireEvent.click(document.querySelector('[data-diff-view-toggle]') as HTMLButtonElement)
     const value = () => document.querySelector('[data-diff-nav-lead-rows]') as HTMLElement
     // The page now has several stepper rows (font size, line height, lead rows);
     // target the ± buttons of the lead-rows row specifically.
@@ -5749,12 +5753,17 @@ describe('PendingPanel', () => {
     }
   })
 
-  it('the DSH Settings tab exposes an expanded diff-view group with editable appearance', () => {
+  it('the DSH Settings tab exposes a folded diff-view group with editable appearance', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)
 
-    // The diff-view group is expanded by default: a live preview plus the
-    // font/line-height/color and the moved layout rows are all visible.
+    // Folded on open, like the keybindings and cover groups: the group is the longest one, and
+    // the switches a reader reaches for while reviewing are on the panel's own toolbar.
+    expect(document.querySelector('[data-diff-view-preview]')).toBeNull()
+    expect(document.querySelector('[data-diff-font-size]')).toBeNull()
+
+    // Expanding it brings the live preview and the font/line-height/color and layout rows in.
+    fireEvent.click(document.querySelector('[data-diff-view-toggle]') as HTMLButtonElement)
     expect(document.querySelector('[data-diff-view-preview]')).not.toBeNull()
     expect(document.querySelector('[data-diff-font-size]')).not.toBeNull()
     expect(document.querySelector('[data-diff-line-height]')).not.toBeNull()
