@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.24.1](https://github.com/9087/dsh-diff-approval/compare/v0.24.0...v0.24.1) (2026-09-15)
+
+### Bug Fixes
+
+* **panel:** keep the list's rows a fixed 8px from the card's edge ([0b0101a](https://github.com/9087/dsh-diff-approval/commit/0b0101ab81e3d686976eb9ac93d121776e2bd8f5))
+
 ## [0.24.0](https://github.com/9087/dsh-diff-approval/compare/v0.23.2...v0.24.0) (2026-09-15)
 
 ### Features
