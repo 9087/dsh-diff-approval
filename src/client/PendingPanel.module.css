@@ -1618,6 +1618,13 @@
   border-radius: 10px;
 }
 
+/* The row menu's anchor element. The list itself is portaled and placed from the press's own
+   rect (the Menu's `getAnchorRect`), so this only has to exist — never to be seen, measured,
+   or laid out. */
+.rowMenuAnchor {
+  display: none;
+}
+
 .rowHead {
   display: flex;
   /* Centred, not baseline-aligned: the row mixes the name with 11px metadata and a tag

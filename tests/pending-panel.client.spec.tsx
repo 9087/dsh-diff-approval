@@ -756,6 +756,42 @@ describe('PendingPanel', () => {
     expect(head.textContent).toContain('panel.group.current')
   })
 
+  it('opens a row\'s actions on right-click, with the same pair its toolbar shows', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // The browser's own menu is taken away for the press (the panel has better to offer).
+    const row = screen.getByText('a.txt').closest('button') as HTMLElement
+    expect(fireEvent.contextMenu(row, { clientX: 40, clientY: 60 })).toBe(false)
+
+    // A row with a diff offers exactly what the open file's toolbar offers…
+    const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+    expect(items.map(item => item.textContent)).toEqual(['action.keep', 'action.revert'])
+
+    // …and the choice runs for that row's own file, without opening it.
+    fireEvent.click(items[0]!)
+    expect(props.onKeep).toHaveBeenCalledWith(FILE.sessionId, FILE.id)
+    expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
+  })
+
+  it('offers 移出 from a row menu once that file has no diff left', () => {
+    // The same condition the open file's toolbar uses: nothing to accept, nothing to put back,
+    // so the only decision left is whether the row stays in the list.
+    const settled = entry({ oldText: 'same\n', newText: 'same\n' })
+    const props = panelProps({ read: true, files: [settled], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    fireEvent.contextMenu(screen.getByText('a.txt').closest('button') as HTMLElement, { clientX: 10, clientY: 12 })
+    const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+    expect(items.map(item => item.textContent)).toEqual(['row.dismiss'])
+
+    fireEvent.click(items[0]!)
+    expect(props.onKeep).toHaveBeenCalledWith(settled.sessionId, settled.id)
+    expect(props.onRevert).not.toHaveBeenCalled()
+  })
+
   it('scrolls only the rows: the heading and its add button stay pinned', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)

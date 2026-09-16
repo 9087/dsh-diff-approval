@@ -2,7 +2,7 @@
 
 import { Component, Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
+import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconListPenOutline16, IconPanelLeftOutline16, IconPlusOutline16, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
@@ -590,6 +590,8 @@ interface PendingFileRowProps {
   failedMessage?: string | undefined
   t: Translator
   onSelect: (id: string) => void
+  /** A right-click on the row: the panel opens the row's action menu at the press. */
+  onMenu: (event: ReactMouseEvent<HTMLElement>) => void
 }
 
 /**
@@ -1090,6 +1092,14 @@ interface RowRange {
   /** Which file's lines a split selection references: 'old' (left column), 'new'
    *  (right column); undefined in single column (always the new file). */
   side?: 'old' | 'new'
+}
+
+/** Whether a pending file has nothing left to review: its content already matches the tracked
+ *  baseline. The file list's context menu offers its actions off this answer, and the detail
+ *  toolbar derives the same answer from the diff it already holds (its `model.blocks`), so a row
+ *  and the file it opens can never disagree about which actions they are. */
+function fileHasNoDiff(file: PendingFileDiff): boolean {
+  return changeBlocksOf(computeWholeFileDiff(file.oldText, file.newText)).length === 0
 }
 
 /** Whether a block keep/revert range covers the file's entire change region, so
@@ -2162,13 +2172,21 @@ function markdownPreviewMarkers(container: HTMLElement): PreviewRulerMarker[] {
 }
 
 /** One row of the file list: the clickable head in the left pane. */
-function PendingFileRow({ file, selected, failedMessage, t, onSelect }: PendingFileRowProps) {
+function PendingFileRow({ file, selected, failedMessage, t, onSelect, onMenu }: PendingFileRowProps) {
   const stats = useMemo(
     () => computeWholeFileDiff(file.oldText, file.newText),
     [file.oldText, file.newText],
   )
   return (
-    <li className={css.row}>
+    <li
+      className={css.row}
+      onContextMenu={(event) => {
+        // The browser's own menu has nothing to say about a pending file, and this row's own
+        // actions are the whole of what it could offer: the press opens ours instead.
+        event.preventDefault()
+        onMenu(event)
+      }}
+    >
       <Tooltip label={file.path} delayMs={500} maxWidth={560}>
         <button
           type="button"
@@ -5668,6 +5686,8 @@ export function PendingPanel({
    *  choice rides the same block RPC as its `removeWhenResolved` flag. */
   const [blockPrompt, setBlockPrompt] = useState<ResolvedBlockPrompt | null>(null)
   const [filePrompt, setFilePrompt] = useState<FileActionPrompt | null>(null)
+  /** The file list row whose action menu is open, and where the right-click landed. */
+  const [rowMenu, setRowMenu] = useState<{ file: PendingFileDiff; x: number; y: number } | null>(null)
   /** Whether the add-path dialog is open. One dialog covers both shapes: what
    *  the browser settles on decides whether a file or a directory is added. */
   const [addOpen, setAddOpen] = useState(false)
@@ -6350,6 +6370,7 @@ export function PendingPanel({
     setAddOpen(false)
     setBlockPrompt(null)
     setFilePrompt(null)
+    setRowMenu(null)
   }, [open])
 
   /** Run the same decision over every current-session file, sequentially. */
@@ -6429,6 +6450,9 @@ export function PendingPanel({
       selected={selected === entry.id}
       failedMessage={failed.get(entry.id)}
       t={t}
+      onMenu={(event) => {
+        setRowMenu({ file: entry, x: event.clientX, y: event.clientY })
+      }}
       onSelect={(id) => {
         // Re-clicking the already-open file jumps to the next diff block in
         // the open file; any other row switches the selection and lands on that
@@ -6444,6 +6468,26 @@ export function PendingPanel({
       }}
     />
   )
+
+  /** The row menu's rows: the pair the file's own toolbar offers, or its single 移出. */
+  const rowMenuItems = useMemo<MenuEntry[]>(() => {
+    if (rowMenu === null) return []
+    if (fileHasNoDiff(rowMenu.file)) return [{ id: 'remove', label: t('row.dismiss') }]
+    return [
+      { id: 'keep', label: t('action.keep') },
+      { id: 'revert', label: rowMenu.file.kind === 'create' ? t('action.delete') : t('action.revert') },
+    ]
+  }, [rowMenu, t])
+
+  /** Run a row-menu choice through the same handlers the open file uses. 移出 is a keep: the
+   *  host folds the content and drops the entry, so the file itself is left alone. */
+  const runRowMenu = (id: string): void => {
+    const target = rowMenu
+    setRowMenu(null)
+    if (target === null) return
+    if (id === 'keep' || id === 'remove') void onKeep(target.file.sessionId, target.file.id)
+    else if (id === 'revert') void onRevert(target.file.sessionId, target.file.id)
+  }
 
   const selectedFile = files.find(file => file.id === selected)
   /**
@@ -7060,6 +7104,18 @@ export function PendingPanel({
                 </div>
               </div>
             </div>
+          )}
+          {rowMenu !== null && (
+            <Menu
+              open
+              portal
+              compact
+              items={rowMenuItems}
+              onSelect={runRowMenu}
+              onClose={() => { setRowMenu(null) }}
+              getAnchorRect={() => new DOMRect(rowMenu.x, rowMenu.y, 0, 0)}
+              anchor={<span className={css.rowMenuAnchor} />}
+            />
           )}
           {addOpen && current !== undefined && (
             <PathPicker
