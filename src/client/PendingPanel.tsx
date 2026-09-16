@@ -718,8 +718,9 @@ interface PendingDiffProps {  file: PendingFileDiff
   /** Show a transient toast (used when a reference is copied to the clipboard). */
   onToast: (text: string) => void
   t: Translator
-  onKeep: (sessionId: SessionId, id: string) => Promise<void>
-  onRevert: (sessionId: SessionId, id: string) => Promise<void>
+  /** `keepListed` answers the whole-file prompt up front: false removes the entry outright. */
+  onKeep: (sessionId: SessionId, id: string, keepListed?: boolean) => Promise<void>
+  onRevert: (sessionId: SessionId, id: string, keepListed?: boolean) => Promise<void>
   /** Replace this file's diff with its current local VCS change. */
   onRefreshVcs: (file: PendingFileDiff) => void
   onBlockKeep: (sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<void>
@@ -4801,24 +4802,42 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
           </button>
         </Tooltip>
         <span className={css.flexSpacer} />
-        <button
-          type="button"
-          className={`${css.action} ${css.actionPrimary} ${css.actionQuietDisabled}`}
-          data-diff-keep
-          disabled={busy}
-          onClick={() => { void onKeep(file.sessionId, file.id) }}
-        >
-          {t('action.keep')}
-        </button>
-        <button
-          type="button"
-          className={`${css.action} ${css.actionQuietDisabled}`}
-          data-diff-revert
-          disabled={busy}
-          onClick={() => { void onRevert(file.sessionId, file.id) }}
-        >
-          {file.kind === 'create' ? t('action.delete') : t('action.revert')}
-        </button>
+        {/* A file that no longer differs from the baseline has nothing left to accept or put
+            back, so the pair collapses into the one decision still open on it: whether it stays
+            in the list. 移出 is a keep — the host folds the (identical) content and drops the
+            entry — which leaves the file itself exactly as it is. */}
+        {model.blocks.length === 0 ? (
+          <button
+            type="button"
+            className={`${css.action} ${css.actionPrimary} ${css.actionQuietDisabled}`}
+            data-diff-remove
+            disabled={busy}
+            onClick={() => { void onKeep(file.sessionId, file.id, false) }}
+          >
+            {t('row.dismiss')}
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              className={`${css.action} ${css.actionPrimary} ${css.actionQuietDisabled}`}
+              data-diff-keep
+              disabled={busy}
+              onClick={() => { void onKeep(file.sessionId, file.id) }}
+            >
+              {t('action.keep')}
+            </button>
+            <button
+              type="button"
+              className={`${css.action} ${css.actionQuietDisabled}`}
+              data-diff-revert
+              disabled={busy}
+              onClick={() => { void onRevert(file.sessionId, file.id) }}
+            >
+              {file.kind === 'create' ? t('action.delete') : t('action.revert')}
+            </button>
+          </>
+        )}
       </div>
       {failedMessage !== undefined && <p className={css.actionError} data-diff-action-error>{failedMessage}</p>}
       {file.missing && <p className={css.missingHint}>{t('panel.missingHint')}</p>}
@@ -5960,8 +5979,9 @@ export function PendingPanel({
 
   // A whole-file keep/revert always resolves the file outright, so — while the
   // preference is on — ask whether to drop it from the list rather than removing
-  // it silently. An explicit `keepListed` (the prompt's own answer) runs straight
-  // through, so the prompt cannot re-enter itself.
+  // it silently. An explicit `keepListed` (the prompt's own answer, and the "移出" the
+  // detail view offers once a file has no diff left) runs straight through, so the
+  // prompt cannot re-enter itself.
   const keepWithPrompt: PendingPanelFace['onKeep'] = (sessionId, id, keepListed) => {
     if (keepListed === undefined && confirmFileRemoveEnabled()) {
       setFilePrompt({ action: 'keep', sessionId, id })

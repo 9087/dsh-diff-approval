@@ -633,6 +633,30 @@ describe('PendingPanel', () => {
     expect(props.onKeep).toHaveBeenCalledWith(FILE.sessionId, FILE.id)
   })
 
+  it('offers 移出 instead of keep/revert once a file has nothing left to review', () => {
+    // The file matches its baseline: there is nothing to accept and nothing to put back, so
+    // the pair collapses into the one decision still open — whether it stays in the list.
+    const settled = entry({ oldText: 'same\n', newText: 'same\n' })
+    const props = panelProps({ read: true, files: [settled], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    expect(document.querySelector('[data-diff-remove]')).not.toBeNull()
+    expect(screen.getByText('row.dismiss')).toBeDefined()
+    expect(document.querySelector('[data-diff-keep]')).toBeNull()
+    expect(document.querySelector('[data-diff-revert]')).toBeNull()
+
+    // 移出 is a keep: the host folds the (identical) content and drops the entry, so the file
+    // on disk is untouched.
+    // No prompt on the way: a file with nothing left to review has nothing to ask about, so
+    // the button answers `keepListed: false` (fold the content, drop the entry) itself.
+    fireEvent.click(document.querySelector('[data-diff-remove]') as HTMLElement)
+    expect(document.querySelector('[data-diff-confirm-file]')).toBeNull()
+    expect(props.onKeep).toHaveBeenCalledWith(settled.sessionId, settled.id, false)
+    expect(props.onRevert).not.toHaveBeenCalled()
+  })
+
   it('disables the actions while an entry is busy', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set([FILE.id]) })
     render(<PendingPanel {...props} />)
