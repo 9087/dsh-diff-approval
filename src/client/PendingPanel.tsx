@@ -728,6 +728,8 @@ interface PendingDiffProps {  file: PendingFileDiff
   onOpen: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
   /** Inline one workspace image as a base64 data URI for the Markdown preview. */
   onPreviewImage: (sessionId: SessionId, path: string) => Promise<string | undefined>
+  /** Open the path typed into the header field: false when it could not be opened. */
+  onAddTypedPath: (path: string) => Promise<boolean>
 }
 
 /** The diff body's row class per line kind. */
@@ -2191,10 +2193,12 @@ function PendingFileRow({ file, selected, failedMessage, t, onSelect }: PendingF
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, failedMessage, commentSkill, onPasteReference, onAskAgent, watchChat, onToast, t, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, failedMessage, commentSkill, onPasteReference, onAskAgent, watchChat, onToast, t, onAddTypedPath, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
+  /** The path being typed into the header field; null shows the open file's own path. */
+  const [pathDraft, setPathDraft] = useState<string | null>(null)
   const [langOverride, setLangOverride] = useState<string | undefined>(undefined)
   const [langMenuOpen, setLangMenuOpen] = useState(false)
   const langMenuItems = useMemo<MenuEntry[]>(() => [
@@ -4693,7 +4697,37 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       style={diffViewVars as unknown as CSSProperties}
     >
       <div className={css.diffHeader} data-diff-toolbar>
-        <span className={css.diffPath}>{file.path}</span>
+        {/* The full path, in place and editable: typing another one opens that file (adding it
+            to the list first when it is not listed yet), and anything that cannot be opened puts
+            the shown path back. The field is its own scroller — the caret drags it along — so
+            the row no longer needs any scroll treatment of its own. */}
+        <input
+          className={css.diffPath}
+          data-diff-path-input
+          type="text"
+          value={pathDraft ?? file.path}
+          spellCheck={false}
+          autoComplete="off"
+          aria-label={t('action.pathField')}
+          onChange={(event) => { setPathDraft(event.target.value) }}
+          onBlur={() => { setPathDraft(null) }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              const typed = (pathDraft ?? '').trim()
+              if (typed === '' || typed === file.path) { setPathDraft(null); return }
+              // Either way the draft goes: a file that opened shows its own path, and one that
+              // did not leaves the path that was showing before.
+              void onAddTypedPath(typed).finally(() => { setPathDraft(null) })
+            } else if (event.key === 'Escape') {
+              // Escape is this field's own: it puts the path back and leaves the field, rather
+              // than closing the whole review (see the panel's own Escape handler).
+              event.preventDefault()
+              setPathDraft(null)
+              event.currentTarget.blur()
+            }
+          }}
+        />
         <Tooltip label={t('action.openFile')} side="bottom" delayMs={500}>
           <button
             type="button"
@@ -5527,6 +5561,12 @@ export function PendingPanel({
   const [open, setOpen] = useState(false)
   const [selected, setSelected] = useState('')
   /**
+   * A file the detail header's path field just added, waiting for it to show up in the list so it
+   * can be selected. The add's own refresh lands a poll later, and a selection made to an id that
+   * is not in the list yet would be replaced by the list's first row, so the id waits here.
+   */
+  const [pendingSelect, setPendingSelect] = useState<string | null>(null)
+  /**
    * Where the diff should land for the file it is about to show, and a nonce so a
    * repeated request for the *same* file lands again. `top` carries the offset the
    * reader was left at when the panel resumes a view (see `panel-memory`); it is
@@ -6045,6 +6085,10 @@ export function PendingPanel({
     // spent once the folded mode is known — see below.)
     if (started) startListOpenRef.current = true
     const pending = (id: string): boolean => files.some(file => file.id === id)
+    // A file the detail header's path field just opened: once it is in the list it wins over
+    // everything else — the reader asked for that file, not for the one that was open.
+    const typed = pendingSelect !== null && pending(pendingSelect) ? pendingSelect : undefined
+    if (typed !== undefined) setPendingSelect(null)
     // The file already chosen, while it is still pending.
     const keep = selected !== '' && pending(selected) ? selected : undefined
     // Resuming is for a fresh showing with nothing chosen yet; a selection that a
@@ -6052,15 +6096,18 @@ export function PendingPanel({
     // first file) rather than jumping to whatever was open last time.
     const remembered = keep === undefined && started ? lastPanelFile(current) : undefined
     const resumed = remembered !== undefined && pending(remembered) ? remembered : undefined
-    const pick = keep ?? resumed ?? files[0]?.id
+    const pick = typed ?? keep ?? resumed ?? files[0]?.id
     if (pick === undefined) return
     if (pick !== selected) setSelected(pick)
     // A fresh showing lands where that file was left (its first change when it has
     // never been left). Everything else — a row the reader clicked, the advance a
     // decision leaves behind — lands on the file's first change, which is the
     // default its own callers set.
+    // A typed path lands on its file's first change like a row click does, whatever this
+    // showing was doing; a fresh showing lands where the file was left instead.
     if (started) landOn(pick, panelFileOffset(current, pick))
-  }, [open, docked, current, files, selected])
+    else if (typed !== undefined) landOn(pick)
+  }, [open, docked, current, files, selected, pendingSelect])
 
   // A fully-processed (emptied) list stays open with the empty state on
   // purpose — no auto-close — so the last action (a Keep-all/Revert-all
@@ -6357,6 +6404,24 @@ export function PendingPanel({
     showCopyToast(t('panel.fileNotPending'))
   }
 
+  /**
+   * Open a path typed into the detail header's field: add it to the list when it is not there
+   * yet, then select the file the host says it landed as. Only one exact file counts — a path
+   * that is missing, is a directory, or has nothing readable in it leaves the list untouched,
+   * and the field falls back to the path it was showing.
+   *
+   * @param path - the path as typed.
+   * @returns whether a file was opened.
+   */
+  const addTypedPath = async (path: string): Promise<boolean> => {
+    if (current === undefined) return false
+    const value = await onAddPath(current, path, true, true).catch(() => undefined)
+    if (value === undefined) return false
+    if (value.outcome !== 'added' && value.outcome !== 'duplicate') return false
+    if (value.id !== undefined) setPendingSelect(value.id)
+    return true
+  }
+
   const renderEntry = (entry: PendingFileDiff) => (
     <PendingFileRow
       key={entry.id}
@@ -6629,6 +6694,9 @@ export function PendingPanel({
       if (event.key !== 'Escape') return
       // The add-path modal closes itself: this press is not the panel's.
       if (pathPickerOpen()) return
+      // The detail header's path field keeps its own Escape — it puts the shown path back —
+      // so this press belongs to the field and never to the panel behind it.
+      if (event.target instanceof Element && event.target.closest('[data-diff-path-input]') !== null) return
       // The coverage popover is the innermost dismissible while it is up, and it
       // closes on this same press.
       if (document.querySelector('[data-diff-approval-cover-popover]') !== null) return
@@ -6873,6 +6941,7 @@ export function PendingPanel({
                     watchChat={watchChat}
                     onToast={showCopyToast}
                     t={t}
+                    onAddTypedPath={addTypedPath}
                     onKeep={keepWithPrompt}
                     onRevert={revertWithPrompt}
                     onRefreshVcs={(entry) => { void runRefreshVcs(entry) }}

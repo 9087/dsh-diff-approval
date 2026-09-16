@@ -47,6 +47,11 @@ beforeAll(() => {
   Element.prototype.scrollIntoView = () => {}
 })
 
+/** The full path the detail header is showing (it is an editable field). */
+function shownPath(): string {
+  return (document.querySelector('[data-diff-path-input]') as HTMLInputElement).value
+}
+
 /** The code view the panel is showing (the only one, while one instance is open). */
 function codeBody(): HTMLElement {
   return document.querySelector('[data-diff-body]') as HTMLElement
@@ -548,7 +553,7 @@ describe('PendingPanel', () => {
     // Both rows show only the basename; the full path lives in a hover
     // tooltip and in the auto-selected detail's header.
     expect(screen.getAllByText('a.txt')).toHaveLength(2)
-    expect(screen.getAllByText(FILE.path).length).toBeGreaterThan(0)
+    expect(shownPath()).toBe(FILE.path)
     expect(screen.queryByText(sibling.path)).toBeNull()
   })
 
@@ -1701,24 +1706,32 @@ describe('PendingPanel', () => {
     expect(deps.slice(0, deps.indexOf(')'))).toContain('splitView')
   })
 
-  it('scrolls the path bar without putting a scrollbar inside it', () => {
-    // The path row is one 18px line of text. It pans, so a long path is never
-    // truncated into an ellipsis — but it draws no bar of its own, because the
-    // theme's 8px scrollbar would be painted inside that line and read as a
-    // control in a label. Both halves are the requirement, and jsdom applies no
-    // stylesheet, so this reads the module the panel ships.
+  it('wears the label\'s clothes as an editable field, and scrolls itself', () => {
+    // The header's path is an input: a field scrolls its own content to the caret, which is
+    // exactly what this row's hand-rolled horizontal pan used to do — so the overflow and
+    // hidden-scrollbar treatment is gone, and the field keeps the label's look (no box, no
+    // fill, the app's font, the same inset). jsdom applies no stylesheet, so this reads the
+    // module the panel ships.
     const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const block = /\.diffPath \{([^}]*)\}/.exec(css)?.[1] ?? ''
-    expect(block).toContain('overflow-x: auto')
-    expect(block).toContain('scrollbar-width: none')
+    expect(block).not.toContain('overflow-x: auto')
+    expect(block).not.toContain('scrollbar-width')
+    expect(css).not.toMatch(/\.diffPath::-webkit-scrollbar/)
+    // It looks like the label it replaced: no platform box, no fill, no ring — and the same
+    // inherited family at the same line as the text that used to sit here.
+    expect(block).toContain('appearance: none')
+    expect(block).toContain('border: 0')
+    expect(block).toContain('background: transparent')
+    expect(block).toContain('font: inherit')
+    expect(block).toContain('font-size: 12px')
+    expect(block).toContain('line-height: 18px')
+    expect(css).toMatch(/\.diffPath:focus \{\s*outline: none;?\s*\}/)
     // It reads the app's own font like the file list's rows do, rather than the code
     // block's monospace one: a path is a label wherever it shows up, inset off the edge
     // the same way.
     expect(block).not.toContain('--dsw-font-markdown-code-block')
     expect(block).toContain('margin-left: 4px')
     expect(block).toContain('top: 1px')
-    // The pseudo-element spelling is what Chromium and WebKit honour.
-    expect(css).toMatch(/\.diffPath::-webkit-scrollbar \{\s*display: none;?\s*\}/)
   })
 
   it('opens or reveals the selected file through the header icon buttons', () => {
@@ -1782,14 +1795,72 @@ describe('PendingPanel', () => {
     const host = document.createElement('div')
     document.body.appendChild(host)
     render(<PendingPanel {...panelProps({ read: true, files: [FILE, second], busy: new Set() })} docked dockHost={host} />)
-    expect(host.textContent).toContain('/repo/a.txt')
+    expect((host.querySelector('[data-diff-path-input]') as HTMLInputElement).value).toBe('/repo/a.txt')
 
     act(() => {
       window.dispatchEvent(new CustomEvent('diff-approval:open-file', { detail: { path: '/repo/b.txt' } }))
     })
     expect(lastPanelFile(S1)).toBe('entry-b')
-    expect(host.textContent).toContain('/repo/b.txt')
+    expect((host.querySelector('[data-diff-path-input]') as HTMLInputElement).value).toBe('/repo/b.txt')
     host.remove()
+  })
+
+  it('opens a path typed into the header field, adding that file to the list first', async () => {
+    const added = entry({ id: 'entry-new', path: '/repo/new.txt', oldText: 'x\n', newText: 'y\n' })
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    ;(props.onAddPath as unknown as { mockResolvedValueOnce: (v: unknown) => void })
+      .mockResolvedValueOnce({ outcome: 'added', added: 1, duplicates: 0, id: added.id })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const field = document.querySelector('[data-diff-path-input]') as HTMLInputElement
+    expect(field.value).toBe(FILE.path)
+    fireEvent.change(field, { target: { value: '/repo/new.txt' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+
+    // One exact file, always including a clean one — the field is for opening a file, and a
+    // file with no diff is still a file to review.
+    await waitFor(() => {
+      expect((props.onAddPath as unknown as { mock: { calls: unknown[][] } }).mock.calls)
+        .toEqual([[S1, '/repo/new.txt', true, true]])
+    })
+
+    // The entry shows up in the list a poll later; the field's file is selected then, and the
+    // field shows that file's own path.
+    view.rerender(<PendingPanel {...panelProps({ read: true, files: [FILE, added], busy: new Set() })} />)
+    await waitFor(() => { expect(shownPath()).toBe('/repo/new.txt') })
+  })
+
+  it('puts the shown path back when the typed one cannot be opened', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    ;(props.onAddPath as unknown as { mockResolvedValueOnce: (v: unknown) => void })
+      .mockResolvedValueOnce({ outcome: 'missing', added: 0, duplicates: 0 })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const field = document.querySelector('[data-diff-path-input]') as HTMLInputElement
+    fireEvent.change(field, { target: { value: '/repo/nope.txt' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+
+    // Nothing was added, so the field falls back to the file that is open, which stays open.
+    await waitFor(() => { expect(shownPath()).toBe(FILE.path) })
+    expect(document.querySelector('[data-diff-approval-diff]')).not.toBeNull()
+  })
+
+  it('keeps the header field\'s Escape to itself, so the review stays up', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const field = document.querySelector('[data-diff-path-input]') as HTMLInputElement
+    fireEvent.change(field, { target: { value: '/repo/other.txt' } })
+    fireEvent.keyDown(field, { key: 'Escape' })
+
+    // The draft goes and the shown path comes back; the panel's own Escape (which closes the
+    // whole review) never sees the press.
+    expect(shownPath()).toBe(FILE.path)
+    expect(props.onAddPath).not.toHaveBeenCalled()
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
   })
 
   it('auto-selects the first pending file and advances to the next after handling', () => {
@@ -1800,12 +1871,12 @@ describe('PendingPanel', () => {
 
     // The first file opens automatically.
     expect(document.querySelector('[data-diff-approval-diff]')).not.toBeNull()
-    expect(screen.getByText('/repo/a.txt')).toBeDefined()
+    expect(shownPath()).toBe('/repo/a.txt')
 
     // Handling it removes it; the next file takes its place.
     fireEvent.click(screen.getByText('action.keep'))
     view.rerender(<PendingPanel {...panelProps({ read: true, files: [second], busy: new Set() })} />)
-    expect(screen.getByText('/repo/b.txt')).toBeDefined()
+    expect(shownPath()).toBe('/repo/b.txt')
   })
 
   it('reopens on the file it was closed on, at the offset it was left', () => {
@@ -1817,7 +1888,7 @@ describe('PendingPanel', () => {
       render(<PendingPanel {...panelProps({ read: true, files: [FILE, second], busy: new Set() })} />)
       fireEvent.click(screen.getByLabelText('panel.aria'))
       clickFileRow('b.txt')
-      expect(screen.getByText('/repo/b.txt')).toBeDefined()
+      expect(shownPath()).toBe('/repo/b.txt')
       codeBody().scrollTop = 640
 
       fireEvent.click(document.querySelector('[data-diff-approval-close]') as HTMLElement)
@@ -1826,7 +1897,7 @@ describe('PendingPanel', () => {
       fireEvent.click(screen.getByLabelText('panel.aria'))
       // The same file, at the same offset — not the first change of the list's
       // first file, and not the first change of this one.
-      expect(screen.getByText('/repo/b.txt')).toBeDefined()
+      expect(shownPath()).toBe('/repo/b.txt')
       expect(codeBody().scrollTop).toBe(640)
     } finally {
       restore()
@@ -1918,7 +1989,7 @@ describe('PendingPanel', () => {
       act(() => {
         window.dispatchEvent(new CustomEvent('diff-approval:open-file', { detail: { path: '/repo/a.txt' } }))
       })
-      expect(screen.getByText('/repo/a.txt')).toBeDefined()
+      expect(shownPath()).toBe('/repo/a.txt')
       expect(codeBody().scrollTop).toBe(0)
       // The remembered place is stale now — the jump was not a resume.
       expect(panelFileOffset(S1, 'entry-1')).toBeUndefined()
@@ -1952,7 +2023,7 @@ describe('PendingPanel', () => {
       render(<PendingPanel {...panelProps({ read: true, files, busy: new Set() })} docked dockHost={host} />)
       // The tab's body resumes the file — and selects one at all, which it never
       // used to do — and scrolls it to the remembered offset.
-      expect(host.textContent).toContain('/repo/b.txt')
+      expect((host.querySelector('[data-diff-path-input]') as HTMLInputElement).value).toBe('/repo/b.txt')
       expect(codeBody().scrollTop).toBe(480)
       host.remove()
     } finally {
@@ -1979,7 +2050,7 @@ describe('PendingPanel', () => {
       // Now pick the other file by hand: the file changed, so it opens at its
       // first change (a.txt's sits at the top) rather than at b.txt's offset.
       clickFileRow('a.txt')
-      expect(screen.getByText('/repo/a.txt')).toBeDefined()
+      expect(shownPath()).toBe('/repo/a.txt')
       expect(codeBody().scrollTop).toBe(0)
     } finally {
       restore()
@@ -1993,15 +2064,15 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
     // Auto-selects the first file (a.txt).
-    expect(screen.getByText('/repo/a.txt')).toBeDefined()
+    expect(shownPath()).toBe('/repo/a.txt')
 
     // Ctrl+Tab advances to the next file (b.txt).
     fireEvent.keyDown(document.body, { key: 'Tab', ctrlKey: true })
-    expect(screen.getByText('/repo/b.txt')).toBeDefined()
+    expect(shownPath()).toBe('/repo/b.txt')
 
     // Ctrl+Shift+Tab returns to the previous file (a.txt).
     fireEvent.keyDown(document.body, { key: 'Tab', ctrlKey: true, shiftKey: true })
-    expect(screen.getByText('/repo/a.txt')).toBeDefined()
+    expect(shownPath()).toBe('/repo/a.txt')
   })
 
   it('toggles the panel with the quick-summon chord and closes with Escape', () => {
@@ -3320,7 +3391,7 @@ describe('PendingPanel', () => {
     // diff mounts, flashing the first change block.
     const body = document.querySelector('[data-diff-body]') as HTMLElement
     fireEvent.keyDown(body, { key: 'z', ctrlKey: true })
-    await waitFor(() => { expect(screen.getByText('/repo/b.txt')).toBeDefined() })
+    await waitFor(() => { expect(shownPath()).toBe('/repo/b.txt') })
     expect(document.querySelector('[data-diff-block-flash]')).not.toBeNull()
   })
 

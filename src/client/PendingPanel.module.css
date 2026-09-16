@@ -1783,21 +1783,21 @@
 .diffPath {
   min-width: 0;
   flex: 1;
-  /* The full path is shown in full: an over-long path scrolls horizontally so
-     nothing is hidden behind a truncation ellipsis. It is text to copy out — the
-     panel's content whitelist keeps it selectable (see `.panel`) — and the row's
-     own copy action is the shortcut for the same thing. */
-  overflow-x: auto;
-  overflow-y: hidden;
-  white-space: nowrap;
-  /* It scrolls, but with no bar of its own: this row is one 18px line of text,
-     and the app's 8px scrollbar would be drawn inside it — taking a third of the
-     line from the glyphs and reading as a control in a label. A trackpad swipe,
-     shift+wheel, or a drag past either edge pans the path; the bar itself simply
-     does not sit in the path. (`display: none` for the engines that style
-     scrollbars through the pseudo-element, `scrollbar-width` for the rest; the
-     theme's own `body *` rule loses to this class.) */
-  scrollbar-width: none;
+  /* The full path, in place and editable — and otherwise indistinguishable from the label it
+     replaced: no box, no fill, no ring, the same inherited family at the same 12px/18px line.
+     A field scrolls its own content to the caret, which is what this row's hand-rolled
+     horizontal pan used to do, so that treatment is gone. It stays text to copy out (the
+     panel's content whitelist keeps it selectable), and the row's own copy action is the
+     shortcut for the same thing. */
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  /* An over-long path ends in an ellipsis while the field is at rest; editing scrolls it. */
+  text-overflow: ellipsis;
   color: var(--dsw-alias-label-primary);
   /* The app's own font, like the file list's rows: a path is a label, not code, and the
      two places the same path shows up now read the same — inset off the edge, and dropped
@@ -1805,12 +1805,12 @@
   margin-left: 4px;
   position: relative;
   top: 1px;
-  font-size: 12px;
-  line-height: 18px;
 }
 
-.diffPath::-webkit-scrollbar {
-  display: none;
+/* No focus ring of its own, and none from the platform either: this is a label that happens to
+   accept typing, and the caret is what says so. */
+.diffPath:focus {
+  outline: none;
 }
 
 .diffActions {
