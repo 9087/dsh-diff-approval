@@ -1340,12 +1340,21 @@ describe('hand-adding paths to the review list', () => {
     })
     fs.stat.mockResolvedValue({ version: 'v1', type: 'file' } as never)
 
-    await expect(handle('add-path', { sessionId: 'session-1', path: 'a.txt' }, signal()))
-      .resolves.toEqual({ ok: true, value: { outcome: 'added', added: 1, duplicates: 0 } })
+    const value = await handle('add-path', { sessionId: 'session-1', path: 'a.txt' }, signal())
+    expect(value).toMatchObject({ ok: true, value: { outcome: 'added', added: 1, duplicates: 0 } })
     // Only the named file: the scope keeps its siblings and every untracked file out.
     const files = await listEntries(handle, 'session-1')
     expect(files.map(file => file.path)).toEqual([join(workspace, 'a.txt')])
+    // The add names the entry it landed as, which is what lets a caller that typed one path
+    // select that file without waiting for the next list poll.
+    expect((value as { value: { id?: string } }).value.id).toBe(files[0]!.id)
     expect(files[0]).toMatchObject({ kind: 'edit', oldText: 'old content\n', newText: 'new content\n' })
+
+    // Naming that same file exactly again answers with the entry already listed, so the
+    // caller still has something to select rather than a bare "duplicate".
+    const again = await handle('add-path', { sessionId: 'session-1', path: 'a.txt', exact: true }, signal())
+    expect(again).toMatchObject({ ok: true, value: { outcome: 'duplicate', added: 0, duplicates: 1 } })
+    expect((again as { value: { id?: string } }).value.id).toBe(files[0]!.id)
 
     // One Ctrl+Z removes the whole add.
     await handle('undo', { sessionId: 'session-1' }, signal())
@@ -1400,11 +1409,14 @@ describe('hand-adding paths to the review list', () => {
 
     // Ticked: the file is listed carrying no diff at all — the state a file
     // reaches once every block has been kept — and is still undoable.
-    await expect(handle('add-path', { sessionId: 'session-1', path: 'clean.txt', includeUnchanged: true }, signal()))
-      .resolves.toEqual({ ok: true, value: { outcome: 'added', added: 1, duplicates: 0 } })
+    const value = await handle('add-path', {
+      sessionId: 'session-1', path: 'clean.txt', includeUnchanged: true,
+    }, signal())
+    expect(value).toMatchObject({ ok: true, value: { outcome: 'added', added: 1, duplicates: 0 } })
     const files = await listEntries(handle, 'session-1')
     expect(files).toHaveLength(1)
     expect(files[0]).toMatchObject({ path: join(workspace, 'clean.txt'), kind: 'edit', oldText: 'same\n', newText: 'same\n' })
+    expect((value as { value: { id?: string } }).value.id).toBe(files[0]!.id)
     await handle('undo', { sessionId: 'session-1' }, signal())
     expect(await listEntries(handle, 'session-1')).toEqual([])
   })
@@ -1500,10 +1512,38 @@ describe('hand-adding paths to the review list', () => {
     })
     fs.stat.mockResolvedValue({ version: 'v1', type: 'file' } as never)
 
-    await expect(handle('add-path', { sessionId: 'session-1', path: 'fresh.txt' }, signal()))
-      .resolves.toEqual({ ok: true, value: { outcome: 'added', added: 1, duplicates: 0 } })
+    const value = await handle('add-path', { sessionId: 'session-1', path: 'fresh.txt' }, signal())
+    expect(value).toMatchObject({ ok: true, value: { outcome: 'added', added: 1, duplicates: 0 } })
     const files = await listEntries(handle, 'session-1')
     expect(files[0]).toMatchObject({ kind: 'create', oldText: '', newText: 'fresh\n' })
+    expect((value as { value: { id?: string } }).value.id).toBe(files[0]!.id)
+  })
+
+  it('refuses a directory when the caller named one exact file', async () => {
+    // The detail header's path field opens one file. A path that turns out to be a directory
+    // must not sweep a subtree into the list behind a mistyped name, so it is refused before
+    // anything is scanned.
+    const { workspace } = await gitRepo()
+    await mkdir(join(workspace, 'dir'), { recursive: true })
+    await writeFile(join(workspace, 'dir', 'one.txt'), 'one new\n')
+    const shell = gitShell(' M sub/dir/one.txt\u0000', { 'sub/dir/one.txt': 'one old\n' })
+    const { handle, fs } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (ctx) => { ctx.provide('shell', shell) },
+    })
+    fs.stat.mockResolvedValue({ version: 'v1', type: 'directory' } as never)
+
+    await expect(handle('add-path', {
+      sessionId: 'session-1', path: 'dir', includeUnchanged: true, exact: true,
+    }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'not-a-file', added: 0, duplicates: 0 } })
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+
+    // The same path without the flag still adds the subtree: the refusal is the caller's ask,
+    // not a change to what a directory means.
+    await expect(handle('add-path', { sessionId: 'session-1', path: 'dir' }, signal()))
+      .resolves.toMatchObject({ ok: true, value: { outcome: 'added', added: 1 } })
   })
 
   it('answers outside, missing, and no-vcs without touching the list', async () => {

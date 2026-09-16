@@ -36,7 +36,7 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   /** List one workspace directory level for the add-path dialog. */
   browse: (sessionId: SessionId, path?: string) => Promise<DiffApprovalBrowseValue>
   /** Add one named path to the list, then refresh; resolves to what the scan did. */
-  addPath: (sessionId: SessionId, path: string, includeUnchanged: boolean) => Promise<DiffApprovalAddValue>
+  addPath: (sessionId: SessionId, path: string, includeUnchanged: boolean, exact?: boolean) => Promise<DiffApprovalAddValue>
   /** Open one file with its default application or reveal it in the folder. */
   open: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
   /** Keep every pending entry of one session in a single host call, then refresh. */
@@ -269,8 +269,8 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
     },
     // An add lands new entries (a directory can land many), so the list is
     // re-read afterwards; the panel reports what the scan did.
-    async addPath(sessionId, path, includeUnchanged) {
-      const value = await port.addPath(sessionId, path, includeUnchanged)
+    async addPath(sessionId, path, includeUnchanged, exact) {
+      const value = await port.addPath(sessionId, path, includeUnchanged, exact)
       await this.refresh(sessionId)
       return value
     },

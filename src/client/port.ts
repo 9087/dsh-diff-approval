@@ -36,8 +36,11 @@ export interface DiffApprovalPort {
   refreshVcs(sessionId: SessionId, id: string, includeUntracked: boolean): Promise<DiffApprovalRefreshValue>
   /** List one workspace directory level (workspace-relative; `''` is the root). */
   browse(sessionId: SessionId, path?: string): Promise<DiffApprovalBrowseValue>
-  /** Add one named path (a file, or a directory's whole subtree) to the list. */
-  addPath(sessionId: SessionId, path: string, includeUnchanged: boolean): Promise<DiffApprovalAddValue>
+  /**
+   * Add one named path (a file, or a directory's whole subtree) to the list. With `exact`, the
+   * path must be one regular file: a directory is refused instead of being scanned.
+   */
+  addPath(sessionId: SessionId, path: string, includeUnchanged: boolean, exact?: boolean): Promise<DiffApprovalAddValue>
   /** Open one file with its default application or reveal it in the folder. */
   open(sessionId: SessionId, id: string, action: DiffApprovalOpenAction): Promise<DiffApprovalOpenValue>
   /** Keep every pending entry of one session in a single host call (one batch). */
@@ -89,8 +92,13 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
       return browseValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'list-path',
         path === undefined ? { sessionId } : { sessionId, path }))
     },
-    async addPath(sessionId, path, includeUnchanged) {
-      return addValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'add-path', { sessionId, path, includeUnchanged }))
+    async addPath(sessionId, path, includeUnchanged, exact) {
+      return addValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'add-path', {
+        sessionId,
+        path,
+        includeUnchanged,
+        ...(exact === true ? { exact: true } : {}),
+      }))
     },
     async open(sessionId, id, action) {
       return openOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'open', { sessionId, id, action }))
@@ -243,7 +251,8 @@ function addValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): D
   const record = value as Record<string, unknown>
   const outcome = record.outcome
   if (outcome !== 'added' && outcome !== 'duplicate' && outcome !== 'unchanged' && outcome !== 'empty'
-    && outcome !== 'missing' && outcome !== 'outside' && outcome !== 'no-vcs' && outcome !== 'failed') {
+    && outcome !== 'missing' && outcome !== 'outside' && outcome !== 'no-vcs' && outcome !== 'failed'
+    && outcome !== 'not-a-file') {
     throw new Error('the add returned a malformed outcome')
   }
   const added = record.added
@@ -256,6 +265,7 @@ function addValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): D
     outcome,
     added,
     duplicates,
+    id: typeof record.id === 'string' ? record.id : undefined,
     truncated: record.truncated === true ? true : undefined,
     message: typeof message === 'string' && message.length > 0 ? message : undefined,
   }

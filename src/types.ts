@@ -209,6 +209,11 @@ export type DiffApprovalAddOutcome =
   | 'empty'
   /** The path does not exist (or is neither a file nor a directory). */
   | 'missing'
+  /**
+   * The caller named one exact file and the path is a directory. Refused before anything is
+   * scanned, so a mistyped path cannot add a whole subtree.
+   */
+  | 'not-a-file'
   /** The path lies outside the session's workspace. */
   | 'outside'
   /** The workspace is not inside a git/svn/p4 checkout. */
@@ -223,6 +228,12 @@ export interface DiffApprovalAddValue {
   added: number
   /** How many scanned paths were already listed (left untouched). */
   duplicates: number
+  /**
+   * The entry a single-file add landed as (the one already listed, for a duplicate). Absent
+   * for a directory add, which is about many files. It is what lets a caller that named one
+   * path select the file without waiting for the next list poll.
+   */
+  id?: string | undefined
   /** Whether the no-change walk hit its file cap, so some files were not added. */
   truncated?: boolean | undefined
   /** Failure detail for `outcome: 'failed'`. */

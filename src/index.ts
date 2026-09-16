@@ -1449,6 +1449,12 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           return { ok: true, value }
         }
         const isDirectory = info.type === 'directory'
+        // A caller that named one exact file means that file, never a subtree: a path that
+        // turns out to be a directory is refused here, before anything is scanned or listed.
+        if (target.exact && isDirectory) {
+          const value: DiffApprovalAddValue = { outcome: 'not-a-file', added: 0, duplicates: 0 }
+          return { ok: true, value }
+        }
         const root = detectVcsRoot(workspace.path)
         if (root === undefined) {
           const value: DiffApprovalAddValue = { outcome: 'no-vcs', added: 0, duplicates: 0 }
@@ -1528,7 +1534,18 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             // tick the box and add it anyway); a directory that contributed
             // nothing had nothing to contribute.
             : isDirectory ? 'empty' : 'unchanged'
-        const value: DiffApprovalAddValue = truncated ? { outcome, added, duplicates, truncated } : { outcome, added, duplicates }
+        // One named file's entry, so the caller can select it now rather than after the next
+        // poll: the fresh one just folded, or the one that was already listed for a duplicate.
+        const single = isDirectory
+          ? undefined
+          : (fresh[0] ?? store.list(target.sessionId).find(entry => pathIdentity(entry.path) === pathIdentity(absolute)))
+        const value: DiffApprovalAddValue = {
+          outcome,
+          added,
+          duplicates,
+          ...(single === undefined ? {} : { id: single.id }),
+          ...(truncated ? { truncated: true } : {}),
+        }
         return { ok: true, value }
       }
       case 'open': {
@@ -1708,12 +1725,19 @@ function pathFieldOf(payload: unknown): string | undefined {
 }
 
 /** Narrow a wire payload to one hand-added path. */
-function addTargetOf(payload: unknown): { sessionId: SessionId; path: string; includeUnchanged: boolean } | undefined {
+function addTargetOf(payload: unknown):
+{ sessionId: SessionId; path: string; includeUnchanged: boolean; exact: boolean } | undefined {
   const sessionId = sessionOf(payload)
   if (sessionId === undefined) return undefined
   const path = pathFieldOf(payload)?.trim()
   if (path === undefined || path === '') return undefined
-  return { sessionId, path, includeUnchanged: (payload as Record<string, unknown>).includeUnchanged === true }
+  const record = payload as Record<string, unknown>
+  return {
+    sessionId,
+    path,
+    includeUnchanged: record.includeUnchanged === true,
+    exact: record.exact === true,
+  }
 }
 
 /** Narrow a wire payload to one open target: the keep/revert pair plus the action. */

@@ -93,7 +93,7 @@ export interface PendingPanelFace {
   /** List one workspace directory level for the add-path dialog. */
   onBrowse: (sessionId: SessionId, path?: string) => Promise<DiffApprovalBrowseValue>
   /** Add one named path (a file, or a directory's whole subtree) to the list. */
-  onAddPath: (sessionId: SessionId, path: string, includeUnchanged: boolean) => Promise<DiffApprovalAddValue>
+  onAddPath: (sessionId: SessionId, path: string, includeUnchanged: boolean, exact?: boolean) => Promise<DiffApprovalAddValue>
   /** Keep every pending entry of one session in a single host call (bulk). */
   onKeepAll: (sessionId: SessionId) => Promise<void>
   /** Revert every pending entry of one session in a single host call (bulk). */
