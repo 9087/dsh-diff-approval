@@ -611,20 +611,14 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
               dataAttribute="data-diff-nav-lead-rows"
               t={t}
             />
-            <PreferenceRow
-              title={t('panel.pasteOnCopy')}
-              description={t('panel.pasteOnCopyDesc')}
-              value={pasteOnCopy}
-              onSelect={setPasteOnCopy}
-              dataAttribute="data-diff-paste-on-copy-select"
-              t={t}
-            />
           </div>
         )}
       </div>
-      {/* Commenting is its own subject: the switch, and how much of a thread a comment keeps.
-          Rounds, not rows, because a round — one question and the answer to it — is the unit a
-          reader catches up in. */}
+      {/* Commenting is its own subject: the switch, how much of a thread a comment keeps, and what
+          a copied reference does. Rounds, not rows, because a round — one question and the answer
+          to it — is the unit a reader catches up in. The reference paste is here rather than with
+          the diff's own view settings: it is about the message the reader is writing, not about
+          how the diff is drawn. */}
       <div className={css.settingsGroup} data-open={commentOpen || undefined}>
         <button
           type="button"
@@ -656,6 +650,14 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
               min={DISCUSSION_ROUNDS_MIN}
               max={DISCUSSION_ROUNDS_MAX}
               dataAttribute="data-diff-discussion-rounds"
+              t={t}
+            />
+            <PreferenceRow
+              title={t('panel.pasteOnCopy')}
+              description={t('panel.pasteOnCopyDesc')}
+              value={pasteOnCopy}
+              onSelect={setPasteOnCopy}
+              dataAttribute="data-diff-paste-on-copy-select"
               t={t}
             />
           </div>

@@ -6047,8 +6047,9 @@ describe('PendingPanel', () => {
   it('the DSH Settings tab toggles the auto-paste preference in localStorage', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)
-    // The row lives in the diff-view group, which opens folded.
-    fireEvent.click(document.querySelector('[data-diff-view-toggle]') as HTMLButtonElement)
+    // The row lives in the comments group — it is about the message being written, not about how
+    // the diff is drawn — and that group opens folded.
+    fireEvent.click(document.querySelector('[data-diff-comment-toggle]') as HTMLButtonElement)
     // Re-query the switch each time: re-rendering can replace the node.
     const toggle = () => document.querySelector('[data-diff-paste-on-copy-select]') as HTMLButtonElement
     expect(toggle()).not.toBeNull()
@@ -6137,6 +6138,8 @@ describe('PendingPanel', () => {
     render(<DiffApprovalSettingsTab {...props} />)
     // The row lives in the comments group, which opens folded.
     fireEvent.click(document.querySelector('[data-diff-comment-toggle]') as HTMLButtonElement)
+    // The group holds the mode, the rounds and the auto-paste switch together.
+    expect(document.querySelector('[data-diff-paste-on-copy-select]')).not.toBeNull()
     const value = () => document.querySelector('[data-diff-discussion-rounds]') as HTMLElement
     // Several stepper rows share the page; target this row's own ± buttons.
     const up = () => (value() as HTMLElement & { parentElement: HTMLElement }).parentElement.querySelector('[data-diff-stepper-up]') as HTMLButtonElement
@@ -6312,7 +6315,8 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-del-color]')).not.toBeNull()
     expect(document.querySelector('[data-diff-tab-width-select]')).not.toBeNull()
     expect(document.querySelector('[data-diff-split-mode-select]')).not.toBeNull()
-    expect(document.querySelector('[data-diff-paste-on-copy-select]')).not.toBeNull()
+    // The auto-paste switch is not here: it belongs to the comments group, which is about writing.
+    expect(document.querySelector('[data-diff-paste-on-copy-select]')).toBeNull()
 
     // Opening a color trigger shows the HSV dial; typing an RGB value and
     // committing persists to localStorage.
