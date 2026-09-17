@@ -1340,9 +1340,10 @@ describe('hand-adding paths to the review list', () => {
     })
     fs.stat.mockResolvedValue({ version: 'v1', type: 'file' } as never)
 
+    // One named file: the scan is scoped to it, so the sibling and the untracked file stay out.
     const value = await handle('add-path', { sessionId: 'session-1', path: 'a.txt' }, signal())
+    // One entry, nothing duplicated; `toMatchObject` because the response also carries its `id`.
     expect(value).toMatchObject({ ok: true, value: { outcome: 'added', added: 1, duplicates: 0 } })
-    // Only the named file: the scope keeps its siblings and every untracked file out.
     const files = await listEntries(handle, 'session-1')
     expect(files.map(file => file.path)).toEqual([join(workspace, 'a.txt')])
     // The add names the entry it landed as, which is what lets a caller that typed one path
@@ -1350,10 +1351,11 @@ describe('hand-adding paths to the review list', () => {
     expect((value as { value: { id?: string } }).value.id).toBe(files[0]!.id)
     expect(files[0]).toMatchObject({ kind: 'edit', oldText: 'old content\n', newText: 'new content\n' })
 
-    // Naming that same file exactly again answers with the entry already listed, so the
-    // caller still has something to select rather than a bare "duplicate".
+    // Naming it again answers with the entry already listed, not a bare "duplicate" — and re-adds
+    // nothing, which would push a review in progress back over its baseline.
     const again = await handle('add-path', { sessionId: 'session-1', path: 'a.txt', exact: true }, signal())
     expect(again).toMatchObject({ ok: true, value: { outcome: 'duplicate', added: 0, duplicates: 1 } })
+    // Its `id` is that entry, not a second copy of the path.
     expect((again as { value: { id?: string } }).value.id).toBe(files[0]!.id)
 
     // One Ctrl+Z removes the whole add.
@@ -1502,6 +1504,9 @@ describe('hand-adding paths to the review list', () => {
   })
 
   it('adds an untracked file the user names, whatever the import preference says', async () => {
+    // The untracked-import preference is opt-in, and it is about SCANS: with it off, a sweep of the
+    // workspace leaves `??` files out. A path the reader typed is not a sweep, so this one has to
+    // come in anyway — the shell reports it as untracked and nothing here turns the preference on.
     const { workspace } = await gitRepo()
     await writeFile(join(workspace, 'fresh.txt'), 'fresh\n')
     const shell = gitShell('?? sub/fresh.txt\u0000')
@@ -1510,6 +1515,8 @@ describe('hand-adding paths to the review list', () => {
       workspacePath: workspace,
       prepare: (ctx) => { ctx.provide('shell', shell) },
     })
+    // The path is not in the diff yet, so it is read on the way in: the stat is what says it is a
+    // plain file rather than something to walk.
     fs.stat.mockResolvedValue({ version: 'v1', type: 'file' } as never)
 
     const value = await handle('add-path', { sessionId: 'session-1', path: 'fresh.txt' }, signal())
