@@ -40,6 +40,14 @@ export interface DiscussionQuoteLine {
   old: number | undefined
   /** New-file number — the second gutter — `undefined` on a removed line. */
   new: number | undefined
+  /**
+   * Which side of the change the row was on when the thread quoted it: an added line, a removed
+   * one, or context. Kept so the quote can wear the diff's own green/red washes — the reader
+   * recognised those rows by their colour, and a quote that renders them as plain code loses the
+   * thing they were looking at. Absent on a thread quoted before this was recorded, which then
+   * simply draws no wash.
+   */
+  kind?: 'add' | 'del' | 'context'
 }
 
 /** One discussion bound to a row range. */
@@ -109,7 +117,9 @@ export interface Discussion {
   /**
    * How many rows the block's body occupies, measured by the caller from what it
    * actually renders (the thread plus the compose row). It is what keeps a
-   * discussion block's height an exact multiple of the code row.
+   * discussion block's height an exact multiple of the thread's own row — which is fixed, not
+   * the code's (see `THREAD_ROW_PX`): a thread is prose and keeps its size whatever the reader
+   * sets the code's line height to.
    */
   bodyRows?: number
   /** How many older messages the row cap left out of the render. */
@@ -119,49 +129,110 @@ export interface Discussion {
 /** Rows a folded block occupies: its header line. */
 export const DISCUSSION_HEADER_ROWS = 1
 
-/** Rows the compose area occupies: 0.3 + 1.4 + 0.3 of a code row. */
+/** Rows the compose area occupies: 0.3 + 1.4 + 0.3 of the thread's own row. */
 export const DISCUSSION_COMPOSE_ROWS = 2
 
 /**
- * The body budget for the turns a block shows: how many rows of older turns it is worth
- * carrying before the diff it annotates is swamped. It is spent in WHOLE turns — see
- * `discussionTail` — so a single turn that needs more than this is shown in full rather
- * than sliced in half (which is what a hard cap on the body's row count did).
- */
-export const DISCUSSION_MAX_BODY_ROWS = 12
-
-/**
- * The newest turns that fit a size budget, and how many older ones were left out.
- * A thread grows without bound, so the block shows its tail and says what it is
- * hiding rather than clipping silently; the hidden note costs one row of the
- * budget itself. Sizes are in whatever unit the caller budgets in (the panel uses
- * code rows, fractions included, and rounds the total up once).
+ * The newest rounds of a thread, and how many older turns were left out.
+ *
+ * A thread grows without bound, so the block shows its tail and says what it is hiding. The unit
+ * is the round rather than a row budget: a block keeps the last `rounds` questions and
+ * everything said after them, however long those turns are (the count is a preference). That is possible
+ * because the block reserves exactly what it draws (see `discussionRows`), so a long answer is
+ * shown in full instead of being sliced — the row budget this replaces existed to stop an old
+ * thread from swamping the diff, and a round cap does that without ever cutting a turn in half.
  *
  * @param messages - the whole thread, oldest first.
+ * @param rounds - how many rounds to keep (at least one: something has to be visible).
  * @param sizeOf - the size one message needs when rendered (text plus its chrome).
- * @param capRows - the body budget.
  * @returns the messages to render, the count left out, and the size they need.
  */
-export function discussionTail(
+export function discussionRounds(
   messages: readonly DiscussionMessage[],
+  rounds: number,
   sizeOf: (message: DiscussionMessage) => number,
-  capRows: number,
 ): { messages: readonly DiscussionMessage[]; hidden: number; rows: number } {
-  let rows = 0
-  let keep = 0
+  // Walk back to the question that opens the oldest kept round: everything before it goes, and
+  // the answers that follow a question belong to it.
+  const keep = Math.max(1, Math.floor(rounds))
+  let questions = 0
+  let start = 0
   for (let index = messages.length - 1; index >= 0; index--) {
-    const size = Math.max(1, sizeOf(messages[index]!))
-    const reserve = index > 0 ? 1 : 0
-    if (keep > 0 && rows + size + reserve > capRows) break
-    rows += size
-    keep += 1
+    if (messages[index]!.role !== 'user') continue
+    questions += 1
+    if (questions === keep) {
+      start = index
+      break
+    }
   }
-  const hidden = messages.length - keep
-  return {
-    messages: messages.slice(hidden),
-    hidden,
-    rows: rows + (hidden > 0 ? 1 : 0),
+  const kept = messages.slice(start)
+  const hidden = start
+  const rows = kept.reduce((total, message) => total + Math.max(1, sizeOf(message)), 0)
+  // The note that says what is hidden is a row of the body itself.
+  return { messages: kept, hidden, rows: rows + (hidden > 0 ? 1 : 0) }
+}
+
+/** One run of a turn's prose, after its inline Markdown is read. */
+export interface DiscussionRun {
+  /** A literal run, inline `code`, or **strong** emphasis. */
+  kind: 'text' | 'code' | 'strong'
+  /** What the run draws: for `code` and `strong`, the text with its markers gone. */
+  text: string
+}
+
+/**
+ * Read one turn's inline Markdown: `code` and **strong**.
+ *
+ * Deliberately tiny. The thread is laid out on the diff's own row grid — one line box per code
+ * row — so nothing here may become a block: no headings, lists, quotes or fenced code. A marker
+ * with no partner, or one spanning a line break, is left exactly as typed, and so is everything
+ * this does not know about.
+ *
+ * @param text - the turn's text.
+ * @returns its runs, in order.
+ */
+export function discussionRuns(text: string): DiscussionRun[] {
+  const runs: DiscussionRun[] = []
+  let literal = ''
+  const flush = (): void => {
+    if (literal === '') return
+    runs.push({ kind: 'text', text: literal })
+    literal = ''
   }
+  for (let index = 0; index < text.length; index++) {
+    const rest = text.slice(index)
+    const code = /^`([^`\n]+)`/.exec(rest)
+    const strong = code === null ? /^\*\*([^*\n]+)\*\*/.exec(rest) : null
+    if (code !== null) {
+      flush()
+      runs.push({ kind: 'code', text: code[1]! })
+      index += code[0].length - 1
+      continue
+    }
+    if (strong !== null) {
+      flush()
+      runs.push({ kind: 'strong', text: strong[1]! })
+      index += strong[0].length - 1
+      continue
+    }
+    literal += text[index]!
+  }
+  flush()
+  return runs
+}
+
+/**
+ * A turn's text with its inline markers gone: what the runs draw, character for character.
+ *
+ * The row measurement uses this, so the rows a block reserves and the text it draws agree. The
+ * markers are not drawn, and counting them would reserve room for characters nobody sees — which
+ * is exactly the kind of whole-row slack that leaves a blank row in the block.
+ *
+ * @param text - the turn's text.
+ * @returns the same text without its `code` and **strong** markers.
+ */
+export function discussionPlainText(text: string): string {
+  return discussionRuns(text).map(run => run.text).join('')
 }
 
 /**

@@ -4,7 +4,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconChevronDownOutline14, IconRefreshOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
-import { DEFAULT_KEYBINDINGS, DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, COVER_CHANGED_EVENT, commentModeEnabled, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, pasteOnCopyEnabled, quickSummonKey, setCommentModeEnabled, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPanelCover, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN } from './settings.ts'
+import { DEFAULT_KEYBINDINGS, DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, COVER_CHANGED_EVENT, commentModeEnabled, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, discussionRoundLimit, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, pasteOnCopyEnabled, quickSummonKey, setCommentModeEnabled, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setDiscussionRoundLimit, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPanelCover, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN,
+  DISCUSSION_ROUNDS_MAX, DISCUSSION_ROUNDS_MIN } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
 import type { DiffApprovalKey } from './locales.ts'
 import { ColorPicker } from './ColorPicker.tsx'
@@ -395,6 +396,7 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   // Comment mode is a preview that ships off (see `commentModeEnabled`); the row is here,
   // and not in the diff-view group, because it is about the commenting feature itself.
   const [commentMode, setCommentModeState] = useState(commentModeEnabled)
+  const [discussionRounds, setDiscussionRoundsState] = useState(discussionRoundLimit)
   const [includeUntracked, setIncludeUntrackedState] = useState(includeUntrackedEnabled)
   const [confirmFileRemove, setConfirmFileRemoveState] = useState(confirmFileRemoveEnabled)
   const [tab, setTabState] = useState(tabWidth)
@@ -430,6 +432,7 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
     setPanelCover(value)
   }
   const [summon, setSummonState] = useState(quickSummonKey)
+  const [commentOpen, setCommentOpen] = useState(false)
   const [keysOpen, setKeysOpen] = useState(false)
   const [keybindings, setKeybindingsState] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {}
@@ -447,6 +450,10 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const setPasteOnCopy = (value: boolean): void => {
     setPasteOnCopyState(value)
     setPasteOnCopyEnabled(value)
+  }
+  const setDiscussionRounds = (value: number): void => {
+    setDiscussionRoundsState(value)
+    setDiscussionRoundLimit(value)
   }
   const setCommentMode = (value: boolean): void => {
     setCommentModeState(value)
@@ -612,12 +619,43 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
               dataAttribute="data-diff-paste-on-copy-select"
               t={t}
             />
+          </div>
+        )}
+      </div>
+      {/* Commenting is its own subject: the switch, and how much of a thread a comment keeps.
+          Rounds, not rows, because a round — one question and the answer to it — is the unit a
+          reader catches up in. */}
+      <div className={css.settingsGroup} data-open={commentOpen || undefined}>
+        <button
+          type="button"
+          className={css.settingsGroupHeader}
+          onClick={() => { setCommentOpen(open => !open) }}
+          data-diff-comment-toggle
+        >
+          <span className={css.settingsGroupText}>
+            <span className={css.settingsGroupTitle}>{t('settings.comment')}</span>
+            <span className={css.settingsGroupDesc}>{t('settings.commentDesc')}</span>
+          </span>
+          <IconChevronDownOutline14 className={css.settingsGroupChevron} />
+        </button>
+        {commentOpen && (
+          <div className={css.settingsGroupBody}>
             <PreferenceRow
               title={t('panel.commentMode')}
               description={t('panel.commentModeDesc')}
               value={commentMode}
               onSelect={setCommentMode}
               dataAttribute="data-diff-comment-mode-select"
+              t={t}
+            />
+            <StepperRow
+              title={t('panel.discussionRounds')}
+              description={t('panel.discussionRoundsDesc')}
+              value={discussionRounds}
+              onChange={setDiscussionRounds}
+              min={DISCUSSION_ROUNDS_MIN}
+              max={DISCUSSION_ROUNDS_MAX}
+              dataAttribute="data-diff-discussion-rounds"
               t={t}
             />
           </div>

@@ -3,6 +3,7 @@
 const PASTE_ON_COPY_KEY = 'diff-approval:paste-on-copy'
 const IMPORT_UNTRACKED_KEY = 'diff-approval:import-untracked'
 const CONFIRM_FILE_REMOVE_KEY = 'diff-approval:confirm-file-remove'
+const DISCUSSION_ROUNDS_KEY = 'diff-approval:discussion-rounds'
 const SEARCH_CASE_KEY = 'diff-approval:search-case'
 const SEARCH_WORD_KEY = 'diff-approval:search-word'
 const TAB_WIDTH_KEY = 'diff-approval:tab-size'
@@ -55,6 +56,13 @@ export interface DiffApprovalCover {
 export const FLOAT_COVER_DEFAULT: DiffApprovalCover = { top: true, left: true, right: true, composer: false }
 
 /** Default lead rows above a jumped-to diff block (kept small and bounded). */
+/** Rounds of a comment thread a block keeps before it hides the older ones. A round is one
+ *  question and the answer to it. One is the floor (something has to be visible) and the
+ *  ceiling keeps a long thread from swamping the diff it annotates. */
+export const DISCUSSION_ROUNDS_DEFAULT = 2
+export const DISCUSSION_ROUNDS_MIN = 1
+export const DISCUSSION_ROUNDS_MAX = 10
+
 export const NAV_LEAD_ROWS_DEFAULT = 2
 export const NAV_LEAD_ROWS_MIN = 0
 export const NAV_LEAD_ROWS_MAX = 10
@@ -460,6 +468,22 @@ export function navLeadRows(): number {
   const raw = Number.parseInt(localStorage.getItem(NAV_LEAD_KEY) ?? '', 10)
   if (!Number.isInteger(raw)) return NAV_LEAD_ROWS_DEFAULT
   return Math.max(NAV_LEAD_ROWS_MIN, Math.min(NAV_LEAD_ROWS_MAX, raw))
+}
+
+/**
+ * How many rounds of a comment thread the panel keeps.
+ * @returns the configured round count, or the default when nothing valid is stored.
+ */
+export function discussionRoundLimit(): number {
+  const raw = Number.parseInt(localStorage.getItem(DISCUSSION_ROUNDS_KEY) ?? '', 10)
+  if (!Number.isInteger(raw)) return DISCUSSION_ROUNDS_DEFAULT
+  return Math.max(DISCUSSION_ROUNDS_MIN, Math.min(DISCUSSION_ROUNDS_MAX, raw))
+}
+
+/** Persist the comment thread's round limit. */
+export function setDiscussionRoundLimit(value: number): void {
+  localStorage.setItem(DISCUSSION_ROUNDS_KEY,
+    String(Math.max(DISCUSSION_ROUNDS_MIN, Math.min(DISCUSSION_ROUNDS_MAX, value))))
 }
 
 /** Persist the block-jump lead row count. */

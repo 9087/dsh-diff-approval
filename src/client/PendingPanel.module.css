@@ -2259,11 +2259,12 @@
      colours that mean "added" / "deleted". */
   border-left: 3px solid var(--dsw-alias-label-secondary);
   /* The code surface hands the whole area the text beam (see `.diffBody`), and a thread is not
-     that: only its writing field is text. Taking the arrow back here covers the header's range
-     label, the outdated mark, the notes, the turns' prose and the quoted code at once — so a
-     pointer over the block never promises a selection the reader has no use for. The controls
-     set their own pointer (`.discussionToggle`, `.action`) and the field asks for the beam
-     again (`.discussionInput`), which is what the disabled field's rule then turns back off. */
+     that: it is mostly chrome. The arrow covers the header's range label, the outdated mark, the
+     notes and the space between the pieces — and the pieces a reader CAN select ask for the beam
+     again (the turns' prose and the quoted code, see `.discussionUser`, `.discussionAnswer`,
+     `.quoteText`), so the cursor says what a press will do instead of contradicting it. The
+     controls set their own pointer (`.discussionToggle`, `.action`) and the writing field asks
+     for the beam too (`.discussionInput`), which the disabled field's rule turns back off. */
   cursor: default;
 }
 
@@ -2274,6 +2275,11 @@
 .discussionBody {
   font: var(--dsw-font-markdown-code-block);
 }
+
+/* The thread's own row is a FIXED 22px — the panel's `THREAD_ROW_PX` mirrors it. A thread is
+   prose, not code: it keeps the size the default settings show whatever the reader sets the
+   code's line height and font scale to, and the block still reserves whole rows of its own (the
+   diff's height table takes its exact pixel height, so nothing below it moves by halves). */
 
 /* Everything under the header: the compose row while the annotation is written,
    or the answer once there is one. Clipped to the rows the block reserved, so it
@@ -2294,26 +2300,46 @@
 }
 
 /* A block whose anchor no longer holds the code it was written about: it stays where it
-   last matched, states why, shows the code it was about, and has nothing to write in — its
-   rows are not annotated any more (see `discussionOverlapping`), so there is no current line
-   for an answer to be about. Nothing is styled here on purpose: the block keeps its ordinary
-   left rule, its plate and its text colours. The code moving on is not a warning, and a
-   recoloured rule would read as one. */
+   last matched, states why, shows the code it was about, and its rows are not annotated any
+   more (see `discussionOverlapping`), so the rule that ties a thread to a range of lines has
+   nothing to tie it to — it turns yellow instead of going away — and the block takes a diagonal
+   hatch behind the turns. The quote of the code it was about sits on a faint, flat wash on top,
+   so the lines the reader came back for stay the easiest thing in the block to read. */
+.discussion[data-lost] {
+  /* The rule turns yellow. The thread is still hung on the lines it names — that is why the rule
+     stays — but the code under it has moved on, and the margin is where that should read: the
+     header says it in words, this says it before the reader gets to them. It keeps its 3px and the
+     box keeps its shape, so nothing in the thread shifts. */
+  border-left-color: var(--dsw-alias-state-warn-primary, #f59e0b);
+  /* The hatch behind the turns: 4px of ink to 4px of gap — as dense as the last cut, in lines half
+     its width. Thin stripes with an equal gap read as hatching; wide ones with a narrow gap read as
+     a tint with seams. The block should say "this code is gone" at a glance, without the pattern
+     competing with the prose laid over it. */
+  background: repeating-linear-gradient(135deg,
+    var(--dsw-alias-interactive-bg-hover) 0 4px,
+    transparent 4px 8px);
+  /* Resolved over the block's own box rather than the padding box, so the hatch runs as one
+     continuous pattern from the block's left edge out to its right: the 3px rule strip sits outside
+     the padding box, and tiling the image there would break its phase exactly in that strip. */
+  background-origin: border-box;
+}
 
-/* The answer, at the code's own size. No inset of its own: the thread's own
+/* The answer, at the thread's own size. No inset of its own: the thread's own
    padding (`.discussionBody`) is the whole margin a turn needs, so a transparent
    answer spans exactly the column the bubble is right-aligned to. No vertical
    chrome either: a message's line boxes ARE its height, so every line in the
-   thread lands on the same 22px grid the code rows use. */
+   thread lands on the thread's own 22px row (see `THREAD_ROW_PX` — the thread is
+   prose, so it keeps its size instead of following the code's line-height setting). */
 .discussionAnswer {
   margin: 0;
   padding: 0;
   color: var(--dsw-alias-label-primary);
   font-family: inherit;
-  font-size: calc(1em * var(--dsh-diff-font-scale, 1));
-  line-height: var(--dsh-diff-line-height, 22px);
+  line-height: 22px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  /* Selectable text, so the beam: see the whitelist in `.panel` and the arrow on `.discussion`. */
+  cursor: text;
 }
 
 /* What the user said, as a bubble: the chat's own bubble fill, but square and a
@@ -2334,8 +2360,8 @@
      stays whole rows while the fill itself reads tight. Horizontally the fill takes
      half a row of its own and no margin at all, so the bubble sits flush with the
      thread's right column and only its fill is inset. */
-  padding: calc(var(--dsh-diff-line-height, 22px) * 0.2) calc(var(--dsh-diff-line-height, 22px) * 0.5);
-  margin: calc(var(--dsh-diff-line-height, 22px) * 0.3) 0 calc(var(--dsh-diff-line-height, 22px) * 0.3) auto;
+  padding: calc(22px * 0.2) calc(22px * 0.5);
+  margin: calc(22px * 0.3) 0 calc(22px * 0.3) auto;
   width: fit-content;
   /* A percentage, so the cap follows the block: never the whole width, never zero
      either — `fit-content` is what keeps a one-word annotation from collapsing. */
@@ -2347,16 +2373,49 @@
      bubble is rounder still — 22px, which on a one-line turn is a pill — but a thread that
      lives between two code rows reads better as a rounded rectangle than as a capsule. */
   border-radius: 8px 0 8px 8px;
-  background: var(--dsw-specific-bubble, var(--dsw-alias-bg-layer-2, var(--dsw-alias-interactive-bg-hover)));
+  /* The chat's own bubble fill, mixed down rather than laid on: the thread hangs inside the code
+     view, and the block's hatch (or the code surface, when the thread is live) has to read through
+     the bubble — an opaque one turns the turn into a card sitting on the diff. */
+  background: color-mix(in srgb, var(--dsw-specific-bubble, var(--dsw-alias-bg-layer-2, var(--dsw-alias-interactive-bg-hover))) 80%, transparent);
   color: var(--dsw-alias-label-primary);
   font-family: inherit;
-  font-size: calc(1em * var(--dsh-diff-font-scale, 1));
-  line-height: var(--dsh-diff-line-height, 22px);
+  line-height: 22px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  /* Selectable text, so the beam: see the whitelist in `.panel` and the arrow on `.discussion`. */
+  cursor: text;
 }
 
-/* Status lines: the lost-anchor note, failures, thinking. One code row each and no
+/* Inline code in a turn. The thread's prose is already the code font — that is what keeps it on
+   the row grid — so the chip is what says "this is code": the app's own inline-code fill, and a
+   hairline that defines it where that fill is a hair off the surface (in the light theme
+   `--dsw-alias-markdown-inline-code` is #fafafa on a near-white surface, which on its own reads
+   as nothing — and `--dsw-alias-bg-layer-2` is worse: it resolves to the *same* step as
+   `--dsw-alias-bg-base` there, which is why the first version was invisible).
+   The hairline is an inset shadow rather than a border on purpose: a border would add a pixel to
+   the run, and the run has to measure exactly as its text does, or the line wraps somewhere the
+   row count did not predict. No padding for the same reason. Bold needs no fill of its own. */
+.discussionCode {
+  /* A little air around the run so it reads as a chip rather than a highlighted word. Only the
+     sides: vertical padding would make the line box taller than the thread's own row. The panel
+     mirrors this number (`DISCUSSION_CODE_PADDING_PX`) and takes it off the wrap width, so a
+     chip near the line's end wraps where the row count says it does. */
+  padding: 0 2px;
+  border-radius: 4px;
+  background: var(--dsw-alias-markdown-inline-code, var(--dsw-alias-interactive-bg-hover-solid));
+  box-shadow: inset 0 0 0 1px var(--dsw-alias-border-l1);
+}
+
+/* Bold inside a turn. The thread's prose is the code font, whose bold face is often synthesized
+   at this size and reads as barely different from the plain text, so the emphasis is helped
+   along: 700 is the browser's own bold, and the hair of stroke is what makes it tell on the
+   engines that can draw it — and is simply ignored by the ones that cannot. */
+.discussionBody strong {
+  font-weight: 700;
+  -webkit-text-stroke: 0.3px currentColor;
+}
+
+/* Status lines: the lost-anchor note, failures, thinking. One thread row each and no
    inset of their own — the thread's padding is the column they share — so a note
    can never push the thread off the grid either. */
 .discussionNote {
@@ -2364,8 +2423,7 @@
   padding: 0;
   color: var(--dsw-alias-label-secondary);
   font-family: inherit;
-  font-size: calc(1em * var(--dsh-diff-font-scale, 1));
-  line-height: var(--dsh-diff-line-height, 22px);
+  line-height: 22px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -2424,12 +2482,30 @@
   margin: 0 -12px 0 -15px;
   border-spacing: 0;
   color: var(--dsw-alias-label-primary);
+  /* The quote is the file's code, so it takes the file's own type settings: the reader's line
+     height and font scale, the same two variables the code rows read. (The rest of the thread does
+     not — a thread is prose and keeps the fixed row `THREAD_ROW_PX` mirrors.) */
   font-size: calc(1em * var(--dsh-diff-font-scale, 1));
   line-height: var(--dsh-diff-line-height, 22px);
+  /* The code an outdated thread quotes sits on a flat tint of the surface, so the block it hangs
+     in stays its own colour and the quoted lines read as code rather than as a box drawn around
+     prose. A quote only ever exists on a block whose code is gone, which is why this needs no
+     `[data-lost]` beside it — and the table's own margins bleed it to the block's edges, so the
+     wash spans the block, not just the code column. The left bleed is the full 15px — the thread's
+     12px inset plus the block's own 3px rule — so the quoted rows' colours start at the rule's
+     inner edge, with the rule itself framing the block. */
+  background: color-mix(in srgb, var(--dsw-alias-interactive-bg-hover) 55%, transparent);
 }
 
-/* One quoted line: a code row of the file's height. A line long enough to wrap grows its row,
-   the same way the file's own wrapped rows do (and the block reserved that height). */
+/* A quoted row wears the same green/red the file gave it (`.add` / `.del`), so the quote reads as
+   the code the reader selected rather than as plain prose — but a step fainter than the file's own
+   rows: these are old lines, shown for what they were, rather than the change under review. */
+.quoteAdd { background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent); }
+.quoteDel { background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 13%, transparent); }
+
+/* One quoted line: one code row, at the code's line height. A line long enough to wrap grows its
+   row, the same way the file's own wrapped rows do (and the block reserved that height, in code
+   rows — see the quote's share of `layoutDiscussion`). */
 .quoteLine {
   display: table-row;
   height: var(--dsh-diff-line-height, 22px);
@@ -2446,14 +2522,30 @@
   display: block;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  /* The quoted code is in the selectability whitelist (see `.panel`), so it takes the beam;
+     the line numbers beside it are chrome and keep the block's arrow. */
+  cursor: text;
 }
 
 /* Wrap off, as in the file's own rows: a quoted line is one line, however long, and it is cut
-   off at the code column's edge — which is where the file's rows run under the scroller's edge. */
+   off at the code column's edge — which is where the file's rows run under the scroller's edge.
+   Its own scroll range is the file's: without the width the file's widest line has, the pan below
+   would clamp the moment the quote ran out of its own characters, and the quoted columns would
+   drift out of alignment for the rest of the file's horizontal scroll. */
 .quoteNoWrap .quoteText {
   white-space: pre;
   overflow-wrap: normal;
   overflow: hidden;
+}
+
+/* The empty tail is what the pan above scrolls into. A min-width would not do it: that widens the
+   element's own box, and `scrollWidth` follows `clientWidth`, so the quote would still have
+   nothing to scroll. The tail is the file's widest line plus the code column, which puts the
+   quote's own range past the file's however short the quoted line is. */
+.quoteNoWrap .quoteText::after {
+  content: '';
+  display: inline-block;
+  width: calc(var(--dsh-diff-quote-width, 0px) + 100%);
 }
 
 /* The outdated mark, riding the range label it applies to: same size as the rest of the header
@@ -2465,14 +2557,14 @@
   line-height: 16px;
 }
 
-/* Exactly one code row: the folded header, and the head of the open block. */
+/* Exactly one thread row: the folded header, and the head of the open block. */
 .discussionHead {
   flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
   box-sizing: border-box;
-  height: var(--dsh-diff-line-height, 22px);
+  height: 22px;
   padding: 0 12px;
   /* The header holds controls and a path, so it keeps the UI size even though the
      family follows the code font. */
@@ -2480,23 +2572,37 @@
   line-height: 16px;
 }
 
-/* The writing row: two code rows tall, which with the one-row header is the three
+/* The writing row: two thread rows tall, which with the one-row header is the three
    rows the block reserves. It also sits a little wider than the turns: the field is a
    control rather than prose, so a negative inline margin takes back half of the
    thread's 12px inset on each side and the input gets that width. The field and its
    button are one toolbar button tall — the same chrome as the selection frame's 保留,
-   see `.action` — and the rest of the row is the space they are centred in, NOT more
-   height inside either control. */
+   see `.action` — and the rest of the row is the space ABOVE them: the pair sits on the
+   row's bottom edge, so the block ends where they do and the slack reads as the gap
+   under the last turn. */
 .discussionCompose {
   flex: none;
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 8px;
   box-sizing: border-box;
-  height: calc(var(--dsh-diff-line-height, 22px) * 2);
-  /* Horizontally the wider row above; vertically the leftover around the controls. */
+  height: calc(22px * 2);
+  /* Horizontally the wider row above; vertically the leftover sits ABOVE the pair. */
   margin: 0 -6px;
-  padding: 0;
+  /* The rows a block reserves come from a canvas-measured wrap, which errs upward by up to a
+     row (the panel's `messageRowsOf` keeps a character of slack so a turn is never clipped).
+     That spare row has nothing to draw, and the writing row is the LAST child of the body's
+     flex column — so by default it collects under the box and reads as a stray blank row below
+     the input. An auto top margin sends it above the writing row instead, where it reads as the
+     thread's own spacing. `auto` resolves to zero both when the content fills its rows exactly
+     (the ordinary case) and when it overflows (the case the slack exists to prevent), so
+     nothing moves and nothing is pushed out of the block either way. */
+  margin-top: auto;
+  /* ...and a third of a row stays under the pair, so the block does not end on the controls'
+     own edge: the field and the button read as sitting inside the block rather than as its
+     bottom border. Padding rather than a margin, because the band's two rows are what the
+     block's row count was built from — they must not move. */
+  padding: 0 0 calc(22px * 0.3);
 }
 
 /* The writing field, whose box is exactly one toolbar button (26px: 3px of padding,
@@ -2512,9 +2618,9 @@
   border-radius: 6px;
   background: var(--dsw-alias-bg-base);
   color: var(--dsw-alias-label-primary);
-  /* Family from the compose row, size scaled by the same setting as the code. */
+  /* Family from the compose row, at the thread's own size: the writing field belongs to the
+     comment box, not to the code, so it keeps the size the default setting shows. */
   font-family: inherit;
-  font-size: calc(1em * var(--dsh-diff-font-scale, 1));
   line-height: 18px;
   /* The block takes the text beam back (see `.discussion`); the field asks for it again, and
      its disabled rule turns it off once there is nothing to type. */
@@ -2543,10 +2649,9 @@
   color: var(--dsw-alias-label-primary);
 }
 
-/* The range label reads as code, at the code's own size: the wrapper carries the
-   theme's code font shorthand so the label's `1em` resolves against the code size
-   (the header itself is UI-sized for its buttons), and the label then applies the
-   same `--dsh-diff-font-scale` the rows do. */
+/* The range label reads as code, at the thread's own size: the wrapper carries the theme's code
+   font shorthand, and nothing scales it — the label follows the thread, which keeps its size
+   whatever the reader sets the code's font scale to. */
 .discussionRangeWrap {
   flex: none;
   font: var(--dsw-font-markdown-code-block);
@@ -2555,25 +2660,11 @@
 .discussionRange {
   color: var(--dsw-alias-label-tertiary);
   font-family: inherit;
-  font-size: calc(1em * var(--dsh-diff-font-scale, 1));
 }
 
 .discussionInput:focus {
   outline: none;
   border-color: var(--dsw-alias-state-business-primary);
-}
-
-/* An outdated thread's field: it stays where the writing would happen and keeps its shape, so
-   the block does not change under the reader when the code moves on, but it takes no input. It
-   also takes the muted surface a dead field wears — the same one the code surfaces use — and
-   its own placeholder says why (see `discussion.placeholderOutdated`). The border does not
-   brighten on focus either: a field that drops keystrokes should not look like it is taking
-   them. */
-.discussionInput:disabled {
-  border-color: var(--dsw-alias-border-l1);
-  background: var(--dsw-alias-markdown-code-block);
-  color: var(--dsw-alias-label-tertiary);
-  cursor: default;
 }
 
 /* The placeholder takes the input's own face and scale: the app styles
@@ -2611,12 +2702,13 @@
    visibly trailed the text, while a row's own background scrolls with it in both axes for
    free. */
 .rowDiscussed {
+  /* Named as well as painted: the row's pinned gutter cells repaint this over their own background
+     (see `.line > .gutter`), and they can only read it as a value — so the wash covers the line
+     numbers too, instead of stopping at the code column. */
+  --diff-row-wash: color-mix(in srgb, var(--dsw-alias-label-secondary) 14%, transparent);
   /* A flat gradient rather than a background-color, so the diff's own tint still shows
      through underneath it (both properties paint: the image over the colour). */
-  background-image: linear-gradient(
-    color-mix(in srgb, var(--dsw-alias-label-secondary) 14%, transparent),
-    color-mix(in srgb, var(--dsw-alias-label-secondary) 14%, transparent)
-  );
+  background-image: linear-gradient(var(--diff-row-wash), var(--diff-row-wash));
 }
 
 @keyframes diffFlashFade {
@@ -2718,6 +2810,37 @@
   cursor: default;
 }
 
+/* The line numbers are the reader's map of the file, not part of the code: they hold the panel's
+   left edge while the code slides under them, so a horizontal scroll never takes away the one
+   thing that says which lines these are. Sticky inside the code's own table is what pins them
+   (the table keeps `border-spacing: 0` and never collapses — a collapsed table cannot stick), and
+   the opaque surface behind them is what keeps the code from showing through as it passes. A
+   changed row's tint comes across with them (`--diff-row-tint`, set by `.add` / `.del`), so the
+   pinned column still reads as part of its row. Scoped to the code rows' own cells: the empty
+   spacers in a thread's row and the quote's own gutters (already at the block's left edge, which
+   is pinned for them) are not these. */
+.line > .gutter {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  /* The code view's own surface — the same token `.diff` paints, not the panel's: a pinned column
+     is only invisible while it is holding still if it matches what is behind the code. */
+  background-color: var(--dsw-alias-markdown-code-block);
+  /* ...and whatever its row is wearing: the diff's tint, and the wash that marks the rows being
+     commented on. These cells paint over their row's own backgrounds, so a pinned column that did
+     not carry them itself would read as a different shade beside its own row. */
+  background-image:
+    linear-gradient(var(--diff-row-tint, transparent), var(--diff-row-tint, transparent)),
+    linear-gradient(var(--diff-row-wash, transparent), var(--diff-row-wash, transparent));
+}
+
+/* The new-side column pins one gutter along, not at 0 as well: two columns sharing an offset
+   would stack the moment the code moves, and the old-side numbers would slide under the new-side
+   ones instead of standing beside them. The step is `.gutter`'s own width. */
+.line > .gutter + .gutter {
+  left: 44px;
+}
+
 .code {
   display: table-cell;
   white-space: pre;
@@ -2735,14 +2858,19 @@
    tokens ui-primitives DiffBlock.module.css uses for its +/- markers, but the
    presentation differs — native DiffBlock colors the markers and line text,
    while this panel tints the whole line background at its own strength
-   (12% / 10%). Both keep the semantic hue token-driven, so a theme change
+   (20% / 18% — the reader has to see a changed line from across the panel). Both keep the
+   semantic hue token-driven, so a theme change
    stays consistent; only the per-line presentation is this package's own. */
+/* The tint is named as well as painted: the row's pinned gutter cells repaint it over the
+   surface behind them (see `.line > .gutter`), and they can only read it as a value. */
 .del {
-  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
+  --diff-row-tint: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 20%, transparent);
+  background-color: var(--diff-row-tint);
 }
 
 .add {
-  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 10%, transparent);
+  --diff-row-tint: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 18%, transparent);
+  background-color: var(--diff-row-tint);
 }
 
 /* Selection status bar: a slim footer under the diff. It carries no own
@@ -3187,18 +3315,18 @@
 
 /* One side of a split pair: tinted by its own semantics (left deletion red,
    right addition green), independent of the other column. */
-.splitLdel { background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent); }
-.splitLadd { background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 10%, transparent); }
-.splitRdel { background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent); }
-.splitRadd { background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 10%, transparent); }
+.splitLdel { background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 20%, transparent); }
+.splitLadd { background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 18%, transparent); }
+.splitRdel { background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 20%, transparent); }
+.splitRadd { background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 18%, transparent); }
 
 /* Intra-line (inline) diff chips: the removed characters of a del line and the
    added characters of its paired add line. A stronger tint than the row's own
    line-level background, so the changed span reads as a distinct chip. */
 .intraDel {
-  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 26%, transparent);
+  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
   text-decoration: line-through;
 }
 .intraAdd {
-  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 24%, transparent);
+  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 32%, transparent);
 }

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
-  DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, DISCUSSION_MAX_BODY_ROWS, discussionOnRange, discussionOverlapping,
-  discussionRowExtras, discussionRows, discussionTail, discussionText, remapDiscussion,
+  DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, discussionOnRange,
+  discussionOverlapping, discussionPlainText, discussionRowExtras, discussionRows, discussionRounds,
+  discussionRuns, discussionText, remapDiscussion,
   selectionFrame, stripBlankLines,
 } from '../src/client/discussion.ts'
 import type { Discussion } from '../src/client/discussion.ts'
@@ -74,32 +75,54 @@ describe('discussions in the diff row stream', () => {
     expect(discussionOverlapping([...discussions, ...outdated], { start: 3, end: 3 })?.id).toBe('a')
   })
 
-  it('keeps the newest turns that fit the row cap, and says what it left out', () => {
+  it('keeps the newest rounds, and says what it left out', () => {
     const thread = [
       { role: 'user' as const, text: 'one' },
       { role: 'assistant' as const, text: 'two' },
       { role: 'user' as const, text: 'three' },
       { role: 'assistant' as const, text: 'four' },
+      { role: 'user' as const, text: 'five' },
+      { role: 'assistant' as const, text: 'six' },
     ]
     const rowsOf = (): number => 2
-    // Everything fits: nothing hidden, no note row.
-    expect(discussionTail(thread, rowsOf, 8)).toEqual({ messages: thread, hidden: 0, rows: 8 })
-    // Four rows of budget keeps the last two turns and spends one row on the note.
-    const tail = discussionTail(thread, rowsOf, 5)
-    expect(tail.messages).toEqual([thread[2], thread[3]])
+    // Nothing to hide while the thread is at or under the cap, so no note row either.
+    expect(discussionRounds(thread.slice(0, 4), 2, rowsOf))
+      .toEqual({ messages: thread.slice(0, 4), hidden: 0, rows: 8 })
+    // Three rounds: the oldest question and its answer go, and the note costs one row.
+    const tail = discussionRounds(thread, 2, rowsOf)
+    expect(tail.messages).toEqual([thread[2], thread[3], thread[4], thread[5]])
     expect(tail.hidden).toBe(2)
-    expect(tail.rows).toBe(5)
-    // A single long message is still kept: something has to be visible.
-    expect(discussionTail(thread, () => 40, 6).messages).toEqual([thread[3]])
-    // The size is whatever the caller budgets in: the panel passes rows including
-    // each message's own padding, which is why a long thread can no longer push
-    // the compose row out of the block. The same two turns then cost more of the
-    // budget than their bare text would (5.6 rows against 5).
-    const sized = discussionTail(thread, (message) => (message.role === 'user' ? 2.4 : 2.2), 6)
-    expect(sized.messages).toEqual([thread[2], thread[3]])
-    expect(sized.hidden).toBe(2)
-    expect(Math.round(sized.rows * 10) / 10).toBe(5.6)
-    expect(discussionTail(thread, () => 2, 6).rows).toBe(5)
+    expect(tail.rows).toBe(9)
+    // The unit is the round, not a row budget: a round's size is only what it costs.
+    const sized = discussionRounds(thread, 1, (message) => (message.role === 'user' ? 2.4 : 2.2))
+    expect(sized.messages).toEqual([thread[4], thread[5]])
+    expect(sized.hidden).toBe(4)
+    expect(sized.rows).toBe(5.6) // the round's own 4.6 rows, plus the one row its note takes
+    expect(discussionRounds(thread, 1, () => 40).messages).toEqual([thread[4], thread[5]])
+    // A question whose answer is still on its way is a round of its own, and is kept.
+    expect(discussionRounds(thread.slice(0, 5), 1, rowsOf).messages).toEqual([thread[4]])
+    // At least one round is always kept, whatever the caller asks for: something has to show.
+    expect(discussionRounds(thread, 0, rowsOf).messages).toHaveLength(2)
+    expect(discussionRounds([], 2, rowsOf)).toEqual({ messages: [], hidden: 0, rows: 0 })
+  })
+
+  it('reads a turn\'s inline code and bold, and leaves everything else as typed', () => {
+    expect(discussionRuns('a `b` **c** d')).toEqual([
+      { kind: 'text', text: 'a ' },
+      { kind: 'code', text: 'b' },
+      { kind: 'text', text: ' ' },
+      { kind: 'strong', text: 'c' },
+      { kind: 'text', text: ' d' },
+    ])
+    // A marker with no partner, or one spanning a line break, is not a marker: the thread is
+    // laid out a line at a time, so nothing here may open a block or swallow a row.
+    expect(discussionRuns('a `b')).toEqual([{ kind: 'text', text: 'a `b' }])
+    expect(discussionRuns('**a\nb**')).toEqual([{ kind: 'text', text: '**a\nb**' }])
+    expect(discussionRuns('``')).toEqual([{ kind: 'text', text: '``' }])
+    expect(discussionRuns('****')).toEqual([{ kind: 'text', text: '****' }])
+    // The measurement reads the text the runs draw, never the markers.
+    expect(discussionPlainText('a `b` **c**')).toBe('a b c')
+    expect(discussionPlainText('no markers')).toBe('no markers')
   })
 
   it('re-anchors by line numbers while they hold the quote, and by quote when they do not', () => {

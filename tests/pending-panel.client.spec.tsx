@@ -1285,11 +1285,15 @@ describe('PendingPanel', () => {
     }
     expect(content).toContain('user-select: text;')
     // Inside a thread, the diff surface's text beam is taken back — the code surface hands the
-    // whole area the I-beam (see `.diffBody`) — and only the writing field asks for it again.
-    // Buttons carry their own pointer, and the disabled field's rule turns the beam off.
+    // whole area the I-beam (see `.diffBody`) — and the arrow is for the chrome: the header, the
+    // marks, the notes and the space between the pieces. What a reader can actually select asks
+    // for the beam again (the turns' prose and the quoted code), so the cursor agrees with the
+    // whitelist instead of contradicting it; buttons carry their own pointer.
     expect(/\.discussion \{[^}]*cursor: default;/.test(css)).toBe(true)
+    expect(/\.discussionUser \{[^}]*cursor: text;/.test(css)).toBe(true)
+    expect(/\.discussionAnswer \{[^}]*cursor: text;/.test(css)).toBe(true)
+    expect(/\.quoteText \{[^}]*cursor: text;/.test(css)).toBe(true)
     expect(/\.discussionInput \{[^}]*cursor: text;/.test(css)).toBe(true)
-    expect(/\.discussionInput:disabled \{[^}]*cursor: default;/.test(css)).toBe(true)
     // A path's own rule leaves both to the whitelist: one place lists what content is.
     expect(/\.diffPath \{[^}]*\}/.exec(css)?.[0] ?? '').not.toContain('user-select')
     expect(/\.rowPath \{[^}]*\}/.exec(css)?.[0] ?? '').not.toContain('user-select')
@@ -1510,15 +1514,17 @@ describe('PendingPanel', () => {
     }
   })
 
-  it('fills what the user said with the chat\'s own bubble colour', () => {
+  it('fills what the user said with the chat\'s own bubble colour, mixed down', () => {
     // A discussion reads as a small chat, so the user's turns carry the fill the
     // conversation's own bubbles use (`--dsw-specific-bubble`, the token the chat's
     // message bubble is painted with). The generic surface token this started with
     // reads as no fill at all inside the code view, which loses the "the user is
-    // speaking" cue the bubble is there for.
+    // speaking" cue the bubble is there for — and it is mixed down rather than opaque,
+    // because whatever the block is drawn on has to read through the turn.
     const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const block = /\.discussionUser \{([^}]*)\}/.exec(css)?.[1] ?? ''
-    expect(block).toContain('background: var(--dsw-specific-bubble')
+    expect(block).toContain('background: color-mix(in srgb, var(--dsw-specific-bubble')
+    expect(block).toContain('80%, transparent)')
     // A rounded rectangle, at the panel's 8px: the bubble is the one soft shape in
     // the block, and the fill is what makes it read as "the user said this".
     expect(block).toContain('border-radius: 8px')
@@ -1546,12 +1552,14 @@ describe('PendingPanel', () => {
     // The bubble's fill is the text plus 0.2 of a row above and below, with 0.3 more
     // of a row as margin outside it: half a row per side, one whole row of height.
     // Horizontally it pads by half a row and carries no margin, so the fill stays
-    // flush with the thread's right column and only the text is inset.
+    // flush with the thread's right column and only the text is inset. The row is the
+    // THREAD's own fixed 22px — prose, not code — so none of this follows the reader's
+    // code line-height setting (mirrors `THREAD_ROW_PX` in the panel).
     expect(own('discussionUser')).toContain(
-      'padding: calc(var(--dsh-diff-line-height, 22px) * 0.2) calc(var(--dsh-diff-line-height, 22px) * 0.5)',
+      'padding: calc(22px * 0.2) calc(22px * 0.5)',
     )
     expect(own('discussionUser')).toContain(
-      'margin: calc(var(--dsh-diff-line-height, 22px) * 0.3) 0 calc(var(--dsh-diff-line-height, 22px) * 0.3) auto',
+      'margin: calc(22px * 0.3) 0 calc(22px * 0.3) auto',
     )
     // The thread is a flex column so those margins cannot collapse into each other:
     // the row budget counts every one of them.
@@ -1561,6 +1569,17 @@ describe('PendingPanel', () => {
     expect(own('discussionCompose')).toContain('margin: 0 -6px')
     expect(/padding: 0;\s/.test(own('discussionAnswer'))).toBe(true)
     expect(/padding: 0;\s/.test(own('discussionNote'))).toBe(true)
+    // Nothing in the thread's prose reads the code's own variables: the whole point is that it
+    // keeps its size while the code's line height and font scale move under it. The quote is the
+    // exception — it IS code, and it follows both (see the outdated test).
+    for (const name of ['discussionAnswer', 'discussionUser', 'discussionNote', 'discussionHead', 'discussionCompose', 'discussionInput']) {
+      expect(own(name), name).not.toContain('--dsh-diff-line-height')
+      expect(own(name), name).not.toContain('--dsh-diff-font-scale')
+    }
+    for (const name of ['quoteLines', 'quoteLine']) {
+      expect(own(name), name).toContain('--dsh-diff-line-height')
+    }
+    expect(own('quoteLines')).toContain('--dsh-diff-font-scale')
     // The "older turns omitted" line is quieter than a status note: it is about the
     // thread's length, not about the turn, so it sits one label lighter.
     const noteColor = /color: ?([^;]+);/.exec(own('discussionNote'))?.[1]?.trim()
@@ -1588,10 +1607,23 @@ describe('PendingPanel', () => {
     expect(input).not.toContain('height: 100%')
     // The button reaches that height by itself: nothing stretches it to the row.
     expect(rule('discussionSend')).not.toContain('align-self: stretch')
-    // ...and the row is still exactly two code rows, with no padding of its own.
+    // ...and the row is still exactly two THREAD rows (fixed, not the code's), with no padding
+    // of its own, and the pair is bottom-aligned: the field and the button end where the block
+    // does, so the row's slack reads as the gap under the last turn instead of a band under
+    // the box.
     const compose = rule('discussionCompose')
-    expect(compose).toContain('height: calc(var(--dsh-diff-line-height, 22px) * 2)')
-    expect(compose).toContain('padding: 0')
+    expect(compose).toContain('height: calc(22px * 2)')
+    expect(compose).toContain('align-items: flex-end')
+    // The pair stops a third of a row above the block's bottom edge, so the writing row does not
+    // end on the controls' own edge — and the two rows of the band are unchanged (padding, not
+    // margin), so the count the block reserved still matches what it draws.
+    expect(compose).toContain('padding: 0 0 calc(22px * 0.3)')
+    // The reserved rows can come out one row longer than the turns draw (the row count is
+    // measured on canvas, with a character of slack). That spare row must not sit below the
+    // field: the writing row is the body's last child, and an auto top margin is what sends
+    // the spare air above it instead — zero when the content fills its rows, so nothing else
+    // moves.
+    expect(compose).toContain('margin-top: auto')
   })
 
   it('points a comment at the skill when the host can deliver it', () => {
@@ -4470,9 +4502,20 @@ describe('PendingPanel', () => {
     // A live comment washes the rows it is about.
     expect(document.querySelector('[data-diff-discussion-band]')).not.toBeNull()
 
+    // The quote is a window onto the file's columns, so it pans with the code. jsdom does no
+    // layout, so the body's horizontal offset is wired by hand here — before the rewrite, so the
+    // very first render that draws a quote draws it under code that is already sideways.
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+    let bodyOffset = 0
+    Object.defineProperty(body, 'scrollLeft', { get: () => bodyOffset, set: (value: number) => { bodyOffset = value } })
+    bodyOffset = 37
+
     // The file is rewritten under the comment: the line numbers are still in the model,
-    // but they hold other code and the quote is nowhere to be found.
-    view.rerender(<PendingPanel {...panelProps({ read: true, files: [entry({ oldText: 'x\n', newText: 'y\n' })], busy: new Set() })} />)
+    // but they hold other code and the quote is nowhere to be found. The props are held in a
+    // variable because the panel renders with THEM from here on: the ask below lands on this
+    // object's mocks, not on the first render's.
+    const rewritten = panelProps({ read: true, files: [entry({ oldText: 'x\n', newText: 'y\n' })], busy: new Set() })
+    view.rerender(<PendingPanel {...rewritten} />)
     const block = document.querySelector('[data-diff-discussion]') as HTMLElement
     expect(block.hasAttribute('data-lost')).toBe(true)
     // The state rides the position label it applies to, in the header.
@@ -4496,26 +4539,125 @@ describe('PendingPanel', () => {
     expect(block.style.height).toBe('110px')
     expect((block.closest('[data-diff-discussion-space]') as HTMLElement).style.height).toBe('110px')
 
-    // The writing row stays in place but takes no input: the block does not change shape
-    // under the reader when the code moves on, and nothing can be sent from it.
+    // The quote was drawn while the code was already sideways, and shows the same columns.
+    const quoteText = (): HTMLElement => document.querySelector('[data-diff-quote-text]') as HTMLElement
+    expect(quoteText().scrollLeft).toBe(37)
+    // From then on the two travel together: a scroll of the code is written straight into the
+    // quote, so the columns under the numbers never drift.
+    bodyOffset = 64
+    fireEvent.scroll(body)
+    expect(quoteText().scrollLeft).toBe(64)
+
+    // The quoted line is CODE, so its row is the code's row, not the thread's: with a 30px code
+    // line height the block is 22 (header) + 22 (quote label) + 30 (quoted line) + 44 (the two
+    // writing rows) — the thread's own prose is what stays on 22px.
+    localStorage.setItem('diff-approval:diff-line-height', '30')
+    view.rerender(<PendingPanel {...rewritten} />)
+    expect((document.querySelector('[data-diff-discussion]') as HTMLElement).style.height).toBe('118px')
+    localStorage.removeItem('diff-approval:diff-line-height')
+    view.rerender(<PendingPanel {...rewritten} />)
+    expect((document.querySelector('[data-diff-discussion]') as HTMLElement).style.height).toBe('110px')
+
+    // The writing row stays in place and keeps taking input: a thread is a conversation, and the
+    // code it was about is quoted right above this row, so a reply still has something to be about.
     const input = document.querySelector('[data-diff-discussion-input]') as HTMLInputElement
     expect(input).not.toBeNull()
-    expect(input.disabled).toBe(true)
-    // The field says why it is dead instead of inviting a comment it would drop.
-    expect(input.placeholder).toBe('discussion.placeholderOutdated')
-    expect((document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement).disabled).toBe(true)
+    expect(input.disabled).toBe(false)
+    expect(input.placeholder).toBe('discussion.placeholder')
+    expect((document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement).disabled).toBe(false)
     fireEvent.change(input, { target: { value: 'and now?' } })
     fireEvent.keyDown(input, { key: 'Enter' })
-    expect(props.onAskAgent).not.toHaveBeenCalled()
+    // What it asks about is the lines the thread was WRITTEN about — the ones the quote shows —
+    // and not whatever those numbers hold now.
+    const asked = (rewritten.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]
+    expect(asked?.[1]).toContain('/repo/a.txt:1')
+    expect(asked?.[1]).toContain('and now?')
 
     // The code comes back (a keep restores the lines), and the mark is derived rather
     // than sticky: it clears instead of condemning the thread for one rebuild — the rows it
-    // is about are washed again and the writing row takes input.
+    // is about are washed again.
     view.rerender(<PendingPanel {...props} />)
     expect(document.querySelector('[data-diff-discussion-outdated]')).toBeNull()
     expect(document.querySelector('[data-diff-discussion]')?.hasAttribute('data-lost')).toBe(false)
     expect(document.querySelector('[data-diff-discussion-band]')).not.toBeNull()
-    expect((document.querySelector('[data-diff-discussion-input]') as HTMLInputElement).disabled).toBe(false)
+  })
+
+  it('marks an outdated thread with a yellow range rule and a hatch', () => {
+    // A thread's left rule is the mark of "this belongs to those rows" — an outdated thread is
+    // still hung on the lines it names, so the rule stays — but its code has moved on, and the rule
+    // is where that reads: it takes the warning hue, in the same 3px the live state wears, so the
+    // box and every column in the thread are where they were. Behind the turns the block takes a
+    // diagonal hatch; the quote sits on its own flat wash on top, so the code the reader came back
+    // for is still the easiest thing in the block to read.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const block = /\.discussion\[data-lost\] \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(block).toContain('border-left-color: var(--dsw-alias-state-warn-primary')
+    expect(block).not.toContain('border-left-width')
+    expect(block).not.toContain('padding-left')
+    expect(block).toContain('repeating-linear-gradient(135deg')
+    // Thin, equal-width stripes: 4px of ink and 4px of gap, an 8px period — hatching rather than
+    // a tint with seams.
+    expect(block).toContain('--dsw-alias-interactive-bg-hover) 0 4px')
+    expect(block).toContain('transparent 4px 8px')
+    // The hatch has to span the box, not just the padding box: an image resolved over the padding
+    // box alone would leave the strip the rule occupies filled by tiling it, which breaks the
+    // pattern's phase right where the left rule is.
+    expect(block).toContain('background-origin: border-box')
+    // The quote's own wash: a tint of the surface, mixed down, so the quoted lines read as code
+    // without a box being drawn around them.
+    const quote = /\.quoteLines \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(quote).toContain('color-mix(in srgb, var(--dsw-alias-interactive-bg-hover) 55%, transparent)')
+    expect(quote).not.toContain('repeating-linear-gradient')
+    // The quote keeps the base table's geometry: its code sits on the columns the file's own rows
+    // sit on, and its wash and green/red reach the rule that frames the block.
+    expect(/\.discussion\[data-lost\] \.quoteLines/.test(css)).toBe(false)
+  })
+
+  it('pins the code view\'s line numbers while the code slides sideways', () => {
+    // The numbers are what says which lines these are, so a horizontal scroll must not take them
+    // away — the quote's own numbers already hold still, and the file's now do too. The cells stick
+    // to the panel's left edge over an opaque surface, and a changed row's tint travels with them.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const pinned = /\.line > \.gutter \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(pinned).toContain('position: sticky')
+    expect(pinned).toContain('left: 0')
+    // Both columns hold, one gutter along from each other.
+    const second = /\.line > \.gutter \+ \.gutter \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(second).toContain('left: 44px')
+    // The code view's own surface, and the two washes a row can wear: without them the pinned
+    // column reads as a different shade beside its own row.
+    expect(pinned).toContain('background-color: var(--dsw-alias-markdown-code-block)')
+    expect(pinned).toContain('--diff-row-tint')
+    expect(pinned).toContain('--diff-row-wash')
+    const discussed = /\.rowDiscussed \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(discussed).toContain('--diff-row-wash: color-mix(')
+    expect(discussed).toContain('background-image: linear-gradient(var(--diff-row-wash)')
+    // `sticky` needs the table not to collapse: a collapsed table cannot pin a cell.
+    expect(/\.lines \{[^}]*\}/.exec(css)?.[0] ?? '').not.toContain('border-collapse')
+    for (const name of ['add', 'del']) {
+      const rule = new RegExp(`^\\.${name} \\{([^}]*)\\}`, 'm').exec(css)?.[1] ?? ''
+      expect(rule, name).toContain('--diff-row-tint: color-mix(')
+      expect(rule, name).toContain('background-color: var(--diff-row-tint)')
+    }
+  })
+
+  it('gives the quote the file\'s own horizontal range, so its pan cannot clamp early', () => {
+    // The quote pans with the code (see the outdated test): dragging the code sideways writes the
+    // same offset into the quote. That only works while the quote's own scroller is at least as
+    // wide as the file's widest line — otherwise the pan clamps the moment the quote runs out of
+    // its own characters, and the quoted columns sit out of alignment for the rest of the range.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const rule = /\.quoteNoWrap \.quoteText::after \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(rule).toContain('width: calc(var(--dsh-diff-quote-width, 0px) + 100%)')
+    expect(rule).toContain('display: inline-block')
+    // The panel hands it the same measure the code table is pinned to.
+    const file = entry({ path: '/repo/a.txt', oldText: 'a\n', newText: 'aaaaaaaaaaaaaa\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+    expect(Number.parseInt(body.style.getPropertyValue('--dsh-diff-quote-width'), 10)).toBeGreaterThanOrEqual(14)
   })
 
   it('highlights an outdated comment\'s quote with the language the file is read in', async () => {
@@ -4549,6 +4691,27 @@ describe('PendingPanel', () => {
     // Shiki's colours ride inline styles (the theme's `--shiki-*` custom properties), which is
     // how the code rows are coloured too.
     expect(quote.querySelector('span[style*="--shiki-"]')).not.toBeNull()
+    // The quoted row keeps the colour the file gave it: the row this thread was made on is an
+    // added line, so the quote says so — a quote of added and removed lines that renders as plain
+    // code loses exactly what the reader was looking at.
+    expect(quote.querySelector('[data-diff-quote-kind]')?.getAttribute('data-diff-quote-kind')).toBe('add')
+  })
+
+  it('washes a quoted row with the file\'s green and red, a step fainter than the file itself', () => {
+    // The quote takes the diff's own colours (`.add` / `.del`), so a theme change cannot leave it
+    // behind — but at a lower strength than the rows under review: a quote is a memory of the code,
+    // shown for what it was rather than as the change being read. jsdom applies no stylesheet, so
+    // this reads the module the panel ships.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const rule = (name: string): string => new RegExp(`^\\.${name} \\{([^}]*)\\}`, 'm').exec(css)?.[1] ?? ''
+    const strength = (block: string): number => Number(/(\d+)%, transparent/.exec(block)?.[1] ?? '0')
+    // Visible, and quieter than the file's own rows.
+    expect(strength(rule('quoteAdd'))).toBeGreaterThan(0)
+    expect(strength(rule('quoteDel'))).toBeGreaterThan(0)
+    expect(strength(rule('quoteAdd'))).toBeLessThan(strength(rule('add')))
+    expect(strength(rule('quoteDel'))).toBeLessThan(strength(rule('del')))
+    expect(rule('quoteAdd')).toContain('--dsh-diff-add-color')
+    expect(rule('quoteDel')).toContain('--dsh-diff-del-color')
   })
 
   it('stacks two comments that end up on the same row instead of overlapping them', async () => {
@@ -4698,6 +4861,174 @@ describe('PendingPanel', () => {
     })
     expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('final answer')
     expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
+  })
+
+  it('draws a turn\'s inline code and bold, and never the markers', () => {
+    // The thread is prose laid out on the code rows, so it knows exactly two pieces of inline
+    // Markdown: \`code\` and **bold**. Both are drawn with their markers gone, and the row
+    // measurement reads that same text — reserving room for a marker would leave a hole.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const code = rows[5]!.querySelector('[data-diff-code]') ?? rows[5]!
+    const node = code.firstChild ?? code
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, {
+      target: { value: 'is \`x\` **right**?' },
+    })
+    fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    const prompt = (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]?.[1]
+    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
+    act(() => {
+      listener!({
+        running: false,
+        nodes: [{ kind: 'user', text: prompt }, { kind: 'assistant', text: 'use \`x\` **always**' }],
+        partial: '',
+        error: undefined,
+      })
+    })
+
+    // The question in the thread: a code chip and a bold run, and the text without markers.
+    const turn = document.querySelector('[data-diff-discussion-user]') as HTMLElement
+    expect(turn.querySelector('code')?.textContent).toBe('x')
+    expect(turn.querySelector('strong')?.textContent).toBe('right')
+    expect(turn.textContent).toBe('is x right?')
+    // The answer is drawn the same way, which is what makes a reply readable as markup as well.
+    const answer = document.querySelector('[data-diff-discussion-reply]') as HTMLElement
+    expect(answer.querySelector('code')?.textContent).toBe('x')
+    expect(answer.querySelector('strong')?.textContent).toBe('always')
+    expect(answer.textContent).toBe('use x always')
+
+    // Both pieces have to be *visible*, which is a stylesheet question jsdom cannot answer:
+    // the chip is a fill plus a hairline drawn inside it (a border would widen the run, and the
+    // run must measure as its text does), and bold is helped past the code font's faint bold
+    // face by a hair of stroke. The fill must not be a surface step: in the light theme
+    // `bg-layer-2` resolves to the same step as `bg-base`, which is why it read as nothing.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const chip = /\.discussionCode \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(chip).toContain('--dsw-alias-markdown-inline-code')
+    expect(chip).not.toContain('--dsw-alias-bg-layer-2')
+    expect(chip).toContain('box-shadow: inset 0 0 0 1px')
+    expect(chip).not.toContain('border:')
+    // The chip carries side padding (the panel mirrors it as `DISCUSSION_CODE_PADDING_PX` and
+    // measures it off the line), and no vertical padding: a taller line box would leave the
+    // thread's own row.
+    expect(chip).toContain('padding: 0 2px')
+    expect(chip).not.toMatch(/padding: [^;]*px [^;]*px [^;]*px/)
+    const bold = /\.discussionBody strong \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(bold).toContain('font-weight: 700')
+    expect(bold).toContain('-webkit-text-stroke')
+  })
+
+  it('keeps a thread on its own row whatever the code\'s line height is set to', () => {
+    // The comment box is prose, not code: it keeps the size the default settings show, so a
+    // thread reads the same in a 10px code row as in a 36px one. The block still reserves whole
+    // rows — of its own — and the diff's height table takes that exact pixel height.
+    localStorage.setItem('diff-approval:diff-line-height', '30')
+    localStorage.setItem('diff-approval:diff-font-scale', '150')
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    // The code's own grid did move: the variables the code rows read are the new ones.
+    const diff = document.querySelector('[data-diff-approval-diff]') as HTMLElement
+    expect(diff.style.getPropertyValue('--dsh-diff-line-height')).toBe('30px')
+    expect(diff.style.getPropertyValue('--dsh-diff-font-scale')).toBe('1.5')
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const code = rows[5]!.querySelector('[data-diff-code]') ?? rows[5]!
+    const node = code.firstChild ?? code
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+
+    // A fresh thread is its header plus the two-row writing row: three rows of the thread's own
+    // 22px, which is what the code row's 30px would have made 90px.
+    const block = document.querySelector('[data-diff-discussion]') as HTMLElement
+    const space = block.closest('[data-diff-discussion-space]') as HTMLElement
+    expect(space.style.height).toBe('66px')
+    expect(block.style.height).toBe('66px')
+  })
+
+  it('keeps as many rounds of a thread as the settings ask for', () => {
+    // The round count is a preference: with one round, a thread that has been through two keeps
+    // only the newest, and says how many turns it left out. (Two rounds — the default — is what
+    // the other thread tests exercise.)
+    localStorage.setItem('diff-approval:discussion-rounds', '1')
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const code = rows[5]!.querySelector('[data-diff-code]') ?? rows[5]!
+    const node = code.firstChild ?? code
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+
+    // Round one, and round two, each question followed by its answer.
+    const ask = (question: string): string => {
+      const input = document.querySelector('[data-diff-discussion-input]') as HTMLInputElement
+      fireEvent.change(input, { target: { value: question } })
+      fireEvent.keyDown(input, { key: 'Enter' })
+      return (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls.at(-1)?.[1] ?? ''
+    }
+    const first = ask('why?')
+    act(() => {
+      listener!({ running: false, nodes: [{ kind: 'user', text: first }, { kind: 'assistant', text: 'one' }], partial: '', error: undefined })
+    })
+    const second = ask('and then?')
+    act(() => {
+      listener!({
+        running: false,
+        nodes: [
+          { kind: 'user', text: first }, { kind: 'assistant', text: 'one' },
+          { kind: 'user', text: second }, { kind: 'assistant', text: 'two' },
+        ],
+        partial: '',
+        error: undefined,
+      })
+    })
+
+    // One round kept: the second question and its answer, and the two older turns are counted out.
+    expect(document.querySelectorAll('[data-diff-discussion-user]').length).toBe(1)
+    expect(document.querySelectorAll('[data-diff-discussion-user]')[0]?.textContent).toBe('and then?')
+    expect(document.querySelectorAll('[data-diff-discussion-reply]').length).toBe(1)
+    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('two')
+    expect(document.querySelector('[data-diff-discussion-hidden]')?.textContent).toBe('discussion.hidden {"count":2}')
   })
 
   it('carries its threads, and a waiting question, across a remount', () => {
@@ -5799,6 +6130,35 @@ describe('PendingPanel', () => {
     for (let i = 0; i < 15; i++) fireEvent.click(up())
     expect(value().textContent).toBe('10')
     expect(up().disabled).toBe(true)
+  })
+
+  it('the DSH Settings tab sets how many rounds a comment keeps', () => {
+    const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
+    render(<DiffApprovalSettingsTab {...props} />)
+    // The row lives in the comments group, which opens folded.
+    fireEvent.click(document.querySelector('[data-diff-comment-toggle]') as HTMLButtonElement)
+    const value = () => document.querySelector('[data-diff-discussion-rounds]') as HTMLElement
+    // Several stepper rows share the page; target this row's own ± buttons.
+    const up = () => (value() as HTMLElement & { parentElement: HTMLElement }).parentElement.querySelector('[data-diff-stepper-up]') as HTMLButtonElement
+    const down = () => (value() as HTMLElement & { parentElement: HTMLElement }).parentElement.querySelector('[data-diff-stepper-down]') as HTMLButtonElement
+    // Two rounds is the default: one question and the answer to it, twice.
+    expect(value().textContent).toBe('2')
+
+    fireEvent.click(up())
+    expect(value().textContent).toBe('3')
+    expect(localStorage.getItem('diff-approval:discussion-rounds')).toBe('3')
+
+    // The floor is one round: something has to be visible, so the down button disables there.
+    for (let i = 0; i < 5; i++) fireEvent.click(down())
+    expect(value().textContent).toBe('1')
+    expect(down().disabled).toBe(true)
+    expect(localStorage.getItem('diff-approval:discussion-rounds')).toBe('1')
+
+    // The ceiling is ten: a thread may not swamp the diff it annotates.
+    for (let i = 0; i < 15; i++) fireEvent.click(up())
+    expect(value().textContent).toBe('10')
+    expect(up().disabled).toBe(true)
+    expect(localStorage.getItem('diff-approval:discussion-rounds')).toBe('10')
   })
 
   it('the DSH Settings tab exposes a collapsed keybindings group that persists chords', () => {
