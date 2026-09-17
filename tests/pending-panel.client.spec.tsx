@@ -1742,6 +1742,22 @@ describe('PendingPanel', () => {
     expect(deps.slice(0, deps.indexOf(')'))).toContain('splitView')
   })
 
+  it('keeps the code\'s own scroll from rubber-banding on a touch screen', () => {
+    // The panel is a fixed overlay: a bounce at the code's edge reads as the whole panel (and
+    // the rows under it) sliding. Every scroller that holds the code or a preview of it opts
+    // out; the list, the dialogs and the panel's own states are chrome and keep the platform's
+    // own feel. jsdom applies no stylesheet, so this reads the module the panel ships.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const block = (name: string): string => new RegExp(`^\\.${name} \\{([^}]*)\\}`, 'm').exec(css)?.[1] ?? ''
+    for (const name of ['diffBody', 'mdPreviewBody', 'diffPreviewScroll', 'splitHScroll']) {
+      expect(block(name), name).toContain('overscroll-behavior: none')
+    }
+    // The fenced code inside a Markdown preview scrolls in its own box, so it opts out too.
+    expect(/\.mdPreviewBody pre \{([^}]*)\}/.exec(css)?.[1] ?? '').toContain('overscroll-behavior: none')
+    // The file list is chrome, not the code, and keeps the platform's own feel.
+    expect(block('listScroll')).not.toContain('overscroll-behavior')
+  })
+
   it('wears the label\'s clothes as an editable field, and scrolls itself', () => {
     // The header's path is an input: a field scrolls its own content to the caret, which is
     // exactly what this row's hand-rolled horizontal pan used to do — so the overflow and

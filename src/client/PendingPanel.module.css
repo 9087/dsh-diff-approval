@@ -663,6 +663,8 @@
 /* A fixed-height vertical viewport so the preview scrolls instead of growing
    the settings page when the line height is increased. */
 .diffPreviewScroll {
+  /* No rubber-band: see `.diffBody`. */
+  overscroll-behavior: none;
   overflow-y: auto;
   height: 132px;
 }
@@ -683,6 +685,8 @@
   isolation: isolate;
 }
 .mdPreviewBody {
+  /* No rubber-band: see `.diffBody`. */
+  overscroll-behavior: none;
   position: relative;
   flex: 1;
   min-height: 0;
@@ -823,6 +827,8 @@
   background: color-mix(in srgb, #9e9e9e 25%, transparent);
 }
 .mdPreviewBody pre {
+  /* No rubber-band: see `.diffBody`. */
+  overscroll-behavior: none;
   margin: 8px 0;
   padding: 10px 12px;
   border: 1px solid var(--dsw-alias-border-l1);
@@ -1993,6 +1999,12 @@
 }
 
 .diffBody {
+  /* The code's own scroll: no rubber-band at its edges. The panel is a fixed overlay, so a
+     bounce there reads as the panel (and the rows under it) sliding, not as the code being
+     scrolled — and the code column can be hundreds of rows long, so the bounce is what the
+     reader sees instead of the code holding still. Touch platforms only: the property is inert
+     elsewhere. */
+  overscroll-behavior: none;
   position: relative;
   flex: 1;
   min-width: 0;
@@ -3144,6 +3156,8 @@
 }
 
 .splitHScroll {
+  /* No rubber-band: see `.diffBody`. */
+  overscroll-behavior: none;
   flex: 1 1 0;
   min-width: 0;
   overflow-x: auto;
