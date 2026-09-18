@@ -1191,9 +1191,22 @@
   padding: 8px 8px 0 0;
 }
 
+/* The footer's buttons share the row in proportion to what they say, not equally: `flex-basis: auto`
+   keeps each one's own content width as its base and the shared grow adds the row's leftover to all
+   three, so a longer label stays the wider button (a plain `flex: 1` would make them equal whatever
+   they say). */
 .bulkActions .action {
-  flex: 1;
+  flex: 1 1 auto;
   text-align: center;
+}
+
+/* Add carries a mark beside its label, so its content is laid out as one unit: centred, with the
+   glyph a hair away from the word rather than on its own baseline. */
+.addPath {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
 }
 
 .resizeHandle {
@@ -1596,6 +1609,9 @@
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
+  /* Square, and never stretched by the flex row it lands in: the tab strip takes the width there,
+     and the bulk footer's own buttons are named rather than icon-boxed (see `.bulkActions`). */
+  flex: none;
   width: 20px;
   height: 20px;
   min-height: 0;
@@ -1605,6 +1621,137 @@
 
 .groupHead > .group {
   margin: 0;
+}
+
+/* The list pane's header: its tabs (when the panel is commenting) with the fold-away toggle at the
+   right. Its edges are the list's own — the rows' cards start at the pane's edge — with a pixel of
+   clearance at each side of the row's two controls: the strip's fill is the list's first painted
+   thing, and the toggle keeps its 8px of scroll-strip clearance plus one. The tabs stretch across
+   everything the toggle leaves, with the row's own gap between them. */
+.listHead {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 8px 1px 2px 1px;
+  padding-right: 8px;
+}
+
+/* The fold toggle is a peer of the tab strip in that row, so it is square at the strip's own height
+   — 2px of pill padding around a 22px tab, so 26px — rather than the 20px icon box the list uses
+   elsewhere. */
+.action.addButton.listFold {
+  width: 26px;
+  height: 26px;
+}
+
+/* The one view's own name, in the tab row's place: a heading, in the tone the list's own labels
+   wear, so the header says what the pane is showing whether or not there is a switch to offer. */
+.listTitle {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+/* Two segments of one control rather than two buttons — the pair shares the row, and the active one
+   is marked by its label and a raised fill, so it reads as a switch between two views of the same
+   list instead of as a pair of actions. */
+.listTabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.listTab {
+  flex: 1;
+  padding: 3px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.listTab[aria-selected='true'] {
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* One comment in that tab: the rows it hangs on, and the first sentence of what was asked. A plain
+   button — the list is a way to reach a comment, not a selection — carrying the file rows' own box
+   (see `.row` / `.rowHead`): the same 8px inset and the same 2px of air between items, so the two
+   lists' text starts on one column and their hover fills are the same shape. */
+.commentRow {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.commentRow:hover {
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+}
+
+.commentHead {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* The reference, in the code face: `path:lines` is the panel's own vocabulary for "there", and it
+   is the line numbers the reader is looking for. */
+.commentLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-markdown-code-block);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+/* Outdated: the same grey word the block's own quote label carries, and it never shrinks — the
+   title gives way instead. */
+.commentLost {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.commentTitle {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+/* The comments tab with nothing in it. Same tone as the list's other notes. */
+.listEmpty {
+  margin: 8px 12px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
 }
 
 /* The empty state's button row: import plus the two additions, wrapping when

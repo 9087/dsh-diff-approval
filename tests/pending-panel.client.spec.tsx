@@ -11,8 +11,8 @@ import type { ComponentProps, ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingFileDiff } from '../src/types.ts'
 import { PendingPanel, frameInsets, makeMeasurer, wrapChipRows } from '../src/client/PendingPanel.tsx'
-import { lastPanelFile, panelFileOffset, resetPanelMemory } from '../src/client/panel-memory.ts'
-import { setCommentModeEnabled } from '../src/client/settings.ts'
+import { lastPanelFile, panelFileOffset, rememberDiscussions, resetPanelMemory } from '../src/client/panel-memory.ts'
+import { diffLineHeight, navLeadRows, setCommentModeEnabled } from '../src/client/settings.ts'
 import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
 import { DiffApprovalHeaderEntry } from '../src/client/header-entry.tsx'
 import { DiffApprovalSettingsTab } from '../src/client/SettingsTab.tsx'
@@ -464,7 +464,6 @@ describe('PendingPanel', () => {
     const props = panelProps({ read: true, files: [other, FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
-    expect(screen.getByText('panel.group.current')).toBeDefined()
     expect(screen.getByText('a.txt')).toBeDefined()
     expect(screen.queryByText('other.txt')).toBeNull()
     expect(screen.queryByText('panel.group.others')).toBeNull()
@@ -511,7 +510,7 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
     // The list stays visible (no full error screen) and the row carries a tag.
-    expect(screen.getByText('panel.group.current')).toBeDefined()
+    expect(document.querySelector('[data-diff-add]')).not.toBeNull()
     expect(screen.getByText('row.failed')).toBeDefined()
 
     // The detail banner under the action buttons shows the failure message.
@@ -748,12 +747,34 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-add]')).not.toBeNull()
     emptyView.unmount()
 
-    // Populated list: it rides the "current session" heading.
+    // Populated list: it rides the bulk footer, past the two decisions, and the fold-away toggle is
+    // the header row's own button.
     const populated = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...populated} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
-    const head = document.querySelector('[data-diff-add]')!.closest('div')!
-    expect(head.textContent).toContain('panel.group.current')
+    const footer = document.querySelector('[data-diff-add]')!.closest('div')!
+    expect([...footer.querySelectorAll('button')].map(button => button.getAttribute('data-diff-add') !== null ? 'add' : button.getAttribute('data-diff-keep-all') !== null ? 'keep' : 'revert'))
+      .toEqual(['keep', 'revert', 'add'])
+    expect(footer.querySelector('[data-diff-file-list-float]')).toBeNull()
+    expect(document.querySelector('[data-diff-file-list-float]')).not.toBeNull()
+    // Add keeps its own mark and label — a third button in the decisions' row is read as a way in
+    // rather than as another decision — and the row shares its width by content (`flex-basis: auto`),
+    // so the longest label stays the widest button.
+    expect(footer.querySelector('[data-diff-add]')?.textContent).toBe('panel.addPathGo')
+    expect(footer.querySelector('[data-diff-add] svg')).not.toBeNull()
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    expect(/\.bulkActions \.action \{([^}]*)\}/.exec(css)?.[1] ?? '').toContain('flex: 1 1 auto')
+    // A pixel of clearance at each side of the row (the strip's fill on the left, the toggle's 8px
+    // of scroll-strip clearance plus one on the right); the strip stretches across what is left, and
+    // the toggle is square at the strip's height (2px of pill padding plus the 22px tab).
+    const head = /^\.listHead \{([^}]*)\}/m.exec(css)?.[1] ?? ''
+    expect(head).toContain('margin: 8px 1px 2px 1px')
+    expect(head).toContain('padding-right: 8px')
+    expect(head).toContain('gap: 4px')
+    expect(/^\.listTabs \{([^}]*)\}/m.exec(css)?.[1] ?? '').toContain('flex: 1 1 auto')
+    const fold = /\.action\.addButton\.listFold \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(fold).toContain('width: 26px')
+    expect(fold).toContain('height: 26px')
   })
 
   it('opens a row\'s actions on right-click, with the same pair its toolbar shows', () => {
@@ -792,20 +813,103 @@ describe('PendingPanel', () => {
     expect(props.onRevert).not.toHaveBeenCalled()
   })
 
-  it('scrolls only the rows: the heading and its add button stay pinned', () => {
+  it('scrolls only the rows: the header and the add button stay pinned', () => {
+    // The tabs are a commenting affordance, so this is a panel with comment mode on.
+    act(() => { setCommentModeEnabled(true) })
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
     const scroller = document.querySelector('[data-diff-list-scroll]')
     expect(scroller).not.toBeNull()
-    // The rows scroll with the scroller; the heading (and the add button) do not.
+    // The rows scroll with the scroller; the header (tabs and fold toggle) and the footer (the two
+    // decisions and Add) do not.
     expect(scroller!.textContent).toContain('a.txt')
     expect(scroller!.querySelector('[data-diff-add]')).toBeNull()
-    expect(scroller!.textContent).not.toContain('panel.group.current')
     expect(document.querySelector('[data-diff-add]')!.closest('[data-diff-list-scroll]')).toBeNull()
-    // …and the heading is still rendered above it.
-    expect(document.querySelector('[data-diff-approval-panel]')!.textContent).toContain('panel.group.current')
+    expect(scroller!.querySelector('[data-diff-list-tab]')).toBeNull()
+    expect(document.querySelector('[data-diff-list-tab="pending"]')).not.toBeNull()
+    expect(scroller!.querySelector('[data-diff-file-list-float]')).toBeNull()
+    expect(document.querySelector('[data-diff-file-list-float]')).not.toBeNull()
+  })
+
+  it('shows a heading instead of tabs while the pane has only one view', () => {
+    // With comment mode off there are no comments to list, so the pane has one view and no switch to
+    // offer: the tab row's place carries that view's own name. (The suite starts each test with the
+    // mode on.)
+    act(() => { setCommentModeEnabled(false) })
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(document.querySelector('[data-diff-list-tab]')).toBeNull()
+    expect(document.querySelector('[data-diff-list-title]')?.textContent).toBe('panel.tab.pending')
+    expect(document.querySelector('[data-diff-file-list-float]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-add]')).not.toBeNull()
+  })
+
+  it('lists the comments the open files carry in a second tab, and jumps to one', () => {
+    // The list pane has two tabs: the pending files, and every comment the files in the list carry.
+    // A comment is a block of rows in one file, so its item is the rows it hangs on, the first
+    // sentence of what was asked, and — when the code under it has moved on — that it is outdated.
+    // The item is a plain button rather than a selectable row: what it opens is the file, with the
+    // comment landed on, so the item itself carries no selected state.
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-rows', path: '/repo/rows.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    rememberDiscussions(S1, {
+      [file.id]: [
+        { id: 'd-eight', anchor: { start: 7, end: 7, startLine: 8, endLine: 8 }, collapsed: false, draft: '', lost: false, messages: [{ role: 'user', text: '这一行为什么要改？后面这句不该进标题。' }] },
+        { id: 'd-lost', anchor: { start: 7, end: 7, startLine: 8, endLine: 8 }, collapsed: false, draft: '', lost: true, quote: 'const gone = 1', quoteLines: [{ old: 8, new: 8, side: 'add' }], messages: [{ role: 'user', text: '这段代码已经不在了' }] },
+        { id: 'd-draft', anchor: { start: 7, end: 7, startLine: 8, endLine: 8 }, collapsed: false, draft: '还没发送的内容。后面的句子不算。', lost: false, messages: [] },
+        { id: 'd-blank', anchor: { start: 7, end: 7, startLine: 8, endLine: 8 }, collapsed: false, draft: '', lost: false, messages: [] },
+      ],
+    } as unknown as Parameters<typeof rememberDiscussions>[1])
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // The pending list is what the pane opens on.
+    expect(document.querySelector('[data-diff-list-tab="pending"]')?.getAttribute('aria-selected')).toBe('true')
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    const items = [...document.querySelectorAll('[data-diff-comment-link]')] as HTMLElement[]
+    expect(items.length).toBe(4)
+    expect(items[0]!.querySelector('[data-diff-comment-label]')?.textContent).toContain(':8')
+    expect(items[0]!.textContent).toContain('这一行为什么要改？')
+    expect(items[0]!.textContent).not.toContain('后面这句')
+    expect(items[0]!.querySelector('[data-diff-comment-lost]')).toBeNull()
+    expect(items[1]!.querySelector('[data-diff-comment-lost]')).not.toBeNull()
+    // A thread that has not been sent yet has no turn to quote: its draft is what the item shows, cut
+    // at its own first full stop like any other title.
+    expect(items[2]!.textContent).toContain('还没发送的内容。')
+    expect(items[2]!.textContent).not.toContain('后面的句子')
+    // …and a comment box placed and left empty has nothing to quote, so it says so instead of
+    // listing as a blank line.
+    expect(items[3]!.querySelector('[data-diff-comment-title]')?.textContent).toBe('panel.commentEmptyTitle')
+    // Pocket's copy-file button is refused on these items, and so is its narrow-layout click guard:
+    // that one swallows the press on any `button, a` whose text looks like a file path, so the item
+    // is a control without being one of those elements.
+    expect(items[0]!.getAttribute('data-mobile-nav-copy')).toBe('1')
+    expect(items[0]!.querySelector('[data-mobile-nav="copy-file"]')).toBeNull()
+    expect(items[0]!.matches('button, a')).toBe(false)
+    expect(items[0]!.getAttribute('role')).toBe('button')
+    // The items wear the file rows' own box, so the two lists' text shares a column.
+    const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const comment = /^\.commentRow \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
+    expect(comment).toContain('padding: 6px 8px')
+    expect(comment).toContain('border-radius: 10px')
+    expect(items[0]!.parentElement?.className).toBe(document.querySelector('[data-diff-comment-list]')?.firstElementChild?.className ?? '')
+
+    // Clicking one lands on the comment the way a jump to a change block lands: the row is left the
+    // configured lead rows below the code view's top edge. (The code view needs its scroll range:
+    // jsdom has none, so the landing would clamp to zero.)
+    const restore = stubCodeScroll()
+    try {
+      fireEvent.click(items[0]!)
+      const body = document.querySelector('[data-diff-body]') as HTMLElement
+      // A file created whole is one row a line, so the row the comment names is its line less one.
+      expect(body.scrollTop).toBe((8 - 1 - navLeadRows()) * diffLineHeight())
+    } finally {
+      restore()
+    }
   })
 
   it('adds the file a browse row names, and closes with a toast', async () => {

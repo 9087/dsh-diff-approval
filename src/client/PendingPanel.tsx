@@ -44,7 +44,7 @@ import { OPEN_FILE_EVENT } from './produced-diff.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
 import { OPEN_PANEL_FILE_EVENT, PANEL_STATE_EVENT, SHOW_PANEL_EVENT, TOGGLE_PANEL_EVENT } from './dock.tsx'
 import type { PanelFileDetail, PanelStateDetail } from './dock.tsx'
-import { lastPanelFile, panelFileOffset, rememberDiscussions, rememberedDiscussions, rememberPanelView } from './panel-memory.ts'
+import { COMMENTS_CHANGED_EVENT, lastPanelFile, panelFileOffset, rememberDiscussions, rememberedDiscussions, rememberPanelView } from './panel-memory.ts'
 import { composerCoveredByPanel, leaveComposerCaret } from './composer-cover.ts'
 import { commentModeEnabled, COMMENT_MODE_CHANGED_EVENT, confirmFileRemoveEnabled, COVER_CHANGED_EVENT, discussionRoundLimit, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
@@ -858,6 +858,27 @@ export function frameInsets(): { top: number; bottom: number; left: number; righ
   return { top, bottom, left, right }
 }
 
+/**
+ * The one-line title a comment is listed under in the comments tab: the first sentence of the first
+ * thing the reader said in it. The thread's first turn IS the annotation (later turns are follow-ups
+ * on the same rows), so that is the comment's own voice; the sentence is cut at its own full stop,
+ * and the list ellipsises whatever is still too long for the column (see `.commentTitle`).
+ *
+ * A thread that has not been sent yet has no turn at all: what the reader has typed so far is its
+ * draft, and that is what the item shows, so a comment being written is not listed as a blank line.
+ * A thread with neither has nothing to quote — an empty comment box the reader placed and left — and
+ * the caller passes in the word for that (see the list).
+ *
+ * @param discussion - the thread to name.
+ * @returns the title, or an empty string when there is nothing to say yet.
+ */
+function commentTitle(discussion: Discussion): string {
+  const asked = discussion.messages.find(message => message.role === 'user')?.text ?? discussion.draft ?? ''
+  const line = asked.split('\n').find(text => text.trim() !== '') ?? ''
+  const stop = /[。！？!?]/.exec(line)
+  return (stop === null ? line : line.slice(0, stop.index + 1)).trim()
+}
+
 /** The right detail pane for one selected file: actions plus the merged diff. */
 interface PendingDiffProps {  file: PendingFileDiff
   busy: boolean
@@ -875,6 +896,10 @@ interface PendingDiffProps {  file: PendingFileDiff
   /** Bumped with every landing request, so a repeated one for the file already
    *  open (the produced-file chip, clicked twice) lands again. */
   landingTick?: number | undefined
+  /** A model row to land on — a jump to a comment, from the list's comments tab. It lands the way a
+   *  jump to a change block does: the configured lead rows above the row, and a flash around the
+   *  block that holds it (see the landing effect), because that is the jump the reader knows. */
+  landingRow?: number | undefined
   /** The last keep/revert failure for this file, shown as an inline banner. */
   failedMessage?: string | undefined
   /**
@@ -2433,7 +2458,7 @@ function PendingFileRow({ file, selected, failedMessage, t, onSelect, onMenu }: 
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, failedMessage, commentSkill, onPasteReference, onAskAgent, watchChat, onToast, t, onAddTypedPath, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, failedMessage, commentSkill, onPasteReference, onAskAgent, watchChat, onToast, t, onAddTypedPath, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -2735,6 +2760,8 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   /** The offset the file now showing was asked to open at, held until the landing
    *  effect below spends it (that effect runs a render later than the switch). */
   const landingTopRef = useRef<number | undefined>(undefined)
+  /** The model row a jump to a comment asked for, spent the same way and by the same effect. */
+  const landingRowRef = useRef<number | undefined>(undefined)
   // The plain text of the last valid (single-line) diff selection, so opening
   // search auto-fills the query even after clicking the search button collapses
   // the native selection.
@@ -2776,7 +2803,14 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     // becomes the current one, so prev/next walk from there — but nothing
     // flashes: no jump happened.
     landingTopRef.current = landingTop
-    if (landingTop === undefined) {
+    landingRowRef.current = landingRow
+    if (landingRow !== undefined) {
+      // A jump to a comment: focus the block the comment hangs on, so the flash that marks a jump
+      // is drawn around it, and let the landing effect below put the row itself where a jump to a
+      // change block would put the block — the configured lead rows above it.
+      setFocus(blockIndexAtOffset(offsetOf(landingRow)))
+      bumpFlash(false)
+    } else if (landingTop === undefined) {
       setFocus(0)
       bumpFlash(false)
     } else {
@@ -2795,10 +2829,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     setSearchOpen(false)
     setSearchQuery('')
     setSearchIndex(0)
-    // `landingTop` and `landingTick` are deps as well as `file.id`: a fresh
+    // `landingTop`, `landingRow` and `landingTick` are deps as well as `file.id`: a fresh
     // showing can re-land the *same* file (reopening where it was left), and the
     // chip's own jump lands on the first change of the file already open.
-  }, [file.id, landingTop, landingTick])
+  }, [file.id, landingTop, landingTick, landingRow])
 
   // An undo/redo that touched the currently open file re-selects the undone
   // diff the same way switching to a file does: reset to the first change
@@ -4278,6 +4312,21 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
           if (resumeBody.scrollTop !== clamped) resumeBody.scrollTop = clamped
           setScrollTop(clamped)
         }
+      }
+      return
+    }
+    // A jump to a comment (the list's comments tab): the row it hangs on, landed on the way a jump
+    // to a change block lands — the same lead rows above it, clamped to the scroll range, with the
+    // flash the focus above already asked for. The preview has no rows to scroll by, so it falls
+    // through to the block path below and lands the block the comment is in.
+    const row = landingRowRef.current
+    if (row !== undefined && !previewActive) {
+      landingRowRef.current = undefined
+      const rowBody = bodyRef.current
+      if (rowBody !== null) {
+        const target = Math.max(0, Math.min(offsetOf(row) - leadRows * ROW_HEIGHT_PX, rowBody.scrollHeight - rowBody.clientHeight))
+        if (rowBody.scrollTop !== target) rowBody.scrollTop = target
+        setScrollTop(target)
       }
       return
     }
@@ -5897,17 +5946,48 @@ export function PendingPanel({
    * list, the advance a decision leaves behind, or the produced-file chip — and
    * that lands on the file's first change.
    */
-  const [landing, setLanding] = useState<{ fileId: string; top?: number | undefined; n: number } | undefined>(undefined)
-  /** Ask the diff to land on one file: its first change unless `top` says where.
+  const [landing, setLanding] = useState<{ fileId: string; top?: number | undefined; row?: number | undefined; n: number } | undefined>(undefined)
+  /** Ask the diff to land on one file: its first change unless `top` says where, or the row a jump
+   *  to a comment names (which lands the way a change-block jump does, see `landingRow`).
    *  The nonce makes the request an event rather than a value, so re-clicking the
    *  chip for the file already open lands on its first change again. */
-  const landOn = (fileId: string, top?: number | undefined): void => {
-    setLanding(prev => ({ fileId, top, n: (prev?.n ?? 0) + 1 }))
+  const landOn = (fileId: string, top?: number | undefined, row?: number | undefined): void => {
+    setLanding(prev => ({ fileId, top, row, n: (prev?.n ?? 0) + 1 }))
   }
   /** The selection as the latest render has it, for the closers that run from a
    *  cleanup (the docked tab unmounting) rather than from a handler. */
   const selectedRef = useRef(selected)
   selectedRef.current = selected
+  /**
+   * Which tab the list pane shows: the pending files, or every comment the files in the list carry.
+   * The pane's own state rather than a remembered preference: a reader who came to the list for a
+   * comment is in the comments tab while they read it, and the next time the panel opens it is the
+   * list they are shown — the pending list is what the panel is for.
+   */
+  const [listTab, setListTab] = useState<'pending' | 'comments'>('pending')
+  /**
+   * Whether this panel is commenting at all: with comment mode off there are no comments to list, so
+   * the pane is the pending list alone and shows no tabs. It follows the setting like the frame does
+   * (the Settings section is another mount).
+   */
+  const [commentMode, setCommentMode] = useState(commentModeEnabled)
+  /** The tabs the pane offers: the comments one exists only while the panel is commenting, so with
+   *  the mode off the pane has one view and no switch to offer. */
+  const listTabs = commentMode ? ['pending', 'comments'] as const : ['pending'] as const
+  /** The tab actually shown: the comments one only exists while the mode is on. */
+  const activeTab = commentMode ? listTab : 'pending'
+  useEffect(() => {
+    const onCommentMode = (): void => { setCommentMode(commentModeEnabled()) }
+    window.addEventListener(COMMENT_MODE_CHANGED_EVENT, onCommentMode)
+    return () => { window.removeEventListener(COMMENT_MODE_CHANGED_EVENT, onCommentMode) }
+  }, [])
+  /** Bumped when the threads change, so the comments tab re-reads them (see `rememberDiscussions`). */
+  const [commentsTick, setCommentsTick] = useState(0)
+  useEffect(() => {
+    const changed = (): void => { setCommentsTick(tick => tick + 1) }
+    window.addEventListener(COMMENTS_CHANGED_EVENT, changed)
+    return () => { window.removeEventListener(COMMENTS_CHANGED_EVENT, changed) }
+  }, [])
   /** Bumped when the already-open file is clicked again, to jump to the next
    * diff block in the open file's detail pane. */
   const [jumpSignal, setJumpSignal] = useState(0)
@@ -6800,6 +6880,32 @@ export function PendingPanel({
 
   const selectedFile = files.find(file => file.id === selected)
   /**
+   * Every comment the files in the list carry, in list order and then in the order their rows run:
+   * what the comments tab shows. A comment IS a block of rows in one file, so its label is the same
+   * `path:lines` reference the thread's own header wears, its title is the first sentence of what
+   * the reader asked (the first turn is the annotation; later ones are follow-ups), and an outdated
+   * one says so — the same state the block itself is wearing (see `[data-lost]`).
+   *
+   * The threads are held by the file detail, which is one mount at a time, so they are read back
+   * out of the memory the two share, and re-read whenever they change (`commentsTick`).
+   */
+  const commentEntries = useMemo(() => {
+    const threads = rememberedDiscussions(current)
+    return files.flatMap(file => (threads[file.id] ?? []).map(discussion => ({
+      id: discussion.id,
+      fileId: file.id,
+      row: discussion.anchor.start,
+      label: referenceLabelOf(file.path, snapshot.workspacePath, discussion.anchor.startLine, discussion.anchor.endLine),
+      title: commentTitle(discussion) || t('panel.commentEmptyTitle'),
+      lost: discussion.lost === true,
+    })))
+  }, [files, current, snapshot.workspacePath, commentsTick, t])
+  /** Open the file a comment hangs in and land on the comment, the way a change-block jump lands. */
+  const jumpToComment = (fileId: string, row: number): void => {
+    if (fileId !== selected) setSelected(fileId)
+    landOn(fileId, undefined, row)
+  }
+  /**
    * The folded card's own box, derived from the measured one, or undefined while
    * the list is not folded open. The card and its width grip are both placed from
    * these numbers, which is what keeps the grip on the card's right edge as the
@@ -6818,32 +6924,50 @@ export function PendingPanel({
   /** The file whose removal is being confirmed (a whole-file action), if any. */
   const promptEntry = filePrompt === null ? undefined : files.find(file => file.id === filePrompt.id)
 
-  // The file list's pinned heading, its scrollable rows, and the pinned bulk
-  // footer, shared by the in-flow left pane and the floating (collapsed) overlay.
-  // Only the rows scroll: the heading (and the add button beside it) stays put.
+  // The list pane's header (its tabs, and the fold-away toggle), its scrollable rows, and the pinned
+  // bulk footer, shared by the in-flow left pane and the floating (collapsed) overlay. Only the rows
+  // scroll: the header and the footer stay put.
   const fileListBody = (
     <>
       {files.length > 0 && (
-        <div className={css.groupHead}>
-          <h3 className={css.group}>{t('panel.group.current')}</h3>
-          <span className={css.flexSpacer} />
-          <Tooltip label={t('action.addPath')} side="bottom" delayMs={500}>
-            <button
-              type="button"
-              className={`${css.action} ${css.addButton}`}
-              data-diff-add
-              aria-label={t('action.addPath')}
-              onClick={() => { setAddOpen(true) }}
-            >
-              <IconPlusOutline16 size={12} />
-            </button>
-          </Tooltip>
-          {/* Beside Add: fold the list away for good, whatever the width allows.
-              The choice is stored, so it survives a reopen. */}
+        <div className={css.listHead}>
+          {/* One view is not a choice: with nothing to switch between, the same spot says which
+              list this is instead of offering a single tab. */}
+          {listTabs.length > 1 ? (
+            <div className={css.listTabs} role="tablist" aria-label={t('panel.tabs')}>
+              <button
+                type="button"
+                role="tab"
+                className={css.listTab}
+                data-diff-list-tab="pending"
+                aria-selected={activeTab === 'pending'}
+                onClick={() => { setListTab('pending') }}
+              >
+                {t('panel.tab.pending')}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                className={css.listTab}
+                data-diff-list-tab="comments"
+                aria-selected={activeTab === 'comments'}
+                onClick={() => { setListTab('comments') }}
+              >
+                {t('panel.tab.comments')}
+              </button>
+            </div>
+          ) : (
+            <h3 className={css.listTitle} data-diff-list-title>{t(`panel.tab.${activeTab}`)}</h3>
+          )}
+          {/* The tabs take the room up to the toggle themselves (the strip is the flexible item), so
+              the spacer is only what pushes the toggle over when a lone title leaves the row slack. */}
+          {listTabs.length <= 1 && <span className={css.flexSpacer} />}
+          {/* Fold the list away for good, whatever the width allows. The choice is stored, so it
+              survives a reopen. */}
           <Tooltip label={t(forceFloat ? 'action.fileListFloatOff' : 'action.fileListFloatOn')} side="bottom" delayMs={500}>
             <button
               type="button"
-              className={`${css.action} ${css.addButton}`}
+              className={`${css.action} ${css.addButton} ${css.listFold}`}
               data-diff-file-list-float
               data-active={forceFloat ? '' : undefined}
               aria-label={t(forceFloat ? 'action.fileListFloatOff' : 'action.fileListFloatOn')}
@@ -6855,30 +6979,89 @@ export function PendingPanel({
           </Tooltip>
         </div>
       )}
-      <div className={css.listScroll} data-diff-list-scroll ref={attachListScroll}>
-        {files.length > 0 && <ul className={css.rows}>{files.map(renderEntry)}</ul>}
-      </div>
-      {files.length > 0 && (
-        <div className={css.bulkActions}>
-          <button
-            type="button"
-            className={`${css.action} ${css.actionPrimary}`}
-            data-diff-keep-all
-            disabled={bulkBusy !== null}
-            onClick={() => { void runBulk('keep') }}
-          >
-            {bulkBusy === 'keep' ? t('action.busy') : t('action.keepAll')}
-          </button>
-          <button
-            type="button"
-            className={css.action}
-            data-diff-revert-all
-            disabled={bulkBusy !== null}
-            onClick={() => { void runBulk('revert') }}
-          >
-            {bulkBusy === 'revert' ? t('action.busy') : t('action.revertAll')}
-          </button>
+      {listTab === 'comments' ? (
+        <div className={css.listScroll} data-diff-list-scroll>
+          {commentEntries.length === 0
+            ? <p className={css.listEmpty} data-diff-comments-empty>{t('panel.commentsEmpty')}</p>
+            : (
+              <ul className={css.rows} data-diff-comment-list>
+                {commentEntries.map(entry => (
+                  <li key={entry.id} className={css.row}>
+                    {/* A control, but deliberately NOT a `<button>`: dsh-pocket's narrow-layout guard
+                        swallows the click on any `button, a` whose text looks like a file path — it
+                        answers with "you cannot open a file from the phone" instead of letting the
+                        press through — and this item's text can look like one (the label is a
+                        `path:lines` reference, and the reader's own words often name a file). It is
+                        still reachable and operable: focusable, and Enter or Space jumps.
+                        `data-mobile-nav-copy` is pocket's own "already handled" mark, kept so it adds
+                        no copy-file button here either — this is a way to a comment, not a file. */}
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      className={css.commentRow}
+                      data-diff-comment-link={entry.id}
+                      data-mobile-nav-copy="1"
+                      onClick={() => { jumpToComment(entry.fileId, entry.row) }}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Enter' && event.key !== ' ') return
+                        event.preventDefault()
+                        jumpToComment(entry.fileId, entry.row)
+                      }}
+                    >
+                      <span className={css.commentHead}>
+                        <span className={css.commentLabel} data-diff-comment-label>{entry.label}</span>
+                        {entry.lost && (
+                          <span className={css.commentLost} data-diff-comment-lost>{t('panel.commentOutdated')}</span>
+                        )}
+                      </span>
+                      <span className={css.commentTitle} data-diff-comment-title>{entry.title}</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
         </div>
+      ) : (
+        <>
+          <div className={css.listScroll} data-diff-list-scroll ref={attachListScroll}>
+            {files.length > 0 && <ul className={css.rows}>{files.map(renderEntry)}</ul>}
+          </div>
+          {files.length > 0 && (
+            <div className={css.bulkActions}>
+              <button
+                type="button"
+                className={`${css.action} ${css.actionPrimary}`}
+                data-diff-keep-all
+                disabled={bulkBusy !== null}
+                onClick={() => { void runBulk('keep') }}
+              >
+                {bulkBusy === 'keep' ? t('action.busy') : t('action.keepAll')}
+              </button>
+              <button
+                type="button"
+                className={css.action}
+                data-diff-revert-all
+                disabled={bulkBusy !== null}
+                onClick={() => { void runBulk('revert') }}
+              >
+                {bulkBusy === 'revert' ? t('action.busy') : t('action.revertAll')}
+              </button>
+              {/* Add goes last, past the decisions: it is how a path JOINS the list, and the two
+                  decisions to its left are about the files already in it. Its own mark and label, so
+                  a third button in the row is read as a way in rather than as another decision. */}
+              <button
+                type="button"
+                className={`${css.action} ${css.addPath}`}
+                data-diff-add
+                aria-label={t('action.addPath')}
+                onClick={() => { setAddOpen(true) }}
+              >
+                <IconPlusOutline16 size={12} />
+                {t('panel.addPathGo')}
+              </button>
+            </div>
+          )}
+        </>
       )}
     </>
   )
@@ -7323,6 +7506,7 @@ export function PendingPanel({
                     // tick makes a repeated request for the same file land again.
                     landingTop={landing !== undefined && landing.fileId === selectedFile.id ? landing.top : undefined}
                     landingTick={landing !== undefined && landing.fileId === selectedFile.id ? landing.n : 0}
+            landingRow={landing !== undefined && landing.fileId === selectedFile.id ? landing.row : undefined}
                     failedMessage={failed.get(selectedFile.id)}
                     commentSkill={snapshot.commentSkill}
                     onPasteReference={onPasteReference}

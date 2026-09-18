@@ -38,6 +38,14 @@ const views = new Map<string, SessionView>()
 const threads = new Map<string, Readonly<Record<string, readonly Discussion[]>>>()
 
 /**
+ * Fired on `window` whenever a session's threads change. The threads are written by the file
+ * detail (which owns them) and read by the list pane (whose comments tab shows them all), so the
+ * event is what keeps the two in step: a reader who posts a comment sees it in the list at once
+ * instead of on the next poll.
+ */
+export const COMMENTS_CHANGED_EVENT = 'dsh-diff-approval:comments-changed'
+
+/**
  * The comment threads a session's panel is holding.
  * @param sessionId - the session, if any.
  * @returns the threads by pending entry id; empty when there are none.
@@ -59,7 +67,11 @@ export function rememberDiscussions(
   byFile: Readonly<Record<string, readonly Discussion[]>>,
 ): void {
   if (sessionId === undefined) return
+  const before = threads.get(sessionId)
   threads.set(sessionId, byFile)
+  if (before === byFile) return
+  if (typeof window === 'undefined') return
+  window.dispatchEvent(new CustomEvent(COMMENTS_CHANGED_EVENT, { detail: { sessionId } }))
 }
 
 /** This session's record, created on first use. */
