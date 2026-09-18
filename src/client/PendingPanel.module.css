@@ -2288,12 +2288,42 @@
   cursor: default;
 }
 
-/* The code cells' font, applied where the body is declared so `1em` resolves
-   against the theme's code size - the same two-step the rows use (`.diffBody`
-   shorthand + `.lines` scale). */
-.discussionHead,
-.discussionBody {
+/* The header's own labels are code references — a path and a range, the same vocabulary the copy
+   control speaks — so they keep the code face at the chrome size the row sets. */
+.discussionHead {
   font: var(--dsw-font-markdown-code-block);
+}
+
+/* The thread's own text is the app's message text, not the code's: the very shorthand the chat's
+   markdown body wears (`--dsw-font-markdown-base` — the reader's content font size, in the UI
+   family, over that family's own line height), so a comment reads exactly like the message it came
+   from, and a reader who changes the content font size moves both together.
+   `1em` inside the body now resolves against THIS size, which is why the quote pins its own (see
+   `.quoteLines`) — the quote is code and has to stay on the file's grid.
+   The probe is a zero-sized span carrying this same font and nothing else: the panel measures the
+   thread's wrap on canvas (`threadFontOf`), and canvas wants the face and the size without the
+   line height, which is the one part of a shorthand a canvas font string cannot take. */
+.discussionBody,
+.threadFontProbe {
+  font: var(--dsw-font-markdown-base);
+  /* Two points under the app's own message text. Family and line height still come from the
+     shorthand above, and every turn overrides the line height with the thread's own fixed row
+     anyway — only the size steps down, so a comment still reads as the conversation it belongs to
+     while it sits inside a code view. The base is read as the reader's content size rather than as
+     a literal, so moving that setting moves this with it; the token's own fallback has to be
+     repeated here, because a custom property is substituted per declaration and the shorthand above
+     cannot hand its `14px` down to this line. */
+  font-size: calc(var(--dsh-content-font-size, 14px) - 2px);
+}
+
+/* No box of its own: the probe is read, never seen. */
+.threadFontProbe {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 /* The thread's own row is a FIXED 22px — the panel's `THREAD_ROW_PX` mirrors it. A thread is
@@ -2393,10 +2423,13 @@
      bubble is rounder still — 22px, which on a one-line turn is a pill — but a thread that
      lives between two code rows reads better as a rounded rectangle than as a capsule. */
   border-radius: 8px 0 8px 8px;
-  /* The chat's own bubble fill, mixed down rather than laid on: the thread hangs inside the code
-     view, and the block's hatch (or the code surface, when the thread is live) has to read through
-     the bubble — an opaque one turns the turn into a card sitting on the diff. */
-  background: color-mix(in srgb, var(--dsw-specific-bubble, var(--dsw-alias-bg-layer-2, var(--dsw-alias-interactive-bg-hover))) 80%, transparent);
+  /* The chat's own bubble fill, the token itself: the colour the conversation paints behind a
+     message of the reader's (`var(--dsw-specific-bubble)`, the same one `.userStack` uses), so the
+     turn reads as the same bubble it was written in. It used to be mixed 80% with transparent, so
+     the code's tints and the block's hatch could read through it — which bought that at the price of
+     a paler colour than the chat's, and a bubble that is not the chat's colour is not the same
+     bubble. Opaque, the hatch stops at its edge. */
+  background: var(--dsw-specific-bubble, var(--dsw-alias-bg-layer-2, var(--dsw-alias-interactive-bg-hover)));
   color: var(--dsw-alias-label-primary);
   font-family: inherit;
   line-height: 22px;
@@ -2406,24 +2439,49 @@
   cursor: text;
 }
 
-/* Inline code in a turn. The thread's prose is already the code font — that is what keeps it on
-   the row grid — so the chip is what says "this is code": the app's own inline-code fill, and a
-   hairline that defines it where that fill is a hair off the surface (in the light theme
-   `--dsw-alias-markdown-inline-code` is #fafafa on a near-white surface, which on its own reads
-   as nothing — and `--dsw-alias-bg-layer-2` is worse: it resolves to the *same* step as
-   `--dsw-alias-bg-base` there, which is why the first version was invisible).
-   The hairline is an inset shadow rather than a border on purpose: a border would add a pixel to
-   the run, and the run has to measure exactly as its text does, or the line wraps somewhere the
-   row count did not predict. No padding for the same reason. Bold needs no fill of its own. */
+/* Inline code in a turn: the conversation's own inline code, declaration for declaration. The
+   shell's markdown sets its chip as
+   `display: inline-flex; align-items: center; box-sizing: border-box; font: var(--dsw-font-markdown-code);
+   font-family: var(--ds-font-family-code); font-size: .875em; background-color: <inline-code token>;
+   border: .5px solid var(--dsw-alias-border-l1); border-radius: 6px; padding: 0 5px`
+   and this is that list, with two deliberate differences:
+   — the fill is mixed toward the secondary label (see the note on it below): the token alone is
+     picked against the chat's own surface and reads as nothing over a diff's tints;
+   — `!important` is left off the size: nothing here competes with it, and the chat only needs it
+     because its own markdown rules are written against the prose element.
+   The inline-flex half is what the box IS, not decoration: the chip is one unit in the line, so it
+   is centred in its own line box (19px from the token's shorthand, not the thread's 22px row) and a
+   chip at the end of a line moves over whole rather than losing half of itself to the wrap. That
+   last part is why the panel's own wrap knows about chips at all — see `wrapChipRows`.
+   Everything the wrap has to know is mirrored in the panel: `DISCUSSION_CODE_PADDING_PX`,
+   `DISCUSSION_CODE_BORDER_PX` and `DISCUSSION_CODE_FONT_SCALE`. */
 .discussionCode {
-  /* A little air around the run so it reads as a chip rather than a highlighted word. Only the
-     sides: vertical padding would make the line box taller than the thread's own row. The panel
-     mirrors this number (`DISCUSSION_CODE_PADDING_PX`) and takes it off the wrap width, so a
-     chip near the line's end wraps where the row count says it does. */
-  padding: 0 2px;
-  border-radius: 4px;
-  background: var(--dsw-alias-markdown-inline-code, var(--dsw-alias-interactive-bg-hover-solid));
-  box-shadow: inset 0 0 0 1px var(--dsw-alias-border-l1);
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  font: var(--dsw-font-markdown-code);
+  font-family: var(--ds-font-family-code);
+  font-size: 0.875em;
+  /* The one number that cannot come from the chat's chip as it stands. Its shorthand gives the chip
+     a 19px line box, which is a fifth of the 24px row the conversation draws in; a thread's row is
+     22px (the block is laid out in whole 22px rows), and a chip that tall pushes the line it sits in
+     to 23px — measured: one pixel of the block's own row budget, gone, on every line that carries a
+     chip, and the block clips what it did not reserve. 16px keeps the box (18px with its hairline)
+     inside the row: the same share of a 22px row that 19px is of a 24px one. Everything else about
+     the box — inline-flex, the centring, the fill, the radius, the padding, the hairline — is the
+     chat's, declaration for declaration. */
+  line-height: 16px;
+  /* The app's own inline-code fill, mixed 10% of the way toward the secondary label. The chat can
+     wear the raw token: its chip sits in prose the reader is already reading, on a surface the token
+     was picked against. A chip in here has the code's own tints and the block's hatch behind it too,
+     and #fafafa on a near-white block reads as no chip at all. The label colour is the one that
+     always tells against the surface (mid grey on light, light grey on dark), so mixing it in makes
+     the chip read in either theme instead of vanishing in one of them. This is the tuning knob: the
+     higher the token's share, the quieter the chip. */
+  background: color-mix(in srgb, var(--dsw-alias-markdown-inline-code, var(--dsw-alias-interactive-bg-hover-solid)) 90%, var(--dsw-alias-label-secondary));
+  border: 0.5px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  padding: 0 5px;
 }
 
 /* Bold inside a turn, and nothing drawn on top of it: 700 is the weight the browser's own
@@ -2501,10 +2559,12 @@
   margin: 0 -12px 0 -15px;
   border-spacing: 0;
   color: var(--dsw-alias-label-primary);
-  /* The quote is the file's code, so it takes the file's own type settings: the reader's line
-     height and font scale, the same two variables the code rows read. (The rest of the thread does
-     not — a thread is prose and keeps the fixed row `THREAD_ROW_PX` mirrors.) */
-  font-size: calc(1em * var(--dsh-diff-font-scale, 1));
+  /* The quote IS the file's code, so it pins the code's own face and base size here — the thread
+     around it is the app's message text now (see `.discussionBody`), and an unscaled `1em` would
+     resolve against that instead. The reader's own line height and font scale are applied on top of
+     this, the same two-step the code view itself uses (the shorthand on the parent, the scale on the
+     child), which is what keeps the quoted columns on the file's grid. */
+  font: var(--dsw-font-markdown-code-block);
   line-height: var(--dsh-diff-line-height, 22px);
   /* The code an outdated thread quotes sits on a flat tint of the surface, so the block it hangs
      in stays its own colour and the quoted lines read as code rather than as a box drawn around
@@ -2527,6 +2587,9 @@
    rows — see the quote's share of `layoutDiscussion`). */
 .quoteLine {
   display: table-row;
+  /* `1em` here is the quote's own base size (the code token's, pinned on `.quoteLines` above), not
+     the thread's prose size — that is the whole reason the scale moved down to this row. */
+  font-size: calc(1em * var(--dsh-diff-font-scale, 1));
   height: var(--dsh-diff-line-height, 22px);
 }
 

@@ -20,7 +20,7 @@ import { chordLabel, closeHint, summonHint, withChord } from './chords.ts'
 import { blockRangesOf, changeBlocksOf, computeIntraLineDiff, computeWholeFileDiff } from './whole-file-diff.ts'
 import {
   DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, discussionOverlapping,
-  discussionPlainText, discussionRowExtras, discussionRows, discussionRounds, discussionRuns, discussionText,
+  discussionRowExtras, discussionRows, discussionRounds, discussionRuns, discussionText,
   remapDiscussions, selectionFrame, stripBlankLines,
 } from './discussion.ts'
 import type { Discussion, DiscussionMessage, DiscussionQuoteLine } from './discussion.ts'
@@ -263,6 +263,12 @@ const DOCK_REVEAL_GRACE_MS = 400
 
 /** A shared canvas for measuring wrapped line heights (CPU-only, no DOM reflow). */
 let measureCanvas: CanvasRenderingContext2D | undefined
+/**
+ * The font `measureCanvas` is currently set to, so a measurer can put its own back before it asks
+ * for a width (see `makeMeasurer`). Every measurer shares the one context, and two of them are
+ * alive at once — the thread's prose and its inline-code chips.
+ */
+let measureCanvasFont: string | undefined
 
 /**
  * Compute a diff line's visual sub-lines for soft wrap the way VSCode does it:
@@ -410,21 +416,101 @@ export function wrapInto(text: string, widthPx: number, measure: (t: string) => 
 }
 
 /**
- * Resolve the thread's own prose font for canvas measurement: the code font at the size the
- * thread draws it, which is the token's own size — the code cell's computed size is that times
- * the reader's font scale (see `codeFontOf`), and the thread does not follow the scale. The
- * string is rebuilt from the individual properties because canvas accepts no line height.
+ * Wrap one line of a turn the way the browser lays it out: the prose by character, each inline-code
+ * chip as one box that cannot be broken.
+ *
+ * `wrapInto` walks characters and nothing else, which is right for the code view and wrong here:
+ * a turn's chip is an inline-flex box (the chat's own inline code, see `.discussionCode`), so half
+ * of a chip never lands on the next line — it moves over whole, and the text after it starts after
+ * the box rather than inside it. Measuring the chip as ordinary text therefore reserves the wrong
+ * number of rows on exactly the lines that carry one, and a row too few is a clipped last line.
+ *
+ * The prose segments are wrapped by `wrapInto` itself, so a line with a chip in it breaks its words
+ * and its spaces exactly where a line without one does; only the chips are placed as boxes.
+ *
+ * @param line - the line's text, markers and all: the runs are read the way the render reads them.
+ * @param room - the width the line wraps in.
+ * @param measure - the prose measurer.
+ * @param chipWidth - the width of one chip's BOX (its text in the chip's own font, plus its padding
+ *   and its hairline).
+ * @param tabPx - one tab stop, in px.
+ * @returns the row count for the line.
+ */
+export function wrapChipRows(
+  line: string,
+  room: number,
+  measure: (text: string) => number,
+  chipWidth: (text: string) => number,
+  tabPx: number,
+): number {
+  let rows = 1
+  let used = 0
+  for (const run of discussionRuns(line)) {
+    if (run.kind === 'code') {
+      const width = chipWidth(run.text)
+      // One box: it either fits where the line has got to, or it starts the next line. A chip wider
+      // than the line itself stays put and overflows, which is what the browser does with it too.
+      if (used > 0 && used + width > room) {
+        rows += 1
+        used = 0
+      }
+      used += width
+      continue
+    }
+    if (run.text === '') continue
+    // A chip that overflowed left no room to wrap in: the rest of the line starts a fresh row.
+    // (The browser would flow on after the box; counting a row here is the safe side of that, and
+    // an over-wide chip is a degenerate line either way.)
+    if (used > room) {
+      rows += 1
+      used = 0
+    }
+    const parts = wrapInto(run.text, room - used, measure, tabPx)
+    rows += parts.length - 1
+    const last = parts[parts.length - 1] ?? ''
+    used = parts.length === 1
+      ? used + charsWidth(Array.from(run.text), measure, tabPx)
+      : charsWidth(Array.from(last), measure, tabPx)
+  }
+  return rows
+}
+
+/**
+ * Resolve the thread's own prose font for canvas measurement: the font the turns are drawn in.
+ *
+ * That is the app's message text (see `.discussionBody`), and the probe span is what carries it:
+ * the turns themselves may not be in the DOM yet when a block is measured — the first render of a
+ * new annotation happens before its bubble exists — while the probe is there as long as the panel
+ * is. Reading the code cell was what this used to do, back when the thread was set in the code's
+ * own face; the code cell still answers `codeFontOf`, and the chip its own (see `chipFontOf`).
+ *
+ * The string is rebuilt from the individual properties because canvas accepts no line height.
+ *
+ * @returns a canvas `font` string, or undefined when the panel is not mounted.
+ */
+function threadFontOf(): string | undefined {
+  const probe = document.querySelector<HTMLElement>('[data-diff-thread-font]')
+  if (probe === null) return undefined
+  const computed = getComputedStyle(probe)
+  return `${computed.fontStyle} ${computed.fontWeight} ${computed.fontSize} ${computed.fontFamily}`
+}
+
+/**
+ * Resolve the inline-code chip's font for canvas measurement: the code face at
+ * `DISCUSSION_CODE_FONT_SCALE` of the thread's prose size, which is what `.discussionCode` asks
+ * for with `font-size: 0.875em`. The family comes off a code cell, which wears the same code token
+ * the chip does.
  *
  * @returns a canvas `font` string, or undefined when there is no code cell to read.
  */
-function threadFontOf(): string | undefined {
+function chipFontOf(): string | undefined {
+  const prose = document.querySelector<HTMLElement>('[data-diff-thread-font]')
   const code = document.querySelector<HTMLElement>('[data-diff-code]')
-  if (code === null) return undefined
+  if (prose === null || code === null) return undefined
+  const size = Number.parseFloat(getComputedStyle(prose).fontSize)
+  if (!Number.isFinite(size)) return undefined
   const computed = getComputedStyle(code)
-  const size = Number.parseFloat(computed.fontSize)
-  const scale = diffFontScale() / 100
-  const unscaled = Number.isFinite(size) && scale > 0 ? size / scale : size
-  return `${computed.fontStyle} ${computed.fontWeight} ${unscaled}px ${computed.fontFamily}`
+  return `${computed.fontStyle} ${computed.fontWeight} ${size * DISCUSSION_CODE_FONT_SCALE}px ${computed.fontFamily}`
 }
 
 /** Resolve the code cell's computed font for canvas measurement. */
@@ -447,7 +533,21 @@ export function makeMeasurer(font: string | undefined): ((text: string) => numbe
   }
   const ctx = measureCanvas
   if (ctx === undefined) return undefined
-  if (font !== undefined) ctx.font = font
+  // The canvas's font is the context's own state, and every measurer shares the one context — so it
+  // is set per call, not once here. Two measurers are alive at the same time (a thread's prose and
+  // its inline-code chips, which are drawn in the code face at a share of the prose size), and a
+  // measurer that set its font at creation left the OTHER one measuring in the wrong face from then
+  // on: the wrap came out a line off — too many rows for a line of Latin (the code face is wider
+  // there) and too few for a line of CJK, which is a block that either leaves a gap under the turns
+  // or clips the writing row. Setting it here costs a string compare per ask and the context only
+  // ever parses a font string when it actually changed.
+  const current = (): CanvasRenderingContext2D => {
+    if (font !== undefined && measureCanvasFont !== font) {
+      ctx.font = font
+      measureCanvasFont = font
+    }
+    return ctx
+  }
   // One `measureText` per DISTINCT character, not per character drawn. The wrap walks a line
   // character by character and sums the advances, so a file asks for the same handful of widths
   // tens of thousands of times — and the canvas call is the expensive half of that loop. A
@@ -456,10 +556,10 @@ export function makeMeasurer(font: string | undefined): ((text: string) => numbe
   // it asks for again and again, and keying whole lines would just hold the file in memory.
   const widths = new Map<string, number>()
   return text => {
-    if (text.length !== 1) return ctx.measureText(text).width
+    if (text.length !== 1) return current().measureText(text).width
     const cached = widths.get(text)
     if (cached !== undefined) return cached
-    const width = ctx.measureText(text).width
+    const width = current().measureText(text).width
     widths.set(text, width)
     return width
   }
@@ -503,7 +603,27 @@ const THREAD_ROW_PX = 22
  * Without it a line whose chip ends near the wrap point would wrap in the DOM where the count
  * said it did not — which is a row too few, and a clipped last line.
  */
-const DISCUSSION_CODE_PADDING_PX = 2
+const DISCUSSION_CODE_PADDING_PX = 5
+
+/**
+ * The inline-code chip's own border width, in px (mirrors `.discussionCode`'s `border: 0.5px`, which
+ * is the chat's own hairline): the chip's box is its text plus the padding plus this on each side.
+ *
+ * The stylesheet says 0.5px and this says 1px on purpose: a non-zero border is laid out a whole
+ * pixel wide (measured in Blink at both 1x and 2x — the chip's own box comes out 2px wider than its
+ * text and padding), so a model built on the half pixel would under-reserve by a pixel a chip, and
+ * a row too few is a clipped line.
+ */
+const DISCUSSION_CODE_BORDER_PX = 1
+
+/**
+ * The share of the thread's prose size an inline-code chip is drawn at (mirrors
+ * `.discussionCode`'s `font-size: 0.875em`, which is the chat's own inline code against its own
+ * message text). The chip is measured in its own font, not in the prose one — a code face at
+ * twelve and a bit pixels is not the UI face at fourteen — so the row count follows the run the
+ * reader actually sees.
+ */
+const DISCUSSION_CODE_FONT_SCALE = 0.875
 
 /** The thread's own side inset in px (mirrors `.discussionBody`'s padding): the one
  * column every turn starts from, so no turn carries a side inset of its own. */
@@ -3274,13 +3394,19 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     const wrapping = width - measure('0')
     if (wrapping <= 0) return lines.length + chrome
     const tabPx = tabWidthSpaces * measure(' ')
-    return chrome + lines.reduce((rows, line) => {
-      // Each chip on the line is `2 × padding` wider than the text it shows, so the line wraps
-      // that much sooner. Counted per line, because that is where it lands.
-      const chips = discussionRuns(line).filter(run => run.kind === 'code').length
-      const room = wrapping - chips * 2 * DISCUSSION_CODE_PADDING_PX
-      return rows + Math.max(1, wrapInto(line, room, measure, tabPx).length)
-    }, 0)
+    // A chip is a box, not text: its own font (see `chipFontOf`), its padding and its hairline.
+    const chipMeasure = makeMeasurer(chipFontOf())
+    const chipWidth = (text: string): number => (
+      (chipMeasure === undefined ? measure(text) : chipMeasure(text))
+      + 2 * (DISCUSSION_CODE_PADDING_PX + DISCUSSION_CODE_BORDER_PX)
+    )
+    return chrome + lines.reduce((rows, line) => (
+      // Always the chip-aware walk, never a plain `wrapInto` on the line: a line with no chip in it
+      // comes out of it as one text run, which is the same `wrapInto` on the same characters. What
+      // this must NOT be handed is the text with its markers stripped — `discussionRuns` is what
+      // finds a chip, and stripped text has none left to find (see `messageSizeOf`).
+      rows + Math.max(1, wrapChipRows(line, wrapping, measure, chipWidth, tabPx))
+    ), 0)
   }, [bodyWidth, tabWidthSpaces, discussionRightInsetPx])
 
   /**
@@ -3320,7 +3446,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
    * @returns its size in code rows.
    */
   const messageSizeOf = useCallback((message: DiscussionMessage): number => {
-    return messageRowsOf(discussionPlainText(discussionText(message)), message.role)
+    // The text the turn DRAWS, markers included: `messageRowsOf` reads its runs, and a chip's box —
+    // its padding, its hairline and the code face it draws its text in — is only visible in the
+    // markers. Measuring the plain text instead (which is what this did) counted every chip as
+    // ordinary prose, so a line ending in one reserved a row less than it drew and the writing row
+    // below it was pushed out of the block, which clips what it did not reserve.
+    return messageRowsOf(discussionText(message), message.role)
   }, [messageRowsOf])
 
   /**
@@ -7298,6 +7429,10 @@ export function PendingPanel({
               t={t}
             />
           )}
+          {/* The thread's own prose font, for the canvas: a zero-sized span wearing the same font
+              the turns are drawn in (see `.discussionBody` and `threadFontOf`), so the wrap can be
+              measured before the first turn of a new annotation exists. Never seen, never focused. */}
+          <span className={css.threadFontProbe} data-diff-thread-font aria-hidden="true" />
           </section>
         </>,
         docked && dockHost !== undefined ? dockHost : document.body,

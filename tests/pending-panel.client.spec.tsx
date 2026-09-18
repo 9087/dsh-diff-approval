@@ -10,7 +10,7 @@ import { Component } from 'react'
 import type { ComponentProps, ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingFileDiff } from '../src/types.ts'
-import { PendingPanel, frameInsets, makeMeasurer } from '../src/client/PendingPanel.tsx'
+import { PendingPanel, frameInsets, makeMeasurer, wrapChipRows } from '../src/client/PendingPanel.tsx'
 import { lastPanelFile, panelFileOffset, resetPanelMemory } from '../src/client/panel-memory.ts'
 import { setCommentModeEnabled } from '../src/client/settings.ts'
 import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
@@ -1514,17 +1514,17 @@ describe('PendingPanel', () => {
     }
   })
 
-  it('fills what the user said with the chat\'s own bubble colour, mixed down', () => {
+  it('fills what the user said with the chat\'s own bubble colour', () => {
     // A discussion reads as a small chat, so the user's turns carry the fill the
-    // conversation's own bubbles use (`--dsw-specific-bubble`, the token the chat's
-    // message bubble is painted with). The generic surface token this started with
-    // reads as no fill at all inside the code view, which loses the "the user is
-    // speaking" cue the bubble is there for — and it is mixed down rather than opaque,
-    // because whatever the block is drawn on has to read through the turn.
+    // conversation's own bubbles use (`--dsw-specific-bubble`, the very token `ui-chat`'s
+    // `.bubble` is painted with) — the token itself, not a mix of it: a bubble that is a
+    // paler colour than the chat's is not the same bubble. The generic surface token this
+    // started with reads as no fill at all inside the code view, which loses the "the user
+    // is speaking" cue the bubble is there for.
     const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
-    const block = /\.discussionUser \{([^}]*)\}/.exec(css)?.[1] ?? ''
-    expect(block).toContain('background: color-mix(in srgb, var(--dsw-specific-bubble')
-    expect(block).toContain('80%, transparent)')
+    const block = /^\.discussionUser \{([^}]*)\}/m.exec(css)?.[1] ?? ''
+    expect(block).toContain('background: var(--dsw-specific-bubble')
+    expect(block).not.toContain('color-mix')
     // A rounded rectangle, at the panel's 8px: the bubble is the one soft shape in
     // the block, and the fill is what makes it read as "the user said this".
     expect(block).toContain('border-radius: 8px')
@@ -1579,7 +1579,26 @@ describe('PendingPanel', () => {
     for (const name of ['quoteLines', 'quoteLine']) {
       expect(own(name), name).toContain('--dsh-diff-line-height')
     }
-    expect(own('quoteLines')).toContain('--dsh-diff-font-scale')
+    // The quote pins the code's own face and base size, and the reader's scale rides the quote's
+    // own rows: an unscaled `1em` would resolve against the thread's prose size instead, which is
+    // the app's message text now (see below) rather than the code token's.
+    expect(own('quoteLines')).toContain('font: var(--dsw-font-markdown-code-block)')
+    expect(own('quoteLine')).toContain('--dsh-diff-font-scale')
+    // The thread's own text IS the app's message text: the shorthand the chat's markdown body
+    // wears, which is where the reader's content font size lives. The header keeps the code face
+    // (its labels are a path and a range — references, not prose), and the probe span carries the
+    // prose font for the canvas wrap (`threadFontOf`).
+    const proseFont = /^\.discussionBody,\s*\n\.threadFontProbe \{([^}]*)\}/m.exec(css)?.[1] ?? ''
+    expect(proseFont).toContain('font: var(--dsw-font-markdown-base)')
+    expect(own('discussionHead')).toContain('font: var(--dsw-font-markdown-code-block)')
+    // The probe shares the prose font with the body (one rule, two selectors) and adds a box that
+    // cannot be seen or laid out — so it is read by the measurement and by nothing else.
+    const probe = [...css.matchAll(/^\.threadFontProbe \{([^}]*)\}/gm)]
+      .map(match => match[1] ?? '')
+      .join('\n')
+    expect(probe).toContain('position: absolute')
+    expect(probe).toContain('width: 0')
+    expect(probe).toContain('visibility: hidden')
     // The "older turns omitted" line is quieter than a status note: it is about the
     // thread's length, not about the turn, so it sits one label lighter.
     const noteColor = /color: ?([^;]+);/.exec(own('discussionNote'))?.[1]?.trim()
@@ -5035,22 +5054,32 @@ describe('PendingPanel', () => {
     expect(answer.querySelector('strong')?.textContent).toBe('always')
     expect(answer.textContent).toBe('use x always')
 
-    // Both pieces have to be *visible*, which is a stylesheet question jsdom cannot answer:
-    // the chip is a fill plus a hairline drawn inside it (a border would widen the run, and the
-    // run must measure as its text does), and bold is helped past the code font's faint bold
-    // face by a hair of stroke. The fill must not be a surface step: in the light theme
-    // `bg-layer-2` resolves to the same step as `bg-base`, which is why it read as nothing.
+    // Both pieces have to be *visible*, which is a stylesheet question jsdom cannot answer: the
+    // chip is the chat's own inline code (box, face, fill and hairline all declared the way the
+    // shell's markdown declares them), and bold is the browser's own. The fill must not be a
+    // surface step: in the light theme `bg-layer-2` resolves to the same step as `bg-base`, which
+    // is why it read as nothing.
     const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const chip = /\.discussionCode \{([^}]*)\}/.exec(css)?.[1] ?? ''
     expect(chip).toContain('--dsw-alias-markdown-inline-code')
     expect(chip).not.toContain('--dsw-alias-bg-layer-2')
-    expect(chip).toContain('box-shadow: inset 0 0 0 1px')
-    expect(chip).not.toContain('border:')
-    // The chip carries side padding (the panel mirrors it as `DISCUSSION_CODE_PADDING_PX` and
-    // measures it off the line), and no vertical padding: a taller line box would leave the
-    // thread's own row.
-    expect(chip).toContain('padding: 0 2px')
+    // The chat's own inline code, declaration for declaration: an inline-flex box, the code face at
+    // 0.875 of the prose size, its 6px radius, its 0 5px padding and its 0.5px hairline.
+    expect(chip).toContain('display: inline-flex')
+    expect(chip).toContain('align-items: center')
+    expect(chip).toContain('box-sizing: border-box')
+    expect(chip).toContain('font: var(--dsw-font-markdown-code)')
+    expect(chip).toContain('font-family: var(--ds-font-family-code)')
+    expect(chip).toContain('font-size: 0.875em')
+    expect(chip).toContain('border-radius: 6px')
+    expect(chip).toContain('border: 0.5px solid var(--dsw-alias-border-l1)')
+    expect(chip).not.toContain('box-shadow: inset')
+    // Side padding only (the panel mirrors it as `DISCUSSION_CODE_PADDING_PX`, and the hairline as
+    // `DISCUSSION_CODE_BORDER_PX`): a taller line box would leave the thread's own row.
+    expect(chip).toContain('padding: 0 5px')
     expect(chip).not.toMatch(/padding: [^;]*px [^;]*px [^;]*px/)
+    // The probe the panel measures the thread's prose font from is really rendered.
+    expect(document.querySelector('[data-diff-thread-font]')).not.toBeNull()
     const bold = /\.discussionBody strong \{([^}]*)\}/.exec(css)?.[1] ?? ''
     // The browser's own bold and nothing drawn on top of it: the stroke that used to help it tell
     // read as a smudge at the thread's size.
@@ -7745,6 +7774,70 @@ describe('PendingPanel', () => {
     // keeping, and caching whole lines would hold the file in memory.
     measure?.('const')
     expect(asked.at(-1)).toBe('const')
+  })
+
+  it('keeps two measurers measuring in their own fonts', async () => {
+    // Every measurer shares the panel's one canvas, and its font is the canvas's own state — so a
+    // measurer that set its font once, when it was created, left whichever measurer came next
+    // asking in the wrong face. Two are alive at the same time in a thread: its prose, and the
+    // inline-code chips, drawn in the code face at a share of the prose size. The wrapped row count
+    // came out a line off in whichever direction the wrong face is wider — a gap under the turns, or
+    // a clipped writing row.
+    //
+    // The canvas is made once and kept for the panel's lifetime, so this asks for a fresh copy of
+    // the module: another test has already filled its cache with a canvas of its own.
+    const context = {
+      font: '10px sans-serif',
+      measureText: (text: string) => ({ width: text.length * Number.parseFloat(context.font) }),
+    }
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(context as never)
+    vi.resetModules()
+    const { makeMeasurer: fresh } = await import('../src/client/PendingPanel.tsx')
+    const prose = fresh('12px prose')
+    const chip = fresh('9px chip')
+    expect(prose?.('abc')).toBe(36)
+    expect(chip?.('abc')).toBe(27)
+    // …and back again: the prose measurer is still the prose measurer.
+    expect(prose?.('abc')).toBe(36)
+    // The per-character cache is the measurer's own, so an ask the other one warmed is still that
+    // measurer's own width.
+    expect(prose?.('a')).toBe(12)
+    expect(chip?.('a')).toBe(9)
+    expect(prose?.('a')).toBe(12)
+  })
+
+  it('wraps a turn with its inline-code chips as boxes, not as text', () => {
+    // A turn's chip is an inline-flex box (the chat's own inline code — see `.discussionCode`), so
+    // the browser never puts half of one at the end of a line: the box moves over whole and the
+    // text after it starts after the box. A character walk measures the chip's text as ordinary
+    // text and reserves the wrong number of rows on exactly the lines that carry one — and a row
+    // too few is a clipped last line, which is why this walks chips itself.
+    const width = (text: string): number => text.length * 10
+    const chip = (text: string): number => width(text) + 12 // 2 × (5px padding + the 1px hairline)
+    // Ten characters are exactly the room, so the prose alone is one row — but the chip's box is
+    // 21px and does not fit in what is left of that row, and an inline-flex box moves over whole.
+    expect(wrapChipRows('12345678 `a`', 100, width, chip, 80)).toBe(2)
+    // The chip's own text is not the measure: the same characters with the markers off are one row.
+    expect(wrapChipRows('12345678 a', 100, width, chip, 80)).toBe(1)
+    // A chip that does fit where the line has got to stays there — box, padding and hairline and
+    // all — and the prose after it follows it on the same row.
+    expect(wrapChipRows('12 `ab` 34', 100, width, chip, 80)).toBe(1)
+    // The prose after a chip that moved over wraps in the room the box left, which is a row of its
+    // own once the box and its tail no longer fit together.
+    expect(wrapChipRows('12345678 `abcd` 9999', 100, width, chip, 80)).toBe(3)
+  })
+
+  it('measures a turn from the text it draws, markers and all', () => {
+    // A chip's box is only visible to the row model if the model is handed the text WITH its
+    // markers: `discussionRuns` is what finds a chip, and text with the markers stripped has none
+    // left to find. Handing it the stripped text — which is what the panel used to do — measured
+    // every chip as ordinary prose: no padding, no hairline, the prose face instead of the code
+    // one, and nothing to say it cannot be broken across two lines. A line ending in a chip then
+    // reserved a row less than it drew, which pushed the writing row out of the bottom of the
+    // block — and the block clips what it did not reserve.
+    const source = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.tsx'), 'utf8')
+    expect(source).toContain('messageRowsOf(discussionText(message), message.role)')
+    expect(source).not.toContain('discussionPlainText')
   })
 
   // PERF-SWEEP-START A measurement harness, not an assertion: it prints what the panel's hot paths
