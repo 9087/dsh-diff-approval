@@ -2262,25 +2262,28 @@
      `.discussionRow`), so the thread is part of the code's own surface rather than a panel
      laid over it. The turns inside keep their own fills. */
   background: transparent;
-  /* Neutral, NOT the change-highlight colour: a discussed range and a change
-     run can sit on the same rows, and two tinted markers of the same hue read as
-     one broken frame. Grey is also what keeps the frame from competing with the
-     colours that mean "added" / "deleted". */
-  border-left: 3px solid var(--dsw-alias-label-secondary);
-  /* The two edges the thread begins and ends at: a hairline above and one below, in the rule's own
-     grey, so the block reads as a band lying on the code instead of as more rows of it. Drawn as
-     an inset shadow rather than as borders, because adjacent borders are mitred: the 3px left rule
-     against a 1px line turns into a slant at both corners, and the block's corners are square on
-     purpose. An inset line is painted inside the block, over its background and inside the rule, so
-     it takes nothing from the height the diff's row table reserved and has no join to get wrong.
-     The block's own painting is above the pinned line-number columns (see `.discussionPin`), so
-     the lines cross those columns too. */
+  /* The very colour the thread's own 评论 button is filled with (see `.actionPrimary`), NOT a
+     change-highlight one: a discussed range and a change run can sit on the same rows, and two
+     markers of the same hue read as one broken frame. It is also what says the block belongs to the
+     app's own review flow rather than to the diff under it — the grey the outdated state falls back
+     to says the opposite. Taken from the button's token rather than repeated as a literal, so the
+     rule and the button cannot come out two different blues. */
+  border-left: 3px solid var(--dsw-alias-state-business-primary);
+  /* A hairline along the three edges the rule does not cover — above, below and on the right — in
+     the rule's own grey, so the block reads as a band lying on the code rather than as more rows of
+     it, and closes at the panel's edge. Drawn as inset lines rather than as borders, because
+     adjacent borders are mitred: the 3px left rule against a 1px line turns into a slant at both
+     corners, and the block's corners are square on purpose. An inset line is painted inside the
+     block, over its background and inside the rule, so it takes nothing from the height the diff's
+     row table reserved and has no join to get wrong. The block's own painting is above the pinned
+     line-number columns (see `.discussionPin`), so the lines cross those columns too. */
   box-shadow:
     inset 0 1px 0 0 color-mix(in srgb, var(--dsw-alias-label-secondary) 55%, transparent),
-    inset 0 -1px 0 0 color-mix(in srgb, var(--dsw-alias-label-secondary) 55%, transparent);
+    inset 0 -1px 0 0 color-mix(in srgb, var(--dsw-alias-label-secondary) 55%, transparent),
+    inset -1px 0 0 0 color-mix(in srgb, var(--dsw-alias-label-secondary) 55%, transparent);
   /* The code surface hands the whole area the text beam (see `.diffBody`), and a thread is not
-     that: it is mostly chrome. The arrow covers the header's range label, the outdated mark, the
-     notes and the space between the pieces — and the pieces a reader CAN select ask for the beam
+     that: it is mostly chrome. The arrow covers the header's range label, the notes and the
+     space between the pieces — and the pieces a reader CAN select ask for the beam
      again (the turns' prose and the quoted code, see `.discussionUser`, `.discussionAnswer`,
      `.quoteText`), so the cursor says what a press will do instead of contradicting it. The
      controls set their own pointer (`.discussionToggle`, `.action`) and the writing field asks
@@ -2352,15 +2355,16 @@
 /* A block whose anchor no longer holds the code it was written about: it stays where it
    last matched, states why, shows the code it was about, and its rows are not annotated any
    more (see `discussionOverlapping`), so the rule that ties a thread to a range of lines has
-   nothing to tie it to — it turns yellow instead of going away — and the block takes a diagonal
+   nothing to tie it to — it goes grey instead of going away — and the block takes a diagonal
    hatch behind the turns. The quote of the code it was about sits on a faint, flat wash on top,
    so the lines the reader came back for stay the easiest thing in the block to read. */
 .discussion[data-lost] {
-  /* The rule turns yellow. The thread is still hung on the lines it names — that is why the rule
-     stays — but the code under it has moved on, and the margin is where that should read: the
-     header says it in words, this says it before the reader gets to them. It keeps its 3px and the
-     box keeps its shape, so nothing in the thread shifts. */
-  border-left-color: var(--dsw-alias-state-warn-primary, #f59e0b);
+  /* The rule goes grey. The thread is still hung on the lines it names — that is why the rule stays
+     — but the code under it has moved on, and the margin is where that should read: this says it
+     before the reader gets to the words, the label over the quote says it in them, and the blue the
+     live state and its 评论 button wear is just what this one gives up. It keeps its 3px and the box
+     keeps its shape, so nothing in the thread shifts. */
+  border-left-color: var(--dsw-alias-label-secondary);
   /* The hatch behind the turns: 4px of ink to 4px of gap — as dense as the last cut, in lines half
      its width. Thin stripes with an equal gap read as hatching; wide ones with a narrow gap read as
      a tint with seams. The block should say "this code is gone" at a glance, without the pattern
@@ -2372,6 +2376,27 @@
      continuous pattern from the block's left edge out to its right: the 3px rule strip sits outside
      the padding box, and tiling the image there would break its phase exactly in that strip. */
   background-origin: border-box;
+}
+
+/* The two colours an outdated thread gives up. Its 评论 button is the brand's blue in every other
+   block, and the reader's own turn wears the chat's bubble fill: both say the thread is part of the
+   review going on under it, and an outdated one is not — it is kept for the reader, not for the
+   code. Both go to the grey the rule above already wears, so the block loses its colour in one move
+   rather than three.
+   Hover and disabled are spelled out because the button's own blue has rules for them: leaving them
+   out would bring the blue back under the pointer, and again while a question is in flight. */
+.discussion[data-lost] .discussionSend,
+.discussion[data-lost] .discussionSend:hover:not(:disabled),
+.discussion[data-lost] .discussionSend:disabled {
+  background: var(--dsw-alias-label-secondary);
+  border-color: var(--dsw-alias-label-secondary);
+  color: var(--dsw-alias-label-primary-foreground);
+}
+
+/* The reader's turn keeps its shape, its inset and its mixed-down fill; only the colour changes, so
+   the hatch behind it still reads through the way it does through the live one. */
+.discussion[data-lost] .discussionUser {
+  background: color-mix(in srgb, var(--dsw-alias-label-secondary) 30%, transparent);
 }
 
 /* The answer, at the thread's own size. No inset of its own: the thread's own
@@ -2628,15 +2653,6 @@
   content: '';
   display: inline-block;
   width: calc(var(--dsh-diff-quote-width, 0px) + 100%);
-}
-
-/* The outdated mark, riding the range label it applies to: same size as the rest of the header
-   and the same tertiary tone as the path beside it, so it reads as part of that label rather
-   than as a second control. */
-.discussionOutdated {
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 12px;
-  line-height: 16px;
 }
 
 /* Exactly one thread row: the folded header, and the head of the open block. */

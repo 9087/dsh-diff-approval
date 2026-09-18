@@ -5417,14 +5417,6 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                                     <span className={css.discussionRange} data-diff-discussion-range>
                                       {discussionLineRange(discussion.anchor)}
                                     </span>
-                                    {/* The state rides the position it is about, so the header
-                                        reads "path:22-29（已过期）" — what the thread is attached
-                                        to and what happened to it in one label. */}
-                                    {discussion.lost === true && (
-                                      <span className={css.discussionOutdated} data-diff-discussion-outdated>
-                                        {t('discussion.outdated')}
-                                      </span>
-                                    )}
                                   </span>
                                   <span className={css.flexSpacer} />
                                   <Menu
@@ -5458,12 +5450,13 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                                     {/* What the thread was written about. The lines it named are
                                         gone or rewritten, so this is the only way to see what it
                                         meant — the mature review tools keep the same quote with an
-                                        outdated thread. The state itself is on the header, beside
-                                        the position it applies to. */}
+                                        outdated thread. The label in front of it is where the block
+                                        says it is outdated: the header keeps to the position the
+                                        thread names and says nothing about its state. */}
                                     {discussion.lost === true && discussion.quote !== undefined && discussion.quote !== '' && (
                                       <>
                                         <p className={css.discussionNote} data-diff-discussion-quote-label>
-                                          {t('discussion.quote')}
+                                          {t('discussion.outdatedQuote')}
                                         </p>
                                         <DiscussionQuote quote={discussion.quote} lines={discussion.quoteLines} lang={lang} wrap={langWrap} />
                                       </>

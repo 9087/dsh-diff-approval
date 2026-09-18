@@ -1299,6 +1299,26 @@ describe('PendingPanel', () => {
     expect(/\.rowPath \{[^}]*\}/.exec(css)?.[0] ?? '').not.toContain('user-select')
   })
 
+  it('drops an outdated thread\'s button and bubble to the grey its rule already wears', () => {
+    // An outdated block is kept for the reader, not for the code, so it gives up the two colours
+    // that say otherwise: the brand blue of its 评论 button and the chat's bubble fill under the
+    // reader's own turn. Both land on the same grey the block's rule went to.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const send = css.slice(css.indexOf('.discussion[data-lost] .discussionSend'))
+    const sendRule = send.slice(0, send.indexOf('}'))
+    expect(sendRule).toContain('background: var(--dsw-alias-label-secondary)')
+    expect(sendRule).toContain('border-color: var(--dsw-alias-label-secondary)')
+    // Hover and disabled are in the selector list: the button's own blue has rules for both, and a
+    // grey button that turns blue under the pointer is worse than a blue one.
+    expect(sendRule).toContain('.discussionSend:hover:not(:disabled)')
+    expect(sendRule).toContain('.discussionSend:disabled')
+    const bubble = css.slice(css.indexOf('.discussion[data-lost] .discussionUser'))
+    expect(bubble.slice(0, bubble.indexOf('}'))).toContain('color-mix(in srgb, var(--dsw-alias-label-secondary)')
+    // The header mark is gone with its key: one place says the thread is outdated, and it is the
+    // label over the quote (and the block's own colour).
+    expect(css).not.toContain('discussionOutdated')
+  })
+
   it('folds the floating card away softly, toward the knob\'s corner', () => {
     // The card used to grow in on every open and vanish on the press. The entrance is gone
     // — pressing the knob puts the card there — and the exit is a gentle version of it: the
@@ -4601,8 +4621,7 @@ describe('PendingPanel', () => {
     } as unknown as Selection)
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
     fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
-    expect(document.querySelector('[data-diff-discussion-outdated]')).toBeNull()
-    // A live comment washes the rows it is about.
+    expect(document.querySelector('[data-diff-discussion]')?.hasAttribute('data-lost')).toBe(false)
     expect(document.querySelector('[data-diff-discussion-band]')).not.toBeNull()
 
     // The quote is a window onto the file's columns, so it pans with the code. jsdom does no
@@ -4621,16 +4640,18 @@ describe('PendingPanel', () => {
     view.rerender(<PendingPanel {...rewritten} />)
     const block = document.querySelector('[data-diff-discussion]') as HTMLElement
     expect(block.hasAttribute('data-lost')).toBe(true)
-    // The state rides the position label it applies to, in the header.
-    expect(document.querySelector('[data-diff-discussion-outdated]')?.textContent).toBe('discussion.outdated')
-    expect(document.querySelector('[data-diff-discussion-range]')?.parentElement?.textContent).toContain('discussion.outdated')
+    // Nothing in the header says it: the header keeps to the position the thread names — path and
+    // lines — and the state is carried by the block's own colour and by the label over the quote.
+    expect(document.querySelector('[data-diff-discussion-range]')?.parentElement?.textContent)
+      .toBe(document.querySelector('[data-diff-discussion-range]')?.textContent)
     // No row is washed any more: the rows under those numbers are not the commented code,
     // so a band there would claim them for a thread that says it no longer matches.
     expect(document.querySelector('[data-diff-discussion-band]')).toBeNull()
     // What the comment was about keeps it readable now that the rows have moved on, laid out
     // the way the file lays its own rows out: the numbers in the file's two gutters, the code
     // in the column beside them, one row each.
-    expect(document.querySelector('[data-diff-discussion-quote-label]')?.textContent).toBe('discussion.quote')
+    // …and the label in front of it is what says the block is outdated.
+    expect(document.querySelector('[data-diff-discussion-quote-label]')?.textContent).toBe('discussion.outdatedQuote')
     const quote = document.querySelector('[data-diff-discussion-quote]') as HTMLElement
     expect(quote.textContent).toBe('1b')
     // The added line the comment was made on has no old-side number, exactly as in the file.
@@ -4680,7 +4701,6 @@ describe('PendingPanel', () => {
     // than sticky: it clears instead of condemning the thread for one rebuild — the rows it
     // is about are washed again.
     view.rerender(<PendingPanel {...props} />)
-    expect(document.querySelector('[data-diff-discussion-outdated]')).toBeNull()
     expect(document.querySelector('[data-diff-discussion]')?.hasAttribute('data-lost')).toBe(false)
     expect(document.querySelector('[data-diff-discussion-band]')).not.toBeNull()
   })
@@ -4718,21 +4738,25 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-discussion]')).toBeNull()
     // …and back: the same thread, still on the rows it was written about.
     fireEvent.click(screen.getByText('changed.txt'))
-    expect(document.querySelector('[data-diff-discussion-outdated]')).toBeNull()
     expect(document.querySelector('[data-diff-discussion]')?.hasAttribute('data-lost')).toBe(false)
     expect(document.querySelector('[data-diff-discussion-band]')).not.toBeNull()
   })
 
-  it('marks an outdated thread with a yellow range rule and a hatch', () => {
+  it('marks an outdated thread with a grey range rule and a hatch', () => {
     // A thread's left rule is the mark of "this belongs to those rows" — an outdated thread is
     // still hung on the lines it names, so the rule stays — but its code has moved on, and the rule
-    // is where that reads: it takes the warning hue, in the same 3px the live state wears, so the
+    // is where that reads: it gives the blue up for the grey, in the same 3px the live state wears,
     // box and every column in the thread are where they were. Behind the turns the block takes a
     // diagonal hatch; the quote sits on its own flat wash on top, so the code the reader came back
     // for is still the easiest thing in the block to read.
     const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const block = /\.discussion\[data-lost\] \{([^}]*)\}/.exec(css)?.[1] ?? ''
-    expect(block).toContain('border-left-color: var(--dsw-alias-state-warn-primary')
+    // The live rule carries the brand's colour; the outdated state is what greys it.
+    expect(block).toContain('border-left-color: var(--dsw-alias-label-secondary)')
+    const live = /\.discussion \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    // The token the thread's 评论 button is filled with (see `.actionPrimary`), so the rule and
+    // the button are the same blue by construction.
+    expect(live).toContain('border-left: 3px solid var(--dsw-alias-state-business-primary)')
     expect(block).not.toContain('border-left-width')
     expect(block).not.toContain('padding-left')
     expect(block).toContain('repeating-linear-gradient(135deg')
@@ -4890,7 +4914,7 @@ describe('PendingPanel', () => {
     // — which is the same row here — and both hang off it.
     view.rerender(<PendingPanel {...panelProps({ read: true, files: [entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'x\n', newText: 'y\n' })], busy: new Set() })} />)
     expect(document.querySelectorAll('[data-diff-discussion]').length).toBe(2)
-    expect([...document.querySelectorAll('[data-diff-discussion-outdated]')].length).toBe(2)
+    expect([...document.querySelectorAll('[data-diff-discussion][data-lost]')].length).toBe(2)
     // The original ranges are still what the headers say, so the two are still told apart.
     expect([...document.querySelectorAll('[data-diff-discussion-range]')].map(node => node.textContent))
       .toEqual(['/repo/m.txt:1', '/repo/m.txt:3'])
@@ -5098,6 +5122,8 @@ describe('PendingPanel', () => {
     const block = /\.discussion \{([^}]*)\}/.exec(css)?.[1] ?? ''
     expect(block).toContain('inset 0 1px 0 0')
     expect(block).toContain('inset 0 -1px 0 0')
+    // The right edge closes the band at the panel's edge; the left one is the rule itself.
+    expect(block).toContain('inset -1px 0 0 0')
     expect(block).not.toContain('border-top')
     expect(block).not.toContain('border-bottom')
     // Grey, and a tint of the surface rather than a palette step, so it reads on either theme.
