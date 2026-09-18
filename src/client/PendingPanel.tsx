@@ -6953,7 +6953,13 @@ export function PendingPanel({
                 aria-selected={activeTab === 'comments'}
                 onClick={() => { setListTab('comments') }}
               >
-                {t('panel.tab.comments')}
+                {/* The count rides the label, and nothing at all when there is nothing to count: a
+                    zero would say "there is a list here" to a reader with no comments. The two are
+                    separate spans so the row's own gap sets the space between them. */}
+                <span>{t('panel.tab.comments')}</span>
+                {commentEntries.length > 0 && (
+                  <span className={css.tabCount} data-diff-list-count>{commentEntries.length}</span>
+                )}
               </button>
             </div>
           ) : (

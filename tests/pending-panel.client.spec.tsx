@@ -831,6 +831,10 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-list-tab="pending"]')).not.toBeNull()
     expect(scroller!.querySelector('[data-diff-file-list-float]')).toBeNull()
     expect(document.querySelector('[data-diff-file-list-float]')).not.toBeNull()
+    // Nothing to count yet: the comments tab says its name and carries no number at all.
+    const tab = document.querySelector('[data-diff-list-tab="comments"]')
+    expect(tab?.textContent).toBe('panel.tab.comments')
+    expect(tab?.querySelector('[data-diff-list-count]')).toBeNull()
   })
 
   it('shows a heading instead of tabs while the pane has only one view', () => {
@@ -869,6 +873,11 @@ describe('PendingPanel', () => {
 
     // The pending list is what the pane opens on.
     expect(document.querySelector('[data-diff-list-tab="pending"]')?.getAttribute('aria-selected')).toBe('true')
+    // Its sibling counts what it would show — the four threads above — as its own span, so the tab
+    // row's gap is what spaces the label from the number.
+    const tab = document.querySelector('[data-diff-list-tab="comments"]')
+    expect(tab?.textContent).toBe('panel.tab.comments4')
+    expect(tab?.querySelector('[data-diff-list-count]')?.textContent).toBe('4')
     fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
     const items = [...document.querySelectorAll('[data-diff-comment-link]')] as HTMLElement[]
     expect(items.length).toBe(4)

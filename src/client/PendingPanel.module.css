@@ -1670,6 +1670,11 @@
 
 .listTab {
   flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* The label and its count are one control, a step apart rather than letter-tight. */
+  gap: 6px;
   padding: 3px 8px;
   border: none;
   border-radius: 6px;
@@ -1679,6 +1684,13 @@
   font-size: 12px;
   line-height: 16px;
   cursor: pointer;
+}
+
+/* The count beside a tab's label: the same size, one tone quieter, and tabular so a two-digit count
+   does not shift the label when it changes. */
+.tabCount {
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 
 .listTab[aria-selected='true'] {
