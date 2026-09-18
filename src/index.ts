@@ -1455,6 +1455,74 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           const value: DiffApprovalAddValue = { outcome: 'not-a-file', added: 0, duplicates: 0 }
           return { ok: true, value }
         }
+        /**
+         * Admit what the add found and answer the wire value. Shared by the two ways in — the
+         * one file a reader named, and the scan of a path — so a named file is listed, counted
+         * and identified exactly like a scanned one.
+         *
+         * @param candidates - the entries to admit (already built, in order).
+         * @param directory - whether the named path was a directory (its own outcome wording).
+         * @param cut - whether the walk hit its cap.
+         * @returns the channel's answer for this add.
+         */
+        const admitNamed = async (
+          candidates: PendingEntry[],
+          directory: boolean,
+          cut: boolean,
+        ): Promise<{ ok: true; value: DiffApprovalAddValue }> => {
+          // Already-listed paths are left exactly as they are: the panel toasts
+          // that the path is in the list rather than silently re-baselining a
+          // review that is already in progress.
+          const listed = new Set(store.list(target.sessionId).map(entry => pathIdentity(entry.path)))
+          const fresh = candidates.filter(entry => !listed.has(pathIdentity(entry.path)))
+          const duplicates = candidates.length - fresh.length
+          const added = await foldBatch(target.sessionId, fresh, true)
+          const outcome: DiffApprovalAddOutcome = added > 0
+            ? 'added'
+            : duplicates > 0
+              ? 'duplicate'
+              // A single file that is simply clean is `unchanged` (the caller may
+              // tick the box and add it anyway); a directory that contributed
+              // nothing had nothing to contribute.
+              : directory ? 'empty' : 'unchanged'
+          // One named file's entry, so the caller can select it now rather than after the next
+          // poll: the fresh one just folded, or the one that was already listed for a duplicate.
+          const single = directory
+            ? undefined
+            : (fresh[0] ?? store.list(target.sessionId).find(entry => pathIdentity(entry.path) === pathIdentity(absolute)))
+          const value: DiffApprovalAddValue = {
+            outcome,
+            added,
+            duplicates,
+            ...(single === undefined ? {} : { id: single.id }),
+            ...(cut ? { truncated: true } : {}),
+          }
+          return { ok: true, value }
+        }
+        const now = Date.now()
+        // One file the reader named, and nothing else: the field's job is to OPEN that file, so
+        // nothing on this way in asks the VCS anything — it does not even need a VCS to exist. The
+        // entry lands with both sides the file's own text, which is the "no pending diff" shape the
+        // scan already produces for a file it found nothing in.
+        if (target.exact) {
+          // A path that is already listed is answered from the list, without reading the file:
+          // naming it again is how the reader reopens it, and a duplicate is a duplicate.
+          const existing = store.list(target.sessionId)
+            .find(entry => pathIdentity(entry.path) === pathIdentity(absolute))
+          if (existing !== undefined) return await admitNamed([existing], false, false)
+          const content = await readTextOrNone(absolute, signal)
+          const named: PendingEntry[] = content === undefined ? [] : [{
+            id: absolute,
+            sessionId: target.sessionId,
+            path: absolute,
+            kind: 'edit',
+            oldText: content,
+            newText: content,
+            updatedAt: now,
+            sessionIds: [target.sessionId],
+          }]
+          return await admitNamed(named, false, false)
+        }
         const root = detectVcsRoot(workspace.path)
         if (root === undefined) {
           const value: DiffApprovalAddValue = { outcome: 'no-vcs', added: 0, duplicates: 0 }
@@ -1481,7 +1549,6 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           const value: DiffApprovalAddValue = { outcome: 'failed', added: 0, duplicates: 0, message: errorMessage(error) }
           return { ok: true, value }
         }
-        const now = Date.now()
         const candidates: PendingEntry[] = changes.map(change => ({
           id: change.path,
           sessionId: target.sessionId,
@@ -1519,34 +1586,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             })
           }
         }
-        // Already-listed paths are left exactly as they are: the panel toasts
-        // that the path is in the list rather than silently re-baselining a
-        // review that is already in progress.
-        const listed = new Set(store.list(target.sessionId).map(entry => pathIdentity(entry.path)))
-        const fresh = candidates.filter(entry => !listed.has(pathIdentity(entry.path)))
-        const duplicates = candidates.length - fresh.length
-        const added = await foldBatch(target.sessionId, fresh, true)
-        const outcome: DiffApprovalAddOutcome = added > 0
-          ? 'added'
-          : duplicates > 0
-            ? 'duplicate'
-            // A single file that is simply clean is `unchanged` (the caller may
-            // tick the box and add it anyway); a directory that contributed
-            // nothing had nothing to contribute.
-            : isDirectory ? 'empty' : 'unchanged'
-        // One named file's entry, so the caller can select it now rather than after the next
-        // poll: the fresh one just folded, or the one that was already listed for a duplicate.
-        const single = isDirectory
-          ? undefined
-          : (fresh[0] ?? store.list(target.sessionId).find(entry => pathIdentity(entry.path) === pathIdentity(absolute)))
-        const value: DiffApprovalAddValue = {
-          outcome,
-          added,
-          duplicates,
-          ...(single === undefined ? {} : { id: single.id }),
-          ...(truncated ? { truncated: true } : {}),
-        }
-        return { ok: true, value }
+        return await admitNamed(candidates, isDirectory, truncated)
       }
       case 'open': {
         const target = openTargetOf(payload)

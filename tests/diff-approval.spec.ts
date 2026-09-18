@@ -1553,6 +1553,36 @@ describe('hand-adding paths to the review list', () => {
       .resolves.toMatchObject({ ok: true, value: { outcome: 'added', added: 1 } })
   })
 
+  it('opens a named file by reading it, without asking the VCS anything', async () => {
+    // The path field's job is to open one file. Nothing on that way in needs a checkout: the entry
+    // lands with both sides the file's own text — the "no pending diff" shape — so a named file
+    // costs one read, a changed one is not re-scanned against the VCS, and a workspace outside any
+    // checkout can still have a file named into it (the harness below provides no shell at all).
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-add-exact-'))
+    tempDirs.push(dir)
+    await writeFile(join(dir, 'named.txt'), 'named content\n')
+    const { handle, fs } = await harness({ sessionIds: [SessionId('session-1')], workspacePath: dir })
+    fs.stat.mockResolvedValue({ version: 'v1', type: 'file' } as never)
+    fs.readText.mockResolvedValue('named content\n')
+
+    const value = await handle('add-path', {
+      sessionId: 'session-1', path: 'named.txt', includeUnchanged: true, exact: true,
+    }, signal())
+    expect(value).toMatchObject({ ok: true, value: { outcome: 'added', added: 1, duplicates: 0 } })
+    const files = await listEntries(handle, 'session-1')
+    expect(files).toHaveLength(1)
+    expect(files[0]).toMatchObject({
+      path: join(dir, 'named.txt'), kind: 'edit', oldText: 'named content\n', newText: 'named content\n',
+    })
+    expect((value as { value: { id?: string } }).value.id).toBe(files[0]!.id)
+
+    // Naming it again reopens the entry that is already there, and reads nothing to do it.
+    fs.readText.mockClear()
+    await expect(handle('add-path', { sessionId: 'session-1', path: 'named.txt', exact: true }, signal()))
+      .resolves.toMatchObject({ ok: true, value: { outcome: 'duplicate', added: 0, duplicates: 1 } })
+    expect(fs.readText).not.toHaveBeenCalled()
+  })
+
   it('answers outside, missing, and no-vcs without touching the list', async () => {
     const { workspace } = await gitRepo()
     const { handle, fs } = await harness({
