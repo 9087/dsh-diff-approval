@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.25.0](https://github.com/9087/dsh-diff-approval/compare/v0.24.1...v0.25.0) (2026-09-18)
+
+### Features
+
+* **host:** add one exact file by name, and report the entry it landed as ([13d7f77](https://github.com/9087/dsh-diff-approval/commit/13d7f7744233f80eabcbb8f55c08e374311bf455))
+* **panel:** act on a list row from its own right-click menu ([2336644](https://github.com/9087/dsh-diff-approval/commit/2336644993804847854bd1a7daa9eb04d91d12f8))
+* **panel:** keep the code's own scroll from rubber-banding ([68315e7](https://github.com/9087/dsh-diff-approval/commit/68315e715d107025e9b42a987bcb08acfdf18371))
+* **panel:** offer 移出 instead of keep/revert for a file with no diff left ([ce608e1](https://github.com/9087/dsh-diff-approval/commit/ce608e1d18c9b1e4a63d05e724a97d8cbabc1990))
+* **panel:** open a path typed into the header's path line ([3fa4e1a](https://github.com/9087/dsh-diff-approval/commit/3fa4e1ae656d3217b772924cc7ee68923cc7e232))
+* **panel:** rework comment threads, their quote and the code's line numbers ([2af5e94](https://github.com/9087/dsh-diff-approval/commit/2af5e9484cf43448ed59094f0e84e7f8b87ca3de))
+* **settings:** move the auto-paste switch to the comments group ([d29a1df](https://github.com/9087/dsh-diff-approval/commit/d29a1df8c3203d1601cd20e4be3bfe1b281f423d))
+
 ## [0.24.1](https://github.com/9087/dsh-diff-approval/compare/v0.24.0...v0.24.1) (2026-09-15)
 
 ### Bug Fixes
