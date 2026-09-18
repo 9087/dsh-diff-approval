@@ -2711,6 +2711,9 @@
   flex: 1 1 auto;
   min-width: 0;
   box-sizing: border-box;
+  /* Stated, not inferred: the recipe below is what makes 26px, but the field and 评论 both say the
+     number so a font metric on either one cannot pull them apart by a pixel. */
+  height: 26px;
   padding: 3px 8px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 6px;
@@ -2779,6 +2782,8 @@
    Enter in the input sends, and the label says what the click does, so the two
    together are the whole hint. */
 .discussionSend {
+  /* The same 26px the field and the frame's 保留 carry. */
+  height: 26px;
   display: inline-flex;
   flex: none;
   align-items: center;

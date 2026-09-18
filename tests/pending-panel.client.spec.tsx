@@ -1645,6 +1645,10 @@ describe('PendingPanel', () => {
     expect(input).not.toContain('height: 100%')
     // The button reaches that height by itself: nothing stretches it to the row.
     expect(rule('discussionSend')).not.toContain('align-self: stretch')
+    // ...and all three state the number outright, so nothing here depends on the recipe coming out
+    // at 26px for one control and 27px for the other.
+    expect(input).toContain('height: 26px')
+    expect(rule('discussionSend')).toContain('height: 26px')
     // ...and the row is still exactly two THREAD rows (fixed, not the code's), with no padding
     // of its own, and the pair is bottom-aligned: the field and the button end where the block
     // does, so the row's slack reads as the gap under the last turn instead of a band under
