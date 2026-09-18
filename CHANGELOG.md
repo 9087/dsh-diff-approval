@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.26.0](https://github.com/9087/dsh-diff-approval/compare/v0.25.0...v0.26.0) (2026-09-18)
+
+### Features
+
+* **host:** open a named path by reading it, with no VCS scan ([6019c41](https://github.com/9087/dsh-diff-approval/commit/6019c418f66bf287336233028ebf4cf04b17c085))
+* **panel:** end a text selection on a press at the panel's chrome, not its content ([d2e15ca](https://github.com/9087/dsh-diff-approval/commit/d2e15cac8d0f0cdeda042764a678d29d07610471))
+* **panel:** give the block its own frame, and grey an outdated comment out ([c9849ac](https://github.com/9087/dsh-diff-approval/commit/c9849acb3d47b171251dd526e8ccf61e30a00d85))
+* **panel:** list every comment the open files carry, and land a jump on one ([0bf6b51](https://github.com/9087/dsh-diff-approval/commit/0bf6b5135926ec552fbf18082650dc2a430fd48b))
+* **panel:** open a named path at once, ask one question at a time, and cut the drag cost ([01429fd](https://github.com/9087/dsh-diff-approval/commit/01429fde242c7ca64adab86069f76a23f91ce7a4))
+* **panel:** set a comment in the chat's own type, and measure its chips as boxes ([2bee621](https://github.com/9087/dsh-diff-approval/commit/2bee621c2153134a7e1fed6c4734a14d67815c5c))
+* **settings:** call the lead-rows setting a jump setting, comments included ([a37170f](https://github.com/9087/dsh-diff-approval/commit/a37170f93e793b5963e3f47e7563e3cf0c6ac15a))
+
+### Bug Fixes
+
+* **panel:** give the writing field and its button the toolbar's own height ([d647cc6](https://github.com/9087/dsh-diff-approval/commit/d647cc605e2751610c8b4be88baf14f6b4c8ab90))
+* **panel:** re-anchor a comment by its own rows, in one pass ([1543972](https://github.com/9087/dsh-diff-approval/commit/15439725afead8ce0d05ebca70fa14f9d69d2514))
+
 ## [0.25.0](https://github.com/9087/dsh-diff-approval/compare/v0.24.1...v0.25.0) (2026-09-18)
 
 ### Features
