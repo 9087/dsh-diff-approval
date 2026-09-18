@@ -2188,7 +2188,6 @@
   position: absolute;
   left: 0;
   right: 0;
-  /* Above the block it frames, which is above the pinned columns (see `.discussionPin`). */
   z-index: 3;
   box-sizing: border-box;
   border: 2px solid var(--dsw-alias-state-business-primary);

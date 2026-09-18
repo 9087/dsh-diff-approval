@@ -4050,11 +4050,18 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     const discussion = discussions.find(entry => entry.id === id)
     if (discussion === undefined) return
     // One question at a time: see `askingId`. The button says the same thing, and this is the
-    // belt to it — the field's own Enter comes through here too. The ref is read as well because
-    // it is written synchronously: two sends inside one tick (a scripted pair of clicks, before
-    // React has re-rendered with the first one's `asking`) would both see the older state.
+    // belt to it — the field's own Enter comes through here too. The two lines below are that one
+    // refusal seen from its two sides: `askingId` is the rendered side (a flag the blocks carry
+    // across every file, a tick behind the send that set it) and `pendingAskRef` the synchronous
+    // one, written the instant a send starts — which is what a second send inside the same tick
+    // runs into, before React has re-rendered with the first one's `asking`. Both name the id
+    // they let through, so what is refused is another block's send; the block that is waiting
+    // carries the same id, and is not what either line is about.
     if (askingId !== undefined && askingId !== id) return
     if (pendingAskRef.current !== undefined && pendingAskRef.current.id !== id) return
+    // Trimmed once, for both jobs: a field holding nothing but spaces has nothing to send, and
+    // the trimmed text is what the prompt below is built from — and with it the needle the answer
+    // is matched back out of the transcript by, so the two can never disagree about the wording.
     const text = discussion.draft.trim()
     if (text === '') return
     const reference = `(${discussionLineRange(discussion.anchor)})`

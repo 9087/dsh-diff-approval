@@ -6107,9 +6107,18 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
 
+    // The two rows the selection runs between: the first change block's code cell and the last
+    // one's. A row with no code cell of its own falls back to the row, so both ends always have a
+    // node to hang the range on.
     const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
     const code0 = rows[0]!.querySelector('[data-diff-code]') ?? rows[0]!
     const codeLast = rows[rows.length - 1]!.querySelector('[data-diff-code]') ?? rows[rows.length - 1]!
+    // jsdom never makes a selection out of a drag, so one is spelled out here: a range from the
+    // first block's text to the last block's, which is what "the whole file is selected" looks like
+    // to the panel — it reads the rows the two boundary nodes sit in (`selectionFrame`). Only the
+    // parts the panel asks about are here, hence the cast. The offsets matter: the panel drops a
+    // partial line when a boundary sits at that line's end or before its start, so these are the
+    // ends of the two lines, one character in.
     const selection = {
       isCollapsed: false,
       anchorNode: code0.firstChild ?? code0,
