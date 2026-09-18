@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, discussionOnRange,
   discussionOverlapping, discussionPlainText, discussionRowExtras, discussionRows, discussionRounds,
-  discussionRuns, discussionText, remapDiscussion,
+  discussionRuns, discussionText, remapDiscussion, remapDiscussions,
   selectionFrame, stripBlankLines,
 } from '../src/client/discussion.ts'
 import type { Discussion } from '../src/client/discussion.ts'
@@ -187,6 +187,58 @@ describe('discussions in the diff row stream', () => {
     expect(rehungAgain.lost).toBe(true)
     expect(rehungAgain.anchor).toEqual({ start: 1, end: 1, startLine: 10, endLine: 11 })
     expect(remap(rehungAgain, rows([1, 2], ['a', 'b']))).toBe(rehungAgain)
+  })
+
+  it('compares a quote over a changed line by its own rows, not by the anchor\'s line span', () => {
+    // A modification is two rows — the line removed and the line that replaced it — but a single
+    // new-file number, because the removed row has none of its own. Reading the row span off
+    // `endLine - startLine` compared a one-row window against a two-row quote, so every comment
+    // over a change was condemned the first time anything rebuilt the rows (switching files, a
+    // keep, an edit above it). The quote's own line count is the row count.
+    const original: Discussion = {
+      ...discussion('a', 0, 1),
+      anchor: { start: 0, end: 1, startLine: 1, endLine: 1 },
+      quote: 'const old = 1\nconst next = 2',
+    }
+    // The very same rows come back: nothing moves, and the thread stays live.
+    const same = remap(original, rows([undefined, 1, 2], ['const old = 1', 'const next = 2', 'keep']))
+    expect(same.lost).toBeUndefined()
+    expect(same.anchor).toMatchObject({ start: 0, end: 1 })
+    // Two context rows above it: the numbers move, the quote is found by its own rows, and the
+    // thread follows it there rather than being marked outdated.
+    const moved = remap(original, rows([1, 2, undefined, 3, 4], ['a', 'b', 'const old = 1', 'const next = 2', 'keep']))
+    expect(moved.lost).toBeUndefined()
+    expect(moved.anchor).toMatchObject({ start: 2, end: 3 })
+  })
+
+  it('re-anchors a whole list in one pass, exactly as it does one block at a time', () => {
+    // The panel's rebuild path: every block of a file, against one model. It has to agree with the
+    // single-block call field for field — and keep its identity contract, because a block that did
+    // not move coming back as the same object is how the panel knows a rebuild changed nothing.
+    const moved: Discussion = {
+      ...discussion('moved', 5, 6),
+      anchor: { start: 5, end: 6, startLine: 10, endLine: 11 },
+      quote: 'one\ntwo',
+    }
+    const gone: Discussion = {
+      ...discussion('gone', 7, 8),
+      anchor: { start: 7, end: 8, startLine: 99, endLine: 100 },
+      quote: 'nowhere',
+    }
+    const still: Discussion = {
+      ...discussion('still', 0, 0),
+      anchor: { start: 0, end: 0, startLine: 1, endLine: 1 },
+      quote: 'a',
+    }
+    const model = rows([1, 2, 10, 11], ['a', 'b', 'one', 'two'])
+    const blocks = [moved, gone, still]
+    const oneByOne = blocks.map(block => remap(block, model))
+    const inOnePass = remapDiscussions(blocks, model.lineOf, model.textOf, model.rowCount)
+    expect(inOnePass).toEqual(oneByOne)
+    expect(inOnePass[2]).toBe(still)
+    expect(oneByOne[2]).toBe(still)
+    expect(inOnePass[1]!.lost).toBe(true)
+    expect(inOnePass[0]!.anchor).toMatchObject({ start: 2, end: 3 })
   })
 
   it('trusts the line numbers for a thread with no quote to check against', () => {

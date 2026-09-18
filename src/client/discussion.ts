@@ -390,6 +390,69 @@ export function remapDiscussion(
   textOf: (row: number) => string,
   rowCount: number,
 ): Discussion {
+  return remapOne(discussion, lineOf, textOf, rowCount, windowCache(textOf, rowCount))
+}
+
+/**
+ * Re-anchor a whole file's blocks in one pass.
+ *
+ * Each block is re-anchored exactly as `remapDiscussion` does it — same rules, same identities,
+ * same "nothing moved, same object back" contract — but the row windows every quote is looked up
+ * in are joined ONCE for the whole list. A rebuild (a keep, an edit, a switched file) runs this
+ * over every block a file has, and joining the rows per block is what made the pass cost grow with
+ * the number of comments on a long file.
+ *
+ * @param discussions - the blocks to re-anchor.
+ * @param lineOf - the new-file line number of a row, or `undefined` for a row that has none.
+ * @param textOf - the text of a row, for the quote comparison.
+ * @param rowCount - how many rows the current model has.
+ * @returns the re-anchored blocks, in the order they came in.
+ */
+export function remapDiscussions(
+  discussions: readonly Discussion[],
+  lineOf: (row: number) => number | undefined,
+  textOf: (row: number) => string,
+  rowCount: number,
+): readonly Discussion[] {
+  const windows = windowCache(textOf, rowCount)
+  return discussions.map(discussion => remapOne(discussion, lineOf, textOf, rowCount, windows))
+}
+
+/** Every row window of one span, indexed by its text, in one pass over the rows. */
+function windowIndex(textOf: (row: number) => string, rowCount: number, span: number): Map<string, number[]> {
+  const byText = new Map<string, number[]>()
+  for (let row = 0; row + span < rowCount; row++) {
+    const parts: string[] = []
+    for (let index = row; index <= row + span; index++) parts.push(index < rowCount ? textOf(index) : '')
+    const text = parts.join('\n')
+    const rows = byText.get(text)
+    if (rows === undefined) byText.set(text, [row])
+    else rows.push(row)
+  }
+  return byText
+}
+
+/** One window index per span, built the first time a span is asked for. */
+function windowCache(textOf: (row: number) => string, rowCount: number): (span: number) => Map<string, number[]> {
+  const cache = new Map<number, Map<string, number[]>>()
+  return (span) => {
+    let index = cache.get(span)
+    if (index === undefined) {
+      index = windowIndex(textOf, rowCount, span)
+      cache.set(span, index)
+    }
+    return index
+  }
+}
+
+/** The body both entry points share: one block, with the row windows read through `windows`. */
+function remapOne(
+  discussion: Discussion,
+  lineOf: (row: number) => number | undefined,
+  textOf: (row: number) => string,
+  rowCount: number,
+  windows: (span: number) => Map<string, number[]>,
+): Discussion {
   const { startLine, endLine } = discussion.anchor
   let start = -1
   let end = -1
@@ -408,7 +471,12 @@ export function remapDiscussion(
     end = row
   }
   const quote = discussion.quote
-  const span = Math.max(0, endLine - startLine)
+  // How many ROWS the quote covers: one line per row, exactly as it was captured. The anchor's
+  // line numbers are not that count — a removed row has no new-file number of its own, so a range
+  // holding one spans fewer numbers than it does rows, and a span read off them compared a
+  // one-row window against a two-row quote: every comment over a changed line looked outdated the
+  // first time anything rebuilt the rows (a file switch, a keep, an edit above it).
+  const span = Math.max(0, (quote ?? '').split('\n').length - 1)
   const textAt = (row: number): string => {
     const parts: string[] = []
     for (let index = row; index <= row + span; index++) {
@@ -441,10 +509,10 @@ export function remapDiscussion(
     return clearOutdated({ ...discussion, anchor: { ...discussion.anchor, start, end } })
   }
   // They do not hold it: follow the quote instead. Where the same code appears more than once
-  // the nearest occurrence wins, since that is where the reader last saw it.
+  // the nearest occurrence wins, since that is where the reader last saw it — the windows are
+  // already joined, so this is a lookup rather than a scan.
   let found = -1
-  for (let row = 0; row + span < rowCount; row++) {
-    if (textAt(row) !== quote) continue
+  for (const row of windows(span).get(quote) ?? []) {
     if (found === -1 || Math.abs(row - start) < Math.abs(found - start)) found = row
   }
   if (found === -1) return start === -1 ? gone() : markOutdated(discussion)
