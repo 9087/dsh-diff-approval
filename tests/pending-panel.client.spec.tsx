@@ -10,7 +10,7 @@ import { Component } from 'react'
 import type { ComponentProps, ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingFileDiff } from '../src/types.ts'
-import { PendingPanel, frameInsets } from '../src/client/PendingPanel.tsx'
+import { PendingPanel, frameInsets, makeMeasurer } from '../src/client/PendingPanel.tsx'
 import { lastPanelFile, panelFileOffset, resetPanelMemory } from '../src/client/panel-memory.ts'
 import { setCommentModeEnabled } from '../src/client/settings.ts'
 import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
@@ -1760,6 +1760,31 @@ describe('PendingPanel', () => {
     expect(list.style.width).toBe('560px')
   })
 
+  it('applies one list width per animation frame while the divider is dragged', async () => {
+    // A mouse reports far more often than the screen draws. Each event re-renders the list — and,
+    // with wrap on, re-wraps the whole code view — so the events of one frame are folded into the
+    // frame's own render, which takes the position the pointer ended the frame at.
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const list = document.querySelector('[data-diff-approval-file-list]') as HTMLElement
+    const handle = document.querySelector('[data-diff-resize]') as HTMLElement
+    expect(list.style.width).toBe('240px')
+    fireEvent.pointerDown(handle, { button: 0, clientX: 100, pointerId: 1, pointerType: 'mouse', isPrimary: true })
+    act(() => {
+      window.dispatchEvent(new PointerEvent('pointermove', { clientX: 180, pointerId: 1 }))
+      window.dispatchEvent(new PointerEvent('pointermove', { clientX: 220, pointerId: 1 }))
+      window.dispatchEvent(new PointerEvent('pointermove', { clientX: 260, pointerId: 1 }))
+    })
+    // Three events, no frame yet: nothing has been rendered.
+    expect(list.style.width).toBe('240px')
+    // Then the frame lands the last of them, not the first.
+    await act(async () => { await new Promise(resolve => { requestAnimationFrame(() => { resolve(undefined) }) }) })
+    expect(list.style.width).toBe('400px')
+    act(() => { window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1 })) })
+  })
+
   it('re-measures the code box when the view mode changes', () => {
     // Leaving the split view mounts a fresh scroller. Its width is what wrapped line heights
     // are computed against, and it used to be measured only for the file, the wrap toggle
@@ -1781,11 +1806,20 @@ describe('PendingPanel', () => {
     // own feel. jsdom applies no stylesheet, so this reads the module the panel ships.
     const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const block = (name: string): string => new RegExp(`^\\.${name} \\{([^}]*)\\}`, 'm').exec(css)?.[1] ?? ''
-    for (const name of ['diffBody', 'mdPreviewBody', 'diffPreviewScroll', 'splitHScroll']) {
+    // The panel's own scrollers — the code's, and the preview's — have nothing behind them, so
+    // they take no rubber-band at their edges.
+    for (const name of ['diffBody', 'mdPreviewBody']) {
       expect(block(name), name).toContain('overscroll-behavior: none')
     }
-    // The fenced code inside a Markdown preview scrolls in its own box, so it opts out too.
-    expect(/\.mdPreviewBody pre \{([^}]*)\}/.exec(css)?.[1] ?? '').toContain('overscroll-behavior: none')
+    // A NESTED scroller may only opt out of the axis it actually scrolls, because the property
+    // covers both: `none` on an axis with nothing to scroll swallows the wheel, and the scroller
+    // around it never moves. The fenced code in a preview is x-only (it grows, it never scrolls
+    // down); so is the split view's pinned strip.
+    expect(/\.mdPreviewBody pre \{([^}]*)\}/.exec(css)?.[1] ?? '').toContain('overscroll-behavior-x: none')
+    expect(/\.splitHScroll \{([^}]*)\}/.exec(css)?.[1] ?? '').toContain('overscroll-behavior-x: none')
+    // The settings preview is a vertical scroller nested in the scrolling settings page: it keeps
+    // the browser's own chaining, or the page stops scrolling under the pointer.
+    expect(block('diffPreviewScroll')).not.toContain('overscroll-behavior')
     // The file list is chrome, not the code, and keeps the platform's own feel.
     expect(block('listScroll')).not.toContain('overscroll-behavior')
   })
@@ -1908,6 +1942,10 @@ describe('PendingPanel', () => {
       expect((props.onAddPath as unknown as { mock: { calls: unknown[][] } }).mock.calls)
         .toEqual([[S1, '/repo/new.txt', true, true]])
     })
+
+    // The panel asks for the list at once: the id the host answered with is only selectable once
+    // its own list holds it, and the field is a way to open a file now — not a poll from now.
+    expect(props.onRefresh).toHaveBeenCalledWith(S1)
 
     // The entry shows up in the list a poll later; the field's file is selected then, and the
     // field shows that file's own path.
@@ -4474,6 +4512,52 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-selection-comment]')).not.toBeNull()
   })
 
+  it('refuses a second question while the session is still answering the first', async () => {
+    // One ask at a time. An answer is read out of the session's transcript by matching the prompt
+    // it answers, and only one of those is tracked at a time (see `pendingAskRef`): a second block
+    // asking while the first waits took that bookkeeping over, and the first answer could settle
+    // into the wrong thread. The second writing row stays usable and says so with its button.
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const select = (index: number): void => {
+      const node = rows[index]!.querySelector('[data-diff-code]')?.firstChild ?? rows[index]!
+      vi.spyOn(window, 'getSelection').mockReturnValue({
+        isCollapsed: false,
+        anchorNode: node,
+        focusNode: node,
+        rangeCount: 1,
+        getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+        removeAllRanges: () => {},
+      } as unknown as Selection)
+      act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    }
+    const asked = (): number => (props.onAskAgent as unknown as { mock: { calls: unknown[][] } }).mock.calls.length
+
+    // The first comment goes out: the session is answering it now.
+    select(0)
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+    fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
+    expect(asked()).toBe(1)
+
+    // A second comment on another row: its writing row opens, and its button refuses.
+    select(1)
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    const send = document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement
+    expect(send).not.toBeNull()
+    expect(send.disabled).toBe(true)
+    const input = document.querySelector('[data-diff-discussion-input]') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'and this one?' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(asked()).toBe(1)
+    // …and the draft is still there for when the answer lands.
+    expect((document.querySelector('[data-diff-discussion-input]') as HTMLInputElement).value).toBe('and this one?')
+  })
+
   it('marks a comment outdated when the code it was about is gone, and takes it back when it returns', async () => {
     // A comment stores the lines it was written about. When a later rebuild of the diff
     // no longer holds them, the thread is not silently re-hung on whatever took their
@@ -4577,6 +4661,44 @@ describe('PendingPanel', () => {
     // than sticky: it clears instead of condemning the thread for one rebuild — the rows it
     // is about are washed again.
     view.rerender(<PendingPanel {...props} />)
+    expect(document.querySelector('[data-diff-discussion-outdated]')).toBeNull()
+    expect(document.querySelector('[data-diff-discussion]')?.hasAttribute('data-lost')).toBe(false)
+    expect(document.querySelector('[data-diff-discussion-band]')).not.toBeNull()
+  })
+
+  it('keeps a thread live across a file switch, over a line that was changed', async () => {
+    // A changed line is two rows — the one removed and the one that replaced it — with a single
+    // new-file number between them, so the thread's quote covers more rows than its anchor spans
+    // lines. Reading that row count off the line span condemned the thread on the first rebuild,
+    // and switching files IS a rebuild: away and back has to leave the comment exactly as it was.
+    const changed = entry({ id: 'entry-changed', path: '/repo/changed.txt', oldText: 'const old = 1\nkeep\n', newText: 'const next = 2\nkeep\n' })
+    const other = entry({ id: 'entry-other', path: '/repo/other.txt', oldText: 'x\n', newText: 'y\n' })
+    const props = panelProps({ read: true, files: [changed, other], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('changed.txt'))
+
+    // The removed row and the added one, selected together.
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const from = rows[0]!.querySelector('[data-diff-code]')?.firstChild ?? rows[0]!
+    const to = rows[1]!.querySelector('[data-diff-code]')?.firstChild ?? rows[1]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: from,
+      focusNode: to,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: from, startOffset: 0, endContainer: to, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    expect(document.querySelector('[data-diff-discussion-band]')).not.toBeNull()
+
+    // Away to another file…
+    fireEvent.click(screen.getByText('other.txt'))
+    expect(document.querySelector('[data-diff-discussion]')).toBeNull()
+    // …and back: the same thread, still on the rows it was written about.
+    fireEvent.click(screen.getByText('changed.txt'))
     expect(document.querySelector('[data-diff-discussion-outdated]')).toBeNull()
     expect(document.querySelector('[data-diff-discussion]')?.hasAttribute('data-lost')).toBe(false)
     expect(document.querySelector('[data-diff-discussion-band]')).not.toBeNull()
@@ -4930,8 +5052,32 @@ describe('PendingPanel', () => {
     expect(chip).toContain('padding: 0 2px')
     expect(chip).not.toMatch(/padding: [^;]*px [^;]*px [^;]*px/)
     const bold = /\.discussionBody strong \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    // The browser's own bold and nothing drawn on top of it: the stroke that used to help it tell
+    // read as a smudge at the thread's size.
     expect(bold).toContain('font-weight: 700')
-    expect(bold).toContain('-webkit-text-stroke')
+    expect(bold).not.toContain('text-stroke')
+  })
+
+  it('draws the block\'s two edges, over the code\'s pinned line numbers', () => {
+    // A thread is a band lying on the code: the row it begins at and the row it ends at are what
+    // say so, so both are drawn — a hairline above and one below, in the rule's own grey. They are
+    // inset lines rather than borders (adjacent borders mitre, and the 3px rule against a 1px line
+    // is a slant at both corners), and the pin that holds the block carries a stacking level of its
+    // own: the pinned line-number columns paint above a row's background, and would cut the top and
+    // bottom edges of the block out of their columns if the block did not outrank them.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const block = /\.discussion \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(block).toContain('inset 0 1px 0 0')
+    expect(block).toContain('inset 0 -1px 0 0')
+    expect(block).not.toContain('border-top')
+    expect(block).not.toContain('border-bottom')
+    // Grey, and a tint of the surface rather than a palette step, so it reads on either theme.
+    expect(block).toContain('--dsw-alias-label-secondary')
+    const gutter = /\.line > \.gutter \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    const pin = /\.discussionPin \{([^}]*)\}/.exec(css)?.[1] ?? ''
+    const zOf = (rule: string): number => Number(/z-index: (-?\d+)/.exec(rule)?.[1] ?? '0')
+    expect(zOf(gutter)).toBe(1)
+    expect(zOf(pin)).toBeGreaterThan(zOf(gutter))
   })
 
   it('keeps a thread on its own row whatever the code\'s line height is set to', () => {
@@ -7574,5 +7720,152 @@ describe('PendingPanel', () => {
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(panel()).not.toBeNull()
   })
+
+  it('asks the canvas once per distinct character, not once per character drawn', () => {
+    // The wrap walks a line character by character and sums the advances, so a file asks the
+    // canvas for the same handful of widths tens of thousands of times — and with wrap on, that
+    // pass runs again on every frame of a resize drag. A character's advance is a property of the
+    // font, so the measurer answers from its own table after the first ask.
+    const asked: string[] = []
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+      font: '',
+      measureText: (text: string) => {
+        asked.push(text)
+        return { width: text.length * 7 }
+      },
+    } as never)
+    const measure = makeMeasurer('13px monospace')
+    expect(measure).toBeDefined()
+    const lines = ['const a = 1', 'const b = 2', 'const c = 3']
+    for (const line of lines) for (const character of line) measure?.(character)
+    const distinct = new Set(lines.join('')).size
+    expect(asked.length).toBe(distinct)
+    expect(asked.length).toBeLessThan(lines.join('').length)
+    // Anything longer than one character goes straight through: the wrap's asks are the ones worth
+    // keeping, and caching whole lines would hold the file in memory.
+    measure?.('const')
+    expect(asked.at(-1)).toBe('const')
+  })
+
+  // PERF-SWEEP-START A measurement harness, not an assertion: it prints what the panel's hot paths
+  // cost and is skipped unless asked for — `PERF=1 pnpm exec vitest run
+  // tests/pending-panel.client.spec.tsx -t "PERF sweep"`. jsdom has no layout, so the browser-only
+  // half of the cost (layout and paint) is not in these numbers: read them as the JS work, and
+  // compare them with each other rather than against a frame budget.
+  it.skipIf(process.env.PERF !== '1')('PERF sweep', async () => {
+    const ms = (label: string, runs: number, fn: () => void): void => {
+      fn()
+      const t0 = performance.now()
+      for (let i = 0; i < runs; i++) fn()
+      console.log(`PERF ${label}: ${((performance.now() - t0) / runs).toFixed(2)}ms/run x${runs}`)
+    }
+    const whole = await import('../src/client/whole-file-diff.ts')
+    const highlight = await import('../src/client/highlight.ts')
+    const discussion = await import('../src/client/discussion.ts')
+    const panel = await import('../src/client/PendingPanel.tsx')
+
+    const build = (every: number): [string, string] => {
+      const oldLines: string[] = []
+      const newLines: string[] = []
+      for (let i = 0; i < 2000; i++) {
+        const line = `const value${i} = compute(${i}, 'a longer argument here')`
+        oldLines.push(line)
+        newLines.push(i % every === 0 ? `const changed${i} = compute(${i}, 'a longer argument here')` : line)
+      }
+      return [`${oldLines.join('\n')}\n`, `${newLines.join('\n')}\n`]
+    }
+    const [old5, new5] = build(20)
+    const [oldAll, newAll] = build(1)
+    const diff = whole.computeWholeFileDiff(old5, new5)
+    ms('computeWholeFileDiff 2000 lines, 5% changed', 5, () => { whole.computeWholeFileDiff(old5, new5) })
+    ms('computeWholeFileDiff 2000 lines, all changed', 5, () => { whole.computeWholeFileDiff(oldAll, newAll) })
+    ms('changeBlocksOf', 20, () => { whole.changeBlocksOf(diff) })
+    ms('computeIntraLineDiff (split view)', 5, () => { whole.computeIntraLineDiff(diff.rows, true) })
+    const newLines = new5.split('\n')
+    ms('highlightWindow 200 lines', 5, () => { highlight.highlightWindow(newLines, 'typescript', 0, 200) })
+    const measure = (text: string): number => text.length * 7.2
+    ms('wrapInto x2000 rows (the wrap model)', 5, () => {
+      for (const line of newLines) panel.wrapInto(line, 800, measure, 4 * measure(' '))
+    })
+    const model = {
+      lineOf: (row: number) => diff.rows[row]?.newLine ?? diff.rows[row]?.oldLine,
+      textOf: (row: number) => diff.rows[row]?.text ?? '',
+      rowCount: diff.rows.length,
+    }
+    const threads = Array.from({ length: 50 }, (_, i) => ({
+      id: `d${i}`,
+      anchor: { start: i * 10, end: i * 10 + 3, startLine: 100 + i, endLine: 103 + i },
+      quote: 'a quote that is nowhere in this model\nnor this one',
+      messages: [], draft: '', collapsed: false,
+    }))
+    ms('remapDiscussion x50, quote not found (per block)', 10, () => {
+      for (const thread of threads) discussion.remapDiscussion(thread as never, model.lineOf, model.textOf, model.rowCount)
+    })
+    ms('remapDiscussions x50, quote not found (one pass)', 10, () => {
+      discussion.remapDiscussions(threads as never, model.lineOf, model.textOf, model.rowCount)
+    })
+    ms('discussionRuns + plainText x200 turns', 5, () => {
+      for (let i = 0; i < 200; i++) {
+        discussion.discussionPlainText(`turn ${i} with \`code\` and **bold** and more words to walk`)
+      }
+    })
+    const messages = Array.from({ length: 200 }, (_, i) => ({ role: (i % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant', text: `turn ${i}` }))
+    ms('discussionRounds over 200 turns', 20, () => { discussion.discussionRounds(messages, 2, () => 1) })
+
+    // The panel itself: mount with a 2000-line file, scroll it, and type in a comment.
+    const big = entry({ id: 'entry-perf', path: '/repo/perf.txt', oldText: old5, newText: new5 })
+    const restore = stubCodeScroll()
+    try {
+      const props = panelProps({ read: true, files: [big], busy: new Set() })
+      let t0 = performance.now()
+      const view = render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      fireEvent.click(screen.getByText('perf.txt'))
+      console.log(`PERF open a 2000-line file (mount + first render): ${(performance.now() - t0).toFixed(1)}ms`)
+
+      const body = codeBody()
+      t0 = performance.now()
+      for (let i = 1; i <= 20; i++) {
+        body.scrollTop = i * 100
+        fireEvent.scroll(body)
+      }
+      console.log(`PERF 20 scroll re-renders: ${((performance.now() - t0) / 20).toFixed(2)}ms/scroll`)
+
+      // A comment on the first rows, then typing in it: every keystroke re-renders and
+      // re-measures the thread against the whole 2000-row height table.
+      const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+      const node = rows[1]!.querySelector('[data-diff-code]')?.firstChild ?? rows[1]!
+      vi.spyOn(window, 'getSelection').mockReturnValue({
+        isCollapsed: false,
+        anchorNode: node,
+        focusNode: node,
+        rangeCount: 1,
+        getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+        removeAllRanges: () => {},
+      } as unknown as Selection)
+      act(() => { document.dispatchEvent(new Event('selectionchange')) })
+      t0 = performance.now()
+      fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+      console.log(`PERF create a comment block: ${(performance.now() - t0).toFixed(1)}ms`)
+      const input = document.querySelector('[data-diff-discussion-input]') as HTMLInputElement
+      t0 = performance.now()
+      for (let i = 1; i <= 10; i++) fireEvent.change(input, { target: { value: 'x'.repeat(i * 4) } })
+      console.log(`PERF 10 keystrokes in the comment box: ${((performance.now() - t0) / 10).toFixed(2)}ms/keystroke`)
+      t0 = performance.now()
+      fireEvent.keyDown(input, { key: 'Enter' })
+      console.log(`PERF send a comment: ${(performance.now() - t0).toFixed(1)}ms`)
+
+      // The windowed highlight, from the panel's side: a jump into the middle of the file.
+      t0 = performance.now()
+      body.scrollTop = 40 * 22
+      fireEvent.scroll(body)
+      await vi.waitFor(() => { expect(document.querySelector('[data-diff-code]')).not.toBeNull() })
+      console.log(`PERF scroll into a fresh window (highlight included): ${(performance.now() - t0).toFixed(1)}ms`)
+      view.unmount()
+    } finally {
+      restore()
+    }
+  })
+  // PERF-SWEEP-END
 
 })

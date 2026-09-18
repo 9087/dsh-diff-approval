@@ -663,8 +663,9 @@
 /* A fixed-height vertical viewport so the preview scrolls instead of growing
    the settings page when the line height is increased. */
 .diffPreviewScroll {
-  /* No rubber-band: see `.diffBody`. */
-  overscroll-behavior: none;
+  /* No opt-out of its own: this one is a VERTICAL scroller nested in the scrolling settings page,
+     and taking the browser's chaining away would stop the page scrolling whenever the pointer was
+     over the card. (The panel's own scrollers have nothing behind them, so they keep it.) */
   overflow-y: auto;
   height: 132px;
 }
@@ -827,8 +828,11 @@
   background: color-mix(in srgb, #9e9e9e 25%, transparent);
 }
 .mdPreviewBody pre {
-  /* No rubber-band: see `.diffBody`. */
-  overscroll-behavior: none;
+  /* Sideways only: a fenced block has long lines to scroll and no height of its own (it grows), so
+     it is a scroller in x alone. `overscroll-behavior` is two axes — a plain `none` here swallowed
+     the wheel that had nowhere to go inside the block, so the preview around it never scrolled
+     while the pointer sat on the code. */
+  overscroll-behavior-x: none;
   margin: 8px 0;
   padding: 10px 12px;
   border: 1px solid var(--dsw-alias-border-l1);
@@ -2184,7 +2188,8 @@
   position: absolute;
   left: 0;
   right: 0;
-  z-index: 1;
+  /* Above the block it frames, which is above the pinned columns (see `.discussionPin`). */
+  z-index: 3;
   box-sizing: border-box;
   border: 2px solid var(--dsw-alias-state-business-primary);
   border-radius: 4px;
@@ -2234,6 +2239,10 @@
   left: 0;
   width: 0;
   height: 0;
+  /* Above the code's pinned line-number columns, which are a stacking level of their own (see
+     `.line > .gutter`). Sticky makes a stacking context, so without this the columns would paint
+     over the top and bottom of the block — over its border, which is part of the block. */
+  z-index: 2;
 }
 
 .discussion {
@@ -2258,6 +2267,17 @@
      one broken frame. Grey is also what keeps the frame from competing with the
      colours that mean "added" / "deleted". */
   border-left: 3px solid var(--dsw-alias-label-secondary);
+  /* The two edges the thread begins and ends at: a hairline above and one below, in the rule's own
+     grey, so the block reads as a band lying on the code instead of as more rows of it. Drawn as
+     an inset shadow rather than as borders, because adjacent borders are mitred: the 3px left rule
+     against a 1px line turns into a slant at both corners, and the block's corners are square on
+     purpose. An inset line is painted inside the block, over its background and inside the rule, so
+     it takes nothing from the height the diff's row table reserved and has no join to get wrong.
+     The block's own painting is above the pinned line-number columns (see `.discussionPin`), so
+     the lines cross those columns too. */
+  box-shadow:
+    inset 0 1px 0 0 color-mix(in srgb, var(--dsw-alias-label-secondary) 55%, transparent),
+    inset 0 -1px 0 0 color-mix(in srgb, var(--dsw-alias-label-secondary) 55%, transparent);
   /* The code surface hands the whole area the text beam (see `.diffBody`), and a thread is not
      that: it is mostly chrome. The arrow covers the header's range label, the outdated mark, the
      notes and the space between the pieces — and the pieces a reader CAN select ask for the beam
@@ -2406,13 +2426,12 @@
   box-shadow: inset 0 0 0 1px var(--dsw-alias-border-l1);
 }
 
-/* Bold inside a turn. The thread's prose is the code font, whose bold face is often synthesized
-   at this size and reads as barely different from the plain text, so the emphasis is helped
-   along: 700 is the browser's own bold, and the hair of stroke is what makes it tell on the
-   engines that can draw it — and is simply ignored by the ones that cannot. */
+/* Bold inside a turn, and nothing drawn on top of it: 700 is the weight the browser's own
+   `<strong>` resolves to, and the one a code font ships. (A hair of `-webkit-text-stroke` used to
+   sit here to make the emphasis tell when the bold face is synthesized — at the thread's size it
+   read as a smudge, so the weight is left to speak for itself.) */
 .discussionBody strong {
   font-weight: 700;
-  -webkit-text-stroke: 0.3px currentColor;
 }
 
 /* Status lines: the lost-anchor note, failures, thinking. One thread row each and no
@@ -3284,8 +3303,9 @@
 }
 
 .splitHScroll {
-  /* No rubber-band: see `.diffBody`. */
-  overscroll-behavior: none;
+  /* Sideways only, like the code block above: this strip is a horizontal scroller, and a wheel
+     over it is trying to scroll the column it belongs to. */
+  overscroll-behavior-x: none;
   flex: 1 1 0;
   min-width: 0;
   overflow-x: auto;

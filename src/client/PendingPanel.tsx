@@ -21,7 +21,7 @@ import { blockRangesOf, changeBlocksOf, computeIntraLineDiff, computeWholeFileDi
 import {
   DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, discussionOverlapping,
   discussionPlainText, discussionRowExtras, discussionRows, discussionRounds, discussionRuns, discussionText,
-  remapDiscussion, selectionFrame, stripBlankLines,
+  remapDiscussions, selectionFrame, stripBlankLines,
 } from './discussion.ts'
 import type { Discussion, DiscussionMessage, DiscussionQuoteLine } from './discussion.ts'
 import { frameFollowIsAnimated, frameFollowKeyframes } from './scroll-follow.ts'
@@ -438,7 +438,7 @@ function codeFontOf(): string | undefined {
 }
 
 /** Create a measurer bound to `font`; falls back to a rough char estimate. */
-function makeMeasurer(font: string | undefined): ((text: string) => number) | undefined {
+export function makeMeasurer(font: string | undefined): ((text: string) => number) | undefined {
   if (typeof document === 'undefined') return undefined
   try {
     if (measureCanvas === undefined) measureCanvas = document.createElement('canvas').getContext('2d') ?? undefined
@@ -448,7 +448,21 @@ function makeMeasurer(font: string | undefined): ((text: string) => number) | un
   const ctx = measureCanvas
   if (ctx === undefined) return undefined
   if (font !== undefined) ctx.font = font
-  return text => ctx.measureText(text).width
+  // One `measureText` per DISTINCT character, not per character drawn. The wrap walks a line
+  // character by character and sums the advances, so a file asks for the same handful of widths
+  // tens of thousands of times — and the canvas call is the expensive half of that loop. A
+  // character's advance is a property of the font alone, so the cached number is the one the sum
+  // would have used anyway. Only single characters are cached: the wrap's own widths are the ones
+  // it asks for again and again, and keying whole lines would just hold the file in memory.
+  const widths = new Map<string, number>()
+  return text => {
+    if (text.length !== 1) return ctx.measureText(text).width
+    const cached = widths.get(text)
+    if (cached !== undefined) return cached
+    const width = ctx.measureText(text).width
+    widths.set(text, width)
+    return width
+  }
 }
 /** How long a question the session has let go stays "queued" before the block hands
  * its writing row back. The local submission echo and the host's queue row are a
@@ -2504,6 +2518,18 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     () => rememberedDiscussions(file.sessionId),
   )
   const discussions = discussionsByFile[file.id] ?? EMPTY_DISCUSSIONS
+  // The one question this session is waiting on, if there is one — across the files, not just the
+  // open one. An ask goes to the session's chat, and the answer is read back out of that single
+  // transcript by matching the prompt it answers (see the watcher below). Only one such prompt is
+  // tracked, so a second block asking while the first waits would take that bookkeeping over and
+  // the answer would settle into the wrong thread: the other writing rows refuse instead.
+  const askingId = useMemo(() => {
+    for (const list of Object.values(discussionsByFile)) {
+      const waiting = list.find(entry => entry.asking === true)
+      if (waiting !== undefined) return waiting.id
+    }
+    return undefined
+  }, [discussionsByFile])
   const setDiscussions = (update: (current: readonly Discussion[]) => readonly Discussion[]): void => {
     setDiscussionsByFile(all => ({ ...all, [file.id]: update(all[file.id] ?? EMPTY_DISCUSSIONS) }))
   }
@@ -3684,15 +3710,15 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   useEffect(() => {
     setDiscussionsByFile(all => {
       const list = all[file.id] ?? EMPTY_DISCUSSIONS
-      const next = list.map(discussion => remapDiscussion(
-        discussion,
+      const next = remapDiscussions(
+        list,
         (row) => {
           const entry = model.diff.rows[row]
           return entry?.newLine ?? entry?.oldLine
         },
         (row) => model.diff.rows[row]?.text ?? '',
         model.diff.rows.length,
-      ))
+      )
       return next.some((discussion, index) => discussion !== list[index]) ? { ...all, [file.id]: next } : all
     })
   }, [model, file.id])
@@ -3868,6 +3894,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   const sendDiscussion = (id: string): void => {
     const discussion = discussions.find(entry => entry.id === id)
     if (discussion === undefined) return
+    // One question at a time: see `askingId`. The button says the same thing, and this is the
+    // belt to it — the field's own Enter comes through here too. The ref is read as well because
+    // it is written synchronously: two sends inside one tick (a scripted pair of clicks, before
+    // React has re-rendered with the first one's `asking`) would both see the older state.
+    if (askingId !== undefined && askingId !== id) return
+    if (pendingAskRef.current !== undefined && pendingAskRef.current.id !== id) return
     const text = discussion.draft.trim()
     if (text === '') return
     const reference = `(${discussionLineRange(discussion.anchor)})`
@@ -5226,10 +5258,14 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                                 data-diff-discussion
                                 data-lost={discussion.lost === true ? '' : undefined}
                                 style={{
-                                  // The panel's own width: the pin is zero-width, so the block cannot
-                                  // take a width from it, and the ruler strip (when there is no bar to
-                                  // clear it) is not ours to paint over.
-                                  width: Math.max(0, bodyWidth - discussionRightInsetPx),
+                                  // The panel's own width, ruler strip included. The block's
+                                  // background is transparent, so the only thing that would land on
+                                  // the ruler is what the reader came for: its two edge lines (they
+                                  // are drawn inside the block, so they can only ever reach as far
+                                  // as the block does) and the left rule. The thread's own content
+                                  // keeps its 12px inset, so no text goes under the ruler. The row
+                                  // measurements stay conservative by the same 4px on purpose.
+                                  width: Math.max(0, bodyWidth),
                                   height: rows * THREAD_ROW_PX,
                                 }}
                               >
@@ -5368,6 +5404,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                                           type="button"
                                           className={`${css.action} ${css.actionPrimary} ${css.discussionSend}`}
                                           data-diff-discussion-send
+                                          // A question is already in flight: the session answers one at a time
+                                          // (see `askingId`), and the answer would have nowhere to land.
+                                          disabled={askingId !== undefined}
                                           onClick={() => { sendDiscussion(discussion.id) }}
                                         >
                                           {t('action.comment')}
@@ -6551,6 +6590,10 @@ export function PendingPanel({
     if (value === undefined) return false
     if (value.outcome !== 'added' && value.outcome !== 'duplicate') return false
     if (value.id !== undefined) setPendingSelect(value.id)
+    // The id is the host's answer, and the panel can only select ids its own list holds: ask for
+    // the list now instead of waiting for the next poll. The field is a way to open a file, and
+    // opening it a second later is not that.
+    onRefresh(current)
     return true
   }
 
@@ -6897,13 +6940,30 @@ export function PendingPanel({
     }
     document.body.style.userSelect = 'none'
     document.body.style.cursor = 'col-resize'
+    // One width per animation frame, not one per pointer event. A mouse reports at 125–1000Hz
+    // while the screen draws at 60–120, so most of those events would re-render the list — and,
+    // with wrap on, re-wrap the whole code view — for positions nobody ever sees; the frame's own
+    // render is the one that shows. The frame takes the LAST position of the events it absorbed.
+    let latest = startWidth
+    let pending = 0
     const onMove = (move: PointerEvent) => {
-      const next = startWidth + (move.clientX - startX)
-      setListWidth(Math.min(Math.max(next, MIN_LIST_WIDTH_PX), cap))
+      latest = Math.min(Math.max(startWidth + (move.clientX - startX), MIN_LIST_WIDTH_PX), cap)
+      if (pending !== 0) return
+      pending = requestAnimationFrame(() => {
+        pending = 0
+        setListWidth(latest)
+      })
     }
     // `pointercancel` is the browser taking the gesture over (a pan it decided to
     // start, a system gesture): the drag ends there, like a release.
     const finish = (): void => {
+      // A release inside the same frame as the last move would otherwise land the width one frame
+      // behind where the reader let go, so the position the drag ended at still goes in — once.
+      if (pending !== 0) {
+        cancelAnimationFrame(pending)
+        pending = 0
+        setListWidth(latest)
+      }
       document.body.style.userSelect = ''
       document.body.style.cursor = ''
       window.removeEventListener('pointermove', onMove)
