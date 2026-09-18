@@ -1151,6 +1151,30 @@ function isInPanelEvent(event: KeyboardEvent): boolean {
 }
 
 /**
+ * What a press inside the panel must NOT drop the text selection for: the content itself, and the
+ * frame that acts on the selection.
+ *
+ * The content mirrors the `user-select` whitelist in `.panel`: the code, the rendered Markdown
+ * preview, a thread's own turns, the code a comment quotes, and any field. Everything else is
+ * chrome (see `.panel`), and a press on chrome ends the selection rather than leaving it standing
+ * — see `onPanelMouseDown`. The frame is the exception that is not content: its 评论 / 保留 / 回退
+ * buttons are about exactly that selection, so dropping it on the way to them would leave them
+ * acting on nothing.
+ */
+const KEEPS_SELECTION = [
+  'input',
+  'textarea',
+  '[contenteditable]',
+  '[data-diff-code]',
+  '[data-diff-md-preview-body]',
+  '[data-diff-discussion-user]',
+  '[data-diff-discussion-reply]',
+  '[data-diff-quote-text]',
+  '[data-diff-selection-actions]',
+  '[data-diff-copy]',
+].join(', ')
+
+/**
  * Whether a key event came from a text field that owns its own keys (`Esc`,
  * cursor moves). The chat composer is the one that matters: the panel leaves it
  * alone even while its own search bar is open.
@@ -7099,6 +7123,24 @@ export function PendingPanel({
     window.addEventListener('pointercancel', finish)
   }
 
+  /**
+   * End the text selection when the press lands on the panel's chrome — blank space, a label, the
+   * toolbar, the file list.
+   *
+   * The chrome is `user-select: none` (see `.panel`), and a press on such an area is one the
+   * browser does NOT clear the selection for: the highlight stayed up, and so did the selection
+   * frame that goes with it, over a gesture that plainly ended. What IS content is left to the
+   * browser — which is also what keeps a drag started on chrome able to select the code it runs
+   * into, since dropping the ranges first costs the drag nothing.
+   */
+  const onPanelMouseDown = (event: ReactMouseEvent<HTMLDivElement>): void => {
+    const target = event.target
+    if (!(target instanceof Element)) return
+    if (target.closest(KEEPS_SELECTION) !== null) return
+    const live = window.getSelection()
+    if (typeof live?.removeAllRanges === 'function') live.removeAllRanges()
+  }
+
   // Docked, the panel is a sidebar tab: it fills the tab body the dock body
   // handed it, so it draws no layer of its own. That layer is the footer seat's
   // box (42px plus margins) and would push the tab content past its own height —
@@ -7138,6 +7180,7 @@ export function PendingPanel({
               { width: viewportWidth, height: viewportHeight },
             )}
             data-diff-approval-panel
+            onMouseDown={onPanelMouseDown}
             data-diff-docked={docked ? '' : undefined}
             aria-label={t('panel.title')}
           >

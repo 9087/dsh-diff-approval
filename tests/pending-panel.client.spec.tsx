@@ -1285,10 +1285,9 @@ describe('PendingPanel', () => {
     }
     expect(content).toContain('user-select: text;')
     // Inside a thread, the diff surface's text beam is taken back — the code surface hands the
-    // whole area the I-beam (see `.diffBody`) — and the arrow is for the chrome: the header, the
-    // marks, the notes and the space between the pieces. What a reader can actually select asks
-    // for the beam again (the turns' prose and the quoted code), so the cursor agrees with the
-    // whitelist instead of contradicting it; buttons carry their own pointer.
+    // whole area the I-beam (see `.diffBody`) — and what a reader CAN select asks for the beam
+    // again (the turns' prose and the quoted code), so the cursor agrees with the whitelist
+    // instead of contradicting it; buttons carry their own pointer.
     expect(/\.discussion \{[^}]*cursor: default;/.test(css)).toBe(true)
     expect(/\.discussionUser \{[^}]*cursor: text;/.test(css)).toBe(true)
     expect(/\.discussionAnswer \{[^}]*cursor: text;/.test(css)).toBe(true)
@@ -4595,6 +4594,72 @@ describe('PendingPanel', () => {
     expect(asked()).toBe(1)
     // …and the draft is still there for when the answer lands.
     expect((document.querySelector('[data-diff-discussion-input]') as HTMLInputElement).value).toBe('and this one?')
+  })
+
+  it('keeps the selection when a real press lands on the frame that acts on it', () => {
+    // The frame's 评论 button comments on the selection, so a press on it must leave the selection
+    // standing. (A press in a browser is mousedown AND click: firing only the click is what let a
+    // blanket "press on chrome drops the selection" break the button without any test noticing.)
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const cell = rows[1]!.querySelector('[data-diff-code]') as HTMLElement
+    const node = cell.firstChild ?? cell
+    const removeAllRanges = vi.fn()
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      rangeCount: 1,
+      anchorNode: node,
+      focusNode: node,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges,
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    const comment = document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement
+    expect(comment).not.toBeNull()
+    fireEvent.mouseDown(comment)
+    expect(removeAllRanges).not.toHaveBeenCalled()
+    fireEvent.click(comment)
+    expect(document.querySelector('[data-diff-discussion]')).not.toBeNull()
+  })
+
+  it('drops a text selection when a press lands on the panel\'s chrome', () => {
+    // The panel's chrome is `user-select: none`, and a press on such an area is one the browser
+    // does NOT clear the selection for: the highlight stayed up, and the selection frame with it,
+    // over a gesture that plainly ended. Content keeps its selection; chrome drops it.
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const cell = rows[1]!.querySelector('[data-diff-code]') as HTMLElement
+    const node = cell.firstChild ?? cell
+    const removeAllRanges = vi.fn()
+    let cleared = false
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      get isCollapsed() { return cleared },
+      get rangeCount() { return cleared ? 0 : 1 },
+      anchorNode: node,
+      focusNode: node,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => { cleared = true; removeAllRanges() },
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    expect(document.querySelector('[data-diff-selection-actions]')).not.toBeNull()
+
+    // A press on the toolbar — chrome — drops the selection, and the frame with it.
+    fireEvent.mouseDown(document.querySelector('[data-diff-toolbar]') as HTMLElement)
+    expect(removeAllRanges).toHaveBeenCalled()
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    expect(document.querySelector('[data-diff-selection-actions]')).toBeNull()
+
+    // A press on the code keeps it: that is where a selection is made.
+    removeAllRanges.mockClear()
+    fireEvent.mouseDown(cell)
+    expect(removeAllRanges).not.toHaveBeenCalled()
   })
 
   it('marks a comment outdated when the code it was about is gone, and takes it back when it returns', async () => {
