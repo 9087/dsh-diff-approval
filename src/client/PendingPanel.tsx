@@ -3544,8 +3544,14 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     const outdatedRows = discussion.lost === true && discussion.quote !== undefined && discussion.quote !== ''
       ? 1 + quoteRowsOf(discussion.quote, langWrap) * (ROW_HEIGHT_PX / THREAD_ROW_PX)
       : 0
+    // A turn that is still answering keeps a line under the text it has streamed so far
+    // (`discussion.answering`): the note that says it is thinking is drawn only while nothing has
+    // arrived, so from the first token on this line is the only thing that says the rest is
+    // coming. It is a row of its own, and the block reserves it here or it would draw a row the
+    // height table never counted — which clips what sits below it.
+    const writingNote = discussion.asking === true && answer !== undefined && answer !== ''
     const trailing = outdatedRows + (answer !== undefined && answer !== ''
-      ? messageSizeOf({ role: 'assistant', text: answer })
+      ? messageSizeOf({ role: 'assistant', text: answer }) + (writingNote ? 1 : 0)
       : discussion.failed === true || discussion.asking === true
         ? 1
         : DISCUSSION_COMPOSE_ROWS + (stoppedNote ? 1 : 0))
@@ -5454,6 +5460,11 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                       `.discussionRow` and `.discussionPin`). */}
                   {blocks.map(discussion => {
                     const rows = discussionRows(discussion)
+                    // The turn is answering and text has arrived: the streamed answer takes the
+                    // branch the thinking note used to hold, so the line that says the answer is
+                    // still coming is drawn with it — and `layoutDiscussion` reserves that row.
+                    const writingNote = discussion.asking === true
+                      && discussion.reply !== undefined && discussion.reply !== ''
                     return (
                       <div
                         key={discussion.id}
@@ -5570,7 +5581,24 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                                       )
                                     ))}
                                     {discussion.reply !== undefined && discussion.reply !== '' ? (
-                                      <p className={css.discussionAnswer} data-diff-discussion-reply>{discussionNodes(discussion.reply)}</p>
+                                      <>
+                                        <p className={css.discussionAnswer} data-diff-discussion-reply>{discussionNodes(discussion.reply)}</p>
+                                        {/* The turn is still writing. The note below it said it was
+                                            thinking only until the first token landed — this branch
+                                            takes over then, and without the line the block would say
+                                            nothing at all about the rest of the answer coming, while
+                                            the text above it grows line by line. It sits under the
+                                            streamed text, at the thread's own left edge, where the
+                                            next line of that answer will appear. */}
+                                        {writingNote && (
+                                          <p className={css.discussionNote} data-diff-discussion-answering>
+                                            {t('discussion.answering')}
+                                            <span className={css.discussionDots} data-diff-discussion-dots aria-hidden="true">
+                                              <span>.</span><span>.</span><span>.</span>
+                                            </span>
+                                          </p>
+                                        )}
+                                      </>
                                     ) : discussion.failed === true ? (
                                       <p className={css.discussionNote} data-diff-discussion-failed>{t('discussion.failed')}</p>
                                     ) : discussion.asking === true ? (
