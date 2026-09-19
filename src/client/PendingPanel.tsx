@@ -7760,7 +7760,7 @@ export function PendingPanel({
                 <p className={css.confirmText}>{t('panel.resolvedAsk', { file: basenameOf(promptFile.path) })}</p>
                 {/* The same checkbox the whole-file dialog carries: this question comes back for
                     every block of the file, and the answer is usually the same one. */}
-                <label className={css.pickerCheck}>
+                <label className={css.pickerCheck} title={t('panel.removalQuietHint')}>
                   <input
                     type="checkbox"
                     data-diff-confirm-quiet
@@ -7814,9 +7814,10 @@ export function PendingPanel({
                   {t(filePrompt.action === 'keep' ? 'panel.fileKeptAsk' : 'panel.fileRevertedAsk', { file: basenameOf(promptEntry.path) })}
                 </p>
                 {/* Tick it and this file stops asking: the action below runs, the row stays in the
-                    list, and the reader takes it out by hand when they are done with it. It lasts
-                    for this page and this session — a reload starts asking again. */}
-                <label className={css.pickerCheck}>
+                    list, and the reader takes it out by hand when they are done with it. The scope is
+                    the page's memory — this session, this visit — so the label says the session and
+                    the title says the visit, which is the bound a reload is. */}
+                <label className={css.pickerCheck} title={t('panel.removalQuietHint')}>
                   <input
                     type="checkbox"
                     data-diff-file-confirm-quiet

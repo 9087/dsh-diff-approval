@@ -12,7 +12,7 @@ import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingFileDiff } from '../src/types.ts'
 import { PendingPanel, frameInsets, makeMeasurer, wrapChipRows, MIN_LIST_WIDTH_PX } from '../src/client/PendingPanel.tsx'
 import { zh } from '../src/client/locales.ts'
-import { lastPanelFile, panelFileOffset, rememberDiscussions, rememberedDiscussions, resetPanelMemory } from '../src/client/panel-memory.ts'
+import { lastPanelFile, panelFileOffset, rememberDiscussions, rememberedDiscussions, removalAskQuiet, resetPanelMemory } from '../src/client/panel-memory.ts'
 import { diffLineHeight, navLeadRows, setCommentModeEnabled } from '../src/client/settings.ts'
 import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
 import { DiffApprovalHeaderEntry } from '../src/client/header-entry.tsx'
@@ -651,8 +651,16 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-confirm-file]')).toBeNull()
     expect(props.onKeep).toHaveBeenCalledTimes(2)
     expect(props.onKeep).toHaveBeenLastCalledWith(FILE.sessionId, FILE.id, true)
-    // A fresh page asks again: this is a fact about the visit, not a preference.
+
+    // It is the page's memory of THE SESSION's answer, not a preference of the panel's: quiet for
+    // this session's file, nothing for another session's, and a fresh page asks all over again.
+    expect(removalAskQuiet(S1, FILE.id)).toBe(true)
+    expect(removalAskQuiet('another-session', FILE.id)).toBe(false)
     resetPanelMemory()
+    expect(removalAskQuiet(S1, FILE.id)).toBe(false)
+    fireEvent.click(screen.getByText('action.keep'))
+    expect(document.querySelector('[data-diff-confirm-file]')).not.toBeNull()
+    fireEvent.click(document.querySelector('[data-diff-file-confirm-keep]') as HTMLButtonElement)
   })
 
   it('runs a whole-file action straight through when the prompt is disabled', () => {
