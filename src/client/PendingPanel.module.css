@@ -2845,20 +2845,29 @@
   height: calc(22px * 2);
   /* Horizontally the wider row above; vertically the leftover sits ABOVE the pair. */
   margin: 0 -6px;
-  /* The rows a block reserves come from a canvas-measured wrap, which errs upward by up to a
-     row (the panel's `messageRowsOf` keeps a character of slack so a turn is never clipped).
-     That spare row has nothing to draw, and the writing row is the LAST child of the body's
-     flex column — so by default it collects under the box and reads as a stray blank row below
-     the input. An auto top margin sends it above the writing row instead, where it reads as the
-     thread's own spacing. `auto` resolves to zero both when the content fills its rows exactly
-     (the ordinary case) and when it overflows (the case the slack exists to prevent), so
-     nothing moves and nothing is pushed out of the block either way. */
-  margin-top: auto;
   /* ...and a third of a row stays under the pair, so the block does not end on the controls'
      own edge: the field and the button read as sitting inside the block rather than as its
      bottom border. Padding rather than a margin, because the band's two rows are what the
      block's row count was built from — they must not move. */
   padding: 0 0 calc(22px * 0.3);
+}
+
+/* The one spare row a block may hold, and where it goes.
+
+   The rows a block reserves come from a canvas-measured wrap, which errs upward by up to a row
+   (the panel's `messageRowsOf` keeps a character of slack so a turn is never clipped). That spare
+   row has nothing to draw, and the writing row is the LAST child of the body's flex column — so by
+   default it collects under the box and reads as a stray blank row below the input. This spacer
+   takes it instead, and it is deliberately capped: it sits directly above the writing row and can
+   absorb AT MOST one row, so the spare air reads as the thread's own spacing. Whatever a block
+   reserves beyond that stays below the writing row, at the block's bottom edge — an over-measured
+   block then ends early rather than opening a hole between what was said and where the reader
+   writes. An auto top margin on the row used to take ALL of it, which is the same thing while the
+   measurement is within its documented slack and a gap the height of the error when it is not. */
+.discussionSlack {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: 22px;
 }
 
 /* The writing field, whose box is exactly one toolbar button (26px: 3px of padding,

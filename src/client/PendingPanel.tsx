@@ -3577,6 +3577,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
         ...discussion,
         bodyRows: laid.rows,
         hidden: laid.hidden,
+        // The wrap the rows above were counted with, handed to the quote that draws them: the
+        // count and the drawing have to be the same decision. `bodyRows` is measured from the
+        // wrapped quote and the quote is rendered from this flag — one render, one value, and no
+        // way for the two to drift apart into a block that reserves the wrapped height and draws
+        // the unwrapped one (see `.discussionCompose`, which turns that difference into air).
+        quoteWrap: langWrap,
         messages: laid.messages.map(message => ({ ...message, text: discussionText(message) })),
         // Only set when there IS an answer in flight: both the type and the render
         // read the absence of `reply` as "nothing streamed yet".
@@ -5538,7 +5544,11 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                                         <p className={css.discussionNote} data-diff-discussion-quote-label>
                                           {t('discussion.outdatedQuote')}
                                         </p>
-                                        <DiscussionQuote quote={discussion.quote} lines={discussion.quoteLines} lang={lang} wrap={langWrap} />
+                                        {/* The wrap comes from the block's own layout, not from the
+                                            setting: the rows above this quote were counted from it
+                                            (see `laidDiscussions`), so a quote drawn with anything
+                                            else would be drawn at a height nobody reserved. */}
+                                        <DiscussionQuote quote={discussion.quote} lines={discussion.quoteLines} lang={lang} wrap={discussion.quoteWrap === true} />
                                       </>
                                     )}
                                     {discussion.hidden !== undefined && discussion.hidden > 0 && (
@@ -5573,50 +5583,56 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                                         </span>
                                       </p>
                                     ) : (
-                                      <div className={css.discussionCompose}>
-                                        {/* An outdated thread writes like any other: what the
-                                            thread was about is quoted above this row, so a reply
-                                            still has something to be about, and the row stays
-                                            where the writing would happen so the block's shape does
-                                            not change under the reader when the code moves on. */}
-                                        <input
-                                          className={css.discussionInput}
-                                          data-diff-discussion-input
-                                          ref={(element) => {
-                                            if (element === null) discussionInputEls.current.delete(discussion.id)
-                                            else discussionInputEls.current.set(discussion.id, element)
-                                          }}
-                                          value={discussion.draft}
-                                          placeholder={t('discussion.placeholder')}
-                                          onChange={(event) => {
-                                            const value = event.target.value
-                                            setDiscussions(current => current.map(entry => (
-                                              entry.id === discussion.id ? { ...entry, draft: value } : entry
-                                            )))
-                                          }}
-                                          onKeyDown={(event) => {
-                                            if (event.key !== 'Enter') return
-                                            // An IME's "confirm the candidate" Enter must not send:
-                                            // composing is the signal for it, and 229 is the code
-                                            // some engines send when they will not say so.
-                                            if (event.nativeEvent.isComposing || event.keyCode === 229) return
-                                            event.preventDefault()
-                                            sendDiscussion(discussion.id)
-                                          }}
-                                        />
-                                        <button
-                                          type="button"
-                                          className={`${css.action} ${css.actionPrimary} ${css.discussionSend}`}
-                                          data-diff-discussion-send
-                                          // A question is already in flight: the session answers one at a time
-                                          // (see `askingId`), and the answer would have nowhere to land.
-                                          disabled={askingId !== undefined}
-                                          onClick={() => { sendDiscussion(discussion.id) }}
-                                        >
-                                          {t('action.comment')}
-                                          <ReturnIcon />
-                                        </button>
-                                      </div>
+                                      <>
+                                        {/* At most one spare row of the block's own measurement,
+                                            and only here, next to the writing row it belongs to
+                                            (see `.discussionSlack`). */}
+                                        <div className={css.discussionSlack} data-diff-discussion-slack aria-hidden="true" />
+                                        <div className={css.discussionCompose}>
+                                          {/* An outdated thread writes like any other: what the
+                                              thread was about is quoted above this row, so a reply
+                                              still has something to be about, and the row stays
+                                              where the writing would happen so the block's shape does
+                                              not change under the reader when the code moves on. */}
+                                          <input
+                                            className={css.discussionInput}
+                                            data-diff-discussion-input
+                                            ref={(element) => {
+                                              if (element === null) discussionInputEls.current.delete(discussion.id)
+                                              else discussionInputEls.current.set(discussion.id, element)
+                                            }}
+                                            value={discussion.draft}
+                                            placeholder={t('discussion.placeholder')}
+                                            onChange={(event) => {
+                                              const value = event.target.value
+                                              setDiscussions(current => current.map(entry => (
+                                                entry.id === discussion.id ? { ...entry, draft: value } : entry
+                                              )))
+                                            }}
+                                            onKeyDown={(event) => {
+                                              if (event.key !== 'Enter') return
+                                              // An IME's "confirm the candidate" Enter must not send:
+                                              // composing is the signal for it, and 229 is the code
+                                              // some engines send when they will not say so.
+                                              if (event.nativeEvent.isComposing || event.keyCode === 229) return
+                                              event.preventDefault()
+                                              sendDiscussion(discussion.id)
+                                            }}
+                                          />
+                                          <button
+                                            type="button"
+                                            className={`${css.action} ${css.actionPrimary} ${css.discussionSend}`}
+                                            data-diff-discussion-send
+                                            // A question is already in flight: the session answers one at a time
+                                            // (see `askingId`), and the answer would have nowhere to land.
+                                            disabled={askingId !== undefined}
+                                            onClick={() => { sendDiscussion(discussion.id) }}
+                                          >
+                                            {t('action.comment')}
+                                            <ReturnIcon />
+                                          </button>
+                                        </div>
+                                      </>
                                     )}
                                   </div>
                                 )}

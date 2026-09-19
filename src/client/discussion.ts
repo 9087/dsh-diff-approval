@@ -122,6 +122,16 @@ export interface Discussion {
    * sets the code's line height to.
    */
   bodyRows?: number
+  /**
+   * The wrap setting `bodyRows` was counted with, carried by the caller so the quote the
+   * block draws reads the very value its rows were reserved from. Set together with
+   * `bodyRows` and never on its own; an outdated block reserves the quote's rows in code
+   * rows scaled to the thread's grid (see `layoutDiscussion`), and a quote that wrapped
+   * while its rows were counted unwrapped — or the other way round — leaves the block
+   * exactly as tall as the difference, air that the bottom-anchored writing row shows as
+   * a hole in the middle of the thread.
+   */
+  quoteWrap?: boolean
   /** How many older messages the row cap left out of the render. */
   hidden?: number
 }
