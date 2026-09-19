@@ -1051,6 +1051,216 @@ function DiscussionQuote({ quote, lines, lang, wrap }: {
   )
 }
 
+/** One comment thread as the panel draws it, whoever is drawing it. */
+interface DiscussionBlockProps {
+  discussion: Discussion
+  /** The `path:lines` reference the header wears, from the thread's own anchor. */
+  label: string
+  /** The panel's width, ruler strip included: the card is laid out to it (see the style below). */
+  bodyWidth: number
+  /** The file's language, for the quote's highlighting. */
+  lang: string | undefined
+  /** Whether this block's ⋯ menu is the open one. */
+  menuOpen: boolean
+  /** Whether a question is already in flight anywhere: the session answers one at a time. */
+  asking: boolean
+  t: Translator
+  onToggle: (id: string) => void
+  onMenuOpen: (id: string | undefined) => void
+  onRemove: (id: string) => void
+  onDraft: (id: string, value: string) => void
+  onSend: (id: string) => void
+  /** Hands the writing field's element to the panel, so a send can ask for the caret back. */
+  registerInput: (id: string, element: HTMLInputElement | null) => void
+}
+
+/**
+ * A thread's card: the header (range, fold, ⋯), the quote when the code it was written about is
+ * gone, the turns, and the writing row.
+ *
+ * Every view draws the same card — the single-column code view hangs it in a row of its own below
+ * the rows the thread annotates, and whatever view comes next hangs it under whatever it draws that
+ * anchor as — so it is a component rather than a piece of one view's row stream. What varies per
+ * view is only the wrapper around it and the width it is given.
+ *
+ * @param props - the thread, where it hangs, and the panel's own callbacks.
+ * @returns the card, sized to the rows the panel laid the thread out in.
+ */
+function DiscussionBlock({
+  discussion, label, bodyWidth, lang, menuOpen, asking, t,
+  onToggle, onMenuOpen, onRemove, onDraft, onSend, registerInput,
+}: DiscussionBlockProps) {
+  const rows = discussionRows(discussion)
+  // The turn is answering and text has arrived: the streamed answer takes the branch the thinking
+  // note used to hold, so the line that says the answer is still coming is drawn with it — and
+  // `layoutDiscussion` reserves that row.
+  const writingNote = discussion.asking === true && discussion.reply !== undefined && discussion.reply !== ''
+  const menuItems: MenuEntry[] = [{ id: 'delete', label: t('action.discussionEnd') }]
+  return (
+    <div
+      className={css.discussion}
+      data-diff-discussion
+      data-lost={discussion.lost === true ? '' : undefined}
+      style={{
+        // The panel's own width, ruler strip included. The block's background is transparent, so the
+        // only thing that would land on the ruler is what the reader came for: its two edge lines
+        // (they are drawn inside the block, so they can only ever reach as far as the block does)
+        // and the left rule. The thread's own content keeps its 12px inset, so no text goes under the
+        // ruler. The row measurements stay conservative by the same 4px on purpose.
+        width: Math.max(0, bodyWidth),
+        height: rows * THREAD_ROW_PX,
+      }}
+    >
+      <div className={css.discussionHead}>
+        <button
+          type="button"
+          className={css.discussionToggle}
+          data-diff-discussion-toggle
+          aria-expanded={!discussion.collapsed}
+          aria-label={t(discussion.collapsed ? 'action.discussionExpand' : 'action.discussionCollapse')}
+          onClick={() => { onToggle(discussion.id) }}
+        >
+          {discussion.collapsed
+            ? <IconChevronDownOutline14 size={12} />
+            : <IconChevronUpOutline14 size={12} />}
+        </button>
+        <span className={css.discussionRangeWrap}>
+          <span className={css.discussionRange} data-diff-discussion-range>{label}</span>
+        </span>
+        <span className={css.flexSpacer} />
+        <Menu
+          open={menuOpen}
+          portal
+          compact
+          align="end"
+          items={menuItems}
+          onSelect={(id) => {
+            if (id === 'delete') onRemove(discussion.id)
+            onMenuOpen(undefined)
+          }}
+          onClose={() => { onMenuOpen(undefined) }}
+          anchor={(
+            <button
+              type="button"
+              className={css.discussionToggle}
+              data-diff-discussion-menu
+              aria-label={t('action.more')}
+              onClick={() => { onMenuOpen(menuOpen ? undefined : discussion.id) }}
+            >
+              {'\u22ef'}
+            </button>
+          )}
+        />
+      </div>
+      {!discussion.collapsed && (
+        <div className={css.discussionBody}>
+          {/* What the thread was written about. The lines it named are gone or rewritten, so this is
+              the only way to see what it meant — the mature review tools keep the same quote with an
+              outdated thread. The label in front of it is where the block says it is outdated: the
+              header keeps to the position the thread names and says nothing about its state. */}
+          {discussion.lost === true && discussion.quote !== undefined && discussion.quote !== '' && (
+            <>
+              <p className={css.discussionNote} data-diff-discussion-quote-label>
+                {t('discussion.outdatedQuote')}
+              </p>
+              {/* The wrap comes from the block's own layout, not from the setting: the rows above
+                  this quote were counted from it (see `laidDiscussions`), so a quote drawn with
+                  anything else would be drawn at a height nobody reserved. */}
+              <DiscussionQuote quote={discussion.quote} lines={discussion.quoteLines} lang={lang} wrap={discussion.quoteWrap === true} />
+            </>
+          )}
+          {discussion.hidden !== undefined && discussion.hidden > 0 && (
+            <p className={css.discussionNote} data-diff-discussion-hidden>
+              {t('discussion.hidden', { count: discussion.hidden })}
+            </p>
+          )}
+          {/* The turn was stopped: the question stays in the thread, the note says why there is no
+              answer, and the writing row below comes back so it can be asked again. */}
+          {discussion.stopped === true && (discussion.reply === undefined || discussion.reply === '') && discussion.failed !== true && (
+            <p className={css.discussionNote} data-diff-discussion-stopped>{t('discussion.stopped')}</p>
+          )}
+          {discussion.messages.map((message, index) => (
+            message.role === 'user' ? (
+              <p className={css.discussionUser} data-diff-discussion-user key={`u${index}`}>{discussionNodes(message.text)}</p>
+            ) : (
+              <p className={css.discussionAnswer} data-diff-discussion-reply key={`a${index}`}>{discussionNodes(message.text)}</p>
+            )
+          ))}
+          {discussion.reply !== undefined && discussion.reply !== '' ? (
+            <>
+              <p className={css.discussionAnswer} data-diff-discussion-reply>{discussionNodes(discussion.reply)}</p>
+              {/* The turn is still writing. The note below it said it was thinking only until the
+                  first token landed — this branch takes over then, and without the line the block
+                  would say nothing at all about the rest of the answer coming, while the text above
+                  it grows line by line. It sits under the streamed text, at the thread's own left
+                  edge, where the next line of that answer will appear. */}
+              {writingNote && (
+                <p className={css.discussionNote} data-diff-discussion-answering>
+                  {t('discussion.answering')}
+                  <span className={css.discussionDots} data-diff-discussion-dots aria-hidden="true">
+                    <span>.</span><span>.</span><span>.</span>
+                  </span>
+                </p>
+              )}
+            </>
+          ) : discussion.failed === true ? (
+            <p className={css.discussionNote} data-diff-discussion-failed>{t('discussion.failed')}</p>
+          ) : discussion.asking === true ? (
+            <p className={css.discussionNote} data-diff-discussion-asking>
+              {discussion.queued === true ? t('discussion.queued') : t('discussion.thinking')}
+              {/* Decorative: the words above say it all, and a screen reader should not read the
+                  dots. */}
+              <span className={css.discussionDots} data-diff-discussion-dots aria-hidden="true">
+                <span>.</span><span>.</span><span>.</span>
+              </span>
+            </p>
+          ) : (
+            <>
+              {/* At most one spare row of the block's own measurement, and only here, next to the
+                  writing row it belongs to (see `.discussionSlack`). */}
+              <div className={css.discussionSlack} data-diff-discussion-slack aria-hidden="true" />
+              <div className={css.discussionCompose}>
+                {/* An outdated thread writes like any other: what the thread was about is quoted
+                    above this row, so a reply still has something to be about, and the row stays
+                    where the writing would happen so the block's shape does not change under the
+                    reader when the code moves on. */}
+                <input
+                  className={css.discussionInput}
+                  data-diff-discussion-input
+                  ref={(element) => { registerInput(discussion.id, element) }}
+                  value={discussion.draft}
+                  placeholder={t('discussion.placeholder')}
+                  onChange={(event) => { onDraft(discussion.id, event.target.value) }}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter') return
+                    // An IME's "confirm the candidate" Enter must not send: composing is the signal
+                    // for it, and 229 is the code some engines send when they will not say so.
+                    if (event.nativeEvent.isComposing || event.keyCode === 229) return
+                    event.preventDefault()
+                    onSend(discussion.id)
+                  }}
+                />
+                <button
+                  type="button"
+                  className={`${css.action} ${css.actionPrimary} ${css.discussionSend}`}
+                  data-diff-discussion-send
+                  // A question is already in flight: the session answers one at a time, and the
+                  // answer would have nowhere to land.
+                  disabled={asking}
+                  onClick={() => { onSend(discussion.id) }}
+                >
+                  {t('action.comment')}
+                  <ReturnIcon />
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** Chip styling for each intra-line run: removed chars and added chars stand out. */
 const INTRA_CLASS: Record<IntraRun['kind'], string | undefined> = {
   same: undefined,
@@ -2751,12 +2961,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   const setDiscussions = (update: (current: readonly Discussion[]) => readonly Discussion[]): void => {
     setDiscussionsByFile(all => ({ ...all, [file.id]: update(all[file.id] ?? EMPTY_DISCUSSIONS) }))
   }
-  /** Which block's overflow menu is open, if any. */
+  /** Which block's overflow menu is open, if any. The card builds the menu's own row (see
+   *  `DiscussionBlock`): finishing a thread takes the block, and its rows, away. */
   const [discussionMenuFor, setDiscussionMenuFor] = useState<string | undefined>(undefined)
-  // The thread's one action: finishing it takes the block (and its rows) away. It says what the
-  // reader is doing with the comment, not what happens to the row underneath — "delete" read
-  // like it was about the code.
-  const discussionMenuItems = useMemo<MenuEntry[]>(() => [{ id: 'delete', label: t('action.discussionEnd') }], [t])
   /** The session's chat, watched so a discussion can show the answer it asked for. */
   const [chat, setChat] = useState<ChatView>({ running: false, nodes: [], partial: '', error: undefined, queued: undefined })
   /** The same view, readable from a timer callback (which closes over nothing fresh). */
@@ -4869,6 +5076,34 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     return () => { window.removeEventListener(COMMENT_MODE_CHANGED_EVENT, onCommentMode) }
   }, [])
 
+  /**
+   * One thread's card, as every view draws it. The views differ only in where the card hangs and
+   * how wide the thing it hangs in is, so the card itself is built in exactly one place (see
+   * `DiscussionBlock`): the single-column row stream, and whatever view comes next.
+   */
+  const renderDiscussion = useCallback((discussion: Discussion, width: number): ReactNode => (
+    <DiscussionBlock
+      discussion={discussion}
+      label={discussionLineRange(discussion.anchor)}
+      bodyWidth={width}
+      lang={lang}
+      menuOpen={discussionMenuFor === discussion.id}
+      asking={askingId !== undefined}
+      t={t}
+      onToggle={toggleDiscussion}
+      onMenuOpen={setDiscussionMenuFor}
+      onRemove={removeDiscussion}
+      onDraft={(id, value) => {
+        setDiscussions(current => current.map(entry => (entry.id === id ? { ...entry, draft: value } : entry)))
+      }}
+      onSend={sendDiscussion}
+      registerInput={(id, element) => {
+        if (element === null) discussionInputEls.current.delete(id)
+        else discussionInputEls.current.set(id, element)
+      }}
+    />
+  ), [discussionMenuFor, askingId, t, lang, toggleDiscussion, removeDiscussion, sendDiscussion, discussionLineRange])
+
   // What the frame offers for the current selection (see `selectionFrame`), with comment
   // mode applied: an OFF mode withholds the comment action but not the frame, so a range
   // over change blocks still offers keep/revert. A range whose only action would have been
@@ -5596,11 +5831,6 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                       `.discussionRow` and `.discussionPin`). */}
                   {blocks.map(discussion => {
                     const rows = discussionRows(discussion)
-                    // The turn is answering and text has arrived: the streamed answer takes the
-                    // branch the thinking note used to hold, so the line that says the answer is
-                    // still coming is drawn with it — and `layoutDiscussion` reserves that row.
-                    const writingNote = discussion.asking === true
-                      && discussion.reply !== undefined && discussion.reply !== ''
                     return (
                       <div
                         key={discussion.id}
@@ -5616,191 +5846,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                               the code slides sideways; the negative gutter margin starts it at
                               the table's left edge instead of the code column's. */}
                           <div className={css.discussionPin} style={{ marginLeft: -WRAP_GUTTERS_PX }}>
-                              <div
-                                key={discussion.id}
-                                className={css.discussion}
-                                data-diff-discussion
-                                data-lost={discussion.lost === true ? '' : undefined}
-                                style={{
-                                  // The panel's own width, ruler strip included. The block's
-                                  // background is transparent, so the only thing that would land on
-                                  // the ruler is what the reader came for: its two edge lines (they
-                                  // are drawn inside the block, so they can only ever reach as far
-                                  // as the block does) and the left rule. The thread's own content
-                                  // keeps its 12px inset, so no text goes under the ruler. The row
-                                  // measurements stay conservative by the same 4px on purpose.
-                                  width: Math.max(0, bodyWidth),
-                                  height: rows * THREAD_ROW_PX,
-                                }}
-                              >
-                                <div className={css.discussionHead}>
-                                  <button
-                                    type="button"
-                                    className={css.discussionToggle}
-                                    data-diff-discussion-toggle
-                                    aria-expanded={!discussion.collapsed}
-                                    aria-label={t(discussion.collapsed ? 'action.discussionExpand' : 'action.discussionCollapse')}
-                                    onClick={() => { toggleDiscussion(discussion.id) }}
-                                  >
-                                    {discussion.collapsed
-                                      ? <IconChevronDownOutline14 size={12} />
-                                      : <IconChevronUpOutline14 size={12} />}
-                                  </button>
-                                  <span className={css.discussionRangeWrap}>
-                                    <span className={css.discussionRange} data-diff-discussion-range>
-                                      {discussionLineRange(discussion.anchor)}
-                                    </span>
-                                  </span>
-                                  <span className={css.flexSpacer} />
-                                  <Menu
-                                    open={discussionMenuFor === discussion.id}
-                                    portal
-                                    compact
-                                    align="end"
-                                    items={discussionMenuItems}
-                                    onSelect={(id) => {
-                                      if (id === 'delete') removeDiscussion(discussion.id)
-                                      setDiscussionMenuFor(undefined)
-                                    }}
-                                    onClose={() => { setDiscussionMenuFor(undefined) }}
-                                    anchor={(
-                                      <button
-                                        type="button"
-                                        className={css.discussionToggle}
-                                        data-diff-discussion-menu
-                                        aria-label={t('action.more')}
-                                        onClick={() => {
-                                          setDiscussionMenuFor(current => (current === discussion.id ? undefined : discussion.id))
-                                        }}
-                                      >
-                                        {'\u22ef'}
-                                      </button>
-                                    )}
-                                  />
-                                </div>
-                                {!discussion.collapsed && (
-                                  <div className={css.discussionBody}>
-                                    {/* What the thread was written about. The lines it named are
-                                        gone or rewritten, so this is the only way to see what it
-                                        meant — the mature review tools keep the same quote with an
-                                        outdated thread. The label in front of it is where the block
-                                        says it is outdated: the header keeps to the position the
-                                        thread names and says nothing about its state. */}
-                                    {discussion.lost === true && discussion.quote !== undefined && discussion.quote !== '' && (
-                                      <>
-                                        <p className={css.discussionNote} data-diff-discussion-quote-label>
-                                          {t('discussion.outdatedQuote')}
-                                        </p>
-                                        {/* The wrap comes from the block's own layout, not from the
-                                            setting: the rows above this quote were counted from it
-                                            (see `laidDiscussions`), so a quote drawn with anything
-                                            else would be drawn at a height nobody reserved. */}
-                                        <DiscussionQuote quote={discussion.quote} lines={discussion.quoteLines} lang={lang} wrap={discussion.quoteWrap === true} />
-                                      </>
-                                    )}
-                                    {discussion.hidden !== undefined && discussion.hidden > 0 && (
-                                      <p className={css.discussionNote} data-diff-discussion-hidden>
-                                        {t('discussion.hidden', { count: discussion.hidden })}
-                                      </p>
-                                    )}
-                                    {/* The turn was stopped: the question stays in the thread, the note
-                                        says why there is no answer, and the writing row below comes
-                                        back so it can be asked again. */}
-                                    {discussion.stopped === true && (discussion.reply === undefined || discussion.reply === '') && discussion.failed !== true && (
-                                      <p className={css.discussionNote} data-diff-discussion-stopped>{t('discussion.stopped')}</p>
-                                    )}
-                                    {discussion.messages.map((message, index) => (
-                                      message.role === 'user' ? (
-                                        <p className={css.discussionUser} data-diff-discussion-user key={`u${index}`}>{discussionNodes(message.text)}</p>
-                                      ) : (
-                                        <p className={css.discussionAnswer} data-diff-discussion-reply key={`a${index}`}>{discussionNodes(message.text)}</p>
-                                      )
-                                    ))}
-                                    {discussion.reply !== undefined && discussion.reply !== '' ? (
-                                      <>
-                                        <p className={css.discussionAnswer} data-diff-discussion-reply>{discussionNodes(discussion.reply)}</p>
-                                        {/* The turn is still writing. The note below it said it was
-                                            thinking only until the first token landed — this branch
-                                            takes over then, and without the line the block would say
-                                            nothing at all about the rest of the answer coming, while
-                                            the text above it grows line by line. It sits under the
-                                            streamed text, at the thread's own left edge, where the
-                                            next line of that answer will appear. */}
-                                        {writingNote && (
-                                          <p className={css.discussionNote} data-diff-discussion-answering>
-                                            {t('discussion.answering')}
-                                            <span className={css.discussionDots} data-diff-discussion-dots aria-hidden="true">
-                                              <span>.</span><span>.</span><span>.</span>
-                                            </span>
-                                          </p>
-                                        )}
-                                      </>
-                                    ) : discussion.failed === true ? (
-                                      <p className={css.discussionNote} data-diff-discussion-failed>{t('discussion.failed')}</p>
-                                    ) : discussion.asking === true ? (
-                                      <p className={css.discussionNote} data-diff-discussion-asking>
-                                        {discussion.queued === true ? t('discussion.queued') : t('discussion.thinking')}
-                                        {/* Decorative: the words above say it all, and a screen
-                                            reader should not read the dots. */}
-                                        <span className={css.discussionDots} data-diff-discussion-dots aria-hidden="true">
-                                          <span>.</span><span>.</span><span>.</span>
-                                        </span>
-                                      </p>
-                                    ) : (
-                                      <>
-                                        {/* At most one spare row of the block's own measurement,
-                                            and only here, next to the writing row it belongs to
-                                            (see `.discussionSlack`). */}
-                                        <div className={css.discussionSlack} data-diff-discussion-slack aria-hidden="true" />
-                                        <div className={css.discussionCompose}>
-                                          {/* An outdated thread writes like any other: what the
-                                              thread was about is quoted above this row, so a reply
-                                              still has something to be about, and the row stays
-                                              where the writing would happen so the block's shape does
-                                              not change under the reader when the code moves on. */}
-                                          <input
-                                            className={css.discussionInput}
-                                            data-diff-discussion-input
-                                            ref={(element) => {
-                                              if (element === null) discussionInputEls.current.delete(discussion.id)
-                                              else discussionInputEls.current.set(discussion.id, element)
-                                            }}
-                                            value={discussion.draft}
-                                            placeholder={t('discussion.placeholder')}
-                                            onChange={(event) => {
-                                              const value = event.target.value
-                                              setDiscussions(current => current.map(entry => (
-                                                entry.id === discussion.id ? { ...entry, draft: value } : entry
-                                              )))
-                                            }}
-                                            onKeyDown={(event) => {
-                                              if (event.key !== 'Enter') return
-                                              // An IME's "confirm the candidate" Enter must not send:
-                                              // composing is the signal for it, and 229 is the code
-                                              // some engines send when they will not say so.
-                                              if (event.nativeEvent.isComposing || event.keyCode === 229) return
-                                              event.preventDefault()
-                                              sendDiscussion(discussion.id)
-                                            }}
-                                          />
-                                          <button
-                                            type="button"
-                                            className={`${css.action} ${css.actionPrimary} ${css.discussionSend}`}
-                                            data-diff-discussion-send
-                                            // A question is already in flight: the session answers one at a time
-                                            // (see `askingId`), and the answer would have nowhere to land.
-                                            disabled={askingId !== undefined}
-                                            onClick={() => { sendDiscussion(discussion.id) }}
-                                          >
-                                            {t('action.comment')}
-                                            <ReturnIcon />
-                                          </button>
-                                        </div>
-                                      </>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
+                            {renderDiscussion(discussion, bodyWidth)}
                           </div>
                         </div>
                       </div>
