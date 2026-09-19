@@ -44,7 +44,7 @@ import { OPEN_FILE_EVENT } from './produced-diff.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
 import { OPEN_PANEL_FILE_EVENT, PANEL_STATE_EVENT, SHOW_PANEL_EVENT, TOGGLE_PANEL_EVENT } from './dock.tsx'
 import type { PanelFileDetail, PanelStateDetail } from './dock.tsx'
-import { COMMENTS_CHANGED_EVENT, lastPanelFile, panelFileOffset, rememberDiscussions, rememberedDiscussions, rememberPanelView } from './panel-memory.ts'
+import { COMMENTS_CHANGED_EVENT, forgetDiscussion, lastPanelFile, panelFileOffset, quietenRemovalAsk, rememberDiscussions, rememberedDiscussions, rememberPanelView, removalAskQuiet } from './panel-memory.ts'
 import { composerCoveredByPanel, leaveComposerCaret } from './composer-cover.ts'
 import { commentModeEnabled, COMMENT_MODE_CHANGED_EVENT, confirmFileRemoveEnabled, COVER_CHANGED_EVENT, discussionRoundLimit, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
@@ -3702,6 +3702,20 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   useEffect(() => {
     rememberDiscussions(file.sessionId, discussionsByFile)
   }, [file.sessionId, discussionsByFile])
+  // …and the other direction, for the one change that does not start here: the list pane's
+  // comments tab ends a comment too (the same one action the block's own menu offers), and it
+  // writes the memory rather than this state. This holds the very object the write above stored,
+  // so its own changes come back as the same reference and this does nothing; a change that names
+  // another object came from the list, and the block goes without the reader having to leave and
+  // come back to the file.
+  useEffect(() => {
+    const changed = (): void => {
+      const next = rememberedDiscussions(file.sessionId)
+      setDiscussionsByFile(all => (all === next ? all : next))
+    }
+    window.addEventListener(COMMENTS_CHANGED_EVENT, changed)
+    return () => { window.removeEventListener(COMMENTS_CHANGED_EVENT, changed) }
+  }, [file.sessionId])
 
   /** Patch one discussion in place, without touching the others or the file key. */
   const updateDiscussion = useCallback((id: string, patch: Partial<Discussion>): void => {
@@ -6115,8 +6129,21 @@ export function PendingPanel({
    *  choice rides the same block RPC as its `removeWhenResolved` flag. */
   const [blockPrompt, setBlockPrompt] = useState<ResolvedBlockPrompt | null>(null)
   const [filePrompt, setFilePrompt] = useState<FileActionPrompt | null>(null)
+  /** The confirm dialog's own checkbox: stop asking about this file for the rest of the page. */
+  const [quietRemoval, setQuietRemoval] = useState(false)
+  /**
+   * Record the confirm dialog's checkbox, if it was ticked, and put it back for the next dialog.
+   * The tick is about the questions still to come, not about the answer just given: the button the
+   * reader presses is the answer, and it runs either way.
+   */
+  const settleRemovalAsk = (id: string): void => {
+    if (quietRemoval) quietenRemovalAsk(current, id)
+    setQuietRemoval(false)
+  }
   /** The file list row whose action menu is open, and where the right-click landed. */
   const [rowMenu, setRowMenu] = useState<{ file: PendingFileDiff; x: number; y: number } | null>(null)
+  /** The comments-tab item whose menu is open, if any: which thread, and where the press landed. */
+  const [commentMenu, setCommentMenu] = useState<{ id: string; fileId: string; x: number; y: number } | null>(null)
   /** Whether the add-path dialog is open. One dialog covers both shapes: what
    *  the browser settles on decides whether a file or a directory is added. */
   const [addOpen, setAddOpen] = useState(false)
@@ -6452,6 +6479,9 @@ export function PendingPanel({
   const blockKeepWithPrompt: PendingPanelFace['onBlockKeep'] = (sessionId, id, block, removeWhenResolved) => {
     const file = files.find(entry => entry.id === id)
     if (removeWhenResolved === undefined && file !== undefined && blockResolvesWholeFile(file, block)) {
+      // The reader has already answered this question for this file (`panel.removalQuiet`): run the
+      // action with the row left in the list, for them to take out by hand when they are done.
+      if (removalAskQuiet(current, id)) return onBlockKeep(sessionId, id, block, false)
       setBlockPrompt({ action: 'keep', sessionId, id, block })
       return Promise.resolve()
     }
@@ -6460,6 +6490,7 @@ export function PendingPanel({
   const blockRevertWithPrompt: PendingPanelFace['onBlockRevert'] = (sessionId, id, block, removeWhenResolved) => {
     const file = files.find(entry => entry.id === id)
     if (removeWhenResolved === undefined && file !== undefined && blockResolvesWholeFile(file, block)) {
+      if (removalAskQuiet(current, id)) return onBlockRevert(sessionId, id, block, false)
       setBlockPrompt({ action: 'revert', sessionId, id, block })
       return Promise.resolve()
     }
@@ -6473,6 +6504,7 @@ export function PendingPanel({
   // prompt cannot re-enter itself.
   const keepWithPrompt: PendingPanelFace['onKeep'] = (sessionId, id, keepListed) => {
     if (keepListed === undefined && confirmFileRemoveEnabled()) {
+      if (removalAskQuiet(current, id)) return onKeep(sessionId, id, true)
       setFilePrompt({ action: 'keep', sessionId, id })
       return Promise.resolve()
     }
@@ -6480,6 +6512,7 @@ export function PendingPanel({
   }
   const revertWithPrompt: PendingPanelFace['onRevert'] = (sessionId, id, keepListed) => {
     if (keepListed === undefined && confirmFileRemoveEnabled()) {
+      if (removalAskQuiet(current, id)) return onRevert(sessionId, id, true)
       setFilePrompt({ action: 'revert', sessionId, id })
       return Promise.resolve()
     }
@@ -6950,6 +6983,23 @@ export function PendingPanel({
     landOn(fileId, undefined, row)
   }
   /**
+   * The comment menu's rows: the one action a thread has, named exactly as the block's own
+   * overflow menu names it — ending a comment is one thing, and the pane it is asked from must
+   * not look like it does something else.
+   */
+  const commentMenuItems = useMemo<MenuEntry[]>(() => [{ id: 'close', label: t('action.discussionEnd') }], [t])
+  /**
+   * End one comment from the list. The threads belong to the file detail, so the list does not
+   * reach into its state: it forgets the thread in the page's memory, and the detail picks that
+   * up (see `forgetDiscussion`), which is also what takes the block out of the open file.
+   */
+  const runCommentMenu = (id: string): void => {
+    const target = commentMenu
+    setCommentMenu(null)
+    if (target === null || id !== 'close') return
+    forgetDiscussion(current, target.fileId, target.id)
+  }
+  /**
    * The folded card's own box, derived from the measured one, or undefined while
    * the list is not folded open. The card and its width grip are both placed from
    * these numbers, which is what keeps the grip on the card's right edge as the
@@ -7052,6 +7102,13 @@ export function PendingPanel({
                       data-diff-comment-link={entry.id}
                       data-mobile-nav-copy="1"
                       onClick={() => { jumpToComment(entry.fileId, entry.row) }}
+                      onContextMenu={(event) => {
+                        // The browser's own menu has nothing to say about a comment, and the one
+                        // action a thread has is the whole of what it could offer — the same press
+                        // on a file row opens that row's actions (see `PendingFileRow`).
+                        event.preventDefault()
+                        setCommentMenu({ id: entry.id, fileId: entry.fileId, x: event.clientX, y: event.clientY })
+                      }}
                       onKeyDown={(event) => {
                         if (event.key !== 'Enter' && event.key !== ' ') return
                         event.preventDefault()
@@ -7610,6 +7667,17 @@ export function PendingPanel({
             <div className={css.confirmBackdrop} data-diff-confirm>
               <div className={css.confirmCard} role="dialog" aria-modal="true">
                 <p className={css.confirmText}>{t('panel.resolvedAsk', { file: basenameOf(promptFile.path) })}</p>
+                {/* The same checkbox the whole-file dialog carries: this question comes back for
+                    every block of the file, and the answer is usually the same one. */}
+                <label className={css.pickerCheck}>
+                  <input
+                    type="checkbox"
+                    data-diff-confirm-quiet
+                    checked={quietRemoval}
+                    onChange={(event) => { setQuietRemoval(event.target.checked) }}
+                  />
+                  {t('panel.removalQuiet')}
+                </label>
                 <div className={css.confirmActions}>
                   <button
                     type="button"
@@ -7620,6 +7688,7 @@ export function PendingPanel({
                       // the choice rides the same block RPC as `removeWhenResolved`.
                       setBlockPrompt(null)
                       const { action, sessionId, id, block } = blockPrompt
+                      settleRemovalAsk(id)
                       void (action === 'keep'
                         ? onBlockKeep(sessionId, id, block, true)
                         : onBlockRevert(sessionId, id, block, true))
@@ -7635,6 +7704,7 @@ export function PendingPanel({
                       // Keep the file listed: run the action with it not removed.
                       setBlockPrompt(null)
                       const { action, sessionId, id, block } = blockPrompt
+                      settleRemovalAsk(id)
                       void (action === 'keep'
                         ? onBlockKeep(sessionId, id, block, false)
                         : onBlockRevert(sessionId, id, block, false))
@@ -7652,6 +7722,18 @@ export function PendingPanel({
                 <p className={css.confirmText}>
                   {t(filePrompt.action === 'keep' ? 'panel.fileKeptAsk' : 'panel.fileRevertedAsk', { file: basenameOf(promptEntry.path) })}
                 </p>
+                {/* Tick it and this file stops asking: the action below runs, the row stays in the
+                    list, and the reader takes it out by hand when they are done with it. It lasts
+                    for this page and this session — a reload starts asking again. */}
+                <label className={css.pickerCheck}>
+                  <input
+                    type="checkbox"
+                    data-diff-file-confirm-quiet
+                    checked={quietRemoval}
+                    onChange={(event) => { setQuietRemoval(event.target.checked) }}
+                  />
+                  {t('panel.removalQuiet')}
+                </label>
                 <div className={css.confirmActions}>
                   <button
                     type="button"
@@ -7662,6 +7744,7 @@ export function PendingPanel({
                       // keep/revert RPC as `keepListed: false`.
                       setFilePrompt(null)
                       const { action, sessionId, id } = filePrompt
+                      settleRemovalAsk(id)
                       void (action === 'keep' ? onKeep(sessionId, id, false) : onRevert(sessionId, id, false))
                     }}
                   >
@@ -7675,6 +7758,7 @@ export function PendingPanel({
                       // Keep the resolved file listed, with no pending diff.
                       setFilePrompt(null)
                       const { action, sessionId, id } = filePrompt
+                      settleRemovalAsk(id)
                       void (action === 'keep' ? onKeep(sessionId, id, true) : onRevert(sessionId, id, true))
                     }}
                   >
@@ -7693,6 +7777,18 @@ export function PendingPanel({
               onSelect={runRowMenu}
               onClose={() => { setRowMenu(null) }}
               getAnchorRect={() => new DOMRect(rowMenu.x, rowMenu.y, 0, 0)}
+              anchor={<span className={css.rowMenuAnchor} />}
+            />
+          )}
+          {commentMenu !== null && (
+            <Menu
+              open
+              portal
+              compact
+              items={commentMenuItems}
+              onSelect={runCommentMenu}
+              onClose={() => { setCommentMenu(null) }}
+              getAnchorRect={() => new DOMRect(commentMenu.x, commentMenu.y, 0, 0)}
               anchor={<span className={css.rowMenuAnchor} />}
             />
           )}

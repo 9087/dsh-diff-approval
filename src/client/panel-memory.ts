@@ -74,6 +74,64 @@ export function rememberDiscussions(
   window.dispatchEvent(new CustomEvent(COMMENTS_CHANGED_EVENT, { detail: { sessionId } }))
 }
 
+/**
+ * End one comment, wherever it came from.
+ *
+ * The threads belong to the file detail, which writes them here on every change — but the list
+ * pane shows them all and ends them too, and it has no way to reach into another component's
+ * state. So the list asks the memory, and the detail reads the memory back on the event this
+ * fires (see `COMMENTS_CHANGED_EVENT`): one record, one action, whichever pane the reader used.
+ *
+ * @param sessionId - the session the panel is reviewing; nothing is forgotten without one.
+ * @param fileId - the pending entry the thread hangs in.
+ * @param discussionId - the thread to end; an id that is not there changes nothing.
+ */
+export function forgetDiscussion(
+  sessionId: string | undefined,
+  fileId: string,
+  discussionId: string,
+): void {
+  if (sessionId === undefined) return
+  const before = threads.get(sessionId)
+  const list = before?.[fileId]
+  if (list === undefined) return
+  const next = list.filter(entry => entry.id !== discussionId)
+  if (next.length === list.length) return
+  rememberDiscussions(sessionId, { ...before, [fileId]: next })
+}
+
+/**
+ * The files this page has been told to stop asking about, by session.
+ *
+ * Keeping or reverting a file asks whether the row should leave the list, and a reader working
+ * through one file's blocks answers that the same way every time. Ticking the box in that prompt is
+ * a fact about this visit rather than a preference — it is not the host's to keep, and a reload
+ * starts clean, exactly like the threads above.
+ */
+const quietRemovals = new Map<string, Set<string>>()
+
+/**
+ * Whether the reader asked not to be asked again about removing one file.
+ * @param sessionId - the session the panel is reviewing; nothing is quiet without one.
+ * @param fileId - the pending entry the question was about.
+ * @returns true when the action should run without the question.
+ */
+export function removalAskQuiet(sessionId: string | undefined, fileId: string): boolean {
+  return sessionId === undefined ? false : quietRemovals.get(sessionId)?.has(fileId) === true
+}
+
+/**
+ * Stop asking whether one file should leave the list, for the rest of this page.
+ * @param sessionId - the session the panel is reviewing; nothing is recorded without one.
+ * @param fileId - the pending entry the question was about.
+ */
+export function quietenRemovalAsk(sessionId: string | undefined, fileId: string): void {
+  if (sessionId === undefined) return
+  const files = quietRemovals.get(sessionId)
+  if (files === undefined) quietRemovals.set(sessionId, new Set([fileId]))
+  else files.add(fileId)
+}
+
 /** This session's record, created on first use. */
 function viewOf(sessionId: string): SessionView {
   let view = views.get(sessionId)
@@ -131,4 +189,5 @@ export function panelFileOffset(sessionId: string | undefined, fileId: string): 
 export function resetPanelMemory(): void {
   views.clear()
   threads.clear()
+  quietRemovals.clear()
 }
