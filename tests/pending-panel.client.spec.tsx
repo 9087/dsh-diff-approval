@@ -10,8 +10,9 @@ import { Component } from 'react'
 import type { ComponentProps, ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingFileDiff } from '../src/types.ts'
-import { PendingPanel, frameInsets, makeMeasurer, wrapChipRows } from '../src/client/PendingPanel.tsx'
-import { lastPanelFile, panelFileOffset, rememberDiscussions, resetPanelMemory } from '../src/client/panel-memory.ts'
+import { PendingPanel, frameInsets, makeMeasurer, wrapChipRows, MIN_LIST_WIDTH_PX } from '../src/client/PendingPanel.tsx'
+import { zh } from '../src/client/locales.ts'
+import { lastPanelFile, panelFileOffset, rememberDiscussions, rememberedDiscussions, resetPanelMemory } from '../src/client/panel-memory.ts'
 import { diffLineHeight, navLeadRows, setCommentModeEnabled } from '../src/client/settings.ts'
 import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
 import { DiffApprovalHeaderEntry } from '../src/client/header-entry.tsx'
@@ -624,6 +625,36 @@ describe('PendingPanel', () => {
     expect(props.onRevert).toHaveBeenCalledWith(FILE.sessionId, FILE.id, true)
   })
 
+  it('stops asking whether a file should leave the list, once the prompt is told to', () => {
+    // Keeping or reverting a file asks whether the row should go, and a reader working through one
+    // file's blocks answers that the same way every time. The box in the dialog is about the
+    // questions STILL TO COME rather than the answer being given: the action runs as the button
+    // says, and from then on the file stops asking — the row stays in the list, and the reader
+    // takes it out by hand (the row's own 移出) when they are done with it.
+    resetPanelMemory()
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    fireEvent.click(screen.getByText('action.keep'))
+    const box = document.querySelector('[data-diff-file-confirm-quiet]') as HTMLInputElement
+    expect(box).not.toBeNull()
+    expect(box.checked).toBe(false)
+    fireEvent.click(box)
+    fireEvent.click(document.querySelector('[data-diff-file-confirm-keep]') as HTMLButtonElement)
+    // The button the reader pressed is the answer to THIS question, box or no box.
+    expect(props.onKeep).toHaveBeenCalledWith(FILE.sessionId, FILE.id, true)
+
+    // The next keep on that file runs straight through — no dialog — and still leaves the row listed.
+    fireEvent.click(screen.getByText('action.keep'))
+    expect(document.querySelector('[data-diff-confirm-file]')).toBeNull()
+    expect(props.onKeep).toHaveBeenCalledTimes(2)
+    expect(props.onKeep).toHaveBeenLastCalledWith(FILE.sessionId, FILE.id, true)
+    // A fresh page asks again: this is a fact about the visit, not a preference.
+    resetPanelMemory()
+  })
+
   it('runs a whole-file action straight through when the prompt is disabled', () => {
     localStorage.setItem('diff-approval:confirm-file-remove', '0')
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
@@ -851,6 +882,39 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-add]')).not.toBeNull()
   })
 
+  it('keeps the list pane at least as wide as the footer it has to hold', () => {
+    // The pane's three decisions (全部保留 / 全部回退 / 添加) are one row pinned to its bottom, and a
+    // pane narrower than they need shrinks them until the labels wrap onto two lines — which is what
+    // the drag floor exists to stop. Re-derived here from the CSS recipe and the REAL labels, so a
+    // wider button, a bigger gap or a longer label cannot creep past the floor unnoticed.
+    const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const rule = (name: string): string => new RegExp(`^\\.${name} \\{([^}]*)\\}`, 'm').exec(sheet)?.[1] ?? ''
+    const paddingOf = (block: string): [number, number] => {
+      const parts = (/padding:\s*([^;]+);/.exec(block)?.[1] ?? '').trim().split(/\s+/)
+      const vertical = Number.parseFloat(parts[0] ?? '0')
+      return [vertical, Number.parseFloat(parts[1] ?? parts[0] ?? '0')]
+    }
+    const action = rule('action')
+    const [actionPadV, actionPadH] = paddingOf(action)
+    const actionBorder = Number.parseFloat(/border:\s*([\d.]+)px/.exec(action)?.[1] ?? '0')
+    const addPath = rule('addPath')
+    const addIconAndGap = Number.parseFloat(/gap:\s*([\d.]+)px/.exec(addPath)?.[1] ?? '0') + 12
+    const [, footerPadH] = paddingOf(rule('bulkActions'))
+    const footerGap = Number.parseFloat(/gap:\s*([\d.]+)px/.exec(rule('bulkActions'))?.[1] ?? '0')
+    const [, panePadH] = paddingOf(rule('fileList'))
+    const paneBorder = Number.parseFloat(/border-right:\s*([\d.]+)px/.exec(rule('fileList'))?.[1] ?? '0')
+    // One em per glyph: the labels are CJK, and the buttons' own text is a fixed 12px.
+    const button = (text: string): number => [...text].length * 12 + 2 * actionPadH + 2 * actionBorder
+    const needed = button(zh['action.keepAll'])
+      + footerGap + button(zh['action.revertAll'])
+      + footerGap + button(zh['panel.addPathGo']) + addIconAndGap
+      + footerPadH + 2 * panePadH + paneBorder
+    expect(actionPadV).toBeGreaterThan(0)
+    expect(MIN_LIST_WIDTH_PX).toBeGreaterThanOrEqual(needed)
+    // …and the pane opens there, rather than at a default that is under its own floor.
+    expect(Number.parseFloat(/width:\s*([\d.]+)px/.exec(rule('fileList'))?.[1] ?? '0')).toBeGreaterThanOrEqual(needed)
+  })
+
   it('lists the comments the open files carry in a second tab, and jumps to one', () => {
     // The list pane has two tabs: the pending files, and every comment the files in the list carry.
     // A comment is a block of rows in one file, so its item is the rows it hangs on, the first
@@ -919,6 +983,44 @@ describe('PendingPanel', () => {
     } finally {
       restore()
     }
+  })
+
+  it('ends a comment from the list, and takes its block with it', () => {
+    // The list is not a read-only index: the one action a thread has (结束评论, the same row the
+    // block's own ⋯ menu offers — see `discussionMenuItems`) is on the item's right-click, where the
+    // file rows keep theirs. The threads belong to the file detail, which is one mount at a time, so
+    // the list writes the page's memory instead of reaching into that state, and the detail reads it
+    // back: the block has to go while the reader is still looking at the file.
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-end', path: '/repo/end.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\n' })
+    rememberDiscussions(S1, {
+      [file.id]: [
+        { id: 'd-one', anchor: { start: 0, end: 0, startLine: 1, endLine: 1 }, collapsed: false, draft: '', lost: false, messages: [{ role: 'user', text: '第一处' }] },
+        { id: 'd-two', anchor: { start: 1, end: 1, startLine: 2, endLine: 2 }, collapsed: false, draft: '', lost: false, messages: [{ role: 'user', text: '第二处' }] },
+      ],
+    } as unknown as Parameters<typeof rememberDiscussions>[1])
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    // The file is the open one, so both threads are blocks on it, and the list holds both items.
+    expect(document.querySelectorAll('[data-diff-discussion]').length).toBe(2)
+    const items = [...document.querySelectorAll('[data-diff-comment-link]')] as HTMLElement[]
+    expect(items.map(item => item.getAttribute('data-diff-comment-link'))).toEqual(['d-one', 'd-two'])
+
+    // The press opens the panel's own menu rather than the browser's, and it says what the block's
+    // menu says: ending a comment is one action, whichever pane asks for it.
+    expect(fireEvent.contextMenu(items[1]!, { clientX: 30, clientY: 40 })).toBe(false)
+    const menu = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+    expect(menu.map(item => item.textContent)).toEqual(['action.discussionEnd'])
+
+    fireEvent.click(menu[0]!)
+    // That one item goes, the thread leaves the page's memory, and the block left the open file with
+    // it — the detail adopted the change instead of waiting for the file to be reopened.
+    expect([...document.querySelectorAll('[data-diff-comment-link]')].map(item => item.getAttribute('data-diff-comment-link'))).toEqual(['d-one'])
+    expect(rememberedDiscussions(S1)[file.id]?.map(entry => entry.id)).toEqual(['d-one'])
+    expect(document.querySelectorAll('[data-diff-discussion]').length).toBe(1)
+    expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
   })
 
   it('adds the file a browse row names, and closes with a toast', async () => {
@@ -1081,6 +1183,57 @@ describe('PendingPanel', () => {
     await waitFor(() => { expect(screen.getByText('panel.refreshDone')).toBeDefined() })
   })
 
+  it('leaves the code view where the reader scrolled it when the content changes', () => {
+    // The file under review is edited again while it is open: the same pending entry, new text. The
+    // reader is reading, not arriving, so the code view must stay where they scrolled it — and the
+    // remembered place (a fresh showing resumes the offset it was left at) has nothing to say here.
+    const before = entry({ id: 'entry-live', path: '/repo/live.txt', oldText: 'a\nb\nc\n', newText: 'A\nb\nC\n' })
+    const view = render(<PendingPanel {...panelProps({ read: true, files: [before], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const restore = stubCodeScroll()
+    try {
+      const body = codeBody()
+      body.scrollTop = 300
+      fireEvent.scroll(body)
+      expect(body.scrollTop).toBe(300)
+
+      const after = entry({ id: 'entry-live', path: '/repo/live.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nD\n' })
+      view.rerender(<PendingPanel {...panelProps({ read: true, files: [after], busy: new Set() })} />)
+      expect(codeBody().scrollTop).toBe(300)
+    } finally {
+      restore()
+    }
+  })
+
+  it('keeps the reader place when the pending list blinks and the file stays open', () => {
+    // A poll can report no pending files at all for a moment — the host re-capturing an entry while
+    // it writes to the file — and the detail pane unmounts with the list. When the file comes back
+    // with its new content the reader must be where they were, not wherever the file was first
+    // landed: the file was open, and nothing about opening it has changed. The place rides the
+    // page's memory (the same record a reopen resumes), which is why scrolling keeps it current.
+    const before = entry({ id: 'entry-live', path: '/repo/live.txt', oldText: 'a\nb\nc\n', newText: 'A\nb\nC\n' })
+    const view = render(<PendingPanel {...panelProps({ read: true, files: [before], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const restore = stubCodeScroll()
+    try {
+      const body = codeBody()
+      body.scrollTop = 300
+      fireEvent.scroll(body)
+      expect(body.scrollTop).toBe(300)
+      expect(panelFileOffset(S1, 'entry-live')).toBe(300)
+
+      // The list blinks: the pane goes away, and the place has to survive it.
+      view.rerender(<PendingPanel {...panelProps({ read: true, files: [], busy: new Set() })} />)
+      expect(panelFileOffset(S1, 'entry-live')).toBe(300)
+
+      const after = entry({ id: 'entry-live', path: '/repo/live.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nD\n' })
+      view.rerender(<PendingPanel {...panelProps({ read: true, files: [after], busy: new Set() })} />)
+      expect(codeBody().scrollTop).toBe(300)
+    } finally {
+      restore()
+    }
+  })
+
   it('disables the refresh button while the file is busy', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set([FILE.id]) })
     render(<PendingPanel {...props} />)
@@ -1182,7 +1335,7 @@ describe('PendingPanel', () => {
     const originalRect = Element.prototype.getBoundingClientRect
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1200 })
     // A 500px-wide code view: 12px inset on each side leaves the card a 476px
-    // ceiling, well above its 240px default and below the 560px bound.
+    // ceiling, well above the pane's own default width and below the 560px bound.
     const box = (top: number, width: number, height: number): DOMRect => ({
       left: 0, right: width, width, top, bottom: top + height, height, x: 0, y: top, toJSON: () => ({}),
     }) as DOMRect
@@ -1216,7 +1369,7 @@ describe('PendingPanel', () => {
       expect(card()).not.toBeNull()
       await waitFor(() => { expect(card()).toBeNull() })
       fireEvent.click(knob())
-      expect(card().style.width).toBe('240px')
+      expect(card().style.width).toBe(`${MIN_LIST_WIDTH_PX}px`)
       // The grip is the card's right edge: a strip the card's own height, straddling
       // that edge, and outside the card node (the strip of scrollbar inside it stays
       // the scrollbar's). It is where the docked divider is on the docked list — the
@@ -1239,7 +1392,7 @@ describe('PendingPanel', () => {
         window.dispatchEvent(new PointerEvent('pointermove', { clientX: 180, pointerId: 1 }))
         window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1 }))
       })
-      expect(card().style.width).toBe('320px')
+      expect(card().style.width).toBe(`${MIN_LIST_WIDTH_PX + 80}px`)
 
       // Past the box's right edge the drag stops at the box: the card keeps 12px
       // clear on each side rather than storing a width it cannot show.
@@ -1775,10 +1928,16 @@ describe('PendingPanel', () => {
     expect(compose).toContain('padding: 0 0 calc(22px * 0.3)')
     // The reserved rows can come out one row longer than the turns draw (the row count is
     // measured on canvas, with a character of slack). That spare row must not sit below the
-    // field: the writing row is the body's last child, and an auto top margin is what sends
-    // the spare air above it instead — zero when the content fills its rows, so nothing else
-    // moves.
-    expect(compose).toContain('margin-top: auto')
+    // field, so the block puts a spacer above the writing row and lets it take the air — capped
+    // at exactly one row. An auto top margin on the row used to take ALL of it, so a block that
+    // over-measured by more than the documented slack opened a hole between what the thread says
+    // and where the reader writes; whatever is left over now stays under the writing row, at the
+    // block's bottom edge.
+    expect(compose).not.toContain('margin-top: auto')
+    const slack = rule('discussionSlack')
+    expect(slack).toContain('flex: 1 1 0')
+    expect(slack).toContain('max-height: 22px')
+    expect(slack).toContain('min-height: 0')
   })
 
   it('points a comment at the skill when the host can deliver it', () => {
@@ -1888,7 +2047,8 @@ describe('PendingPanel', () => {
 
     const list = document.querySelector('[data-diff-approval-file-list]') as HTMLElement
     const handle = document.querySelector('[data-diff-resize]') as HTMLElement
-    expect(list.style.width).toBe('240px')
+    // It opens at the floor: the width its bulk footer needs for three labels on one line.
+    expect(list.style.width).toBe(`${MIN_LIST_WIDTH_PX}px`)
 
     // A mouse drag, which is the same pointer stream a mouse produces.
     fireEvent.pointerDown(handle, { button: 0, clientX: 100, pointerId: 1, pointerType: 'mouse', isPrimary: true })
@@ -1896,7 +2056,7 @@ describe('PendingPanel', () => {
       window.dispatchEvent(new PointerEvent('pointermove', { clientX: 180, pointerId: 1 }))
       window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1 }))
     })
-    expect(list.style.width).toBe('320px')
+    expect(list.style.width).toBe(`${MIN_LIST_WIDTH_PX + 80}px`)
 
     // Clamped at both ends on an extreme drag.
     fireEvent.pointerDown(handle, { button: 0, clientX: 100, pointerId: 2, pointerType: 'mouse', isPrimary: true })
@@ -1913,6 +2073,15 @@ describe('PendingPanel', () => {
       window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 3 }))
     })
     expect(list.style.width).toBe('560px')
+
+    // …and the floor it clamps to is the width the bulk footer's three labels need on one line, so
+    // the footer can never be dragged into wrapping them.
+    fireEvent.pointerDown(handle, { button: 0, clientX: 400, pointerId: 4, pointerType: 'mouse', isPrimary: true })
+    act(() => {
+      window.dispatchEvent(new PointerEvent('pointermove', { clientX: 0, pointerId: 4 }))
+      window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 4 }))
+    })
+    expect(list.style.width).toBe(`${MIN_LIST_WIDTH_PX}px`)
   })
 
   it('applies one list width per animation frame while the divider is dragged', async () => {
@@ -1925,7 +2094,7 @@ describe('PendingPanel', () => {
 
     const list = document.querySelector('[data-diff-approval-file-list]') as HTMLElement
     const handle = document.querySelector('[data-diff-resize]') as HTMLElement
-    expect(list.style.width).toBe('240px')
+    expect(list.style.width).toBe(`${MIN_LIST_WIDTH_PX}px`)
     fireEvent.pointerDown(handle, { button: 0, clientX: 100, pointerId: 1, pointerType: 'mouse', isPrimary: true })
     act(() => {
       window.dispatchEvent(new PointerEvent('pointermove', { clientX: 180, pointerId: 1 }))
@@ -1933,10 +2102,10 @@ describe('PendingPanel', () => {
       window.dispatchEvent(new PointerEvent('pointermove', { clientX: 260, pointerId: 1 }))
     })
     // Three events, no frame yet: nothing has been rendered.
-    expect(list.style.width).toBe('240px')
+    expect(list.style.width).toBe(`${MIN_LIST_WIDTH_PX}px`)
     // Then the frame lands the last of them, not the first.
     await act(async () => { await new Promise(resolve => { requestAnimationFrame(() => { resolve(undefined) }) }) })
-    expect(list.style.width).toBe('400px')
+    expect(list.style.width).toBe(`${MIN_LIST_WIDTH_PX + 160}px`)
     act(() => { window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1 })) })
   })
 
@@ -2268,8 +2437,10 @@ describe('PendingPanel', () => {
       })
       expect(shownPath()).toBe('/repo/a.txt')
       expect(codeBody().scrollTop).toBe(0)
-      // The remembered place is stale now — the jump was not a resume.
-      expect(panelFileOffset(S1, 'entry-1')).toBeUndefined()
+      // The stale place is gone — the jump was not a resume — and what the memory holds now is where
+      // the jump left the reader: it is their position in the file, which is also what a pane that
+      // mounts again resumes, so a jump is not undone by the next poll.
+      expect(panelFileOffset(S1, 'entry-1')).toBe(0)
 
       // Scrolled away again, the same chip click lands on the first change again.
       codeBody().scrollTop = 500
@@ -2452,6 +2623,33 @@ describe('PendingPanel', () => {
     fireEvent.click(document.querySelector('[data-diff-confirm-remove]') as HTMLButtonElement)
     expect(props.onBlockKeep).toHaveBeenCalledWith(S1, FILE.id, { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 }, true)
     expect(document.querySelector('[data-diff-confirm]')).toBeNull()
+  })
+
+  it('runs a last-block action straight through for a file that is not to be asked about', () => {
+    // The same box the whole-file dialog carries, on the dialog a block action raises: one answer
+    // per file is enough, and the file keeps its row until the reader takes it out.
+    resetPanelMemory()
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const block = { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 }
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    fireEvent.mouseEnter(rows[0]!)
+    fireEvent.click(document.querySelector('[data-diff-block-keep]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-confirm-quiet]') as HTMLInputElement)
+    fireEvent.click(document.querySelector('[data-diff-confirm-keep]') as HTMLButtonElement)
+    expect(props.onBlockKeep).toHaveBeenLastCalledWith(S1, FILE.id, block, false)
+
+    // The same action on the same file again: no dialog, and the row is left in the list again.
+    const again = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    fireEvent.mouseEnter(again[0]!)
+    fireEvent.click(document.querySelector('[data-diff-block-keep]') as HTMLElement)
+    expect(document.querySelector('[data-diff-confirm]')).toBeNull()
+    expect(props.onBlockKeep).toHaveBeenCalledTimes(2)
+    expect(props.onBlockKeep).toHaveBeenLastCalledWith(S1, FILE.id, block, false)
+    resetPanelMemory()
   })
 
   it('marks changed lines on the scrollbar overview ruler in diff colors', () => {
@@ -4642,10 +4840,25 @@ describe('PendingPanel', () => {
       listener!({ running: true, nodes: [prompt], partial: 'the answer', error: undefined })
     })
     expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('the answer')
+    // …and while it is still being written the block says so, right under the text that has
+    // arrived: the note that said 思考中 is drawn only until the first token lands, so without this
+    // line the block would look finished while the rest of the answer is still coming.
+    const writing = document.querySelector('[data-diff-discussion-answering]')
+    expect(writing?.textContent).toContain('discussion.answering')
+    expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
+    expect(writing?.previousElementSibling).toBe(document.querySelector('[data-diff-discussion-reply]'))
+    // The line is a thread row of its own, and the block reserves it: the header, the question's
+    // bubble (a line and its chrome), the streamed answer, and the line that says more is coming.
+    const streamingBlock = document.querySelector('[data-diff-discussion]') as HTMLElement
+    expect(streamingBlock.style.height).toBe('110px')
     act(() => {
       listener!({ running: false, nodes: [prompt, { kind: 'assistant', text: 'the final answer' }], partial: '', error: undefined })
     })
     expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('the final answer')
+    expect(document.querySelector('[data-diff-discussion-answering]')).toBeNull()
+    // The line's row comes off with it, and the writing row (two rows) returns for a follow-up —
+    // which is one row more than the line cost.
+    expect(Number.parseFloat(streamingBlock.style.height)).toBe(132)
     // The answer settled into the thread, so the compose row is back for a
     // follow-up: the conversation continues instead of ending with one answer.
     expect(document.querySelector('[data-diff-discussion-user]')?.textContent).toBe('why?')
@@ -4844,6 +5057,13 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-discussion-range]')?.textContent).toBe('/repo/a.txt:1')
     expect(block.style.height).toBe('110px')
     expect((block.closest('[data-diff-discussion-space]') as HTMLElement).style.height).toBe('110px')
+    // The one spare row the block may have reserved is taken by a spacer of its own, and it sits
+    // directly above the writing row rather than anywhere else in the thread (see
+    // `.discussionSlack`): it is the only child that may carry air, and it is capped at a row.
+    const slack = block.querySelector('[data-diff-discussion-slack]') as HTMLElement
+    expect(slack).not.toBeNull()
+    expect(block.contains(slack)).toBe(true)
+    expect(slack.nextElementSibling?.querySelector('[data-diff-discussion-input]')).not.toBeNull()
 
     // The quote was drawn while the code was already sideways, and shows the same columns.
     const quoteText = (): HTMLElement => document.querySelector('[data-diff-quote-text]') as HTMLElement
@@ -5191,12 +5411,15 @@ describe('PendingPanel', () => {
     expect(document.querySelectorAll('[data-diff-discussion-dots] span').length).toBe(3)
     expect(document.querySelector('[data-diff-discussion-reply]')).toBeNull()
 
-    // With the prompt in the transcript, the answer that follows it is ours.
+    // With the prompt in the transcript, the answer that follows it is ours — and it is still
+    // being written: the note it replaced is gone, and the line under the streamed text says so
+    // instead, so the block never looks finished while words are still coming.
     act(() => {
       listener!({ running: true, nodes: [otherUser, otherAnswer, { kind: 'user', text: prompt }], partial: 'our answer', error: undefined })
     })
     expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('our answer')
     expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
+    expect(document.querySelector('[data-diff-discussion-answering]')?.textContent).toContain('discussion.answering')
 
     act(() => {
       listener!({
@@ -5207,6 +5430,7 @@ describe('PendingPanel', () => {
       })
     })
     expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('final answer')
+    expect(document.querySelector('[data-diff-discussion-answering]')).toBeNull()
     expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
   })
 
