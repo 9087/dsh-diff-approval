@@ -1213,6 +1213,42 @@ const KEEPS_SELECTION = [
 ].join(', ')
 
 /**
+ * Whether a press landed on a row the live selection already covers — the highlighted text itself,
+ * or the blank space beside it on the same line.
+ *
+ * Both are inside the code view, which `KEEPS_SELECTION` leaves to the browser, and the browser
+ * keeps the selection for neither: inside the highlight is where a drag that extends it would
+ * begin, and the blank beside it is chrome, which it never clears a selection from. So a plain
+ * press there left the highlight and the frame standing over a gesture that plainly ended. This is
+ * the one press in the content the panel has to end itself (see `onPanelMouseDown`).
+ *
+ * @param target - the element the press landed on.
+ * @param live - the window's selection, still the one the reader had.
+ * @returns whether that selection covers the pressed row.
+ */
+function pressOnSelectedRow(target: Element, live: Selection | null): boolean {
+  if (live === null || live.isCollapsed) return false
+  const unified = rowRangeOf(live)
+  const split = unified === undefined ? splitRowRangeOf(live) : undefined
+  const range = unified ?? split
+  if (range === undefined) return false
+  const row = target.closest<HTMLElement>('[data-diff-row], [data-diff-split-row]')
+  if (row === null) return false
+  let index: number | undefined
+  if (unified !== undefined) {
+    const value = Number(row.dataset.diffRow)
+    index = Number.isFinite(value) ? value : undefined
+  } else {
+    const info = splitRowInfoAt(target)
+    // The two columns are two files: a press on the other one is not on this selection.
+    if (info === undefined || (range.side !== undefined && info.side !== range.side)) return false
+    index = info.pairIndex
+  }
+  if (index === undefined) return false
+  return index >= range.start && index <= range.end
+}
+
+/**
  * Whether a key event came from a text field that owns its own keys (`Esc`,
  * cursor moves). The chat composer is the one that matters: the panel leaves it
  * alone even while its own search bar is open.
@@ -7509,19 +7545,28 @@ export function PendingPanel({
 
   /**
    * End the text selection when the press lands on the panel's chrome — blank space, a label, the
-   * toolbar, the file list.
+   * toolbar, the file list — or on a row the selection already covers (see `pressOnSelectedRow`).
    *
    * The chrome is `user-select: none` (see `.panel`), and a press on such an area is one the
    * browser does NOT clear the selection for: the highlight stayed up, and so did the selection
-   * frame that goes with it, over a gesture that plainly ended. What IS content is left to the
-   * browser — which is also what keeps a drag started on chrome able to select the code it runs
-   * into, since dropping the ranges first costs the drag nothing.
+   * frame that goes with it, over a gesture that plainly ended. The same is true inside the code
+   * view when the press lands on the selection's own row, which is the one content press the panel
+   * ends itself. What IS content is otherwise left to the browser — which is also what keeps a drag
+   * started on chrome able to select the code it runs into, since dropping the ranges first costs
+   * the drag nothing.
    */
   const onPanelMouseDown = (event: ReactMouseEvent<HTMLDivElement>): void => {
     const target = event.target
     if (!(target instanceof Element)) return
-    if (target.closest(KEEPS_SELECTION) !== null) return
     const live = window.getSelection()
+    // The selection frame is about the selection: a press on it must not drop it (see
+    // `KEEPS_SELECTION`).
+    if (target.closest('[data-diff-selection-actions], [data-diff-copy]') === null
+      && pressOnSelectedRow(target, live)) {
+      if (typeof live?.removeAllRanges === 'function') live.removeAllRanges()
+      return
+    }
+    if (target.closest(KEEPS_SELECTION) !== null) return
     if (typeof live?.removeAllRanges === 'function') live.removeAllRanges()
   }
 

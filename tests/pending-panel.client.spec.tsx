@@ -663,6 +663,45 @@ describe('PendingPanel', () => {
     fireEvent.click(document.querySelector('[data-diff-file-confirm-keep]') as HTMLButtonElement)
   })
 
+  it('ends the selection when the press lands on a row it already covers', () => {
+    // Clicking inside one's own highlight — or on the blank beside it on the same line — ends the
+    // selection everywhere else. In the code view the browser keeps it there: the highlight is where
+    // a drag that extends it would begin, and the blank beside it is chrome, which the browser never
+    // clears a selection from. So the panel ends it itself, and the frame that acts on it goes too.
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const start = rows[0]!.querySelector('[data-diff-code]')!.firstChild ?? rows[0]!
+    const end = rows[1]!.querySelector('[data-diff-code]')!.firstChild ?? rows[1]!
+    let collapsed = false
+    const removeAllRanges = vi.fn(() => { collapsed = true })
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      get isCollapsed() { return collapsed },
+      anchorNode: start,
+      focusNode: end,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: start, startOffset: 0, endContainer: end, endOffset: 1 }),
+      removeAllRanges,
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    const frame = (): HTMLElement | null => document.querySelector('[data-diff-selection-actions]')
+    expect(frame()).not.toBeNull()
+
+    // The frame is about the selection: a press on it must not drop it.
+    fireEvent.mouseDown(frame() as HTMLElement)
+    expect(removeAllRanges).not.toHaveBeenCalled()
+
+    // The blank of a selected row is a press the panel ends the selection for — and the frame that
+    // was acting on it goes with the selection.
+    fireEvent.mouseDown(rows[1]!.querySelector('[data-diff-code]') as HTMLElement)
+    expect(removeAllRanges).toHaveBeenCalledTimes(1)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    expect(frame()).toBeNull()
+  })
+
   it('runs a whole-file action straight through when the prompt is disabled', () => {
     localStorage.setItem('diff-approval:confirm-file-remove', '0')
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
