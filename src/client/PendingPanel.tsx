@@ -138,8 +138,18 @@ function focusComposer(): void {
 const COMPOSER_HEIGHT_VAR = '--dsh-composer-height'
 /** Seat counts as docked when its bottom is this close to the window bottom. */
 const DOCKED_TOLERANCE_PX = 48
-/** File-list pane width bounds for the manual split drag, in px. */
-const MIN_LIST_WIDTH_PX = 160
+/**
+ * File-list pane width bounds for the manual split drag, in px.
+ *
+ * The floor is the width the pane's bulk footer needs to keep its three labels on ONE line
+ * (全部保留 / 全部回退 / 添加). Each is a `.action` — 12px text, 12px of side padding and a
+ * hairline, so 26px of chrome — laid out in `.bulkActions` (6px gaps, and its own 8px right inset)
+ * inside `.fileList`'s 8px side padding and 1px border: 74 + 6 + 74 + 6 + 66 + 8 + 17 = 251px, and
+ * a hair of slack on top. Narrower than that the row shrinks its buttons until the labels wrap onto
+ * two lines, which makes the pane's most-used controls two rows tall in the narrowest case — so the
+ * floor is not just a drag limit, it is the width at which the footer is still itself.
+ */
+export const MIN_LIST_WIDTH_PX = 260
 const MAX_LIST_WIDTH_PX = 560
 /** Inset of the floating file-list card from the code scroll box, in px. */
 const FLOAT_LIST_MARGIN_PX = 12
@@ -6159,8 +6169,9 @@ export function PendingPanel({
   /** The chord's on-screen echo: the edge just flipped, and a nonce so a repeat
    *  restarts the notice instead of re-rendering the same one. */
   const [coverNotice, setCoverNotice] = useState<{ edge: keyof DiffApprovalCover; n: number } | null>(null)
-  /** File-list pane width, adjustable by dragging the divider. */
-  const [listWidth, setListWidth] = useState(240)
+  /** File-list pane width, adjustable by dragging the divider. It opens AT the floor, which is the
+   *  width the bulk footer needs for its three labels, so a fresh pane cannot wrap them either. */
+  const [listWidth, setListWidth] = useState(MIN_LIST_WIDTH_PX)
   /** Whether the floating (collapsed) file list is currently shown. */
   const [floatOpen, setFloatOpen] = useState(false)
   /** Whether the file list is always folded, whatever the width allows. */

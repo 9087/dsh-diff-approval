@@ -1150,7 +1150,9 @@
 
 .fileList {
   flex: none;
-  width: 240px;
+  /* Mirrors `MIN_LIST_WIDTH_PX`, which is the width the bulk footer needs for its three labels on
+     one line; the panel sets the live width inline, so this is only the CSS-side default. */
+  width: 260px;
   min-height: 0;
   display: flex;
   flex-direction: column;
