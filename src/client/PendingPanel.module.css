@@ -3533,6 +3533,25 @@
   background: var(--dsw-alias-border-l2);
 }
 
+/* The threads of the side-by-side view, over both halves. The two columns are separate clipped
+   scrollers, so a card cannot live inside either one: it is placed by its pair's content offset
+   less the scroll (see `SplitDiff`), spans the view, and takes presses itself while the layer
+   between the cards lets them through to the code underneath. */
+.splitDiscussions {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.splitDiscussion {
+  position: absolute;
+  left: 0;
+  box-sizing: border-box;
+  pointer-events: auto;
+  background: var(--dsw-alias-bg-base);
+}
+
 /* Both halves top-align so a wrapped multi-sub-line side and its shorter
    counterpart start their content on the same pixel across the divider. */
 .splitCol .gutter,

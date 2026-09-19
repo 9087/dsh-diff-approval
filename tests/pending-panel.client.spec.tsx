@@ -7160,6 +7160,64 @@ describe('PendingPanel', () => {
     expect(rightCode?.querySelectorAll('span').length ?? 0).toBeGreaterThanOrEqual(2)
   })
 
+  it('comments on a selection in the side-by-side view, and draws the thread over both halves', () => {
+    // A two-column selection names a pair range and ONE column. Only the right (new) column is
+    // offered: a thread is anchored to new-file lines — what survives a rebuild — so the left
+    // column's old code has nothing to anchor to. The card is drawn over both halves (they are
+    // separate clipped scrollers, so it cannot live inside either) while each half reserves its rows,
+    // which is what keeps the pairs below aligned.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-split-comment', path: '/repo/comment.txt', oldText: 'a\nb\n', newText: 'a\nB\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('comment.txt'))
+
+    const select = (element: HTMLElement): void => {
+      const node = element.firstChild ?? element
+      vi.spyOn(window, 'getSelection').mockReturnValue({
+        isCollapsed: false,
+        anchorNode: node,
+        focusNode: node,
+        rangeCount: 1,
+        getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+        removeAllRanges: () => {},
+      } as unknown as Selection)
+      act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    }
+    const rowsOf = (side: 'left' | 'right'): HTMLElement[] => (
+      [...document.querySelectorAll(`[data-diff-split-row][data-diff-split-side="${side}"] [data-diff-code]`)] as HTMLElement[]
+    )
+
+    // The left column is the old file: it offers no comment at all.
+    select(rowsOf('left')[rowsOf('left').length - 1]!)
+    expect(document.querySelector('[data-diff-selection-actions]')).toBeNull()
+
+    // The added line, on the right: the last right row (the first is the context line the pair
+    // shares, which is not this file's change).
+    const code = rowsOf('right')[rowsOf('right').length - 1]!
+    expect(code.textContent).toContain('B')
+    select(code)
+    expect(document.querySelector('[data-diff-selection-comment]')).not.toBeNull()
+
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    const block = document.querySelector('[data-diff-discussion]') as HTMLElement
+    expect(block).not.toBeNull()
+    // Over both halves, not inside one of them…
+    expect(block.closest('[data-diff-split-discussions]')).not.toBeNull()
+    expect(block.closest('[data-diff-split-side]')).toBeNull()
+    // …and its reference names the added line the right column showed.
+    expect(block.querySelector('[data-diff-discussion-range]')?.textContent).toBe('/repo/comment.txt:2')
+    // Both halves reserved its rows, so the pair below starts on the same pixel in each.
+    expect(document.querySelectorAll('[data-diff-discussion-space]').length).toBe(2)
+    // The annotated row wears the wash, in the column it is on.
+    expect(document.querySelectorAll('[data-diff-split-row][data-diff-discussion-band]').length).toBe(1)
+    // The card is laid out to the rows the panel measured for the thread: a box sized to the compose
+    // fallback would clip the thread's own turns (which is how an answer could go missing here).
+    expect(Number.parseFloat(block.style.height)).toBeGreaterThan(2 * 22)
+  })
+
   it('row-aligns a similarity-matched del/add pair in the split view', () => {
     // The split view always aligns by similarity: the deletion "old line A"
     // pairs with its most-similar addition "modified old line A", so both sit

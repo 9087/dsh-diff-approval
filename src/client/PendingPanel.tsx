@@ -1,6 +1,6 @@
 /** Sidebar-foot pending-edit review action and the split review panel it opens. */
 
-import { Component, Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Component, Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconListPenOutline16, IconPanelLeftOutline16, IconPlusOutline16, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -1051,6 +1051,11 @@ function DiscussionQuote({ quote, lines, lang, wrap }: {
   )
 }
 
+/** How far outside the viewport a side-by-side thread's card is still drawn, in px: it is a pair's
+ *  hop from the edge before the scroll brings it in, and dropping it earlier would flash the card
+ *  away at the boundary. */
+const SPLIT_DISCUSSION_MARGIN_PX = 200
+
 /** One comment thread as the panel draws it, whoever is drawing it. */
 interface DiscussionBlockProps {
   discussion: Discussion
@@ -1101,6 +1106,7 @@ function DiscussionBlock({
       className={css.discussion}
       data-diff-discussion
       data-lost={discussion.lost === true ? '' : undefined}
+      data-diff-discussion-id={discussion.id}
       style={{
         // The panel's own width, ruler strip included. The block's background is transparent, so the
         // only thing that would land on the ruler is what the reader came for: its two edge lines
@@ -1717,7 +1723,7 @@ function splitSideContent(
  * one side is longer. The gutter and code are top-aligned so sub-lines line up
  * across the divider.
  */
-function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focused, searchHit, searchCurrent, searchQuery, searchOptions, onHover, intra }: {
+function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focused, discussed, searchHit, searchCurrent, searchQuery, searchOptions, onHover, intra }: {
   index: number
   side: SplitSide | undefined
   wrapped: string[] | undefined
@@ -1726,6 +1732,8 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
   isLeft: boolean
   height: number
   focused: boolean
+  /** Whether a thread annotates this row: it carries the wash (see `rowDiscussed`). */
+  discussed: boolean
   searchHit: boolean
   searchCurrent: boolean
   /** The active search query, used to highlight the matched substrings. */
@@ -1740,9 +1748,10 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
     : (kind === 'add' || kind === 'replace' ? css.splitRadd : '')
   return (
     <div
-      className={css.line}
+      className={`${css.line}${discussed ? ' ' + css.rowDiscussed : ''}`}
       style={{ height }}
       data-diff-split-row
+      data-diff-discussion-band={discussed ? '' : undefined}
       data-diff-split-index={index}
       data-diff-split-side={isLeft ? 'left' : 'right'}
       data-diff-focused={focused ? '' : undefined}
@@ -1777,7 +1786,13 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   /** Report which source lines this view is showing, so the parent's windowed
    *  highlighter follows this view's own scroller (it has its own virtual window). */
   onVisibleLines: (visible: VisibleLines) => void
-}>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert, onWrapToast, onVisibleLines }, ref) {
+  /** The threads this file carries, laid out: each hangs under the pair its anchor ends in. */
+  discussions?: readonly Discussion[]
+  /** Draws one thread's card at the width this view gives it (see `DiscussionBlock`). */
+  renderDiscussion?: (discussion: Discussion, bodyWidth: number) => ReactNode
+  /** The comment action for the current selection, when the panel offers one for it. */
+  selectionComment?: ReactNode
+}>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert, onWrapToast, onVisibleLines, discussions, renderDiscussion, selectionComment }, ref) {
   // Use the configured line height for the split virtual window and jump math
   // (the rendered split rows already size to the same value).
   // eslint-disable-next-line @typescript-eslint/no-shadow
@@ -1919,13 +1934,53 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     if (pairWrapped === null) return null
     return pairWrapped.map(w => Math.max(w.left?.length ?? 1, w.right?.length ?? 1) * ROW_HEIGHT_PX)
   }, [pairWrapped])
+  /** The model rows a thread annotates: the wash their halves wear (see `rowDiscussed`). */
+  const discussedRows = useMemo(() => {
+    const set = new Set<number>()
+    for (const discussion of discussions ?? []) {
+      if (discussion.lost === true) continue
+      for (let row = Math.max(0, discussion.anchor.start); row <= Math.min(discussion.anchor.end, model.diff.rows.length - 1); row++) {
+        set.add(row)
+      }
+    }
+    return set
+  }, [discussions, model])
+  /** The threads that hang under each pair, by the row their anchor ends in. */
+  const pairDiscussions = useMemo(() => {
+    const map = new Map<number, Discussion[]>()
+    for (const discussion of discussions ?? []) {
+      const pair = pairOfRow.get(discussion.anchor.end) ?? pairOfRow.get(discussion.anchor.start)
+      if (pair === undefined) continue
+      const list = map.get(pair)
+      if (list === undefined) map.set(pair, [discussion])
+      else list.push(discussion)
+    }
+    return map
+  }, [discussions, pairOfRow])
+  /**
+   * The height a pair holds for the threads hanging under it, in px.
+   *
+   * A thread's rows are the thread's own (see `THREAD_ROW_PX`), not the code's, so a block off the
+   * code's grid still lands exactly where the height table says. Both columns reserve this much —
+   * the cards themselves are drawn over both (see the layer below) — which is what keeps the two
+   * halves from drifting apart under a thread either of them shows.
+   */
+  const discussionPx = useCallback(
+    (k: number): number => (pairDiscussions.get(k) ?? []).reduce((px, discussion) => px + discussionRows(discussion) * THREAD_ROW_PX, 0),
+    [pairDiscussions],
+  )
   const pairOffsets = useMemo(() => {
-    if (pairHeights === null) return null
-    const offs = new Array<number>(pairHeights.length + 1)
+    // With no threads the cheap uniform-row path is the whole story (and `pairHeights` is null
+    // while wrap is off, which is the common case); a thread anywhere in the file needs the table,
+    // because its rows are not the code's and every offset below it moves.
+    if (pairHeights === null && pairDiscussions.size === 0) return null
+    const offs = new Array<number>(pairCount + 1)
     offs[0] = 0
-    for (let i = 0; i < pairHeights.length; i++) offs[i + 1] = offs[i]! + pairHeights[i]!
+    for (let i = 0; i < pairCount; i++) {
+      offs[i + 1] = offs[i]! + (pairHeights === null ? ROW_HEIGHT_PX : pairHeights[i] ?? ROW_HEIGHT_PX) + discussionPx(i)
+    }
     return offs
-  }, [pairHeights])
+  }, [pairHeights, pairCount, discussionPx, pairDiscussions])
   const totalHeight = pairOffsets === null ? pairCount * ROW_HEIGHT_PX : (pairOffsets[pairCount] ?? 0)
   const off = (k: number): number => (pairOffsets === null ? k * ROW_HEIGHT_PX : (pairOffsets[Math.max(0, Math.min(k, pairCount))] ?? 0))
   // Fixed height for a pair's row: both columns must hold this exact value so
@@ -2271,8 +2326,8 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
                 const leftRuns = pair.left === undefined ? undefined : runs?.oldRuns?.[(pair.left.line ?? 0) - 1]
                 const sideIndex = pairRowIndices.get(index)
                 return (
+                  <Fragment key={index}>
                   <SplitSideRow
-                    key={index}
                     index={index}
                     side={pair.left}
                     wrapped={pairWrapped?.[index]?.left}
@@ -2287,7 +2342,20 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
                     searchOptions={search.options}
                     onHover={() => onPairHover(index)}
                     intra={sideIndex?.left === undefined ? undefined : model.intra.get(sideIndex.left)}
+                    discussed={sideIndex?.left !== undefined && discussedRows.has(sideIndex.left)}
                   />
+                  {/* The rows a thread under this pair holds. Both halves reserve the same height —
+                      the card itself is drawn over both (see the layer below) — which is what keeps
+                      the two halves from drifting apart under a thread. */}
+                  {discussionPx(index) > 0 && (
+                    <div
+                      className={css.vSpacer}
+                      data-diff-discussion-space={discussionPx(index)}
+                      style={{ height: discussionPx(index) }}
+                      aria-hidden="true"
+                    />
+                  )}
+                  </Fragment>
                 )
               })}
               {end < pairCount && <div className={css.vSpacer} style={{ height: totalHeight - off(end) }} aria-hidden="true" />}
@@ -2305,8 +2373,8 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
                 const rightRuns = pair.right === undefined ? undefined : runs?.newRuns?.[(pair.right.line ?? 0) - 1]
                 const sideIndex = pairRowIndices.get(index)
                 return (
+                  <Fragment key={index}>
                   <SplitSideRow
-                    key={index}
                     index={index}
                     side={pair.right}
                     wrapped={pairWrapped?.[index]?.right}
@@ -2321,7 +2389,19 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
                     searchOptions={search.options}
                     onHover={() => onPairHover(index)}
                     intra={sideIndex?.right === undefined ? undefined : model.intra.get(sideIndex.right)}
+                    discussed={sideIndex?.right !== undefined && discussedRows.has(sideIndex.right)}
                   />
+                  {/* The same rows the left half reserved, so the pair below this one starts on the
+                      same pixel in both halves (the thread itself is drawn over both, below). */}
+                  {discussionPx(index) > 0 && (
+                    <div
+                      className={css.vSpacer}
+                      data-diff-discussion-space={discussionPx(index)}
+                      style={{ height: discussionPx(index) }}
+                      aria-hidden="true"
+                    />
+                  )}
+                  </Fragment>
                 )
               })}
               {end < pairCount && <div className={css.vSpacer} style={{ height: totalHeight - off(end) }} aria-hidden="true" />}
@@ -2329,6 +2409,44 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
           </div>
         </div>
       </div>
+      {/* The threads, over both halves. A card is the width of the view and hangs at the pair its
+          anchor ends in, placed by the pair's own content offset less the scroll — the same
+          positioning the selection frame below uses — so it travels with the code. It is a layer of
+          its own because the two halves are separate clipped scrollers: a card inside either would
+          be cut off at the divider. Only the cards take presses; the layer between them does not, or
+          it would stand between the reader and the code. */}
+      <div className={css.splitDiscussions} data-diff-split-discussions>
+        {[...pairDiscussions.entries()].map(([pair, list]) => {
+          const top = off(pair) + pairHeightAt(pair) - scrollTop
+          const height = discussionPx(pair)
+          if (top > viewportH + SPLIT_DISCUSSION_MARGIN_PX || top + height < -SPLIT_DISCUSSION_MARGIN_PX) return null
+          return (
+            <div
+              key={pair}
+              className={css.splitDiscussion}
+              data-discussion-pair={pair}
+              style={{ top, width: bodyWidth }}
+            >
+              {list.map(discussion => (
+                <Fragment key={discussion.id}>{renderDiscussion?.(discussion, bodyWidth)}</Fragment>
+              ))}
+            </div>
+          )
+        })}
+      </div>
+      {/* The selection's own frame: a range in either half offers the comment, which is the one
+          action this view takes on a selection (keep/revert belong to the change blocks' own frames
+          here). It is placed against the scroller the two halves share — the content offset of the
+          selection's last pair, less the scroll — so it stays where the reader selected. */}
+      {selectionComment !== undefined && selection !== undefined && (
+        <div
+          className={css.blockActions}
+          data-diff-selection-actions
+          style={{ top: Math.max(0, Math.min(off(selection.end + 1) - scrollTop, Math.max(0, viewportH - 32))) }}
+        >
+          {selectionComment}
+        </div>
+      )}
       <div className={css.splitHScrollRow} data-diff-hscroll-row>
         <div className={css.splitHScroll} ref={leftHScrollRef} data-diff-hscroll="left" style={{ width: colWidth, flex: 'none' }} onScroll={() => onHScroll('left')}>
           <div className={css.splitHScrollFill} style={{ width: fillWidth.left || undefined }} />
@@ -2835,9 +2953,51 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   }, [file.oldText, file.newText, splitView])
   // The aligned split pairs (only in split mode): used to map a left/right
   // selection to the old/new line numbers for the copy reference.
-  const splitPairs = useMemo(() => (
-    splitView ? computeSideBySideDiff(model.diff.rows, true).pairs : null
+  const splitModel = useMemo(() => (
+    splitView ? computeSideBySideDiff(model.diff.rows, true) : null
   ), [splitView, model])
+  const splitPairs = splitModel?.pairs ?? null
+  /**
+   * Which model row each pair holds on each side: the side-by-side view selects PAIRS and names one
+   * column (see `splitRowRangeOf`), while everything that reads a selection as lines — the anchor a
+   * comment is written to, and the "this range already has a thread" test — speaks rows.
+   */
+  const pairRows = useMemo(() => {
+    const map = new Map<number, { old?: number; new?: number }>()
+    if (splitModel === null) return map
+    model.diff.rows.forEach((row, rowIndex) => {
+      const pair = splitModel.pairOfRow.get(rowIndex)
+      if (pair === undefined) return
+      const entry = map.get(pair) ?? {}
+      if (row.kind !== 'add') entry.old = rowIndex
+      if (row.kind !== 'del') entry.new = rowIndex
+      map.set(pair, entry)
+    })
+    return map
+  }, [splitModel, model])
+  /**
+   * The rows a selection names, whichever view made it: the pair range of a side-by-side selection
+   * mapped to that column's rows, and a single-column range left as it is.
+   *
+   * Only the NEW side can be named. A thread is anchored to new-file lines — those are what survive
+   * the model being rebuilt, and what its reference label shows — so a left-column selection (the
+   * old file, code that may not exist any more) has nothing to anchor to: it reads as no rows, and
+   * the comment is not offered on it.
+   *
+   * @param range - the selection to read.
+   * @returns the same lines as a row range, or undefined when the view named none.
+   */
+  const selectionRows = (range: RowRange | undefined): RowRange | undefined => {
+    if (range === undefined) return undefined
+    if (!splitView || range.side === undefined || splitModel === null) return range
+    if (range.side !== 'new') return undefined
+    const rows: number[] = []
+    for (let index = range.start; index <= range.end; index++) {
+      const row = pairRows.get(index)?.new
+      if (row !== undefined) rows.push(row)
+    }
+    return rows.length === 0 ? undefined : { start: Math.min(...rows), end: Math.max(...rows) }
+  }
 
   // Inline local Markdown images after the preview body renders. The preview is
   // injected as innerHTML, so `<img src="details/x.png">` keeps its relative
@@ -3832,6 +3992,18 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   // How much of a thread a block keeps: a preference, so a reader who wants more (or less) of a
   // long thread gets it. Read per render, not once, so the settings take effect without a reload.
   const roundLimit = discussionRoundLimit()
+  /**
+   * Rows a thread's own rendered height corrected the model to, by thread id.
+   *
+   * The rows a block reserves are meant to BE the rows it draws, and the wrap model above is how
+   * they are worked out — but a wrap model that is off by a row or by ten shows up as air under the
+   * writing row (or as a clipped turn), and this one demonstrably is: the same answer has measured
+   * 7, 11, 25 and 35 rows in different sessions at the same width. So the block's own rendered
+   * height is read back after every render and the reservation is corrected to it — the same
+   * "measure it, do not reason about it" rule the code view's wrapped rows follow. The map only
+   * ever holds what was measured, and an entry stops changing once the drawing settles.
+   */
+  const [rowFix, setRowFix] = useState<Record<string, number>>({})
   const layoutDiscussion = useCallback((discussion: Discussion): { messages: readonly DiscussionMessage[]; hidden: number; rows: number } => {
     // Every trailing piece is a whole number of rows: a status note is one row, the
     // compose area two, an answer as many as its wrapped lines. There is no chrome
@@ -3875,7 +4047,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       // whole row of round-up would leave that much air above the writing row.
       rows: tail.rows + trailing,
     }
-  }, [langWrap, quoteRowsOf, messageSizeOf, roundLimit, ROW_HEIGHT_PX])
+  // `bodyWidth` is in the list explicitly, and not only through `messageSizeOf`/`quoteRowsOf`: those
+  // two are callbacks of their own, and one link in the chain that stops short of the width is a
+  // block laid out for the width it had at some earlier moment — a side-by-side column kept after
+  // switching back to one column, say, which reserves rows for a turn wrapped half as wide as the
+  // card it is drawn in. That is the difference that shows up as a blank under the writing row.
+  }, [langWrap, quoteRowsOf, messageSizeOf, roundLimit, ROW_HEIGHT_PX, bodyWidth])
 
   /**
    * The discussions as the render will draw them: the body height the measurement
@@ -3889,7 +4066,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       const laid = layoutDiscussion(discussion)
       return {
         ...discussion,
-        bodyRows: laid.rows,
+        bodyRows: rowFix[discussion.id] ?? laid.rows,
         hidden: laid.hidden,
         // The wrap the rows above were counted with, handed to the quote that draws them: the
         // count and the drawing have to be the same decision. `bodyRows` is measured from the
@@ -3903,7 +4080,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
         ...(discussion.reply === undefined ? {} : { reply: stripBlankLines(discussion.reply) }),
       }
     }),
-    [discussions, layoutDiscussion],
+    [discussions, layoutDiscussion, rowFix],
   )
 
   // Discussion blocks reserve whole rows in the same height table the wrap model
@@ -4326,11 +4503,15 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     // Comment mode is off by default (a preview): the button and the chord are withheld
     // while it is, so this is the belt to that pair of braces.
     if (!commentMode) return
-    if (selection === undefined) return
+    // The rows the range names, whichever view made it. A side-by-side selection hands over a pair
+    // range and a column, and only its new column reads as rows (see `selectionRows`), so the
+    // anchor is always new-file lines — the lines that survive the model being rebuilt.
+    const range = selectionRows(selection)
+    if (range === undefined) return
     // A row belongs to one annotation at most, so any overlap refuses a second.
-    if (discussionOverlapping(discussions, selection) !== undefined) return
-    const first = model.diff.rows[selection.start]
-    const last = model.diff.rows[selection.end] ?? first
+    if (discussionOverlapping(discussions, range) !== undefined) return
+    const first = model.diff.rows[range.start]
+    const last = model.diff.rows[range.end] ?? first
     // The anchor is stored as new-file lines: those are what survive the model
     // being rebuilt (a keep/revert, a later edit), and they are also what the
     // reference label shows.
@@ -4341,7 +4522,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     // the viewport, everything the user is reading moves down by the same amount,
     // so the scroll offset follows it - the same rule folding and removal use.
     const body = bodyRef.current
-    if (body !== null && offsetOf(selection.start) - body.scrollTop < 0) {
+    if (body !== null && offsetOf(range.start) - body.scrollTop < 0) {
       pendingScrollShiftRef.current += (DISCUSSION_HEADER_ROWS + DISCUSSION_COMPOSE_ROWS) * THREAD_ROW_PX
     }
     const id = `discussion-${Date.now().toString(36)}-${discussions.length}`
@@ -4349,12 +4530,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     // anchor is line numbers, and the quote is what tells a later rebuild whether they still
     // point at the same code — see `remapDiscussion`. The gutter pair rides along so an
     // outdated block can show the quote where the file showed it.
-    const quoted = model.diff.rows.slice(selection.start, selection.end + 1)
+    const quoted = model.diff.rows.slice(range.start, range.end + 1)
     const quote = quoted.map(row => row.text).join('\n')
     const quoteLines = quoted.map(row => ({ old: row.oldLine, new: row.newLine, kind: row.kind }))
     setDiscussions(current => [...current, {
       id,
-      anchor: { start: selection.start, end: selection.end, startLine, endLine },
+      anchor: { start: range.start, end: range.end, startLine, endLine },
       quote,
       quoteLines,
       messages: [],
@@ -4620,6 +4801,84 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     observer?.observe(body)
     return () => { observer?.disconnect() }
   }, [file.id, langWrap, previewActive, splitView])
+
+  // Read that same width back after every render, not only when the observer fires. A drag of the
+  // panel's edge re-renders per frame, and the observer delivers its callback in a later task, so the
+  // comment card — whose box is an inline width from this state, unlike the code rows, whose width is
+  // the layout's — stayed visibly behind the code while the reader dragged and only caught up once the
+  // drag ended. A layout effect runs before paint, so the card lands on the frame the drag made. The
+  // guard is what keeps this from looping; the observer above still covers the changes that come with
+  // no render at all (a window resize, a platform scrollbar appearing).
+  const widthMovedRef = useRef(false)
+  useLayoutEffect(() => {
+    const body = bodyRef.current
+    if (body === null) return
+    const width = body.clientWidth
+    widthMovedRef.current = width !== bodyWidth
+    if (width !== bodyWidth) setBodyWidth(width)
+  })
+
+  // The reservation follows the drawing (see `rowFix`): what the card renders is measured here and
+  // the thread's rows are corrected to it. The last child's bottom edge IS the content's height —
+  // margins included, since the model counts a bubble's own margin as a row — and the box's
+  // `overflow: hidden` does not move it, so an under-reserved block grows and an over-reserved one
+  // gives its air back. One row of rounding is left to the writing row's own slack spacer.
+  const rowFixRef = useRef(rowFix)
+  rowFixRef.current = rowFix
+  // The width the cards are drawn at, from the last pass. While it is still moving — the panel's
+  // edge being dragged, a divider — the correction waits: a resize re-wraps every thread on every
+  // frame, and correcting each one costs a second render per frame, which is what left the card's
+  // own width a frame behind the code view's while the reader dragged. The frame after it settles
+  // corrects as usual.
+  const fitWidthRef = useRef(0)
+  // A correction that the settled pass still owes. Needed because the pass that first sees the new
+  // width is the pass the read-back above triggered — and nothing else may re-render this panel once
+  // the reader lets go of the edge, so without this the reservation could keep the outgoing figure.
+  const [, bumpFixTick] = useReducer((n: number) => n + 1, 0)
+  const fixTickArmedRef = useRef(false)
+  useLayoutEffect(() => {
+    const firstCard = document.querySelector<HTMLElement>('[data-diff-discussion]')
+    const cardWidth = firstCard?.getBoundingClientRect().width ?? 0
+    const settled = cardWidth > 0 && Math.abs(cardWidth - fitWidthRef.current) <= 1
+    fitWidthRef.current = cardWidth
+    if (!settled) {
+      // Still moving (a drag, a divider) — correcting every frame costs a render per frame, which is
+      // what made the card's own width trail the code view's. Wait for the box to stop moving and then
+      // take one more pass, since this one drew the outgoing width. What "stopped" means is checked a
+      // frame later, because the pass that first wears the new width is the one the read-back above
+      // triggered and a drag will have moved the box again by the time the frame is over. With no card
+      // drawn there is nothing to correct and nothing to wait for.
+      if (cardWidth > 0 && !widthMovedRef.current && !fixTickArmedRef.current) {
+        const armed = bodyRef.current?.clientWidth ?? 0
+        fixTickArmedRef.current = true
+        requestAnimationFrame(() => {
+          fixTickArmedRef.current = false
+          if ((bodyRef.current?.clientWidth ?? 0) !== armed) return
+          bumpFixTick()
+        })
+      }
+      return
+    }
+    const next: Record<string, number> = { ...rowFixRef.current }
+    let changed = false
+    for (const card of document.querySelectorAll<HTMLElement>('[data-diff-discussion]')) {
+      const id = card.dataset.diffDiscussionId
+      const body = card.children[1]
+      const last = body?.lastElementChild
+      if (id === undefined || body === undefined || last === null || last === undefined) continue
+      const drawn = last.getBoundingClientRect().bottom
+        + (Number.parseFloat(getComputedStyle(last).marginBottom) || 0)
+        - body.getBoundingClientRect().top
+      // A collapsed or not-yet-laid-out card measures zero; leave it to a later pass.
+      if (drawn <= 0) continue
+      const want = Math.max(1, Math.ceil(drawn / THREAD_ROW_PX))
+      if (next[id] !== want) {
+        next[id] = want
+        changed = true
+      }
+    }
+    if (changed) setRowFix(next)
+  })
 
   // Scroll the focused change block into view after focus, content changes, or
   // a jump. The block's top edge lands two rows below the viewport top so a
@@ -5102,14 +5361,36 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
         else discussionInputEls.current.set(id, element)
       }}
     />
+  // The card is given its width as an ARGUMENT (`renderDiscussion(discussion, bodyWidth)`), so this
+  // callback reads nothing but the menu and the question in flight; the width is not its to keep.
   ), [discussionMenuFor, askingId, t, lang, toggleDiscussion, removeDiscussion, sendDiscussion, discussionLineRange])
+
+  /**
+   * The lines a selection names, whichever view made it, or undefined when it names none this panel
+   * can comment on — a side-by-side selection of the LEFT column is the old file, and a thread is
+   * anchored to new-file lines. The frame (and the chord) hang off this, so the left column simply
+   * offers nothing.
+   */
+  const selectionRowRange = selectionRows(selection)
+  /**
+   * Whether those lines already carry a thread: the comment is withheld then (a row belongs to one
+   * annotation at most).
+   */
+  const selectionHasDiscussion = selectionRowRange !== undefined
+    && discussionOverlapping(discussions, selectionRowRange) !== undefined
 
   // What the frame offers for the current selection (see `selectionFrame`), with comment
   // mode applied: an OFF mode withholds the comment action but not the frame, so a range
   // over change blocks still offers keep/revert. A range whose only action would have been
   // the comment then has no frame at all — which is also what keeps the chord below off.
-  const frameForSelection = !splitView && selection !== undefined
-    ? selectionFrame({ coversBlocks: selectionRange !== undefined, hasDiscussion: discussionOverlapping(discussions, selection) !== undefined })
+  const frameForSelection = selectionRowRange !== undefined
+    ? selectionFrame({
+        // Keep/revert are the change blocks' own frames, and only the single-column view anchors a
+        // selection to them (see `selectionRange`); the comment is offered wherever a range reads as
+        // the current file's lines, which the side-by-side view's right column does too.
+        coversBlocks: !splitView && selectionRange !== undefined,
+        hasDiscussion: selectionHasDiscussion,
+      })
     : undefined
   const selectionCommentOffered = commentMode && frameForSelection?.comment === true
   const selectionFrameVisible = frameForSelection !== undefined
@@ -5785,6 +6066,23 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
           onBlockRevert={onBlockRevert}
           onWrapToast={(text) => onToast(text)}
           onVisibleLines={onSplitVisibleLines}
+          discussions={laidDiscussions}
+          renderDiscussion={renderDiscussion}
+          // A range in either half offers the comment; keep/revert stay with the change blocks' own
+          // frames here (see `frameForSelection`).
+          selectionComment={splitView && selectionCommentOffered ? (
+            <button
+              type="button"
+              className={css.action}
+              data-diff-selection-comment
+              onClick={addDiscussion}
+            >
+              {t('action.comment')}
+              {commentChord !== '' && (
+                <span className={css.actionChord} data-diff-selection-comment-chord>{commentChord}</span>
+              )}
+            </button>
+          ) : undefined}
         />
       ) : (
       <div className={css.diffBodyWrap} ref={bodyWrapRef} onMouseLeave={() => { setHoveredBlock(undefined) }}>
