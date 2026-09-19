@@ -910,6 +910,9 @@ interface PendingDiffProps {  file: PendingFileDiff
    *  jump to a change block does: the configured lead rows above the row, and a flash around the
    *  block that holds it (see the landing effect), because that is the jump the reader knows. */
   landingRow?: number | undefined
+  /** Called once this pane has taken the landing above. The panel spends it then, so a pane that
+   *  mounts later for the same open file cannot land it again (see the landing effect). */
+  onLanded?: (() => void) | undefined
   /** The last keep/revert failure for this file, shown as an inline banner. */
   failedMessage?: string | undefined
   /**
@@ -2468,7 +2471,7 @@ function PendingFileRow({ file, selected, failedMessage, t, onSelect, onMenu }: 
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, failedMessage, commentSkill, onPasteReference, onAskAgent, watchChat, onToast, t, onAddTypedPath, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, onLanded, failedMessage, commentSkill, onPasteReference, onAskAgent, watchChat, onToast, t, onAddTypedPath, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -2772,6 +2775,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   const landingTopRef = useRef<number | undefined>(undefined)
   /** The model row a jump to a comment asked for, spent the same way and by the same effect. */
   const landingRowRef = useRef<number | undefined>(undefined)
+  /** The latest `onLanded`, for the landing effect: it says the ask has been taken, and the panel
+   *  then spends it so a pane that mounts later cannot take it again. Read through a ref because the
+   *  panel hands a fresh closure on every render, and re-running the landing effect for that would
+   *  place the file twice. */
+  const onLandedRef = useRef(onLanded)
+  onLandedRef.current = onLanded
   // The plain text of the last valid (single-line) diff selection, so opening
   // search auto-fills the query even after clicking the search button collapses
   // the native selection.
@@ -2801,35 +2810,12 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
 
   // Reset transient viewer state whenever the selected file changes, take
   // keyboard focus into the diff body so the Ctrl+Up/Down block-jump (scoped
-  // to the panel) works as soon as a file is shown, and flash the initial
-  // block so the user sees where the first change sits. The scroll position is
-  // left to the landing effect below: it scrolls the first change block into
-  // view, and resetting it to 0 here would override that for long files whose
-  // first change sits far down.
+  // to the panel) works as soon as a file is shown. The scroll position is left
+  // to the landing effect below: it scrolls the first change block into view,
+  // and resetting it to 0 here would override that for long files whose
+  // first change sits far down. This is about the FILE, so a landing that arrives
+  // later for the file already showing does not reset any of it.
   useEffect(() => {
-    // Where this file opens, decided by the panel per selection: the offset the
-    // reader was left at when it resumed a remembered view, or nothing for the
-    // file's first change. `focus` follows it — the block the reader was in
-    // becomes the current one, so prev/next walk from there — but nothing
-    // flashes: no jump happened.
-    landingTopRef.current = landingTop
-    landingRowRef.current = landingRow
-    if (landingRow !== undefined) {
-      // A jump to a comment: focus the block the comment hangs on, so the flash that marks a jump
-      // is drawn around it, and let the landing effect below put the row itself where a jump to a
-      // change block would put the block — the configured lead rows above it.
-      setFocus(blockIndexAtOffset(offsetOf(landingRow)))
-      bumpFlash(false)
-    } else if (landingTop === undefined) {
-      setFocus(0)
-      bumpFlash(false)
-    } else {
-      setFocus(blockIndexAtOffset(landingTop))
-    }
-    // Bump the landing tick so switching files re-lands even when the focus index
-    // is unchanged (0 -> 0); the landing effect keys off this instead of the
-    // model, so a content refresh no longer re-centers.
-    setScrollTick(tick => tick + 1)
     bodyRef.current?.focus()
     setHoveredBlock(undefined)
     setSelection(undefined)
@@ -2839,6 +2825,75 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     setSearchOpen(false)
     setSearchQuery('')
     setSearchIndex(0)
+  }, [file.id])
+
+  // Where this file opens. The panel decides that per selection and says so with a
+  // landing: the offset it was left at when a showing resumed, the row a comment jump
+  // named, or nothing for the file's first change. `focus` follows it — the block the
+  // reader was in becomes the current one, so prev/next walk from there — but only a
+  // jump flashes: arriving somewhere is not a jump.
+  //
+  // NO landing, and the file is one this mount did not open, means the pane remounted
+  // under a reader who is already reading it: the pending list lost the entry for a
+  // moment (a poll re-capturing it), or the panel changed presentation. A file that is
+  // already open must not be scrolled — the code under the reader may have changed, but
+  // the reader has not — so it resumes the offset they had scrolled it to, which the
+  // scroll handler mirrors into the page's memory as they read. Taking the stale
+  // landing again here is what threw the reader's place away exactly when the code
+  // changed, and landing the first change instead is no better.
+  //
+  // `landedFileRef` is what separates "this mount has not placed this file yet" from a
+  // later render of the same file: without it, the panel spending the landing (see
+  // `onLanded`) would look like a remount and re-place the file a second time, undoing
+  // whatever jump had just been asked for.
+  const landedFileRef = useRef<string | undefined>(undefined)
+  /** The file the placement effect below has decided the opening place for (see `placedFileRef`). */
+  const placedFileRef = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    // A landing is "the panel asked for this file, at this place": the tick is what says an ask is
+    // there at all, since a plain "land on the first change" carries no offset and no row.
+    const landing = (landingTick ?? 0) > 0
+    const opened = landedFileRef.current !== file.id
+    landedFileRef.current = file.id
+    // The landing effect below must not place this file before this decision is made: it runs in the
+    // LAYOUT phase, and a fresh mount's wrap measurement becomes ready in the very commit this file
+    // first renders in — so it would land the first block on a file whose reader had scrolled it
+    // somewhere, and write that over the place they were. This is the mark that says the decision is
+    // in; until then the landing effect does nothing.
+    placedFileRef.current = file.id
+    if (!landing && !opened) return
+    if (landing) {
+      landingTopRef.current = landingTop
+      landingRowRef.current = landingRow
+      if (landingRow !== undefined) {
+        // A jump to a comment: focus the block the comment hangs on, so the flash that marks a jump
+        // is drawn around it, and let the landing effect below put the row itself where a jump to a
+        // change block would put the block — the configured lead rows above it.
+        setFocus(blockIndexAtOffset(offsetOf(landingRow)))
+        bumpFlash(false)
+      } else if (landingTop === undefined) {
+        setFocus(0)
+        bumpFlash(false)
+      } else {
+        setFocus(blockIndexAtOffset(landingTop))
+      }
+      // Bump the landing tick so switching files re-lands even when the focus index
+      // is unchanged (0 -> 0); the landing effect keys off this instead of the
+      // model, so a content refresh no longer re-centers.
+      setScrollTick(tick => tick + 1)
+      // The ask has been taken: the panel spends it, so a pane that mounts later cannot land it a
+      // second time (see the comment above).
+      onLandedRef.current?.()
+      return
+    }
+    // Nothing was asked for: the reader's own place, or nothing at all — a file that has never been
+    // scrolled opens at the top like any other, and there is no reason to move it.
+    landingRowRef.current = undefined
+    const offset = panelFileOffset(file.sessionId, file.id)
+    if (offset === undefined) return
+    landingTopRef.current = offset
+    setFocus(blockIndexAtOffset(offset))
+    setScrollTick(tick => tick + 1)
     // `landingTop`, `landingRow` and `landingTick` are deps as well as `file.id`: a fresh
     // showing can re-land the *same* file (reopening where it was left), and the
     // chip's own jump lands on the first change of the file already open.
@@ -4332,8 +4387,30 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   // mirrored into state to re-render the window; onScroll covers real user
   // scrolling. Layout timing matters: the block-flash overlay reads scrollTop
   // while rendering, so the scroll must settle BEFORE the browser paints —
+  /**
+   * Move the code view to one offset, and take the page's memory with it.
+   *
+   * The memory is what a pane that remounts under the reader resumes (see the landing effect), so it
+   * has to follow every write the panel itself makes — a jump included. Mirroring only the reader's
+   * own scrolls would leave a remount resuming the place they left rather than the place the jump
+   * put them, which is the same "it moved on its own" the memory exists to stop.
+   *
+   * @param body - the code view's scroll box.
+   * @param offset - the offset to settle it at.
+   */
+  const applyScrollTop = (body: HTMLElement, offset: number): void => {
+    if (body.scrollTop !== offset) body.scrollTop = offset
+    setScrollTop(offset)
+    rememberPanelView(file.sessionId, { fileId: file.id, scrollTop: offset })
+  }
+
   useLayoutEffect(() => {
     if (rowCount === 0) return
+    // Nothing is placed before the placement effect has decided where this file opens: this runs in
+    // the layout phase, and a fresh mount's wrap measurement becomes ready in the same commit — it
+    // would land the first block on a file whose reader had scrolled it elsewhere (see
+    // `placedFileRef`).
+    if (placedFileRef.current !== file.id) return
     // A resumed view wins over the focused block: the reader comes back to the
     // line they left, and the exact stored offset is a better answer than the
     // change block the anchor in `blockIndexAtOffset` approximated. Spent here,
@@ -4344,9 +4421,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       if (!previewActive) {
         const resumeBody = bodyRef.current
         if (resumeBody !== null) {
-          const clamped = Math.max(0, Math.min(resumed, resumeBody.scrollHeight - resumeBody.clientHeight))
-          if (resumeBody.scrollTop !== clamped) resumeBody.scrollTop = clamped
-          setScrollTop(clamped)
+          applyScrollTop(resumeBody, Math.max(0, Math.min(resumed, resumeBody.scrollHeight - resumeBody.clientHeight)))
         }
       }
       return
@@ -4360,9 +4435,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       landingRowRef.current = undefined
       const rowBody = bodyRef.current
       if (rowBody !== null) {
-        const target = Math.max(0, Math.min(offsetOf(row) - leadRows * ROW_HEIGHT_PX, rowBody.scrollHeight - rowBody.clientHeight))
-        if (rowBody.scrollTop !== target) rowBody.scrollTop = target
-        setScrollTop(target)
+        applyScrollTop(rowBody, Math.max(0, Math.min(offsetOf(row) - leadRows * ROW_HEIGHT_PX, rowBody.scrollHeight - rowBody.clientHeight)))
       }
       return
     }
@@ -4389,9 +4462,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     // Leave the configured lead rows above the block's top edge; when the block
     // is too close to the top or bottom to afford it, clamp to the scroll range.
     const target = offsetOf(block.start) - leadRows * ROW_HEIGHT_PX
-    const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
-    if (body.scrollTop !== clamped) body.scrollTop = clamped
-    setScrollTop(clamped)
+    applyScrollTop(body, Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight)))
     // Re-run once when wrapped offsets go from "not measured yet" to ready, so
     // an open-with-wrap-on file centers on the block's real (wrapped) offset
     // instead of the initial fixed-22px guess. `rowOffsets === null` flips only
@@ -4591,6 +4662,11 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     const body = bodyRef.current
     if (body === null) return
     syncQuoteScroll(body)
+    // The reader's place in this file, recorded as they read it rather than only on the way out: a
+    // pane that remounts under them (a poll that lost the entry for a moment, a presentation
+    // switch) resumes it, so the code changing under the reader cannot move them (see the landing
+    // effect). This is the offset the panel would have remembered on closing — just kept current.
+    rememberPanelView(file.sessionId, { fileId: file.id, scrollTop: body.scrollTop })
     setScrollTop(body.scrollTop)
     setViewportHeight(body.clientHeight)
     // Re-anchor the "current diff" (`focus`) to the block under the viewport
@@ -7624,7 +7700,11 @@ export function PendingPanel({
                     // tick makes a repeated request for the same file land again.
                     landingTop={landing !== undefined && landing.fileId === selectedFile.id ? landing.top : undefined}
                     landingTick={landing !== undefined && landing.fileId === selectedFile.id ? landing.n : 0}
-            landingRow={landing !== undefined && landing.fileId === selectedFile.id ? landing.row : undefined}
+                    landingRow={landing !== undefined && landing.fileId === selectedFile.id ? landing.row : undefined}
+                    // The landing is an ask, not a state: once the pane showing the file has taken
+                    // it, the panel forgets it, so a pane that mounts later for the same open file
+                    // resumes the reader's own place instead of landing where they once arrived.
+                    onLanded={() => { setLanding(current => (current === undefined ? current : undefined)) }}
                     failedMessage={failed.get(selectedFile.id)}
                     commentSkill={snapshot.commentSkill}
                     onPasteReference={onPasteReference}
