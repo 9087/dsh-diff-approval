@@ -2815,6 +2815,55 @@
   width: calc(var(--dsh-diff-quote-width, 0px) + 100%);
 }
 
+/* The quote of a side-by-side thread: one row per aligned PAIR, in the file's own two columns, since
+   the selection the thread quotes covered both halves. The card is the width of the view and its
+   content box is inset, so this bleeds back out to the card's edges — each half then measures exactly
+   what the column above it does, which is what keeps the quoted numbers under the file's own. */
+.quoteSplit {
+  display: flex;
+  align-items: flex-start;
+  /* A flex item of `.discussionBody`, which is a flex column: it stretches to that body's width and
+     the negative margins bleed it back out over the body's own 12px inset, so the two halves measure
+     exactly what the columns above them do. A width here would be ignored — a stretched item's cross
+     size comes from the container. */
+  align-self: stretch;
+  margin: 0 -12px;
+}
+
+/* One half. The divider between them is that half's own border: an element of its own would take a
+   pixel from the two halves, and they have to be the columns' width exactly. */
+.quoteSplitSide {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.quoteSplitSide + .quoteSplitSide {
+  border-left: 1px solid var(--dsw-alias-border-l2);
+}
+
+/* Each half is its own [gutter][code] table, as a column is (`table-layout: fixed` keeps the two
+   halves' code cells clipping at their own edge, wrapped or not). */
+.quoteSplitTable {
+  display: table;
+  table-layout: fixed;
+  width: 100%;
+  border-spacing: 0;
+}
+
+/* Wrap off: each half pans with its own column (see `SplitDiff`) and can travel exactly as far as
+   the file's own widest line lets it — the tail is that figure, not the quoted line's own. */
+.quoteNoWrap .quoteSplit [data-diff-quote-side='left'] .quoteText::after {
+  content: '';
+  display: inline-block;
+  width: calc(var(--dsh-quote-width-left, 0px) + 100%);
+}
+
+.quoteNoWrap .quoteSplit [data-diff-quote-side='right'] .quoteText::after {
+  content: '';
+  display: inline-block;
+  width: calc(var(--dsh-quote-width-right, 0px) + 100%);
+}
+
 /* Exactly one thread row: the folded header, and the head of the open block. */
 .discussionHead {
   flex: none;

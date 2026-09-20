@@ -910,6 +910,9 @@ interface PendingDiffProps {  file: PendingFileDiff
    *  jump to a change block does: the configured lead rows above the row, and a flash around the
    *  block that holds it (see the landing effect), because that is the jump the reader knows. */
   landingRow?: number | undefined
+  /** Land on the thread's own box rather than on the row above: what an outdated comment gets, since
+   *  the code it was written about is gone and the position its numbers point at says nothing. */
+  landingCard?: boolean | undefined
   /** Called once this pane has taken the landing above. The panel spends it then, so a pane that
    *  mounts later for the same open file cannot land it again (see the landing effect). */
   onLanded?: (() => void) | undefined
@@ -1006,27 +1009,97 @@ function discussionNodes(text: string): ReactNode[] {
   })
 }
 
-function DiscussionQuote({ quote, lines, lang, wrap }: {
+function DiscussionQuote({ quote, lines, lang, wrap, split }: {
   quote: string
   lines: readonly DiscussionQuoteLine[] | undefined
   lang: string | undefined
   wrap: boolean
+  /**
+   * The side-by-side view draws one row per ALIGNED PAIR, in the two columns the file itself shows
+   * (left = the old file, right = the new one): a selection there covers both halves, so the thread
+   * it became quotes both, and a single-column quote would show only half of what it was about.
+   */
+  split: boolean
 }) {
   /** The diff's own wash for a quoted row, or nothing for context (and for older threads). */
   const wash = (kind: DiscussionQuoteLine['kind']): string => (
     kind === 'add' ? ` ${css.quoteAdd}` : kind === 'del' ? ` ${css.quoteDel}` : ''
   )
-  const rows = useMemo(() => {
-    const texts = quote.split('\n')
-    const runs = highlightWindow(texts, lang, 0, texts.length)?.runs
-    return texts.map((text, index) => {
-      const lineRuns = runs?.[index]
-      const content: ReactNode[] = []
-      if (lineRuns === undefined) content.push(text)
-      else for (const run of lineRuns) content.push(<span key={content.length} style={run.style}>{run.text}</span>)
-      return { content, gutter: lines?.[index] }
+  const texts = useMemo(() => quote.split('\n'), [quote])
+  /** The quoted lines paired the way the split view pairs the file's rows. */
+  const pairs = useMemo(() => {
+    if (!split) return undefined
+    const rows = texts.map((text, index) => {
+      const line = lines?.[index]
+      // The recorded gutter pair and kind are the row's own; a thread quoted before they were kept
+      // has neither, and then reads as context.
+      return { text, kind: line?.kind ?? 'context', oldLine: line?.old, newLine: line?.new } as WholeFileDiffRow
     })
-  }, [quote, lines, lang])
+    return computeSideBySideDiff(rows, true).pairs
+  }, [split, texts, lines])
+  /**
+   * One column's lines and the highlighted runs each draws. Highlighted per column rather than from
+   * one window over the quoted rows: a multi-line construct must not light up across the divider,
+   * which is also how the file's own two columns are lit.
+   */
+  const sides = useMemo(() => {
+    if (pairs === undefined) return undefined
+    const build = (which: 'left' | 'right'): {
+      lines: string[]
+      runs: ReturnType<typeof highlightWindow>
+    } => {
+      const columnLines = pairs.map(pair => pair[which]?.text ?? '')
+      return { lines: columnLines, runs: highlightWindow(columnLines, lang, 0, columnLines.length) }
+    }
+    return { left: build('left'), right: build('right') }
+  }, [pairs, lang])
+  /** One line's nodes: the highlighted runs it draws, or its own text when nothing highlighted it. */
+  const nodesOf = (
+    lineRuns: readonly { style: CSSProperties; text: string }[] | undefined,
+    text: string,
+  ): ReactNode[] => {
+    if (lineRuns === undefined) return [text]
+    const content: ReactNode[] = []
+    for (const run of lineRuns) content.push(<span key={content.length} style={run.style}>{run.text}</span>)
+    return content
+  }
+  const rows = useMemo(() => {
+    const runs = highlightWindow(texts, lang, 0, texts.length)?.runs
+    return texts.map((text, index) => ({ content: nodesOf(runs?.[index], text), gutter: lines?.[index] }))
+  }, [texts, lines, lang])
+  if (pairs !== undefined && sides !== undefined) {
+    /** The tint a pair's two cells wear, the same way the file's columns tint theirs. */
+    const pairWash = (which: 'left' | 'right', kind: SplitPair['kind']): string => (
+      which === 'left' ? wash(kind === 'context' ? 'context' : 'del') : wash(kind === 'context' ? 'context' : 'add')
+    )
+    return (
+      <div
+        className={`${css.quoteLines} ${css.quoteSplit}${wrap ? '' : ' ' + css.quoteNoWrap}`}
+        data-diff-discussion-quote
+      >
+        {(['left', 'right'] as const).map(which => (
+          <div className={css.quoteSplitSide} data-diff-quote-side={which} key={which}>
+            <div className={css.quoteSplitTable}>
+              {pairs.map((pair, index) => (
+                <div className={`${css.quoteLine} ${css.quotePair}`} data-diff-quote-pair key={index}>
+                  <span className={css.gutter} data-diff-quote-gutter>{pair[which]?.line ?? ''}</span>
+                  <span className={`${css.quoteCode}${pairWash(which, pair.kind)}`}>
+                    <span
+                      className={css.quoteText}
+                      data-diff-quote-text
+                      data-diff-quote-side={which}
+                    >
+                      {nodesOf(sides[which].runs?.runs?.[index], sides[which].lines[index] ?? '')}
+                    </span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    )
+  }
   return (
     <div className={`${css.quoteLines}${wrap ? '' : ' ' + css.quoteNoWrap}`} data-diff-discussion-quote>
       {rows.map((row, index) => (
@@ -1077,6 +1150,8 @@ interface DiscussionBlockProps {
   onSend: (id: string) => void
   /** Hands the writing field's element to the panel, so a send can ask for the caret back. */
   registerInput: (id: string, element: HTMLInputElement | null) => void
+  /** The card is drawn in the side-by-side view, whose code it quotes as two columns. */
+  split: boolean
 }
 
 /**
@@ -1093,7 +1168,7 @@ interface DiscussionBlockProps {
  */
 function DiscussionBlock({
   discussion, label, bodyWidth, lang, menuOpen, asking, t,
-  onToggle, onMenuOpen, onRemove, onDraft, onSend, registerInput,
+  onToggle, onMenuOpen, onRemove, onDraft, onSend, registerInput, split,
 }: DiscussionBlockProps) {
   const rows = discussionRows(discussion)
   // The turn is answering and text has arrived: the streamed answer takes the branch the thinking
@@ -1172,7 +1247,7 @@ function DiscussionBlock({
               {/* The wrap comes from the block's own layout, not from the setting: the rows above
                   this quote were counted from it (see `laidDiscussions`), so a quote drawn with
                   anything else would be drawn at a height nobody reserved. */}
-              <DiscussionQuote quote={discussion.quote} lines={discussion.quoteLines} lang={lang} wrap={discussion.quoteWrap === true} />
+              <DiscussionQuote quote={discussion.quote} lines={discussion.quoteLines} lang={lang} wrap={discussion.quoteWrap === true} split={split} />
             </>
           )}
           {discussion.hidden !== undefined && discussion.hidden > 0 && (
@@ -1766,7 +1841,7 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
 
 /** Imperative surface the parent uses to drive block navigation from the
  *  shared toolbar/keyboard in split mode (its own `focus` is private here). */
-export interface SplitDiffHandle { jump: (direction: -1 | 1, wrapGuard?: boolean, singleToast?: boolean) => void; openSearch: () => void; toggleSearch: () => void; closeSearch: () => boolean; searchNext: (direction: -1 | 1) => boolean; toggleMatchCase: () => boolean; toggleMatchWholeWord: () => boolean }
+export interface SplitDiffHandle { jump: (direction: -1 | 1, wrapGuard?: boolean, singleToast?: boolean) => void; land: (row: number, toCard?: boolean) => void; openSearch: () => void; toggleSearch: () => void; closeSearch: () => boolean; searchNext: (direction: -1 | 1) => boolean; toggleMatchCase: () => boolean; toggleMatchWholeWord: () => boolean }
 
 /** The two-column (side-by-side) whole-file diff view. */
 export const SplitDiff = forwardRef<SplitDiffHandle, {
@@ -1789,7 +1864,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   /** The threads this file carries, laid out: each hangs under the pair its anchor ends in. */
   discussions?: readonly Discussion[]
   /** Draws one thread's card at the width this view gives it (see `DiscussionBlock`). */
-  renderDiscussion?: (discussion: Discussion, bodyWidth: number) => ReactNode
+  renderDiscussion?: (discussion: Discussion, bodyWidth: number, split: boolean) => ReactNode
   /** The comment action for the current selection, when the panel offers one for it. */
   selectionComment?: ReactNode
 }>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert, onWrapToast, onVisibleLines, discussions, renderDiscussion, selectionComment }, ref) {
@@ -2032,12 +2107,19 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     sync('right')
   }, [pairs, langWrap, tabWidthSpaces, bodyWidth])
 
-  // Dragging a pinned strip scrolls only that column's content.
+  // Dragging a pinned strip scrolls only that column's content — and, with it, the half of an
+  // outdated thread's quote that stands for that column. The quote is drawn in the card over both
+  // halves rather than inside them (see `DiscussionQuote`), so nothing else would move it with its
+  // own code.
   const onHScroll = useCallback((side: 'left' | 'right') => {
     const strip = side === 'left' ? leftHScrollRef.current : rightHScrollRef.current
     const col = side === 'left' ? leftColRef.current : rightColRef.current
     if (strip === null || col === null) return
     col.scrollLeft = strip.scrollLeft
+    const quotes = splitRootRef.current?.querySelectorAll<HTMLElement>(
+      `[data-diff-quote-text][data-diff-quote-side="${side}"]`,
+    )
+    for (const text of quotes ?? []) text.scrollLeft = strip.scrollLeft
   }, [])
   // Search: pair indices whose left or right text contains the query.
   const searchMatches = useMemo(() => searchPairs(pairs, searchQuery, search.options), [pairs, searchQuery, search.options])
@@ -2250,9 +2332,26 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     goSearch(direction)
     return true
   }
+  /**
+   * The row this view was asked to land on — the comments list's jump into a file that is already open —
+   * and whether it is a thread's own BOX rather than a place in the code. The centering effect below
+   * lands it at the pair that row is in (or at the box hanging under that pair) rather than at its
+   * block's first pair, which is the precision the single-column view has; spent once, like every
+   * landing.
+   */
+  const landingRowRef = useRef<{ row: number; toCard: boolean } | undefined>(undefined)
+  const land = useCallback((row: number, toCard = false): void => {
+    landingRowRef.current = { row, toCard }
+    const pair = pairOfRow.get(row)
+    const block = pair === undefined ? undefined : blockIndexByPair.get(pair)
+    if (block !== undefined) setFocus(block)
+    setFlashKey(key => key + 1)
+  }, [pairOfRow, blockIndexByPair])
+
   // Expose the block jump to the parent so the shared toolbar/keyboard drives
-  // this split view's own (private) focus in split mode.
-  useImperativeHandle(ref, () => ({ jump, openSearch, toggleSearch, closeSearch, searchNext, toggleMatchCase, toggleMatchWholeWord }), [jump, openSearch, toggleSearch, closeSearch, searchNext, toggleMatchCase, toggleMatchWholeWord])
+  // this split view's own (private) focus in split mode — and the landing of a row the comments list
+  // asked for, which is a jump to a place inside a block rather than to a block.
+  useImperativeHandle(ref, () => ({ jump, land, openSearch, toggleSearch, closeSearch, searchNext, toggleMatchCase, toggleMatchWholeWord }), [jump, land, openSearch, toggleSearch, closeSearch, searchNext, toggleMatchCase, toggleMatchWholeWord])
 
   useLayoutEffect(() => {
     if (pairCount === 0) return
@@ -2260,8 +2359,12 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     if (block === undefined) return
     const body = bodyRef.current
     if (body === null) return
-    // Leave the configured lead rows above the block, matching the single-column view.
-    const target = off(block.start) - leadRows * ROW_HEIGHT_PX
+    // Leave the configured lead rows above the block, matching the single-column view — or above the
+    // pair a landing named (or the box hanging under it), which is the row the reader asked for.
+    const landed = landingRowRef.current
+    landingRowRef.current = undefined
+    const from = landed === undefined ? block.start : pairOfRow.get(landed.row) ?? block.start
+    const target = off(from) + (landed?.toCard === true ? pairHeightAt(from) : 0) - leadRows * ROW_HEIGHT_PX
     const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
     if (body.scrollTop !== clamped) body.scrollTop = clamped
     setScrollTop(clamped)
@@ -2590,7 +2693,16 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
             are separate clipped scrollers, and the card spans both), so it is a sibling of the
             columns. Only the cards take presses; the layer between them does not, or it would stand
             between the reader and the code. */}
-        <div className={css.splitDiscussions} data-diff-split-discussions>
+        <div
+          className={css.splitDiscussions}
+          data-diff-split-discussions
+          // Each half of an outdated thread's quote gets its own column's pan range (see
+          // `.quoteNoWrap`), so the quoted code can travel exactly as far as the file's does.
+          style={{
+            '--dsh-quote-width-left': `${widestSide.left}ch`,
+            '--dsh-quote-width-right': `${widestSide.right}ch`,
+          } as CSSProperties}
+        >
           {[...pairDiscussions.entries()].map(([pair, list]) => {
             const top = off(pair) + pairHeightAt(pair)
             const height = discussionPx(pair)
@@ -2606,7 +2718,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
                 style={{ top, width: bodyWidth, height }}
               >
                 {list.map(discussion => (
-                  <Fragment key={discussion.id}>{renderDiscussion?.(discussion, bodyWidth)}</Fragment>
+                  <Fragment key={discussion.id}>{renderDiscussion?.(discussion, bodyWidth, true)}</Fragment>
                 ))}
               </div>
             )
@@ -3051,7 +3163,7 @@ function PendingFileRow({ file, selected, failedMessage, t, onSelect, onMenu }: 
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, onLanded, failedMessage, commentSkill, onPasteReference, onAskAgent, watchChat, onToast, t, onAddTypedPath, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
+function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, landingCard, onLanded, failedMessage, commentSkill, onPasteReference, onAskAgent, watchChat, onToast, t, onAddTypedPath, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -3394,6 +3506,8 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   const landingTopRef = useRef<number | undefined>(undefined)
   /** The model row a jump to a comment asked for, spent the same way and by the same effect. */
   const landingRowRef = useRef<number | undefined>(undefined)
+  /** Whether that row is a thread's own box rather than a place in the code (see `landingCard`). */
+  const landingCardRef = useRef(false)
   /** The latest `onLanded`, for the landing effect: it says the ask has been taken, and the panel
    *  then spends it so a pane that mounts later cannot take it again. Read through a ref because the
    *  panel hands a fresh closure on every render, and re-running the landing effect for that would
@@ -3484,6 +3598,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     if (landing) {
       landingTopRef.current = landingTop
       landingRowRef.current = landingRow
+      landingCardRef.current = landingCard === true
       if (landingRow !== undefined) {
         // A jump to a comment: focus the block the comment hangs on, so the flash that marks a jump
         // is drawn around it, and let the landing effect below put the row itself where a jump to a
@@ -3508,6 +3623,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     // Nothing was asked for: the reader's own place, or nothing at all — a file that has never been
     // scrolled opens at the top like any other, and there is no reason to move it.
     landingRowRef.current = undefined
+    landingCardRef.current = false
     const offset = panelFileOffset(file.sessionId, file.id)
     if (offset === undefined) return
     landingTopRef.current = offset
@@ -3516,7 +3632,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     // `landingTop`, `landingRow` and `landingTick` are deps as well as `file.id`: a fresh
     // showing can re-land the *same* file (reopening where it was left), and the
     // chip's own jump lands on the first change of the file already open.
-  }, [file.id, landingTop, landingTick, landingRow])
+  }, [file.id, landingTop, landingTick, landingRow, landingCard])
 
   // An undo/redo that touched the currently open file re-selects the undone
   // diff the same way switching to a file does: reset to the first change
@@ -4161,20 +4277,41 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
    * row per quoted line whatever the width.
    * @returns the occupied row count (whole).
    */
-  const quoteRowsOf = useCallback((quote: string, wrap: boolean): number => {
-    if (!wrap) return quote.split('\n').length
-    const lines = quote.split('\n')
-    // Measured at the CODE font, not the thread's: the quote draws at the reader's font scale and
-    // wraps at the code column's width, exactly as the file's own rows do. No chips either — a
-    // quoted line's backticks are code, not inline Markdown.
+  const quoteRowsOf = useCallback((
+    quote: string,
+    lines: readonly DiscussionQuoteLine[] | undefined,
+    wrap: boolean,
+    split: boolean,
+  ): number => {
+    const texts = quote.split('\n')
+    if (!split) {
+      if (!wrap) return texts.length
+      const measure = makeMeasurer(codeFontOf())
+      const width = Math.max(0, bodyWidth - discussionRightInsetPx) - WRAP_GUTTERS_PX
+      if (measure === undefined) return texts.length
+      const wrapping = width - measure('0')
+      if (wrapping <= 0) return texts.length
+      const tabPx = tabWidthSpaces * measure(' ')
+      return texts.reduce((rows, line) => rows + Math.max(1, wrapInto(line, wrapping, measure, tabPx).length), 0)
+    }
+    // Side by side: one row per ALIGNED PAIR, each as tall as the taller of its two halves — the rule
+    // the file's own columns follow (see `pairWrapped`), and the reason a quote of a changed line
+    // takes one row here where one column would give it two.
+    const rows = texts.map((text, index) => {
+      const line = lines?.[index]
+      return { text, kind: line?.kind ?? 'context', oldLine: line?.old, newLine: line?.new } as WholeFileDiffRow
+    })
+    const pairs = computeSideBySideDiff(rows, true).pairs
+    if (!wrap) return pairs.length
     const measure = makeMeasurer(codeFontOf())
-    const width = Math.max(0, bodyWidth - discussionRightInsetPx) - WRAP_GUTTERS_PX
-    if (measure === undefined) return lines.length
-    // One character of slack, like the diff's own wrap (see `messageRowsOf`).
-    const wrapping = width - measure('0')
-    if (wrapping <= 0) return lines.length
+    if (measure === undefined) return pairs.length
+    const wrapping = Math.max(0, (bodyWidth - 1) / 2) - WRAP_GUTTERS_PX / 2 - measure('0')
+    if (wrapping <= 0) return pairs.length
     const tabPx = tabWidthSpaces * measure(' ')
-    return lines.reduce((rows, line) => rows + Math.max(1, wrapInto(line, wrapping, measure, tabPx).length), 0)
+    const rowsIn = (text: string | undefined): number => (
+      text === undefined ? 1 : Math.max(1, wrapInto(text, wrapping, measure, tabPx).length)
+    )
+    return pairs.reduce((count, pair) => count + Math.max(rowsIn(pair.left?.text), rowsIn(pair.right?.text)), 0)
   }, [bodyWidth, discussionRightInsetPx, tabWidthSpaces])
 
   /**
@@ -4238,7 +4375,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     // that unit scaled by the ratio of the two heights, so a line-height setting moves the block
     // by exactly the pixels the quote draws.
     const outdatedRows = discussion.lost === true && discussion.quote !== undefined && discussion.quote !== ''
-      ? 1 + quoteRowsOf(discussion.quote, langWrap) * (ROW_HEIGHT_PX / THREAD_ROW_PX)
+      ? 1 + quoteRowsOf(discussion.quote, discussion.quoteLines, langWrap, splitView) * (ROW_HEIGHT_PX / THREAD_ROW_PX)
       : 0
     // A turn that is still answering keeps a line under the text it has streamed so far
     // (`discussion.answering`): the note that says it is thinking is drawn only while nothing has
@@ -4268,7 +4405,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   // block laid out for the width it had at some earlier moment — a side-by-side column kept after
   // switching back to one column, say, which reserves rows for a turn wrapped half as wide as the
   // card it is drawn in. That is the difference that shows up as a blank under the writing row.
-  }, [langWrap, quoteRowsOf, messageSizeOf, roundLimit, ROW_HEIGHT_PX, bodyWidth])
+  }, [langWrap, quoteRowsOf, messageSizeOf, roundLimit, ROW_HEIGHT_PX, bodyWidth, splitView])
 
   /**
    * The discussions as the render will draw them: the body height the measurement
@@ -5150,10 +5287,22 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     // through to the block path below and lands the block the comment is in.
     const row = landingRowRef.current
     if (row !== undefined && !previewActive) {
+      const toCard = landingCardRef.current
       landingRowRef.current = undefined
+      landingCardRef.current = false
+      // The split view owns its own scroller — this component's `bodyRef` is null while it is up — so
+      // the row is landed there, at the pair it is in, by the same rule.
+      if (splitView) {
+        splitDiffRef.current?.land(row, toCard)
+        return
+      }
       const rowBody = bodyRef.current
       if (rowBody !== null) {
-        applyScrollTop(rowBody, Math.max(0, Math.min(offsetOf(row) - leadRows * ROW_HEIGHT_PX, rowBody.scrollHeight - rowBody.clientHeight)))
+        // A thread's box hangs just below the row its range ends in, so it starts where that row's own
+        // height ends — the reserving rows charged to it are the box itself, not part of the row.
+        const cardTop = offsetOf(row + 1) - (discussionExtras.get(row) ?? 0) * THREAD_ROW_PX
+        const target = toCard ? cardTop : offsetOf(row)
+        applyScrollTop(rowBody, Math.max(0, Math.min(target - leadRows * ROW_HEIGHT_PX, rowBody.scrollHeight - rowBody.clientHeight)))
       }
       return
     }
@@ -5556,7 +5705,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
    * how wide the thing it hangs in is, so the card itself is built in exactly one place (see
    * `DiscussionBlock`): the single-column row stream, and whatever view comes next.
    */
-  const renderDiscussion = useCallback((discussion: Discussion, width: number): ReactNode => (
+  const renderDiscussion = useCallback((discussion: Discussion, width: number, split: boolean): ReactNode => (
     <DiscussionBlock
       discussion={discussion}
       label={discussionLineRange(discussion.anchor)}
@@ -5564,6 +5713,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       lang={lang}
       menuOpen={discussionMenuFor === discussion.id}
       asking={askingId !== undefined}
+      split={split}
       t={t}
       onToggle={toggleDiscussion}
       onMenuOpen={setDiscussionMenuFor}
@@ -6360,7 +6510,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
                               the code slides sideways; the negative gutter margin starts it at
                               the table's left edge instead of the code column's. */}
                           <div className={css.discussionPin} style={{ marginLeft: -WRAP_GUTTERS_PX }}>
-                            {renderDiscussion(discussion, bodyWidth)}
+                            {renderDiscussion(discussion, bodyWidth, false)}
                           </div>
                         </div>
                       </div>
@@ -6686,13 +6836,15 @@ export function PendingPanel({
    * list, the advance a decision leaves behind, or the produced-file chip — and
    * that lands on the file's first change.
    */
-  const [landing, setLanding] = useState<{ fileId: string; top?: number | undefined; row?: number | undefined; n: number } | undefined>(undefined)
+  const [landing, setLanding] = useState<{ fileId: string; top?: number | undefined; row?: number | undefined; card?: boolean | undefined; n: number } | undefined>(undefined)
   /** Ask the diff to land on one file: its first change unless `top` says where, or the row a jump
-   *  to a comment names (which lands the way a change-block jump does, see `landingRow`).
+   *  to a comment names (which lands the way a change-block jump does, see `landingRow`). `card` lands
+   *  the thread's own box instead of the rows it named, which is what an outdated comment needs: the
+   *  code it was written about is gone, so the position its numbers point at says nothing.
    *  The nonce makes the request an event rather than a value, so re-clicking the
    *  chip for the file already open lands on its first change again. */
-  const landOn = (fileId: string, top?: number | undefined, row?: number | undefined): void => {
-    setLanding(prev => ({ fileId, top, row, n: (prev?.n ?? 0) + 1 }))
+  const landOn = (fileId: string, top?: number | undefined, row?: number | undefined, card?: boolean): void => {
+    setLanding(prev => ({ fileId, top, row, card, n: (prev?.n ?? 0) + 1 }))
   }
   /** The selection as the latest render has it, for the closers that run from a
    *  cleanup (the docked tab unmounting) rather than from a handler. */
@@ -7655,15 +7807,18 @@ export function PendingPanel({
       id: discussion.id,
       fileId: file.id,
       row: discussion.anchor.start,
+      // The row the thread's box hangs below, which is what an outdated thread is landed on.
+      end: discussion.anchor.end,
       label: referenceLabelOf(file.path, snapshot.workspacePath, discussion.anchor.startLine, discussion.anchor.endLine),
       title: commentTitle(discussion) || t('panel.commentEmptyTitle'),
       lost: discussion.lost === true,
     })))
   }, [files, current, snapshot.workspacePath, commentsTick, t])
-  /** Open the file a comment hangs in and land on the comment, the way a change-block jump lands. */
-  const jumpToComment = (fileId: string, row: number): void => {
+  /** Open the file a comment hangs in and land on the comment: the rows it names, or — for an outdated
+   *  thread, whose code is gone — its own box, which is the only place that says anything. */
+  const jumpToComment = (fileId: string, row: number, card = false): void => {
     if (fileId !== selected) setSelected(fileId)
-    landOn(fileId, undefined, row)
+    landOn(fileId, undefined, row, card)
   }
   /**
    * The comment menu's rows: the one action a thread has, named exactly as the block's own
@@ -7784,7 +7939,9 @@ export function PendingPanel({
                       className={css.commentRow}
                       data-diff-comment-link={entry.id}
                       data-mobile-nav-copy="1"
-                      onClick={() => { jumpToComment(entry.fileId, entry.row) }}
+                      // An outdated thread is landed on its own box: the code it named is gone, so the row
+                      // its numbers point at is not where the reader wants to be.
+                      onClick={() => { jumpToComment(entry.fileId, entry.lost ? entry.end : entry.row, entry.lost) }}
                       onContextMenu={(event) => {
                         // The browser's own menu has nothing to say about a comment, and the one
                         // action a thread has is the whole of what it could offer — the same press
@@ -7795,7 +7952,7 @@ export function PendingPanel({
                       onKeyDown={(event) => {
                         if (event.key !== 'Enter' && event.key !== ' ') return
                         event.preventDefault()
-                        jumpToComment(entry.fileId, entry.row)
+                        jumpToComment(entry.fileId, entry.lost ? entry.end : entry.row, entry.lost)
                       }}
                     >
                       <span className={css.commentHead}>
@@ -8306,6 +8463,7 @@ export function PendingPanel({
                     landingTop={landing !== undefined && landing.fileId === selectedFile.id ? landing.top : undefined}
                     landingTick={landing !== undefined && landing.fileId === selectedFile.id ? landing.n : 0}
                     landingRow={landing !== undefined && landing.fileId === selectedFile.id ? landing.row : undefined}
+                    landingCard={landing !== undefined && landing.fileId === selectedFile.id ? landing.card : undefined}
                     // The landing is an ask, not a state: once the pane showing the file has taken
                     // it, the panel forgets it, so a pane that mounts later for the same open file
                     // resumes the reader's own place instead of landing where they once arrived.
