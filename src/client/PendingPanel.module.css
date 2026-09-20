@@ -3533,13 +3533,18 @@
   background: var(--dsw-alias-border-l2);
 }
 
-/* The threads of the side-by-side view, over both halves. The two columns are separate clipped
-   scrollers, so a card cannot live inside either one: it is placed by its pair's content offset
-   less the scroll (see `SplitDiff`), spans the view, and takes presses itself while the layer
-   between the cards lets them through to the code underneath. */
+/* The threads of the side-by-side view, inside the vertical scroller and below the two columns, so
+   the browser scrolls a card with the code exactly as it scrolls a row: a wheel or a drag that
+   starts on a card reaches that scroller (a layer pinned over it swallowed both). A card cannot live
+   inside either column instead — they are separate clipped scrollers and a card spans both — so the
+   layer is a sibling of the columns, and only the cards take presses while the layer between them
+   lets them through to the code underneath. */
 .splitDiscussions {
   position: absolute;
-  inset: 0;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 0;
   z-index: 3;
   pointer-events: none;
 }
@@ -3549,6 +3554,10 @@
   left: 0;
   box-sizing: border-box;
   pointer-events: auto;
+  /* The thread's plate, which cannot live on the card: the card inside is absolutely positioned (see
+     `.discussion`), gives this box no height, and a box with no height paints nothing — the card's own
+     fills would be the only opaque pixels and the divider would run through the thread's empty rows.
+     `SplitDiff` gives the height, from the same reservation both halves hold. */
   background: var(--dsw-alias-bg-base);
 }
 

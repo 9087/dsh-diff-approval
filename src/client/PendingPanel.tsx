@@ -2408,31 +2408,35 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
             </div>
           </div>
         </div>
-      </div>
-      {/* The threads, over both halves. A card is the width of the view and hangs at the pair its
-          anchor ends in, placed by the pair's own content offset less the scroll — the same
-          positioning the selection frame below uses — so it travels with the code. It is a layer of
-          its own because the two halves are separate clipped scrollers: a card inside either would
-          be cut off at the divider. Only the cards take presses; the layer between them does not, or
-          it would stand between the reader and the code. */}
-      <div className={css.splitDiscussions} data-diff-split-discussions>
-        {[...pairDiscussions.entries()].map(([pair, list]) => {
-          const top = off(pair) + pairHeightAt(pair) - scrollTop
-          const height = discussionPx(pair)
-          if (top > viewportH + SPLIT_DISCUSSION_MARGIN_PX || top + height < -SPLIT_DISCUSSION_MARGIN_PX) return null
-          return (
-            <div
-              key={pair}
-              className={css.splitDiscussion}
-              data-discussion-pair={pair}
-              style={{ top, width: bodyWidth }}
-            >
-              {list.map(discussion => (
-                <Fragment key={discussion.id}>{renderDiscussion?.(discussion, bodyWidth)}</Fragment>
-              ))}
-            </div>
-          )
-        })}
+        {/* The threads, in the code's own stream. A card is the width of the view and hangs below the
+            pair its anchor ends in, at that pair's content offset, so the browser scrolls it with the
+            code exactly as it scrolls a row — and a wheel or a drag that starts on a card reaches the
+            scroller instead of dying on a layer pinned above it. It cannot live in either half (they
+            are separate clipped scrollers, and the card spans both), so it is a sibling of the
+            columns. Only the cards take presses; the layer between them does not, or it would stand
+            between the reader and the code. */}
+        <div className={css.splitDiscussions} data-diff-split-discussions>
+          {[...pairDiscussions.entries()].map(([pair, list]) => {
+            const top = off(pair) + pairHeightAt(pair)
+            const height = discussionPx(pair)
+            if (top - scrollTop > viewportH + SPLIT_DISCUSSION_MARGIN_PX || top + height - scrollTop < -SPLIT_DISCUSSION_MARGIN_PX) return null
+            return (
+              <div
+                key={pair}
+                className={css.splitDiscussion}
+                data-discussion-pair={pair}
+                // The height is the reservation's, not the card's: the card is absolutely positioned
+                // (`see .discussion`), so the plate has to be told how far down to paint or it paints
+                // nothing and the divider shows through the thread's empty rows.
+                style={{ top, width: bodyWidth, height }}
+              >
+                {list.map(discussion => (
+                  <Fragment key={discussion.id}>{renderDiscussion?.(discussion, bodyWidth)}</Fragment>
+                ))}
+              </div>
+            )
+          })}
+        </div>
       </div>
       {/* The selection's own frame: a range in either half offers the comment, which is the one
           action this view takes on a selection (keep/revert belong to the change blocks' own frames
