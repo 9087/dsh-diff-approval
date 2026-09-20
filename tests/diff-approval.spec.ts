@@ -1,7 +1,7 @@
 // The host half: capture, per-operation entries, channel serving, keep,
 // kind-aware revert, live file state, and persistence.
 
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -921,6 +921,43 @@ describe('persistence', () => {
 
     const second = await harness({ sessionIds: [SessionId('session-1')], storageDir })
     expect(await listEntries(second.handle, 'session-1')).toEqual([])
+  })
+
+  it('tells the client when the pending state cannot reach the disk, and retracts it once a write works', async () => {
+    // A storage root whose parent is a FILE: every save fails before it can write, while the
+    // in-memory list keeps working — the shape issue #6 had, where the reader saw a list that
+    // would silently vanish on the next restart and had nothing to explain it.
+    const root = await mkdtemp(join(tmpdir(), 'dsh-diff-approval-'))
+    tempDirs.push(root)
+    const blocker = join(root, 'blocker')
+    await writeFile(blocker, 'not a directory', 'utf8')
+    const { ctx, handle, storageDir } = await harness({
+      sessionIds: [SessionId('session-1')],
+      storageDir: join(blocker, 'workspaces'),
+    })
+
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    await vi.waitFor(async () => {
+      const answer = await handle('list', { sessionId: 'session-1' }, signal())
+      expect(answer).toEqual({ ok: true, value: expect.objectContaining({ persistError: expect.any(String) as string }) as object })
+    })
+    // The list itself is unaffected: only the disk is.
+    expect(await listEntries(handle, 'session-1')).toHaveLength(1)
+
+    // The filesystem recovers. A write that works retracts the field, so the panel stops
+    // saying the list is unsafe — and that retraction is what makes a later failure news again.
+    await rm(blocker, { force: true })
+    await mkdir(blocker, { recursive: true })
+    const [entry] = await listEntries(handle, 'session-1')
+    await handle('keep', { sessionId: 'session-1', id: entry!.id }, signal())
+    await vi.waitFor(async () => {
+      const answer = await handle('list', { sessionId: 'session-1' }, signal())
+      expect(answer).toEqual({ ok: true, value: expect.objectContaining({ persistError: undefined }) as object })
+    })
+    // ...and it really did reach the disk, at the configured root.
+    await vi.waitFor(async () => {
+      await expect(readdir(storageDir)).resolves.toContain('pending.json')
+    })
   })
 
   it('rejects a blank storageDir config', async () => {

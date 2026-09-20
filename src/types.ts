@@ -71,6 +71,12 @@ export interface DiffApprovalListValue {
    * is set, and carries the same rules inline when it is not.
    */
   commentSkill?: string | undefined
+  /**
+   * The last failure to write the pending state to disk, or absent while writes are working. The
+   * panel says so once: that file is what makes the list survive a restart, so a reader who is not
+   * told about it simply finds the list gone later, with nothing to explain it (issue #6).
+   */
+  persistError?: string | undefined
 }
 
 /** What the open endpoint asks the OS to do with a file. */

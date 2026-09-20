@@ -1023,6 +1023,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           // The skill a comment prompt may point at, so the client knows which prompt
           // shape to send (see `lazyCommentSkill`).
           commentSkill: commentSkill(),
+          // The last failure to write the pending state, so the panel can say that the list will not
+          // survive a restart — the one thing a reader cannot find out from the panel itself.
+          persistError: persistFailureReported,
         }
         return { ok: true, value }
       }
