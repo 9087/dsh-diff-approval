@@ -7352,6 +7352,170 @@ describe('PendingPanel', () => {
     }
   })
 
+  it('quotes an outdated thread of the side-by-side view in both columns, each panning with its own', () => {
+    // A selection in this view covers both halves, so the quote of a thread whose code has moved on is
+    // drawn in both: one row per aligned pair, in the columns the file itself shows. Each half then
+    // pans with its own column's strip — the quote is drawn in the card over both halves, so nothing
+    // else would move it along with its own code.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const file = entry({ id: 'entry-split-quote', path: '/repo/quote.txt', oldText: 'a\nb\n', newText: 'a\nB\n' })
+    rememberDiscussions(S1, {
+      [file.id]: [{
+        id: 'd-split-lost',
+        anchor: { start: 1, end: 1, startLine: 2, endLine: 2 },
+        collapsed: false,
+        draft: '',
+        lost: true,
+        quote: 'const gone = 1',
+        quoteLines: [{ old: undefined, new: 2, kind: 'add' }],
+        messages: [{ role: 'user', text: '这行为什么改了？' }],
+      }],
+    } as unknown as Parameters<typeof rememberDiscussions>[1])
+    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('quote.txt'))
+
+    const quote = document.querySelector('[data-diff-discussion-quote]') as HTMLElement
+    expect(quote).not.toBeNull()
+    // The block still says why the code below it is a quote at all.
+    expect(document.querySelector('[data-diff-discussion-quote-label]')?.textContent).toBe('discussion.outdatedQuote')
+    // One row for the pair, drawn in both halves: the quoted line was an addition, so the old half has
+    // no number and no text of its own.
+    const left = quote.querySelector('[data-diff-quote-side="left"]') as HTMLElement
+    const right = quote.querySelector('[data-diff-quote-side="right"]') as HTMLElement
+    expect(left).not.toBeNull()
+    expect(right).not.toBeNull()
+    expect(left.querySelectorAll('[data-diff-quote-pair]').length).toBe(1)
+    expect(right.querySelectorAll('[data-diff-quote-pair]').length).toBe(1)
+    expect(right.textContent).toContain('const gone = 1')
+    expect(left.textContent).not.toContain('const gone = 1')
+    expect(left.querySelector('[data-diff-quote-gutter]')?.textContent).toBe('')
+    expect(right.querySelector('[data-diff-quote-gutter]')?.textContent).toBe('2')
+
+    // Each half follows its own strip, and only its own.
+    const leftText = left.querySelector('[data-diff-quote-text]') as HTMLElement
+    const rightText = right.querySelector('[data-diff-quote-text]') as HTMLElement
+    const leftStrip = document.querySelector('[data-diff-hscroll="left"]') as HTMLElement
+    leftStrip.scrollLeft = 40
+    fireEvent.scroll(leftStrip)
+    expect(leftText.scrollLeft).toBe(40)
+    expect(rightText.scrollLeft).toBe(0)
+
+    const rightStrip = document.querySelector('[data-diff-hscroll="right"]') as HTMLElement
+    rightStrip.scrollLeft = 12
+    fireEvent.scroll(rightStrip)
+    expect(rightText.scrollLeft).toBe(12)
+    expect(leftText.scrollLeft).toBe(40)
+  })
+
+  it('marks a side-by-side comment outdated by the same rule the one-column view uses', () => {
+    // The outdated decision is made from the model, not from the view: a file rewritten under a
+    // side-by-side comment leaves that comment outdated exactly as it would in one column, with the
+    // same label over the same quote.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-split-outdated', path: '/repo/outdated.txt', oldText: 'a\n', newText: 'b\n' })
+    const view = render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('outdated.txt'))
+
+    // The comment goes on the added line, which the split view shows in its right column.
+    const rows = [...document.querySelectorAll('[data-diff-split-row][data-diff-split-side="right"]')] as HTMLElement[]
+    const row = rows[rows.length - 1]!
+    const node = row.querySelector('[data-diff-code]')?.firstChild ?? row
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    expect(document.querySelector('[data-diff-discussion]')?.hasAttribute('data-lost')).toBe(false)
+
+    // The file is rewritten under it: the numbers are still in the model but the quoted line is
+    // nowhere, which is what marks the thread outdated.
+    const rewritten = entry({ id: 'entry-split-outdated', path: '/repo/outdated.txt', oldText: 'x\n', newText: 'y\n' })
+    view.rerender(<PendingPanel {...panelProps({ read: true, files: [rewritten], busy: new Set() })} />)
+    const block = document.querySelector('[data-diff-discussion]') as HTMLElement
+    expect(block.hasAttribute('data-lost')).toBe(true)
+    expect(document.querySelector('[data-diff-discussion-quote-label]')?.textContent).toBe('discussion.outdatedQuote')
+    // And its quote is still the two columns this view draws.
+    expect(document.querySelector('[data-diff-discussion-quote] [data-diff-quote-side="left"]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-discussion-quote] [data-diff-quote-side="right"]')).not.toBeNull()
+  })
+
+  it('lands a comment jump on the split view\'s own scroller', () => {
+    // The comments list's jump is shared by both views, so it has to reach whichever one is up. The
+    // split view owns its own scroller (the single-column one is not mounted at all), and it lands the
+    // row at the pair that row is in, leaving the same lead rows above it as every other jump.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-split-jump', path: '/repo/jump.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    rememberDiscussions(S1, {
+      [file.id]: [
+        { id: 'd-split-jump', anchor: { start: 7, end: 7, startLine: 8, endLine: 8 }, collapsed: false, draft: '', lost: false, messages: [{ role: 'user', text: '这一行' }] },
+      ],
+    } as unknown as Parameters<typeof rememberDiscussions>[1])
+    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('jump.txt'))
+    expect(document.querySelector('[data-diff-split-row]')).not.toBeNull()
+
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    const item = document.querySelector('[data-diff-comment-link]') as HTMLElement
+    expect(item).not.toBeNull()
+
+    const restore = stubCodeScroll()
+    try {
+      fireEvent.click(item)
+      const body = document.querySelector('[data-diff-body]') as HTMLElement
+      // One row a line here too (nothing wraps in jsdom), so the pair the comment names is its line less
+      // one, and the lead rows above it are the configured ones.
+      expect(body.scrollTop).toBe((8 - 1 - navLeadRows()) * diffLineHeight())
+    } finally {
+      restore()
+    }
+  })
+
+  it('lands an outdated comment on its own box, not on the rows its numbers name', () => {
+    // The code an outdated comment was written about is gone, so the row its numbers point at says
+    // nothing: the jump goes to the thread's box instead, which hangs under the pair its range ends in —
+    // one row lower than the landing a live comment's row gets.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-split-card', path: '/repo/card.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    rememberDiscussions(S1, {
+      [file.id]: [{
+        id: 'd-split-card',
+        anchor: { start: 7, end: 7, startLine: 8, endLine: 8 },
+        collapsed: false,
+        draft: '',
+        lost: true,
+        quote: 'const gone = 1',
+        quoteLines: [{ old: undefined, new: 8, kind: 'add' }],
+        messages: [{ role: 'user', text: '这一行' }],
+      }],
+    } as unknown as Parameters<typeof rememberDiscussions>[1])
+    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('card.txt'))
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+
+    const item = document.querySelector('[data-diff-comment-link]') as HTMLElement
+    expect(item).not.toBeNull()
+    const restore = stubCodeScroll()
+    try {
+      fireEvent.click(item)
+      const body = document.querySelector('[data-diff-body]') as HTMLElement
+      expect(body.scrollTop).toBe((8 - navLeadRows()) * diffLineHeight())
+    } finally {
+      restore()
+    }
+  })
+
   it('row-aligns a similarity-matched del/add pair in the split view', () => {
     // The split view always aligns by similarity: the deletion "old line A"
     // pairs with its most-similar addition "modified old line A", so both sit
