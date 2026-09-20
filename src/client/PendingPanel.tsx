@@ -1819,6 +1819,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     return map
   }, [model, pairOfRow])
   const bodyRef = useRef<HTMLDivElement>(null)
+  const splitRootRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportH, setViewportH] = useState(0)
   const [bodyWidth, setBodyWidth] = useState(0)
@@ -2304,8 +2305,167 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     ? 0
     : Math.max(0, Math.min(off(blockOfPair[hoveredBlock]!.end + 1) - scrollTop, Math.max(0, viewportH - BLOCK_ACTIONS_FRAME_PX)))
 
+  /**
+   * How a press in the side-by-side view makes a selection. Left to the browser, a drag that crosses
+   * the divider takes in the rest of the column it began in and then the other one upwards — the
+   * pointer's own position decides that, and the selection cannot be written to stop it (a write under
+   * a live drag makes the browser drop the drag instead). An editor has no such problem because a
+   * pointer there is only ever a coordinate: it computes the position inside the editor, so a drag
+   * cannot leave it, which is how VS Code's own text keeps a selection inside its box. The same is
+   * done here for the column the press began in: x is taken inside that column's code cell, so
+   * dragging past the divider keeps the row the pointer is on and the line numbers never join the
+   * selection, and y is taken inside the scroller, which is scrolled here when the pointer leaves it.
+   * Double and triple clicks are still the browser's (`detail` above one), so word and line selection
+   * are unchanged.
+   *
+   * Touch cannot be driven this way — the platform owns the long press, and preventing the touch would
+   * take the scroll with it — so there the other column is simply made unselectable while the press
+   * lasts (see `.splitSealed`), which stops the caret from entering it at all; the cost is that the
+   * caret then resolves to the nearest selectable position rather than to the row under the finger.
+   */
+  useEffect(() => {
+    const root = splitRootRef.current
+    const scroller = bodyRef.current
+    if (root === null || scroller === null) return
+    const caretApi = document as Document & { caretRangeFromPoint?: unknown; caretPositionFromPoint?: unknown }
+    // Without a point-to-position API the drag cannot be computed, and the selection is left to the
+    // browser (a touch press is still sealed below, which needs none of this).
+    const canDrive = caretApi.caretRangeFromPoint !== undefined || caretApi.caretPositionFromPoint !== undefined
+    let drag: { column: HTMLElement; anchor: { node: Node; offset: number } } | null = null
+    let frame = 0
+    let point = { x: 0, y: 0 }
+    let pointerType: string | undefined
+    /** The position a point names inside `column`: its row for y, and that row's code cell for x. */
+    const positionIn = (column: HTMLElement, clientX: number, clientY: number): { node: Node; offset: number } | undefined => {
+      const rows = column.querySelectorAll<HTMLElement>('[data-diff-split-row]')
+      if (rows.length === 0) return undefined
+      let row = rows[rows.length - 1]!
+      for (const candidate of rows) {
+        if (clientY < candidate.getBoundingClientRect().bottom) {
+          row = candidate
+          break
+        }
+      }
+      const box = row.getBoundingClientRect()
+      const y = Math.min(Math.max(clientY, box.top + 1), box.bottom - 1)
+      const code = row.querySelector<HTMLElement>('[data-diff-code]')
+      if (code === null) return undefined
+      const cell = code.getBoundingClientRect()
+      const x = Math.min(Math.max(clientX, cell.left + 1), cell.right - 1)
+      const found = caretAtPoint(x, y)
+      if (found !== undefined && code.contains(found.node)) return found
+      // Something drawn over the row (a card, an action frame) took that point: then take the row's own
+      // edge on the side the pointer is on.
+      const edges = textEdgesOf(code)
+      if (edges === undefined) return undefined
+      return x < (cell.left + cell.right) / 2
+        ? { node: edges.first, offset: 0 }
+        : { node: edges.last, offset: edges.last.length }
+    }
+    const apply = (): void => {
+      if (drag === null) return
+      const selection = window.getSelection()
+      const extent = positionIn(drag.column, point.x, point.y)
+      if (selection === null || extent === undefined) return
+      selection.setBaseAndExtent(drag.anchor.node, drag.anchor.offset, extent.node, extent.offset)
+    }
+    /** One pass per frame: the position first, then a scroll if the pointer is outside the scroller. */
+    const tick = (): void => {
+      frame = 0
+      if (drag === null) return
+      const box = scroller.getBoundingClientRect()
+      const out = point.y < box.top ? point.y - box.top : point.y > box.bottom ? point.y - box.bottom : 0
+      if (out !== 0) {
+        const step = Math.min(ROW_HEIGHT_PX * 3, Math.max(ROW_HEIGHT_PX, Math.abs(out) / 3))
+        scroller.scrollTop += Math.sign(out) * step
+      }
+      apply()
+      if (out !== 0) frame = window.requestAnimationFrame(tick)
+    }
+    /** The column a node sits in, or undefined for anything else in the view (a card, a frame). */
+    const columnOf = (target: Element): HTMLElement | undefined => {
+      const row = target.closest<HTMLElement>('[data-diff-split-row]')
+      if (row === null) return undefined
+      const left = leftColRef.current
+      const right = rightColRef.current
+      if (left !== null && left.contains(row)) return left
+      return right !== null && right.contains(row) ? right : undefined
+    }
+    const onPointerDown = (event: PointerEvent): void => {
+      pointerType = event.pointerType
+      if (event.pointerType === 'mouse') return
+      const target = event.target
+      if (!(target instanceof Element) || columnOf(target) === undefined) return
+      const sealed = css.splitSealed
+      const side = css.splitSealedLeft
+      const other = css.splitSealedRight
+      if (sealed === undefined || side === undefined || other === undefined) return
+      document.body.classList.add(sealed, target.closest('[data-diff-split-side="left"]') !== null ? side : other)
+    }
+    const onMouseDown = (event: MouseEvent): void => {
+      if (!canDrive) return
+      // A press the platform reported as touch or pen is sealed instead of driven; one the platform
+      // did not report at all (no pointer event seen) is treated as a mouse.
+      if (pointerType !== undefined && pointerType !== 'mouse') return
+      if (event.button !== 0 || event.detail !== 1 || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return
+      const target = event.target
+      if (!(target instanceof Element)) return
+      const column = columnOf(target)
+      if (column === undefined) return
+      const anchor = positionIn(column, event.clientX, event.clientY)
+      if (anchor === undefined) return
+      // The browser's own drag would run past the divider; this one is computed and cannot.
+      event.preventDefault()
+      // …and with that default goes the focus the press would have given the scroller.
+      scroller.focus()
+      point = { x: event.clientX, y: event.clientY }
+      drag = { column, anchor }
+      apply()
+    }
+    const onMove = (event: PointerEvent): void => {
+      if (drag === null) return
+      point = { x: event.clientX, y: event.clientY }
+      if (frame === 0) frame = window.requestAnimationFrame(tick)
+    }
+    const release = (): void => {
+      const sealed = css.splitSealed
+      const side = css.splitSealedLeft
+      const other = css.splitSealedRight
+      if (sealed !== undefined && side !== undefined && other !== undefined) {
+        document.body.classList.remove(sealed, side, other)
+      }
+    }
+    const stop = (): void => {
+      drag = null
+      release()
+      if (frame !== 0) {
+        window.cancelAnimationFrame(frame)
+        frame = 0
+      }
+    }
+    root.addEventListener('pointerdown', onPointerDown, true)
+    root.addEventListener('mousedown', onMouseDown, true)
+    document.addEventListener('pointermove', onMove, true)
+    document.addEventListener('pointerup', stop, true)
+    document.addEventListener('pointercancel', stop, true)
+    document.addEventListener('touchend', release, true)
+    document.addEventListener('touchcancel', release, true)
+    window.addEventListener('blur', stop)
+    return () => {
+      root.removeEventListener('pointerdown', onPointerDown, true)
+      root.removeEventListener('mousedown', onMouseDown, true)
+      document.removeEventListener('pointermove', onMove, true)
+      document.removeEventListener('pointerup', stop, true)
+      document.removeEventListener('pointercancel', stop, true)
+      document.removeEventListener('touchend', release, true)
+      document.removeEventListener('touchcancel', release, true)
+      window.removeEventListener('blur', stop)
+      stop()
+    }
+  }, [])
+
   return (
-    <div className={css.splitRoot} onMouseLeave={() => setHoveredBlock(undefined)}>
+    <div className={css.splitRoot} ref={splitRootRef} onMouseLeave={() => setHoveredBlock(undefined)}>
       <div
         className={`${css.diffBody} ${css.diffBodySplit}`}
         ref={bodyRef}
@@ -2588,10 +2748,48 @@ function splitRowInfoAt(node: Node | null): { pairIndex: number; side: 'old' | '
   return { pairIndex: index, side: side === 'left' ? 'old' : 'new' }
 }
 
+/** The first and last text node inside `root`, or undefined when it holds no text. */
+function textEdgesOf(root: Node): { first: Text; last: Text } | undefined {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  const first = walker.nextNode()
+  if (!(first instanceof Text)) return undefined
+  let last = first
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    if (node instanceof Text) last = node
+  }
+  return { first, last }
+}
+
+/**
+ * The text position a point names, in whichever of the two spellings the browser has — or undefined
+ * when it has neither, which is when the panel has to leave the selection to the browser (see the
+ * split view's own drag).
+ * @param x - client X of the point.
+ * @param y - client Y of the point.
+ * @returns the position, or undefined when the browser cannot resolve one.
+ */
+function caretAtPoint(x: number, y: number): { node: Node; offset: number } | undefined {
+  const api = document as Document & {
+    caretRangeFromPoint?: (x: number, y: number) => Range | null
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null
+  }
+  const range = api.caretRangeFromPoint?.(x, y)
+  if (range !== undefined && range !== null) return { node: range.startContainer, offset: range.startOffset }
+  const position = api.caretPositionFromPoint?.(x, y)
+  return position === undefined || position === null
+    ? undefined
+    : { node: position.offsetNode, offset: position.offset }
+}
+
 /**
  * Derive the selected split pair range per side (a left-column selection
- * references the old file, a right-column selection the new file). A selection
- * spanning the divider (both sides) references two files, so it is rejected.
+ * references the old file, a right-column selection the new file). The two ends
+ * can only disagree about the side when the selection was not made by the split
+ * view's own drag, which cannot leave its column (see `SplitDiff`) — a keyboard
+ * selection onto the neighbouring column, say, or a touch press. The range then
+ * belongs to the column the selection began in and covers the pairs both ends
+ * name: the pairs are the same list in both halves, so that is the range a
+ * selection that stayed in that half would have made.
  */
 function splitRowRangeOf(selection: Selection | null): RowRange | undefined {
   if (selection === null || selection.isCollapsed || selection.rangeCount === 0) return undefined
@@ -2599,13 +2797,12 @@ function splitRowRangeOf(selection: Selection | null): RowRange | undefined {
   const startInfo = splitRowInfoAt(range.startContainer)
   const endInfo = splitRowInfoAt(range.endContainer)
   if (startInfo === undefined || endInfo === undefined) return undefined
-  if (startInfo.side !== endInfo.side) return undefined
   let start = startInfo.pairIndex
   let end = endInfo.pairIndex
   if (lineOffsetAt(range.startContainer, range.startOffset) >= lineLengthAt(range.startContainer)) start += 1
   if (lineOffsetAt(range.endContainer, range.endOffset) === 0) end -= 1
   if (start > end) return undefined
-  return { start, end, side: startInfo.side }
+  return { start, end, side: splitRowInfoAt(selection.anchorNode)?.side ?? startInfo.side }
 }
 
 /** The code cell in `node`'s visual row, a sibling of its gutter cells. A

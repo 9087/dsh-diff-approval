@@ -3561,6 +3561,27 @@
   background: var(--dsw-alias-bg-base);
 }
 
+/* A touch press in one column of the side-by-side view seals the rest of the page for as long as it
+   lasts, so the caret cannot enter the other column: a touch drag cannot be driven by the panel (the
+   platform owns the long press, and preventing the touch would take the scroll with it — see
+   `SplitDiff`, which drives the mouse drag itself instead). The seal is declared for everything
+   inside rather than inherited, because the code cells ask for `user-select: text` themselves (see
+   `.panel .code`) and that beats an inherited value; `!important` is what outranks them. The second
+   rule opens the column the press began in again, and outranks the first by specificity. */
+.splitSealed,
+.splitSealed * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+.splitSealedLeft [data-diff-split-side='left'],
+.splitSealedLeft [data-diff-split-side='left'] *,
+.splitSealedRight [data-diff-split-side='right'],
+.splitSealedRight [data-diff-split-side='right'] * {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
 /* Both halves top-align so a wrapped multi-sub-line side and its shorter
    counterpart start their content on the same pixel across the divider. */
 .splitCol .gutter,
