@@ -4771,6 +4771,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
         },
         (row) => model.diff.rows[row]?.text ?? '',
         model.diff.rows.length,
+        // Whether a row is code the file still has (a deleted row has no new-file line): the quote may
+        // only be followed to a window that is current in some part, or a copy left behind in the
+        // deletions reads as the comment still holding.
+        (row) => model.diff.rows[row]?.newLine !== undefined,
       )
       return next.some((discussion, index) => discussion !== list[index]) ? { ...all, [file.id]: next } : all
     })
@@ -4886,10 +4890,19 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     const quoted = model.diff.rows.slice(range.start, range.end + 1)
     const quote = quoted.map(row => row.text).join('\n')
     const quoteLines = quoted.map(row => ({ old: row.oldLine, new: row.newLine, kind: row.kind }))
+    // The quoted rows with one row of context on each side — the fingerprint a rebuild matches the
+    // thread against, so the code it was about is followed only where its surroundings read the same
+    // (see `remapDiscussion`). A quote alone is too weak: a comment on a closing brace or a blank line
+    // found that line elsewhere in the file and never went outdated.
+    const quoteContext = model.diff.rows
+      .slice(Math.max(0, range.start - 1), Math.min(model.diff.rows.length, range.end + 2))
+      .map(row => row.text)
+      .join('\n')
     setDiscussions(current => [...current, {
       id,
       anchor: { start: range.start, end: range.end, startLine, endLine },
       quote,
+      quoteContext,
       quoteLines,
       messages: [],
       draft: '',

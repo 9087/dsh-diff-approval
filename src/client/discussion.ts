@@ -75,6 +75,17 @@ export interface Discussion {
    */
   quote?: string
   /**
+   * The quoted rows with one row of context on each side, as they read when the thread was created.
+   *
+   * The fingerprint a later rebuild matches the thread against. `quote` alone is too weak to say
+   * whether the code is still there: a comment on a common line — a closing brace, a blank line —
+   * found that line somewhere else in the file, followed it, and stayed live however thoroughly the
+   * code under its numbers had been rewritten. The context is what tells a genuine move from that
+   * coincidence. Absent on threads recorded before it was kept, which then falls back to matching
+   * the quote alone.
+   */
+  quoteContext?: string
+  /**
    * The gutter numbers of `quote`'s lines, in the same order, so an outdated block can lay the
    * quote out exactly as the file lays code out. See `DiscussionQuoteLine`.
    */
@@ -399,8 +410,9 @@ export function remapDiscussion(
   lineOf: (row: number) => number | undefined,
   textOf: (row: number) => string,
   rowCount: number,
+  hasNewLine: (row: number) => boolean = () => true,
 ): Discussion {
-  return remapOne(discussion, lineOf, textOf, rowCount, windowCache(textOf, rowCount))
+  return remapOne(discussion, lineOf, textOf, rowCount, windowCache(textOf, rowCount), hasNewLine)
 }
 
 /**
@@ -423,9 +435,10 @@ export function remapDiscussions(
   lineOf: (row: number) => number | undefined,
   textOf: (row: number) => string,
   rowCount: number,
+  hasNewLine: (row: number) => boolean = () => true,
 ): readonly Discussion[] {
   const windows = windowCache(textOf, rowCount)
-  return discussions.map(discussion => remapOne(discussion, lineOf, textOf, rowCount, windows))
+  return discussions.map(discussion => remapOne(discussion, lineOf, textOf, rowCount, windows, hasNewLine))
 }
 
 /** Every row window of one span, indexed by its text, in one pass over the rows. */
@@ -462,6 +475,7 @@ function remapOne(
   textOf: (row: number) => string,
   rowCount: number,
   windows: (span: number) => Map<string, number[]>,
+  hasNewLine: (row: number) => boolean,
 ): Discussion {
   const { startLine, endLine } = discussion.anchor
   let start = -1
@@ -511,31 +525,78 @@ function remapOne(
     if (discussion.lost === true && discussion.anchor.start === row && discussion.anchor.end === row) return discussion
     return markOutdated({ ...discussion, anchor: { ...discussion.anchor, start: row, end: row } })
   }
-  // Nothing to check against, or the numbers still hold what the comment was about: the line
-  // numbers are the answer, and that is the ordinary case (an edit above the block).
-  if (quote === undefined || quote === '' || (start !== -1 && textAt(start) === quote)) {
+  /** The block live again on `row`..`row + span` (the same object when it was already there). */
+  const live = (row: number, last: number): Discussion => (
+    row === discussion.anchor.start && last === discussion.anchor.end
+      ? clearOutdated(discussion)
+      : clearOutdated({ ...discussion, anchor: { ...discussion.anchor, start: row, end: last } })
+  )
+  /**
+   * The window's text with one line of context on each side, in the current model.
+   *
+   * Compared against the context the thread recorded when it was made (see `quoteContext`): that is
+   * what tells a genuine move of the quoted code from another line elsewhere in the file that happens
+   * to read the same.
+   */
+  const contextAt = (row: number): string => {
+    const parts: string[] = []
+    for (let index = Math.max(0, row - 1); index <= Math.min(rowCount - 1, row + span + 1); index++) {
+      parts.push(textOf(index))
+    }
+    return parts.join('\n')
+  }
+  // A thread from before quotes were kept has nothing to compare against: its numbers are all there is.
+  if (quote === undefined) {
     if (start === -1) return gone()
-    if (start === discussion.anchor.start && end === discussion.anchor.end) return clearOutdated(discussion)
-    return clearOutdated({ ...discussion, anchor: { ...discussion.anchor, start, end } })
+    return live(start, end)
   }
-  // They do not hold it: follow the quote instead. Where the same code appears more than once
-  // the nearest occurrence wins, since that is where the reader last saw it — the windows are
-  // already joined, so this is a lookup rather than a scan.
-  let found = -1
-  for (const row of windows(span).get(quote) ?? []) {
-    if (found === -1 || Math.abs(row - start) < Math.abs(found - start)) found = row
+  // The numbers still hold the quoted window: the ordinary case, and the one an edit above the block
+  // leaves behind. An empty window is compared the same way — those lines were blank, and "blank there"
+  // is what says they still are.
+  if (start !== -1 && textAt(start) === quote) return live(start, end)
+  // They do not hold it: follow the quote instead. Where the same code appears more than once the
+  // nearest occurrence wins, since that is where the reader last saw it — the windows are already
+  // joined, so this is a lookup rather than a scan. The recorded context has to agree as well wherever
+  // the thread carries one, so that a line reading the same somewhere else is not taken for the code
+  // the comment was about.
+  if (start !== -1) {
+    const fingerprint = discussion.quoteContext
+    let found = -1
+    for (const row of windows(span).get(quote) ?? []) {
+      // The window has to be code the file still HAS, in some part: a copy that survives only among the
+      // pending deletions is the one the diff is offering to take away, not the lines the comment is
+      // about. Following it is what left a comment live after the code it named had been moved to
+      // another place in the file and rewritten there — the old copy still read exactly like the quote.
+      let current = false
+      for (let index = row; index <= row + span; index++) {
+        if (hasNewLine(index)) {
+          current = true
+          break
+        }
+      }
+      if (!current) continue
+      if (fingerprint !== undefined && contextAt(row) !== fingerprint) continue
+      if (found === -1 || Math.abs(row - start) < Math.abs(found - start)) found = row
+    }
+    if (found !== -1) {
+      return clearOutdated({
+        ...discussion,
+        anchor: {
+          ...discussion.anchor,
+          start: found,
+          end: found + span,
+          startLine: lineOf(found) ?? startLine,
+          endLine: lineOf(found + span) ?? endLine,
+        },
+      })
+    }
   }
-  if (found === -1) return start === -1 ? gone() : markOutdated(discussion)
-  return clearOutdated({
-    ...discussion,
-    anchor: {
-      ...discussion.anchor,
-      start: found,
-      end: found + span,
-      startLine: lineOf(found) ?? startLine,
-      endLine: lineOf(found + span) ?? endLine,
-    },
-  })
+  // The quote is nowhere: the thread is outdated. It hangs by the LINES it names, taken in this model,
+  // rather than by the row index it last matched — that index is a row index, so every insert or delete
+  // above the block shifts what it points at, and an outdated thread drifted down the file one rebuild
+  // at a time instead of staying beside the lines its header still shows.
+  if (start === -1) return gone()
+  return markOutdated({ ...discussion, anchor: { ...discussion.anchor, start, end } })
 }
 
 /** What the selection frame shows for the current selection. */

@@ -22,12 +22,12 @@ function discussion(id: string, start: number, end: number, collapsed = false): 
 function rows(lines: readonly (number | undefined)[], texts: readonly string[]) {
   const lineOf = (row: number): number | undefined => lines[row]
   const textOf = (row: number): string => texts[row] ?? ''
-  return { lineOf, textOf, rowCount: lines.length }
+  return { lineOf, textOf, rowCount: lines.length, hasNewLine: (row: number): boolean => lines[row] !== undefined }
 }
 
 /** Re-anchor one discussion against a model, the way the panel's rebuild effect does. */
 function remap(discussion: Discussion, model: ReturnType<typeof rows>): Discussion {
-  return remapDiscussion(discussion, model.lineOf, model.textOf, model.rowCount)
+  return remapDiscussion(discussion, model.lineOf, model.textOf, model.rowCount, model.hasNewLine)
 }
 
 describe('discussions in the diff row stream', () => {
@@ -152,18 +152,95 @@ describe('discussions in the diff row stream', () => {
     expect(followed.lost).toBeUndefined()
   })
 
+  it('follows a quote only where its recorded context reads the same, and condemns the rest', () => {
+    // The quote alone is too weak a fingerprint: a comment on a common line — a closing brace, a blank
+    // line — matches that line somewhere else in the file, and the thread used to follow it and stay
+    // live however thoroughly the code under its numbers had been rewritten. The context recorded with
+    // the thread is what tells a genuine move from that coincidence.
+    const moved: Discussion = {
+      ...discussion('a', 0, 0),
+      anchor: { start: 3, end: 3, startLine: 10, endLine: 10 },
+      quote: 'b',
+      quoteContext: 'a\nb\nc',
+    }
+    // The numbers hold other code now, but 'a b c' sits together elsewhere: quote and context moved as
+    // one, so the thread follows the code it was about.
+    const followed = remap(moved, rows([1, 2, 3, 10], ['a', 'b', 'c', 'z']))
+    expect(followed.lost).toBeUndefined()
+    expect(followed.anchor).toMatchObject({ start: 1, end: 1, startLine: 2, endLine: 2 })
+    // A 'b' whose neighbours read differently is not it, so the thread is outdated rather than carried
+    // off to a line that merely looks the same.
+    expect(remap(moved, rows([1, 2, 3, 10], ['b', 'x', 'b', 'z'])).lost).toBe(true)
+    // A thread with no recorded context (from before it was kept) still follows the quote alone.
+    const bare = { ...moved, quoteContext: undefined }
+    expect(remap(bare, rows([1, 2, 3, 10], ['b', 'x', 'b', 'z'])).lost).toBeUndefined()
+  })
+
+  it('condemns a comment on a blank line once that line holds code', () => {
+    // A blank line quotes as an empty string, which used to mean "nothing to compare against": the
+    // thread stayed live however the code under it was rewritten. Its recorded context makes the blank
+    // window a fact like any other.
+    const blank: Discussion = {
+      ...discussion('a', 1, 1),
+      anchor: { start: 1, end: 1, startLine: 2, endLine: 2 },
+      quote: '',
+      quoteContext: 'a\n\nb',
+    }
+    // Still blank there: live.
+    expect(remap(blank, rows([1, 2, 3], ['a', '', 'b'])).lost).toBeUndefined()
+    // The line holds code now: outdated, and the blank line further down the file is not followed —
+    // its context is not the one the thread recorded.
+    expect(remap(blank, rows([1, 2, 3, 4], ['a', 'const x = 1', 'b', ''])).lost).toBe(true)
+  })
+
+  it('condemns a comment whose code survives only in the pending deletions', () => {
+    // The code was moved and then rewritten where it landed: the new side no longer reads like the
+    // quote, but the old side — the deletion the diff is offering to take away — still does. Following
+    // that copy is what used to leave the thread looking current after its whole function had changed.
+    const original: Discussion = {
+      ...discussion('a', 3, 4),
+      anchor: { start: 3, end: 4, startLine: 193, endLine: 194 },
+      quote: 'Left (bShift),\nRight (bShift),',
+    }
+    // The old side of the move: those rows have no new-file line at all, which is what says the code
+    // they hold is the copy the diff is offering to take away.
+    const oldCopy = rows([undefined, undefined, 193, 194], [
+      'Left (bShift),',
+      'Right (bShift),',
+      'Left (bShift),  // LeftShift',
+      'Right (bShift),  // RightShift',
+    ])
+    expect(remap(original, oldCopy).lost).toBe(true)
+    // A copy the file still HAS is followed, as it always was: the same two lines again, further down.
+    const liveCopy = rows([193, 194, 240, 241], [
+      'Left (bShift),  // LeftShift',
+      'Right (bShift),  // RightShift',
+      'Left (bShift),',
+      'Right (bShift),',
+    ])
+    const followed = remap(original, liveCopy)
+    expect(followed.lost).toBeUndefined()
+    expect(followed.anchor).toMatchObject({ start: 2, end: 3 })
+  })
+
   it('marks a thread outdated when the code it was about is gone, and clears the mark when it returns', () => {
     const original: Discussion = {
       ...discussion('a', 1, 2),
       anchor: { start: 1, end: 2, startLine: 10, endLine: 11 },
       quote: 'one\ntwo',
     }
-    // Nothing of the range holds the quote and the quote is nowhere else: the block keeps
-    // the rows it last matched, says it is outdated, and keeps its quote for the reader.
+    // Nothing of the range holds the quote and the quote is nowhere else: the thread says it is
+    // outdated, keeps its quote for the reader, and hangs by the LINES it names — the rows of this
+    // model, not the row index it last matched.
     const gone = remap(original, rows([1, 2, 10, 12], ['a', 'b', 'y', 'z']))
     expect(gone.lost).toBe(true)
-    expect(gone.anchor).toEqual(original.anchor)
+    expect(gone.anchor).toEqual({ start: 2, end: 2, startLine: 10, endLine: 11 })
     expect(gone.quote).toBe('one\ntwo')
+    // A further edit above it moves the rows, not the block: an outdated thread used to walk down the
+    // file one rebuild at a time, because it hung on a row index that every insert shifts.
+    const shifted = remap(gone, rows([1, 2, 3, 10, 11], ['a', 'b', 'c', 'y', 'z']))
+    expect(shifted.lost).toBe(true)
+    expect(shifted.anchor).toMatchObject({ start: 3, end: 4, startLine: 10, endLine: 11 })
     // The whole range gone from the model is the one case where the block moves, and it moves by
     // line number: back to where the range used to be — under the last row that still reads
     // before it — rather than on the row index it last matched (which drifts with every edit
