@@ -7211,11 +7211,145 @@ describe('PendingPanel', () => {
     expect(block.querySelector('[data-diff-discussion-range]')?.textContent).toBe('/repo/comment.txt:2')
     // Both halves reserved its rows, so the pair below starts on the same pixel in each.
     expect(document.querySelectorAll('[data-diff-discussion-space]').length).toBe(2)
-    // The annotated row wears the wash, in the column it is on.
-    expect(document.querySelectorAll('[data-diff-split-row][data-diff-discussion-band]').length).toBe(1)
+    // The wash belongs to the pair, not to a half of it: the commented line is an addition, so the old
+    // side has no row there at all — and the band is drawn across both halves, the empty one included.
+    expect(document.querySelectorAll('[data-diff-split-row][data-diff-discussion-band]').length).toBe(2)
     // The card is laid out to the rows the panel measured for the thread: a box sized to the compose
     // fallback would clip the thread's own turns (which is how an answer could go missing here).
     expect(Number.parseFloat(block.style.height)).toBeGreaterThan(2 * 22)
+  })
+
+  it('reads a selection that crossed the divider as the column it began in', () => {
+    // Only a selection the panel did not drive itself can have its two ends in different halves: a
+    // keyboard selection onto the neighbouring column, or a touch press. It is read as the range of the
+    // column it began in, over the pairs both ends name.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-split-sides', path: '/repo/sides.txt', oldText: 'a\nb\nc\n', newText: 'a\nB\nc\n' })
+    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('sides.txt'))
+
+    const rowsOf = (side: 'left' | 'right'): HTMLElement[] => (
+      [...document.querySelectorAll(`[data-diff-split-row][data-diff-split-side="${side}"]`)] as HTMLElement[]
+    )
+    // A backwards selection: it began in the right column's first row and was dragged into the left
+    // column, so the anchor's side is the new one while the range starts at the left column's node.
+    const anchorNode = rowsOf('right')[0]!.querySelector('[data-diff-code]')!.firstChild!
+    const startNode = rowsOf('left')[0]!.querySelector('[data-diff-code]')!.firstChild!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      rangeCount: 1,
+      anchorNode,
+      anchorOffset: 0,
+      focusNode: startNode,
+      getRangeAt: () => ({ startContainer: startNode, startOffset: 0, endContainer: anchorNode, endOffset: 1 }),
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    // Which the panel offers a comment for, as a range of the new file — the column it began in.
+    expect(document.querySelector('[data-diff-selection-comment]')).not.toBeNull()
+  })
+
+  it('seals the page while a touch press is held in a column', () => {
+    // Touch cannot be driven by the panel, so the other column is made unselectable instead: a class on
+    // `body` (see `.splitSealed`), with the pressed column's side opened again.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const file = entry({ id: 'entry-split-seal', path: '/repo/seal.txt', oldText: 'a\nb\n', newText: 'a\nB\n' })
+    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('seal.txt'))
+
+    const row = document.querySelector('[data-diff-split-row][data-diff-split-side="left"]') as HTMLElement
+    expect(document.body.className).not.toContain('splitSealed')
+
+    fireEvent.pointerDown(row)
+    expect(document.body.className).toContain('splitSealed')
+    expect(document.body.className).toContain('splitSealedLeft')
+
+    fireEvent.pointerUp(document)
+    expect(document.body.className).not.toContain('splitSealed')
+  })
+
+  it('drives a mouse drag in the column it began in, past the divider', async () => {
+    // The press is the panel's own drag: the browser's default — which would run on into the other
+    // column — is prevented, and the position comes from the pointer, computed inside the pressed
+    // column's own rows (see the split view's drag).
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const file = entry({ id: 'entry-split-drive', path: '/repo/drive.txt', oldText: 'a\nb\n', newText: 'a\nB\n' })
+    const originalCaret = (document as Document & { caretRangeFromPoint?: unknown }).caretRangeFromPoint
+    const range = document.createRange()
+    const asked: Array<{ x: number; y: number }> = []
+    Object.defineProperty(document, 'caretRangeFromPoint', {
+      configurable: true,
+      value: (x: number, y: number): Range => {
+        asked.push({ x, y })
+        return range
+      },
+    })
+    try {
+      render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      fireEvent.click(screen.getByText('drive.txt'))
+
+      // jsdom lays nothing out, so the rows the drag picks between are given boxes here: one row of 22
+      // pixels per index, each with its code cell inset from the row's left edge.
+      const rows = [...document.querySelectorAll('[data-diff-split-row][data-diff-split-side="left"]')] as HTMLElement[]
+      const boxOf = (index: number): DOMRect => ({
+        x: 0,
+        y: index * 22,
+        left: 0,
+        top: index * 22,
+        right: 400,
+        bottom: index * 22 + 22,
+        width: 400,
+        height: 22,
+        toJSON: () => ({}),
+      }) as DOMRect
+      rows.forEach((row, index) => {
+        vi.spyOn(row, 'getBoundingClientRect').mockReturnValue(boxOf(index))
+        const cell = row.querySelector('[data-diff-code]') as HTMLElement
+        vi.spyOn(cell, 'getBoundingClientRect').mockReturnValue({ ...boxOf(index), left: 20, right: 400, width: 380 })
+      })
+      const code = rows[0]!.querySelector('[data-diff-code]') as HTMLElement
+      const scroller = document.querySelector('[data-diff-body]') as HTMLElement
+      vi.spyOn(scroller, 'getBoundingClientRect').mockReturnValue({ ...boxOf(0), bottom: 200, height: 200 })
+      range.setStart(code.firstChild as Text, 0)
+      const at = range.startContainer
+      const setBaseAndExtent = vi.fn()
+      vi.spyOn(window, 'getSelection').mockReturnValue({
+        isCollapsed: true,
+        rangeCount: 0,
+        setBaseAndExtent,
+      } as unknown as Selection)
+
+      // A plain press (the first of its click) with nothing held: exactly what the drag takes over.
+      const press = new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, clientX: 12, clientY: 5 })
+      Object.defineProperty(press, 'detail', { value: 1 })
+      code.dispatchEvent(press)
+      expect(press.defaultPrevented).toBe(true)
+      expect(setBaseAndExtent).toHaveBeenCalledTimes(1)
+      const call = setBaseAndExtent.mock.calls[0] as unknown[]
+      // The anchor is the position the press names, and the extent the position the pointer names —
+      // both taken inside the pressed column's code, which is what keeps the drag there.
+      expect(call[0]).toBe(at)
+      expect(call[2]).toBe(at)
+
+      // Dragged past the divider into the other column: the point asked about is still inside the
+      // pressed column's code cell, so the selection cannot follow the pointer across — and the move
+      // does move the selection (a pass that only ever scrolled would leave it where the press put it).
+      const move = new Event('pointermove', { bubbles: true }) as Event & { clientX: number; clientY: number }
+      move.clientX = 700
+      move.clientY = 5
+      document.dispatchEvent(move)
+      await act(async () => { await new Promise(resolve => { requestAnimationFrame(() => { resolve(undefined) }) }) })
+      expect(asked.length).toBeGreaterThan(1)
+      expect(asked[asked.length - 1]!.x).toBeLessThanOrEqual(400)
+      expect(setBaseAndExtent.mock.calls.length).toBeGreaterThan(1)
+    } finally {
+      if (originalCaret === undefined) delete (document as Document & { caretRangeFromPoint?: unknown }).caretRangeFromPoint
+      else Object.defineProperty(document, 'caretRangeFromPoint', { configurable: true, value: originalCaret })
+    }
   })
 
   it('row-aligns a similarity-matched del/add pair in the split view', () => {

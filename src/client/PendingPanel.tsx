@@ -1946,6 +1946,21 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     }
     return set
   }, [discussions, model])
+  /**
+   * The pairs that wear the wash: a pair does when either of its rows is one a thread annotates. Per
+   * pair rather than per half, because a commented ADDED line has no old-side row at all — asking each
+   * half about its own row left the empty half bare, and the band is what says the pair carries a
+   * thread. Both halves take it from either row, the way the single-column view washes the whole row.
+   */
+  const discussedPairs = useMemo(() => {
+    const set = new Set<number>()
+    for (const [pair, rows] of pairRowIndices) {
+      const left = rows.left === undefined ? false : discussedRows.has(rows.left)
+      const right = rows.right === undefined ? false : discussedRows.has(rows.right)
+      if (left || right) set.add(pair)
+    }
+    return set
+  }, [pairRowIndices, discussedRows])
   /** The threads that hang under each pair, by the row their anchor ends in. */
   const pairDiscussions = useMemo(() => {
     const map = new Map<number, Discussion[]>()
@@ -2502,7 +2517,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
                     searchOptions={search.options}
                     onHover={() => onPairHover(index)}
                     intra={sideIndex?.left === undefined ? undefined : model.intra.get(sideIndex.left)}
-                    discussed={sideIndex?.left !== undefined && discussedRows.has(sideIndex.left)}
+                    discussed={discussedPairs.has(index)}
                   />
                   {/* The rows a thread under this pair holds. Both halves reserve the same height —
                       the card itself is drawn over both (see the layer below) — which is what keeps
@@ -2549,7 +2564,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
                     searchOptions={search.options}
                     onHover={() => onPairHover(index)}
                     intra={sideIndex?.right === undefined ? undefined : model.intra.get(sideIndex.right)}
-                    discussed={sideIndex?.right !== undefined && discussedRows.has(sideIndex.right)}
+                    discussed={discussedPairs.has(index)}
                   />
                   {/* The same rows the left half reserved, so the pair below this one starts on the
                       same pixel in both halves (the thread itself is drawn over both, below). */}
