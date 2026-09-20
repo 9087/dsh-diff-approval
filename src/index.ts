@@ -474,7 +474,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // A legacy per-workspace layout: fold once, then drop the old files.
         if (migratedLegacy) await persistence.save(store.all())
       } catch (error: unknown) {
-        ctx.logger.warn(`diff-approval: loading persisted state failed: ${errorMessage(error)}`)
+        ctx.logger.error(`diff-approval: loading persisted state failed, so the list starts empty: ${errorMessage(error)}`)
       }
     })()
     return loadPromise
@@ -943,6 +943,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   let lastPersistAt = 0
   let persistTimer: ReturnType<typeof setTimeout> | undefined
 
+  /** The last persist failure reported, so a writer that keeps failing says so once (cleared by a
+   *  write that works, which is what makes a later, different failure report again). */
+  let persistFailureReported: string | undefined
+
   /** Actually write the (dirty) store to disk; one coalesced write. */
   async function flushPersist(): Promise<void> {
     if (!persistDirty) return
@@ -951,8 +955,18 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     try {
       await ensureLoaded()
       await persistence.save(store.all())
+      persistFailureReported = undefined
     } catch (error: unknown) {
-      ctx.logger.warn(`diff-approval: persisting pending changes failed: ${errorMessage(error)}`)
+      const message = errorMessage(error)
+      // Not a detail to file away. This file is what makes the list survive a restart, and a filesystem
+      // that refuses the write — no permission, no space, a path this host cannot create (issue #6:
+      // `dirName` answered `.` on Windows, so every write threw ENOENT) — leaves the reader with a list
+      // that silently disappears, which is the one failure nobody can diagnose from the outside. At
+      // error level, once per distinct message, so a writer retrying every second cannot bury it.
+      if (persistFailureReported !== message) {
+        persistFailureReported = message
+        ctx.logger.error(`diff-approval: persisting pending changes failed, so the list will not survive a restart: ${message}`)
+      }
     }
   }
 
