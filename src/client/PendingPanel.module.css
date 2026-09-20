@@ -2010,6 +2010,28 @@
   flex: 1;
 }
 
+/* The go-to-line dialog's box and field. The scrim around it is inline (a fixed overlay, one place,
+   no theme values); these carry the two pieces that have to read as panel chrome. */
+.gotoBox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-base);
+  box-shadow: var(--dsw-shadow-lv2);
+}
+
+.gotoInput {
+  width: 8em;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
 /* Vertical divider between grouped toolbar controls (e.g. search | view mode). */
 .divider {
   align-self: stretch;

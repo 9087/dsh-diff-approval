@@ -520,6 +520,7 @@ export const DEFAULT_KEYBINDINGS: Record<string, string> = {
   jumpDown: 'Ctrl+ArrowDown',
   copyRef: 'Ctrl+L',
   addComment: 'Ctrl+K',
+  goto: 'Ctrl+G',
   openSearch: 'Ctrl+F',
   searchNext: 'F3',
   searchPrev: 'Shift+F3',

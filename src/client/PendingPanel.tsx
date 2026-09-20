@@ -246,6 +246,22 @@ function MarkdownModeIcon({ preview, size = 14 }: { preview: boolean; size?: num
     </svg>
   )
 }
+/** The go-to-line glyph: an arrow landing on a line of code, drawn on the same 14-grid as
+ *  `ViewModeIcon`, `MarkdownModeIcon` and `ReturnIcon` so a toolbar of these reads as one set. The
+ *  icon library has no "go to line" mark, and a bare `#` beside three line drawings read as a stray
+ *  key rather than a control. */
+function GotoLineIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      {/* The line it lands on … */}
+      <path d="M1.5 10.6h11" stroke="currentColor" strokeWidth="1.3" />
+      {/* … and the arrow coming down onto it. */}
+      <path d="M7 1.9v5.9" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M4.3 5.2 7 7.9l2.7-2.7" stroke="currentColor" strokeWidth="1.3" fill="none" />
+    </svg>
+  )
+}
+
 /** Return/enter glyph for the comment button: the key's own corner arrow, drawn on
  *  MarkdownModeIcon's 14-grid so the two read at the same weight. It is what tells
  *  the user that Enter sends the comment, without spending a row on the hint. */
@@ -1841,7 +1857,7 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
 
 /** Imperative surface the parent uses to drive block navigation from the
  *  shared toolbar/keyboard in split mode (its own `focus` is private here). */
-export interface SplitDiffHandle { jump: (direction: -1 | 1, wrapGuard?: boolean, singleToast?: boolean) => void; land: (row: number, toCard?: boolean) => void; openSearch: () => void; toggleSearch: () => void; closeSearch: () => boolean; searchNext: (direction: -1 | 1) => boolean; toggleMatchCase: () => boolean; toggleMatchWholeWord: () => boolean }
+export interface SplitDiffHandle { jump: (direction: -1 | 1, wrapGuard?: boolean, singleToast?: boolean) => void; land: (row: number, toCard?: boolean, flash?: boolean) => void; openSearch: () => void; toggleSearch: () => void; closeSearch: () => boolean; searchNext: (direction: -1 | 1) => boolean; toggleMatchCase: () => boolean; toggleMatchWholeWord: () => boolean }
 
 /** The two-column (side-by-side) whole-file diff view. */
 export const SplitDiff = forwardRef<SplitDiffHandle, {
@@ -2340,11 +2356,16 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
    * landing.
    */
   const landingRowRef = useRef<{ row: number; toCard: boolean } | undefined>(undefined)
-  const land = useCallback((row: number, toCard = false): void => {
+  /** A row this view was asked to frame and land on rather than a whole block (a go-to-line). */
+  const flashRowRef = useRef<number | undefined>(undefined)
+  const land = useCallback((row: number, toCard = false, rowFlash = false): void => {
     landingRowRef.current = { row, toCard }
     const pair = pairOfRow.get(row)
     const block = pair === undefined ? undefined : blockIndexByPair.get(pair)
     if (block !== undefined) setFocus(block)
+    // A landing that means "here is the change you were looking for" flashes the whole block; a
+    // go-to-line frames the one row it was asked for, and recenters without that block flash.
+    flashRowRef.current = rowFlash ? row : undefined
     setFlashKey(key => key + 1)
   }, [pairOfRow, blockIndexByPair])
 
@@ -2411,10 +2432,17 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   // Split keeps the whole-diff stats from the single-column model (same diff).
   const blockRanges = useMemo(() => model.blocks.map(block => blockRangesOf(model.diff.rows, block)), [model])
   const focusedBlock = blockOfPair[focus]
-  const flashTop = focusedBlock === undefined ? 0 : Math.max(0, off(focusedBlock.start) - scrollTop)
-  const flashBottom = focusedBlock === undefined
-    ? 0
-    : Math.min(viewportH > 0 ? viewportH : Number.POSITIVE_INFINITY, off(focusedBlock.end + 1) - scrollTop)
+  const flashRow = flashRowRef.current
+  const flashTop = flashRow !== undefined
+    ? Math.max(0, off(pairOfRow.get(flashRow) ?? flashRow) - scrollTop)
+    : focusedBlock === undefined
+      ? 0
+      : Math.max(0, off(focusedBlock.start) - scrollTop)
+  const flashBottom = flashRow !== undefined
+    ? Math.min(viewportH > 0 ? viewportH : Number.POSITIVE_INFINITY, off((pairOfRow.get(flashRow) ?? flashRow) + 1) - scrollTop)
+    : focusedBlock === undefined
+      ? 0
+      : Math.min(viewportH > 0 ? viewportH : Number.POSITIVE_INFINITY, off(focusedBlock.end + 1) - scrollTop)
   const flashHeight = Math.max(0, flashBottom - flashTop)
   // Hovered block's actions frame, pinned to the block's bottom edge. The actions
   // live in the non-scrolling wrapper (viewport coordinates), so subtract
@@ -3415,6 +3443,11 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(0)
   const [bodyWidth, setBodyWidth] = useState(0)
+  /** The go-to-line dialog: whether it is up, and what has been typed into it. */
+  const [gotoOpen, setGotoOpen] = useState(false)
+  const [gotoDraft, setGotoDraft] = useState('')
+  /** The row a go-to-line flashed: its box frames that one row instead of the block around it. */
+  const flashRowRef = useRef<number | undefined>(undefined)
   const [hScrollbarPx, setHScrollbarPx] = useState(0)
   const [hoveredBlock, setHoveredBlock] = useState<number | undefined>(undefined)
   const [selection, setSelection] = useState<RowRange | undefined>(undefined)
@@ -5303,6 +5336,8 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       const toCard = landingCardRef.current
       landingRowRef.current = undefined
       landingCardRef.current = false
+      // A flash asked for by a block jump frames the block, not the row a go-to-line framed last.
+      flashRowRef.current = undefined
       // The split view owns its own scroller — this component's `bodyRef` is null while it is up — so
       // the row is landed there, at the pair it is in, by the same rule.
       if (splitView) {
@@ -5437,6 +5472,48 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   }
   const jumpBlockRef = useRef(jumpBlock)
   jumpBlockRef.current = jumpBlock
+
+  /**
+   * Go to a line of the file as it reads NOW: the row carrying that new-file line, because the old side
+   * of the diff is not a place a reader can be sent (its numbers belong to text that is already gone) —
+   * a number that only exists there is answered with a note instead. Both views take it the way a comment
+   * jump does: the split view through its own handle, one column through the height table, with the
+   * configured lead rows above it and the block it lands in flashed.
+   */
+  const gotoLine = (line: number): void => {
+    const row = model.diff.rows.findIndex(entry => entry.newLine === line)
+    if (row === -1) {
+      onToast(t('panel.gotoMissing', { line }))
+      return
+    }
+    if (splitView && !previewActive) {
+      splitDiffRef.current?.land(row, false, true)
+      return
+    }
+    // Order matters: a block flash clears the row the previous go-to-line framed, so this sets it
+    // AFTER asking for the flash.
+    bumpFlash(false)
+    flashRowRef.current = row
+    setFocus(blockIndexAtOffset(offsetOf(row)))
+    const body = bodyRef.current
+    if (body === null) return
+    applyScrollTop(body, Math.max(0, Math.min(offsetOf(row) - leadRows * ROW_HEIGHT_PX, body.scrollHeight - body.clientHeight)))
+  }
+
+  // The configured go-to-line chord opens the dialog, unless a text field (or the file picker) already
+  // has those keys. Capture on the window and preventDefault, the way the comment chord does: Ctrl+G is
+  // the browser's own find-again, and this panel is where the reader means it.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (!matchesShortcut(event, keybindingOf('goto'))) return
+      if (isTextFieldEvent(event) || pathPickerOpen()) return
+      event.preventDefault()
+      setGotoDraft('')
+      setGotoOpen(true)
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true) }
+  }, [])
 
   // Step the hovered block's floating actions frame to the adjacent diff block
   // (wrapping). Both the hovered block (the frame follows it) and the focused
@@ -5948,12 +6025,19 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   // So `top = contentOffset - scrollTop` (viewport coordinates), clamped to the
   // block's intersection with the viewport — a tall block scrolled into never
   // draws a box past the top edge, and still fills the visible area.
-  const flashTop = focusedBlock === undefined
-    ? 0
-    : Math.max(0, offsetOf(focusedBlock.start) - scrollTop)
-  const flashBottom = focusedBlock === undefined
-    ? 0
-    : Math.min(viewportHeight > 0 ? viewportHeight : Number.POSITIVE_INFINITY, offsetOf(focusedBlock.end + 1) - scrollTop)
+  // A go-to-line frames the ROW it landed on rather than the change block around it: the reader named a
+  // line, not a change (see `gotoLine`). Everything else keeps the block's own box.
+  const flashRow = flashRowRef.current
+  const flashTop = flashRow !== undefined
+    ? Math.max(0, offsetOf(flashRow) - scrollTop)
+    : focusedBlock === undefined
+      ? 0
+      : Math.max(0, offsetOf(focusedBlock.start) - scrollTop)
+  const flashBottom = flashRow !== undefined
+    ? Math.min(viewportHeight > 0 ? viewportHeight : Number.POSITIVE_INFINITY, offsetOf(flashRow + 1) - scrollTop)
+    : focusedBlock === undefined
+      ? 0
+      : Math.min(viewportHeight > 0 ? viewportHeight : Number.POSITIVE_INFINITY, offsetOf(focusedBlock.end + 1) - scrollTop)
   const flashHeight = Math.max(0, flashBottom - flashTop)
 
   // The preview's flash box at the mirrored scroll offset; a scroll re-places it
@@ -6207,6 +6291,77 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
             <IconSearchOutline16 size={14} />
           </button>
         </Tooltip>
+        {previewActive ? null : (
+          <Tooltip label={withChord(t('action.goto'), 'goto')} side="bottom" delayMs={500}>
+            <button
+              type="button"
+              className={`${css.action} ${css.iconAction}`}
+              data-diff-goto
+              aria-label={t('action.goto')}
+              onClick={() => { setGotoDraft(''); setGotoOpen(true) }}
+            >
+            <GotoLineIcon />
+            </button>
+          </Tooltip>
+        )}
+        {gotoOpen && (
+          // A dialog, not a bar: the number is a whole answer, and Enter confirms it. Escape and Cancel
+          // leave everything as it was.
+          <div
+            role="dialog"
+            aria-label={t('action.goto')}
+            data-diff-goto-dialog
+            style={{ position: 'fixed', inset: 0, zIndex: 40, display: 'grid', placeItems: 'center', background: 'rgba(0, 0, 0, 0.18)' }}
+            onClick={() => { setGotoOpen(false) }}
+          >
+            <div
+              className={css.gotoBox}
+              style={{ display: 'flex', gap: 8, alignItems: 'center', padding: 12, borderRadius: 12, background: 'var(--dsw-alias-bg-base)', boxShadow: 'var(--dsw-shadow-lv2)' }}
+              onClick={(event) => { event.stopPropagation() }}
+            >
+              <input
+                className={css.gotoInput}
+                data-diff-goto-input
+                value={gotoDraft}
+                autoFocus
+                inputMode="numeric"
+                spellCheck={false}
+                autoComplete="off"
+                aria-label={t('action.goto')}
+                placeholder={t('action.goto')}
+                style={{ width: '8em', padding: '4px 8px', borderRadius: 8, border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent', color: 'inherit', font: 'inherit' }}
+                onChange={(event) => { setGotoDraft(event.target.value) }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    event.preventDefault()
+                    setGotoOpen(false)
+                    return
+                  }
+                  if (event.key !== 'Enter') return
+                  event.preventDefault()
+                  const line = Number.parseInt(gotoDraft.trim(), 10)
+                  setGotoOpen(false)
+                  if (Number.isFinite(line) && line > 0) gotoLine(line)
+                }}
+              />
+              <button
+                type="button"
+                className={css.action}
+                data-diff-goto-go
+                onClick={() => {
+                  const line = Number.parseInt(gotoDraft.trim(), 10)
+                  setGotoOpen(false)
+                  if (Number.isFinite(line) && line > 0) gotoLine(line)
+                }}
+              >
+                {t('action.gotoGo')}
+              </button>
+              <button type="button" className={css.action} data-diff-goto-cancel onClick={() => { setGotoOpen(false) }}>
+                {t('action.gotoCancel')}
+              </button>
+            </div>
+          </div>
+        )}
         <span className={css.divider} />
         <Tooltip label={t(splitView ? 'action.viewUnified' : 'action.viewSplit')} side="bottom" delayMs={500}>
           <button
