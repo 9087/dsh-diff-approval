@@ -17,7 +17,7 @@
  */
 
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { PendingEntry } from './types.ts'
@@ -106,9 +106,20 @@ async function writeJson(file: string, value: unknown): Promise<void> {
   }
 }
 
+/**
+ * The directory a path names, in the platform's own spelling.
+ *
+ * `node:path` rather than a scan for the last `/`: on Windows the storage root is
+ * `C:\Users\<user>\.dsh\diff-approval\workspaces`, which contains no forward slash at all — the
+ * scan answered `.`, the `mkdir` before every write became a no-op, and the write itself threw
+ * ENOENT, so no pending change was ever persisted there (the failure only reached a logger
+ * warning). Both separators have to be understood, and only the platform knows which they are.
+ *
+ * @param file - the file whose directory is wanted.
+ * @returns that directory, or `.` for a bare file name.
+ */
 function dirName(file: string): string {
-  const index = file.lastIndexOf('/')
-  return index < 0 ? '.' : file.slice(0, index)
+  return dirname(file)
 }
 
 /**

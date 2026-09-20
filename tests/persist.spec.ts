@@ -34,6 +34,19 @@ describe('loadAll', () => {
     await expect((await persistence()).loadAll()).resolves.toEqual({ entries: [], migratedLegacy: false })
   })
 
+  it('creates the storage directory on a path spelled with the platform separators', async () => {
+    // The Windows storage root is `C:\Users\<user>\.dsh\diff-approval\workspaces` — no forward slash
+    // anywhere. A helper that scanned for the last `/` answered `.`, the mkdir before every write became
+    // a no-op and the write itself threw ENOENT, so no pending change was ever persisted there and the
+    // list was empty again after a restart (issue #6). `node:path` knows this machine's separators; the
+    // root here does not exist yet, which is the case that tells the two apart.
+    await persistence()
+    const store = new PendingPersistence(join(root, 'workspaces'))
+    await store.save([entry(S1, '/repo/a.txt')])
+    await expect(readFile(join(root, 'workspaces', 'pending.json'), 'utf8')).resolves.toContain('/repo/a.txt')
+    await expect(store.loadAll()).resolves.toMatchObject({ entries: [entry(S1, '/repo/a.txt')] })
+  })
+
   it('round-trips saved entries, oldest capture first', async () => {
     const store = await persistence()
     await store.save([entry(S1, '/repo/b.txt', 2), entry(S1, '/repo/a.txt', 1)])
