@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { attachDiffDock, createDockState, DiffDockTitle, DIFF_DOCK_ID, DIFF_DOCK_KIND, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
 import type { DockHostContext } from '../src/client/dock.tsx'
+import { IconListPenOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PendingDiffSnapshot } from '../src/client/slots.ts'
 
 afterEach(cleanup)
@@ -126,7 +127,14 @@ describe('attachDiffDock', () => {
     expect(definition.id).toBe(DIFF_DOCK_ID)
     expect(definition.kind).toBe(DIFF_DOCK_KIND)
     expect((definition.title as (address: string) => string)('')).toBe('T')
-    expect((definition.guide as { description?: () => string }[])[0]!.description?.()).toBe('D')
+    const entry = (definition.guide as {
+      description?: () => string
+      icon?: unknown
+    }[])[0]!
+    expect(entry.description?.()).toBe('D')
+    // The mark the header's pending-changes button wears too, so one glyph means this panel
+    // everywhere; without one the guide draws its placeholder cube.
+    expect(entry.icon).toBe(IconListPenOutline16)
     expect(host.effects).toEqual([
       'diff-approval: dock lookup',
       'diff-approval: dock sidebar',

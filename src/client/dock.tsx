@@ -16,6 +16,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { HostObservable, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+import { IconListPenOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import css from './PendingPanel.module.css'
 import { PanelBoundary } from './boundary.tsx'
 import { PendingPanel } from './PendingPanel.tsx'
@@ -119,7 +120,18 @@ export interface TabRegistryFace {
     id: string
     kind: string
     title: (address: string) => string
-    guide?: readonly { order: number; title: () => string; description?: () => string }[]
+    guide?: readonly {
+      order: number
+      title: () => string
+      description?: () => string
+      /**
+       * Glyph drawn before the title. The package types this as
+       * `ComponentType<IconProps>`; declared structurally so the build stays off
+       * that package's version line — the shape is what the seat reads, and
+       * leaving it out is why this panel's guide row had no mark of its own.
+       */
+      icon?: (props: { size?: number; className?: string }) => unknown
+    }[]
   }): () => void
 }
 
@@ -443,6 +455,10 @@ export function attachDiffDock(
           order: DIFF_DOCK_GUIDE_ORDER,
           title: () => copy.title(),
           description: () => copy.guideDescription(),
+          // The mark the Session header's pending-changes button already wears, and the panel's own
+          // rail with it: the guide row is about the same thing that button opens, so a reader who
+          // knows one knows the other. Without an icon at all the guide draws its placeholder cube.
+          icon: IconListPenOutline16,
         }],
       }), 'diff-approval: right-sidebar tab type')
       return true
