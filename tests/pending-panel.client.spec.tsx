@@ -544,6 +544,42 @@ describe('PendingPanel', () => {
     })
   })
 
+  it('says once that the pending state cannot be written to disk, and again only after the host retracts it', async () => {
+    // The host attaches the failure to every list read, so the panel must not toast per
+    // poll — but a reader who is never told finds the list gone after a restart with
+    // nothing to explain it (issue #6). "Once" is therefore per distinct message, and
+    // the host retracting the field (a write that worked) re-arms the marker.
+    const t = vi.fn((key: string) => key)
+    const withState = (snapshot: PendingDiffSnapshot): ReactNode => {
+      const props = panelProps(snapshot)
+      props.t = t as unknown as PanelProps['t']
+      return <PendingPanel {...props} />
+    }
+    const said = (): number => t.mock.calls.filter(([key]) => key === 'panel.persistFailed').length
+    const failing: PendingDiffSnapshot = {
+      read: true, files: [FILE], busy: new Set(), persistError: 'ENOENT: no such file or directory',
+    }
+
+    const view = render(withState(failing))
+    await waitFor(() => {
+      const alert = [...document.querySelectorAll('[role="alert"]')]
+        .find(el => el.textContent?.includes('panel.persistFailed'))
+      expect(alert).toBeDefined()
+    })
+    expect(said()).toBe(1)
+
+    // The same message arriving again — a fresh poll carrying the same failure — is the
+    // same news, not a second one.
+    view.rerender(withState({ ...failing }))
+    await waitFor(() => expect(said()).toBe(1))
+
+    // The disk recovers and the host drops the field; failing again afterwards is news.
+    view.rerender(withState({ read: true, files: [FILE], busy: new Set() }))
+    await waitFor(() => expect(said()).toBe(1))
+    view.rerender(withState({ ...failing }))
+    await waitFor(() => expect(said()).toBe(2))
+  })
+
   it('always shows the short file name with the full path on hover, even when basenames collide', () => {
     const sibling = entry({ id: 'entry-dup', path: '/repo/sub/a.txt' })
     const props = panelProps({ read: true, files: [FILE, sibling], busy: new Set() })

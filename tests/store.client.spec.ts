@@ -63,6 +63,25 @@ describe('refresh', () => {
     expect(seam.list).not.toHaveBeenCalled()
   })
 
+  it('carries the host\'s persist failure into the snapshot, and keeps it through a failed poll', async () => {
+    const seam = port()
+    seam.list.mockResolvedValue({ files: [FILE], persistError: 'ENOSPC: no space left on device' })
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+    expect(store.getSnapshot().persistError).toBe('ENOSPC: no space left on device')
+
+    // A poll that never reached the host knows nothing about the disk, so it must not
+    // answer "writes work now" — only the host retracts this field, by leaving it out
+    // once a write succeeds.
+    seam.list.mockRejectedValue(new Error('socket closed'))
+    await store.refresh(S1)
+    expect(store.getSnapshot().persistError).toBe('ENOSPC: no space left on device')
+
+    seam.list.mockResolvedValue({ files: [FILE] })
+    await store.refresh(S1)
+    expect(store.getSnapshot().persistError).toBeUndefined()
+  })
+
   it('keeps the files it had when a read fails and says why', async () => {
     const seam = port()
     const store = createPendingDiffStore(seam.port)

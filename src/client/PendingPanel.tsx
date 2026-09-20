@@ -7074,6 +7074,25 @@ export function PendingPanel({
   const showCopyToast = (text: string): void => {
     setCopyToast(prev => ({ text, n: (prev?.n ?? 0) + 1 }))
   }
+  /**
+   * The host says it cannot write the pending state to disk. Said ONCE per distinct message: that file
+   * is what makes the list survive a restart, so a reader who is never told simply finds the list gone
+   * later with nothing to explain it (issue #6) — but the field rides every poll, and a filesystem that
+   * keeps failing must not toast on each one. The host retracts the field once a write works, and that
+   * retraction is what arms the marker again: the same disk failing twice, with a working spell between,
+   * is news the second time too.
+   */
+  const persistToastRef = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    const message = snapshot.persistError
+    if (message === undefined) {
+      persistToastRef.current = undefined
+      return
+    }
+    if (message === persistToastRef.current) return
+    persistToastRef.current = message
+    showCopyToast(t('panel.persistFailed'))
+  }, [snapshot.persistError, showCopyToast, t])
   // "查看差异" bridge from a produced-file chip (see produced-diff.ts): the
   // injected button dispatches OPEN_FILE_EVENT with a path. Open the panel and
   // select the file when it is still pending; otherwise toast. The ref defers to

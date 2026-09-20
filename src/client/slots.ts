@@ -26,6 +26,12 @@ export interface PendingDiffSnapshot {
    * same rules inline when it is not.
    */
   commentSkill?: string | undefined
+  /**
+   * The last failure to write the pending state to disk, or absent while writes are working. The
+   * panel says so once: the file is what makes the list survive a restart, so a reader who is never
+   * told finds the list gone later with nothing to explain it (see the wire type).
+   */
+  persistError?: string | undefined
   /** Latched when an external change created a fresh undo checkpoint that
    * superseded the redo history; the panel surfaces it once (deferred if the
    * panel is closed) via a bottom-right notice. */

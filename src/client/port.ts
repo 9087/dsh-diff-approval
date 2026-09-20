@@ -165,9 +165,13 @@ function listValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): 
   // pointer stayed out of the comment prompt after the host started sending it.
   const skill = (value as Record<string, unknown>).commentSkill
   const commentSkill = typeof skill === 'string' && skill.length > 0 ? skill : undefined
+  // The host's last persistence failure, said once by the panel: a list that will not survive a
+  // restart is something the reader cannot find out from the list itself.
+  const persisted = (value as Record<string, unknown>).persistError
+  const persistError = typeof persisted === 'string' && persisted.length > 0 ? persisted : undefined
   return redoCleared === true
-    ? { files, workspacePath, redoCleared: true, commentSkill }
-    : { files, workspacePath, commentSkill }
+    ? { files, workspacePath, redoCleared: true, commentSkill, persistError }
+    : { files, workspacePath, commentSkill, persistError }
 }
 
 /** Narrow one action endpoint's value; a malformed wire value is an action failure. */

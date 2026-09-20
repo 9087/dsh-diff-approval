@@ -74,6 +74,19 @@ describe('list', () => {
       .resolves.toMatchObject({ commentSkill: undefined })
   })
 
+  it("passes the host's persist failure through", async () => {
+    // Narrowed field by field like the skill above: the host can only tell the reader that the
+    // pending state is not reaching the disk through this value (issue #6).
+    const seam = fakeRpc({ list: { ok: true, value: { files: [], persistError: 'ENOENT: no such file' } } })
+    await expect(createDiffApprovalPort(seam.rpc).list(S1))
+      .resolves.toMatchObject({ persistError: 'ENOENT: no such file' })
+
+    // Malformed — and the host's own empty string — read as absent, not as a failure.
+    const bad = fakeRpc({ list: { ok: true, value: { files: [], persistError: '' } } })
+    await expect(createDiffApprovalPort(bad.rpc).list(S1))
+      .resolves.toMatchObject({ persistError: undefined })
+  })
+
   it('folds a transport error into a rejection', async () => {
     const seam = fakeRpc({
       list: { ok: false, error: { code: 'internal', message: 'down', details: {} } },
