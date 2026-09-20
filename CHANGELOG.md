@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.27.0](https://github.com/9087/dsh-diff-approval/compare/v0.26.0...v0.27.0) (2026-09-20)
+
+### Features
+
+* **comment:** say the answer is still coming while it streams ([92ba2eb](https://github.com/9087/dsh-diff-approval/commit/92ba2ebb728159be12ae28a11e77dc795d0e5296))
+* **panel:** comment on a selection in the side-by-side view ([8159a7d](https://github.com/9087/dsh-diff-approval/commit/8159a7d28363a727a90e52a284d6e443fcc7f88f))
+* **panel:** count the comments on the tab, and space the number off the label ([953fa8f](https://github.com/9087/dsh-diff-approval/commit/953fa8fc785c42bbb3b066d50b3f14be95967f16))
+* **panel:** end a comment from the list, and let a file go quiet ([ebd122c](https://github.com/9087/dsh-diff-approval/commit/ebd122c3f2556526d208c485849835ab4d5236b2))
+* **panel:** go to a line of the file, by chord or by button ([d8d371d](https://github.com/9087/dsh-diff-approval/commit/d8d371d77bd9ea7fbff89e494d64df9801665be3))
+* **panel:** keep the list wide enough for its footer on one line ([74004b9](https://github.com/9087/dsh-diff-approval/commit/74004b986fb7f1f6313abe2b7ac0fa96d06bc85d))
+* **panel:** quote and jump to a comment in the side-by-side view ([63b3a7c](https://github.com/9087/dsh-diff-approval/commit/63b3a7c360981e6c5c463a59db20a11d82733f20))
+
+### Bug Fixes
+
+* **comment:** reserve an outdated quote in the rows it draws ([63df2dd](https://github.com/9087/dsh-diff-approval/commit/63df2ddda1bea0c26b595edd782f65da28b1d147))
+* **host:** create the storage directory on Windows, so pending changes persist ([d154f30](https://github.com/9087/dsh-diff-approval/commit/d154f30480256a75d44d2c32c98726175e347f23)), references [#6](https://github.com/9087/dsh-diff-approval/issues/6)
+* **host:** report a failed persist at error level, once per message ([654daa1](https://github.com/9087/dsh-diff-approval/commit/654daa1984434a2c5fb4c9309bfaf73e8ce80f10))
+* **panel:** drive a side-by-side selection inside the column it began in ([47758cd](https://github.com/9087/dsh-diff-approval/commit/47758cdaf9dac19d4af8094be1dfa4ba2b266450))
+* **panel:** end the selection when the press lands on its own row ([eda82f4](https://github.com/9087/dsh-diff-approval/commit/eda82f4bd1beab8a9deafae426c7e6d26d4f21aa))
+* **panel:** give the sidebar guide entry the mark the header button wears ([a5c11c9](https://github.com/9087/dsh-diff-approval/commit/a5c11c9ef1dd2b71e38bd8778c2764f84a3b35b3))
+* **panel:** judge a thread outdated by the code the file still has ([bd535ba](https://github.com/9087/dsh-diff-approval/commit/bd535ba5d834d907c34656e396796c25e891badd))
+* **panel:** keep a side-by-side thread's plate opaque and scrolling with the code ([4a78873](https://github.com/9087/dsh-diff-approval/commit/4a788734b4dda7dfb51354d096d688be7fb63592))
+* **panel:** keep the reader's place when the pane remounts under them ([39cf53b](https://github.com/9087/dsh-diff-approval/commit/39cf53b18cc8beedb26ca362c2976922108f6af6))
+* **panel:** run the divider between the halves to the bottom of the view ([5aa8b66](https://github.com/9087/dsh-diff-approval/commit/5aa8b666922260df2f07dcd27d4f51abf65bee77))
+* **panel:** say what the remove prompt's box lasts for ([b511b1d](https://github.com/9087/dsh-diff-approval/commit/b511b1d8ee21e3bcb335fc2f03a64b8c1740f3ec))
+* **panel:** wash both halves of a commented pair ([371e6d0](https://github.com/9087/dsh-diff-approval/commit/371e6d0e72d5415f6cfe5b87eafc2108695a5f3d))
+
 ## [0.26.0](https://github.com/9087/dsh-diff-approval/compare/v0.25.0...v0.26.0) (2026-09-18)
 
 ### Features
