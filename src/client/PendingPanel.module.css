@@ -3516,6 +3516,12 @@
   display: flex;
   width: 100%;
   min-width: 0;
+  /* At least as tall as the scroller, so `.splitDivider` runs to the bottom of the view instead of
+     stopping where a short file's content happens to end: it is stretched to this row's height, and
+     the row is only as tall as its columns otherwise. The pinned horizontal strip below carries the
+     matching divider, so the two read as one line. A shorter file adds no scroll range for it — the
+     row simply fills the scrollport. */
+  min-height: 100%;
 }
 
 .splitCol {
