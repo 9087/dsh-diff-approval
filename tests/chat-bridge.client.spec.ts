@@ -118,6 +118,118 @@ describe('the session chat bridge', () => {
     expect(other.at(-1)?.queued).toBeUndefined()
   })
 
+  it('reconciles a quietly ended turn on its own when the build exposes no store to subscribe', () => {
+    // The fallback: a build whose chat target has no store and whose session face and list store are
+    // absent. Nothing can report the turn ending, and the panel cannot ask for a re-read, so the bridge
+    // reconciles by itself (see `TURN_STATE_REFRESH_MS`). With a store to subscribe, there is no timer —
+    // see the next test.
+    vi.useFakeTimers()
+    try {
+      const session: Record<string, unknown> = { running: true, queue: [] }
+      const chat = { legacy: { nodes: [] } }
+      const actx = { get: () => undefined }
+      const sessions = { scope: () => actx, binding: () => ({ session: { getSnapshot: () => session } }) }
+      const uiConversation = {
+        binding: () => ({ target: (name: string) => (name === 'chat' ? { getSnapshot: () => chat } : undefined) }),
+      }
+      const ctx = {
+        get: (name: string) => (name === 'sessions' ? sessions : name === 'uiConversation' ? uiConversation : undefined),
+      } as unknown as ClientContext
+      const seen: ChatView[] = []
+      const stop = createChatBridge(ctx).watch(SID, (view) => { seen.push(view) })
+      expect(seen.at(-1)?.running).toBe(true)
+
+      // The turn ends and the transcript has nothing more to say, so no notification arrives.
+      session.running = false
+      expect(seen.at(-1)?.running).toBe(true)
+      // …and the bridge looks again on its own, which is what hands the block its answer.
+      vi.advanceTimersByTime(2000)
+      expect(seen.at(-1)?.running).toBe(false)
+      stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('delivers nothing when a re-read says the same thing', () => {
+    // Every read rebuilds the transcript into fresh node objects, and the stores can report changes this
+    // view does not read: without this gate the panel would be handed a new view for nothing — a React
+    // re-render, and, for a block that is waiting, a state write that travels on into the page's comment
+    // memory. Same content, no delivery; a real change still arrives.
+    const session: Record<string, unknown> = { running: false, queue: [] }
+    const chat = { legacy: { nodes: [{ kind: 'assistant', blocks: [{ kind: 'text', text: 'first' }] }] } }
+    let ping: (() => void) | undefined
+    const actx = { get: () => undefined }
+    const sessions = { scope: () => actx, binding: () => ({ session: { getSnapshot: () => session } }) }
+    const uiConversation = {
+      binding: () => ({
+        target: (name: string) => (name === 'chat'
+          ? { getSnapshot: () => chat, subscribe: (fn: () => void) => { ping = fn; return () => { ping = undefined } } }
+          : undefined),
+      }),
+    }
+    const ctx = {
+      get: (name: string) => (name === 'sessions' ? sessions : name === 'uiConversation' ? uiConversation : undefined),
+    } as unknown as ClientContext
+    const seen: ChatView[] = []
+    const stop = createChatBridge(ctx).watch(SID, (view) => { seen.push(view) })
+    expect(seen).toHaveLength(1)
+
+    // Ten reports that say the same thing: the transcript is rebuilt every time and nothing moved.
+    for (let index = 0; index < 10; index++) ping?.()
+    expect(seen).toHaveLength(1)
+
+    // A real change still arrives.
+    chat.legacy.nodes = [
+      { kind: 'assistant', blocks: [{ kind: 'text', text: 'first' }] },
+      { kind: 'assistant', blocks: [{ kind: 'text', text: 'second' }] },
+    ]
+    ping?.()
+    expect(seen).toHaveLength(2)
+    expect(seen.at(-1)?.nodes.at(-1)?.text).toBe('second')
+    stop()
+  })
+
+  it('reports a quietly ended turn through the session store, with no timer', () => {
+    // The session face IS an observable snapshot (`SessionFace = ISession & ObservableSnapshot<…>`), so the
+    // store behind the very snapshot `currentView` reads can be subscribed — and that is where a turn
+    // ENDING is published. With a subscription in place no reconcile timer is installed at all: a change
+    // that nobody announces is not picked up (that is the point), while the store's own report lands at
+    // once.
+    vi.useFakeTimers()
+    try {
+      const session: Record<string, unknown> = { running: true, queue: [] }
+      let notifySession: (() => void) | undefined
+      const actx = { get: () => undefined }
+      const sessions = {
+        scope: () => actx,
+        binding: () => ({
+          session: {
+            getSnapshot: () => session,
+            subscribe: (fn: () => void) => { notifySession = fn; return () => { notifySession = undefined } },
+          },
+        }),
+      }
+      const ctx = { get: (name: string) => (name === 'sessions' ? sessions : undefined) } as unknown as ClientContext
+      const seen: ChatView[] = []
+      const stop = createChatBridge(ctx).watch(SID, (view) => { seen.push(view) })
+      expect(seen.at(-1)?.running).toBe(true)
+
+      // The turn ends and the store says so: no timer is needed, and none would help.
+      session.running = false
+      notifySession?.()
+      expect(seen.at(-1)?.running).toBe(false)
+
+      // A change nobody announces is NOT polled for: there is no tick behind a working subscription.
+      session.running = true
+      vi.advanceTimersByTime(10 * 1000)
+      expect(seen.at(-1)?.running).toBe(false)
+      stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('reports unavailability rather than throwing', () => {
     const bridge = createChatBridge(contextWith({}))
     expect(bridge.ask(SID, 'hello')).toBe(false)

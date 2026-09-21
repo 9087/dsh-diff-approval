@@ -142,6 +142,42 @@ function queuedOf(session: Record<string, unknown> | undefined): readonly string
   return texts
 }
 
+/** Whether two node lists say the same thing (the transcript is rebuilt on every read). */
+function sameNodes(left: readonly ChatNodeView[], right: readonly ChatNodeView[]): boolean {
+  return left.length === right.length && left.every((node, index) => {
+    const other = right[index]!
+    return node.kind === other.kind && node.text === other.text && node.interrupted === other.interrupted
+  })
+}
+
+/** Whether two waiting-prompt lists say the same thing. */
+function sameQueued(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+  return left === right || (left !== undefined && right !== undefined
+    && left.length === right.length && left.every((text, index) => text === right[index]))
+}
+
+/** Whether a freshly read view says anything the consumer has not already been told. */
+function sameView(left: ChatView | undefined, right: ChatView): boolean {
+  return left !== undefined
+    && left.running === right.running
+    && left.partial === right.partial
+    && left.error === right.error
+    && sameQueued(left.queued, right.queued)
+    && sameNodes(left.nodes, right.nodes)
+}
+
+/**
+ * How often a watched session's turn state is re-read, in ms.
+ *
+ * The transcript arrives by subscription, but `running` and the queue are read from the session
+ * snapshot, which the chat target does not publish: a turn that ends without another transcript change
+ * (the answer already written, nothing more to say) left the consumer holding `running: true` — which is
+ * how a comment sat at "答复中" long after its session was done. The panel cannot ask for a re-read, so
+ * the bridge does. What a tick costs is a snapshot read and the node walk behind it; what it must NOT
+ * cost is a delivery, and `sameView` is what stops one (see `watch`).
+ */
+const TURN_STATE_REFRESH_MS = 1000
+
 /**
  * Build the bridge over the client context. Every verb takes the session it
  * addresses, so one bridge serves whichever session the panel is showing.
@@ -150,17 +186,43 @@ function queuedOf(session: Record<string, unknown> | undefined): readonly string
  */
 export function createChatBridge(ctx: ClientContext): ChatBridge {
   const scoped = (sessionId: SessionId): { actx: ClientContext; binding: {
-    session?: { getSnapshot?: () => unknown }
+    session?: {
+      getSnapshot?: () => unknown
+      /** The session face IS an observable snapshot (`SessionFace`), so its store can be subscribed. */
+      subscribe?: (listener: () => void) => () => void
+    }
     eventSource?: unknown
   } | undefined } | undefined => {
     try {
       const sessions = ctx.get('sessions') as {
         scope?: (id: SessionId) => ClientContext | undefined
-        binding?: (id: SessionId) => { session?: { getSnapshot?: () => unknown } } | undefined
+        binding?: (id: SessionId) => {
+          session?: {
+            getSnapshot?: () => unknown
+            subscribe?: (listener: () => void) => () => void
+          }
+        } | undefined
       } | undefined
       const actx = sessions?.scope?.(sessionId)
       if (actx === undefined) return undefined
       return { actx, binding: sessions?.binding?.(sessionId) }
+    } catch {
+      return undefined
+    }
+  }
+  /**
+   * Subscribe to the session LIST store — the one observable the host documents as carrying a session's
+   * `running` state (`SessionSummary.running`, fed by the controller's running-state change).
+   * @param listener - called on every list-store change.
+   * @returns the unsubscribe, or undefined on a build without the store.
+   */
+  const watchList = (listener: () => void): (() => void) | undefined => {
+    try {
+      const sessions = ctx.get('sessions') as {
+        list?: { subscribe?: (fn: () => void) => () => void }
+      } | undefined
+      const stop = sessions?.list?.subscribe?.(listener)
+      return typeof stop === 'function' ? stop : undefined
     } catch {
       return undefined
     }
@@ -255,7 +317,30 @@ export function createChatBridge(ctx: ClientContext): ChatBridge {
       return () => {}
     }
     const unsubscribes: (() => void)[] = []
-    const notify = (): void => { listener(currentView(sessionId)) }
+    // Only a CHANGE is delivered, whoever asked. A transcript that was rebuilt into equal nodes, or the
+    // session store reporting something this view does not read, would otherwise hand the panel a fresh
+    // object: a React re-render, and — for a block that is waiting — a state write that travels on into the
+    // page's comment memory. Equal reads are dropped here instead.
+    let delivered: ChatView | undefined
+    const notify = (): void => {
+      const view = currentView(sessionId)
+      if (sameView(delivered, view)) return
+      delivered = view
+      listener(view)
+    }
+    // The turn state first: `running` and the queue are NOT published through the chat target, they are the
+    // session's own snapshot — and that snapshot is an observable (`SessionFace`), so its store reports the
+    // turn ENDING quietly, which is the report that was missing (a comment sat at "答复中" long after its
+    // session was done). The list store carries the same running state (`SessionSummary.running`), so it is
+    // subscribed too: whichever of the two the host actually publishes through, one of them fires.
+    try {
+      const stopSession = target.binding?.session?.subscribe?.(notify)
+      if (typeof stopSession === 'function') unsubscribes.push(stopSession)
+    } catch {
+      // A session face without a store falls through to the other two below.
+    }
+    const stopList = watchList(notify)
+    if (stopList !== undefined) unsubscribes.push(stopList)
     try {
       const uiConversation = ctx.get('uiConversation') as {
         binding?: (id: SessionId) => { target?: (name: string) => { subscribe?: (fn: () => void) => () => void } | undefined } | undefined
@@ -268,7 +353,14 @@ export function createChatBridge(ctx: ClientContext): ChatBridge {
       // A build without the target falls back to the initial snapshot below.
     }
     notify()
-    return () => { for (const stop of unsubscribes) stop() }
+    // A reconcile tick, for a build that exposed NEITHER store above: the panel cannot ask for a re-read,
+    // and an unreported turn-end is a stuck block. It is the fallback, not the design — with a
+    // subscription in place a change arrives as it happens and no timer is installed (see the test).
+    const refresh = unsubscribes.length > 0 ? undefined : window.setInterval(notify, TURN_STATE_REFRESH_MS)
+    return () => {
+      for (const stop of unsubscribes) stop()
+      if (refresh !== undefined) window.clearInterval(refresh)
+    }
   }
   return { ask, watch }
 }
