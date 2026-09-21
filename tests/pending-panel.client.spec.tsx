@@ -2895,6 +2895,149 @@ describe('PendingPanel', () => {
     expect(Number.parseFloat((document.querySelector('[data-diff-block-flash]') as HTMLElement).style.top)).toBe(0)
   })
 
+  it('goes to a line from the toolbar popup, and leaves on cancel, Escape or a click away', async () => {
+    // The number names a line of the file as it reads NOW: the row carrying that new-file line is landed on,
+    // with the configured lead rows above it and the block it sits in flashed. Nothing is done for a number
+    // the current side does not have — the reader is told instead.
+    const file = entry({ id: 'entry-goto', path: '/repo/goto.txt', kind: 'create', oldText: '', newText: Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join('\n') })
+    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('goto.txt'))
+
+    const restore = stubCodeScroll()
+    try {
+      const open = (): HTMLElement => {
+        fireEvent.click(document.querySelector('[data-diff-goto]') as HTMLElement)
+        const dialog = document.querySelector('[data-diff-goto-dialog]')
+        expect(dialog).not.toBeNull()
+        return document.querySelector('[data-diff-goto-input]') as HTMLElement
+      }
+
+      // Enter confirms: line 10 is the tenth of the twenty added rows, so the view lands a lead above it.
+      const input = open()
+      // It is mounted in the CODE VIEW, not under the button that asked for it: the layer lives in the box
+      // that holds the scroller, which is what makes "centred on the code view" true.
+      const layer = document.querySelector('[data-diff-goto-layer]') as HTMLElement
+      expect(layer.parentElement?.querySelector('[data-diff-body]')).not.toBeNull()
+      // One code box here, so the layer fills it whole: the pane it centres against is that single column.
+      expect(layer.dataset.diffGotoPane).toBe('code')
+      expect((document.querySelector('[data-diff-goto]') as HTMLElement).parentElement?.querySelector('[data-diff-goto-dialog]')).toBeNull()
+      fireEvent.change(input, { target: { value: '10' } })
+      fireEvent.keyDown(input, { key: 'Enter' })
+      expect(document.querySelector('[data-diff-goto-dialog]')).toBeNull()
+      expect(codeBody().scrollTop).toBe(Math.max(0, (10 - 1) * diffLineHeight() - navLeadRows() * diffLineHeight()))
+
+      // Cancel leaves everything as it was.
+      const before = codeBody().scrollTop
+      open()
+      fireEvent.click(document.querySelector('[data-diff-goto-cancel]') as HTMLElement)
+      expect(document.querySelector('[data-diff-goto-dialog]')).toBeNull()
+      expect(codeBody().scrollTop).toBe(before)
+
+      // Escape too, and a press anywhere else dismisses it the same way.
+      fireEvent.keyDown(open(), { key: 'Escape' })
+      expect(document.querySelector('[data-diff-goto-dialog]')).toBeNull()
+      open()
+      fireEvent.click(document.querySelector('[data-diff-goto-backdrop]') as HTMLElement)
+      expect(document.querySelector('[data-diff-goto-dialog]')).toBeNull()
+
+      // The Go button is the same answer as Enter — one function behind both — and it is the brand-coloured
+      // one of the pair: the tokens it wears that 取消 does not are the primary pair's.
+      const go = open()
+      const goButton = document.querySelector('[data-diff-goto-go]') as HTMLElement
+      const cancelButton = document.querySelector('[data-diff-goto-cancel]') as HTMLElement
+      const keepButton = document.querySelector('[data-diff-keep]') as HTMLElement
+      const primaryTokens = [...keepButton.classList].filter(token => !cancelButton.classList.contains(token))
+      expect(primaryTokens.length).toBeGreaterThan(0)
+      expect(primaryTokens.some(token => goButton.classList.contains(token))).toBe(true)
+      fireEvent.change(go, { target: { value: '3' } })
+      fireEvent.click(goButton)
+      expect(codeBody().scrollTop).toBe(Math.max(0, 2 * diffLineHeight() - navLeadRows() * diffLineHeight()))
+
+      // Focus leaving the popup closes it; a move to its own buttons is not leaving, or they could never be
+      // pressed (the press blurs the field first).
+      const blurred = open()
+      fireEvent.blur(blurred, { relatedTarget: document.querySelector('[data-diff-goto-go]') })
+      expect(document.querySelector('[data-diff-goto-dialog]')).not.toBeNull()
+      fireEvent.blur(blurred)
+      expect(document.querySelector('[data-diff-goto-dialog]')).toBeNull()
+
+      // A line the current file does not have is answered with a note, not a jump.
+      const missing = open()
+      fireEvent.change(missing, { target: { value: '9999' } })
+      fireEvent.keyDown(missing, { key: 'Enter' })
+      expect(document.querySelector('[data-diff-goto-dialog]')).toBeNull()
+      await waitFor(() => { expect(screen.getByText('panel.gotoMissing {"line":9999}')).toBeDefined() })
+    } finally {
+      restore()
+    }
+  })
+
+  it('keeps the go-to popup in the search bar\'s own recipe', () => {
+    // The popup is meant to read as a sibling of the search bar, and jsdom lays nothing out to show it: the
+    // sheet is compared instead, declaration by declaration, so the two cannot drift apart unnoticed.
+    const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const rule = (name: string): string => new RegExp(`^\\.${name} \\{([^}]*)\\}`, 'm').exec(sheet)?.[1] ?? ''
+    const bar = rule('searchBar')
+    const box = rule('gotoBox')
+    for (const declaration of ['border: 1px solid var(--dsw-alias-border-l2)', 'border-radius: 10px',
+      'background: var(--dsw-alias-markdown-code-block)', 'box-shadow: var(--dsw-shadow-lv1)',
+      'padding: 4px', 'gap: 4px']) {
+      expect(bar).toContain(declaration)
+      expect(box).toContain(declaration)
+    }
+    const searchInput = rule('searchInput')
+    const gotoInput = rule('gotoInput')
+    for (const declaration of ['padding: 3px 8px', 'border-radius: 6px', 'font-size: 12px', 'line-height: 18px',
+      'background: var(--dsw-alias-bg-base)']) {
+      expect(searchInput).toContain(declaration)
+      expect(gotoInput).toContain(declaration)
+    }
+    // The focus ring is the bar's own too.
+    expect(rule('searchInput:focus')).toContain('border-color: var(--dsw-alias-state-business-primary)')
+    // Centred on the code view's own box, and each button keeps one line: squeezed in the row, their labels
+    // wrapped onto two and the box read as ragged. The field is the size of a line number, not of the bar.
+    expect(rule('gotoLayer')).toContain('position: absolute')
+    expect(rule('gotoLayer')).toContain('place-items: center')
+    // Side by side, the centring is against the right pane — the column that is read there — with the two
+    // things in that half that are not code left out: the scroller's own bar and the pinned strips row.
+    const right = rule('gotoLayerRight')
+    expect(right).toContain('left: 50%')
+    expect(right).toContain('right: var(--dsh-scrollbar-width, 8px)')
+    expect(right).toContain('bottom: calc(var(--dsh-scrollbar-width, 8px) + 1px)')
+    expect(rule('gotoAction')).toContain('white-space: nowrap')
+    expect(rule('gotoAction')).toContain('flex: none')
+    expect(rule('gotoInput')).toContain('width: 9em')
+    expect(rule('gotoInput')).toContain('flex: none')
+    // 确定 is the brand-coloured one, like every other primary action in the panel.
+    expect(rule('actionPrimary')).toContain('background: var(--dsw-alias-state-business-primary)')
+  })
+
+  it('centres the go-to popup on the side-by-side view too', () => {
+    // The side-by-side view is a component of its own, so its popup arrives as a prop and is mounted in its
+    // root — with the scroller the two panes share, which is the box the centring is against.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const file = entry({ id: 'entry-goto-split', path: '/repo/gs.txt', oldText: 'a\nb\n', newText: 'A\nb\n' })
+    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('gs.txt'))
+
+    fireEvent.click(document.querySelector('[data-diff-goto]') as HTMLElement)
+    const layer = document.querySelector('[data-diff-goto-layer]') as HTMLElement
+    expect(layer).not.toBeNull()
+    expect(layer.parentElement?.querySelector('[data-diff-body]')).not.toBeNull()
+    // But here there are two code boxes side by side and the reader reads the right one, so the layer is cut
+    // back to that half of the root rather than filling it: the variant class is what does the cutting, and
+    // the attribute names the pane.
+    expect(layer.dataset.diffGotoPane).toBe('right')
+    expect(layer.className).toContain('gotoLayerRight')
+    // The half being cut off is the pane the reader is not reading: the root holds exactly the two columns,
+    // left first, and the right one is the second half of the box the layer is measured against.
+    const columns = layer.parentElement!.querySelectorAll('[data-diff-body] > * > [data-diff-split-side]')
+    expect(columns).toHaveLength(2)
+    expect(columns[1]!.getAttribute('data-diff-split-side')).toBe('right')
+  })
+
   it('marks changed lines on the scrollbar overview ruler in diff colors', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     const view = render(<PendingPanel {...props} />)

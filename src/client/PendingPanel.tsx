@@ -1914,7 +1914,9 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   selectionComment?: ReactNode
   /** The changed-line runs the overview ruler draws, in whole-file row indices. */
   rulerRuns: readonly RulerRun[]
-}>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert, onWrapToast, onVisibleLines, discussions, renderDiscussion, selectionComment, rulerRuns }, ref) {
+  /** The go-to popup, which this view centres on its own box (see `gotoDialog`). */
+  gotoDialog?: ReactNode
+}>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert, onWrapToast, onVisibleLines, discussions, renderDiscussion, selectionComment, rulerRuns, gotoDialog }, ref) {
   // Use the configured line height for the split virtual window and jump math
   // (the rendered split rows already size to the same value).
   // eslint-disable-next-line @typescript-eslint/no-shadow
@@ -2879,6 +2881,8 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
           ))}
         </div>
       )}
+      {/* The go-to popup, centred on this view the way the single column centres it on its own wrapper. */}
+      {gotoDialog}
       {/* The selection's own frame: a range in either half offers the comment, which is the one
           action this view takes on a selection (keep/revert belong to the change blocks' own frames
           here). It is placed against the scroller the two halves share — the content offset of the
@@ -5656,6 +5660,92 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
   }, [])
 
+  /**
+   * The popup's one answer. Enter and the 确定 button both run this, so the key and the press are literally
+   * the same action: the number is read, the popup closes, and a number the current side does not have is
+   * answered with a note instead of a jump (see `gotoLine`).
+   */
+  const submitGoto = (): void => {
+    const line = Number.parseInt(gotoDraft.trim(), 10)
+    setGotoOpen(false)
+    if (Number.isFinite(line) && line > 0) gotoLine(line)
+  }
+
+  /**
+   * The go-to popup, centred on the code view: the layer fills that view's own box (the single column's
+   * wrapper, or the side-by-side view's root, which is why it is handed to `SplitDiff` there), and the
+   * parts wear the search bar's recipe (see `.gotoBox` / `.gotoInput`). Side by side there are two code
+   * boxes rather than one, and the one being read is the right pane: the layer is cut back to that half
+   * (`splitView`, see `.gotoLayerRight`), which is what `data-diff-goto-pane` records for the tests. A
+   * press anywhere dismisses it — the layer catches the presses inside the code view, the full-window
+   * catcher the rest — while the bar itself stops them. Escape, Cancel and focus leaving the popup leave
+   * everything as it was.
+   */
+  const gotoDialog = !gotoOpen || previewActive ? null : (
+    <>
+      <div className={css.gotoBackdrop} data-diff-goto-backdrop aria-hidden="true" onClick={() => { setGotoOpen(false) }} />
+      <div
+        className={`${css.gotoLayer}${splitView ? ` ${css.gotoLayerRight}` : ''}`}
+        data-diff-goto-layer
+        data-diff-goto-pane={splitView ? 'right' : 'code'}
+        onClick={() => { setGotoOpen(false) }}
+      >
+        <div
+          role="dialog"
+          aria-label={t('action.goto')}
+          data-diff-goto-dialog
+          className={css.gotoBox}
+          onClick={(event) => { event.stopPropagation() }}
+          // Focus leaving the popup closes it — that is the reader pressing somewhere that takes focus, or
+          // tabbing out — while a move to its own buttons is not leaving: they have to stay clickable.
+          onBlur={(event) => {
+            if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return
+            setGotoOpen(false)
+          }}
+        >
+          <input
+            className={css.gotoInput}
+            data-diff-goto-input
+            value={gotoDraft}
+            autoFocus
+            inputMode="numeric"
+            spellCheck={false}
+            autoComplete="off"
+            aria-label={t('action.goto')}
+            placeholder={t('action.goto')}
+            onChange={(event) => { setGotoDraft(event.target.value) }}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                setGotoOpen(false)
+                return
+              }
+              if (event.key !== 'Enter') return
+              event.preventDefault()
+              submitGoto()
+            }}
+          />
+          <button
+            type="button"
+            className={`${css.action} ${css.actionPrimary} ${css.gotoAction}`}
+            data-diff-goto-go
+            onClick={submitGoto}
+          >
+            {t('action.gotoGo')}
+          </button>
+          <button
+            type="button"
+            className={`${css.action} ${css.gotoAction}`}
+            data-diff-goto-cancel
+            onClick={() => { setGotoOpen(false) }}
+          >
+            {t('action.gotoCancel')}
+          </button>
+        </div>
+      </div>
+    </>
+  )
+
   // Step the hovered block's floating actions frame to the adjacent diff block
   // (wrapping). Both the hovered block (the frame follows it) and the focused
   // block (which recenters and re-flashes) advance together; the shared
@@ -6442,75 +6532,21 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
           </button>
         </Tooltip>
         {previewActive ? null : (
-          <Tooltip label={withChord(t('action.goto'), 'goto')} side="bottom" delayMs={500}>
-            <button
-              type="button"
-              className={`${css.action} ${css.iconAction}`}
-              data-diff-goto
-              aria-label={t('action.goto')}
-              onClick={() => { setGotoDraft(''); setGotoOpen(true) }}
-            >
-            <GotoLineIcon />
-            </button>
-          </Tooltip>
-        )}
-        {gotoOpen && (
-          // A dialog, not a bar: the number is a whole answer, and Enter confirms it. Escape and Cancel
-          // leave everything as it was.
-          <div
-            role="dialog"
-            aria-label={t('action.goto')}
-            data-diff-goto-dialog
-            style={{ position: 'fixed', inset: 0, zIndex: 40, display: 'grid', placeItems: 'center', background: 'rgba(0, 0, 0, 0.18)' }}
-            onClick={() => { setGotoOpen(false) }}
-          >
-            <div
-              className={css.gotoBox}
-              style={{ display: 'flex', gap: 8, alignItems: 'center', padding: 12, borderRadius: 12, background: 'var(--dsw-alias-bg-base)', boxShadow: 'var(--dsw-shadow-lv2)' }}
-              onClick={(event) => { event.stopPropagation() }}
-            >
-              <input
-                className={css.gotoInput}
-                data-diff-goto-input
-                value={gotoDraft}
-                autoFocus
-                inputMode="numeric"
-                spellCheck={false}
-                autoComplete="off"
-                aria-label={t('action.goto')}
-                placeholder={t('action.goto')}
-                style={{ width: '8em', padding: '4px 8px', borderRadius: 8, border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent', color: 'inherit', font: 'inherit' }}
-                onChange={(event) => { setGotoDraft(event.target.value) }}
-                onKeyDown={(event) => {
-                  if (event.key === 'Escape') {
-                    event.preventDefault()
-                    setGotoOpen(false)
-                    return
-                  }
-                  if (event.key !== 'Enter') return
-                  event.preventDefault()
-                  const line = Number.parseInt(gotoDraft.trim(), 10)
-                  setGotoOpen(false)
-                  if (Number.isFinite(line) && line > 0) gotoLine(line)
-                }}
-              />
+          // The button only asks; the popup itself is rendered by the code view it belongs to (see
+          // `gotoDialog`), so it can be centred on that view's own box.
+          <span className={css.gotoHost}>
+            <Tooltip label={withChord(t('action.goto'), 'goto')} side="bottom" delayMs={500}>
               <button
                 type="button"
-                className={css.action}
-                data-diff-goto-go
-                onClick={() => {
-                  const line = Number.parseInt(gotoDraft.trim(), 10)
-                  setGotoOpen(false)
-                  if (Number.isFinite(line) && line > 0) gotoLine(line)
-                }}
+                className={`${css.action} ${css.iconAction}`}
+                data-diff-goto
+                aria-label={t('action.goto')}
+                onClick={() => { setGotoDraft(''); setGotoOpen(true) }}
               >
-                {t('action.gotoGo')}
+              <GotoLineIcon />
               </button>
-              <button type="button" className={css.action} data-diff-goto-cancel onClick={() => { setGotoOpen(false) }}>
-                {t('action.gotoCancel')}
-              </button>
-            </div>
-          </div>
+            </Tooltip>
+          </span>
         )}
         <span className={css.divider} />
         <Tooltip label={t(splitView ? 'action.viewUnified' : 'action.viewSplit')} side="bottom" delayMs={500}>
@@ -6753,6 +6789,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
           discussions={laidDiscussions}
           renderDiscussion={renderDiscussion}
           rulerRuns={rulerMarkers}
+          gotoDialog={gotoDialog}
           // A range in either half offers the comment; keep/revert stay with the change blocks' own
           // frames here (see `frameForSelection`).
           selectionComment={splitView && selectionCommentOffered ? (
@@ -6970,6 +7007,8 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
           />
         )}
         {searchBar}
+        {/* The go-to popup, centred on the code view it belongs to (see `gotoDialog`). */}
+        {gotoDialog}
         {rulerMarkers.length > 0 && (
           <div
             className={css.overviewRuler}
@@ -8538,6 +8577,9 @@ export function PendingPanel({
       const target = event.target
       const inPanel = target instanceof Node && panelRef.current?.contains(target) === true
       if (inPanel && document.querySelector('[data-diff-searchbar]') !== null) return
+      // The go-to popup is the innermost dismissible too, and its own Escape is what closes it — the same
+      // rule the search bar gets, so one press never takes the popup AND the panel behind it.
+      if (inPanel && document.querySelector('[data-diff-goto-dialog]') !== null) return
       event.preventDefault()
       closePanel()
     }

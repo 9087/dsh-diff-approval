@@ -2012,24 +2012,77 @@
 
 /* The go-to-line dialog's box and field. The scrim around it is inline (a fixed overlay, one place,
    no theme values); these carry the two pieces that have to read as panel chrome. */
+/* The go-to popup. It is centred on the CODE VIEW — its layer fills that view's own box (`.diffBodyWrap`
+   or `.splitRoot`) — and its parts are the search bar's recipe: the same border, tracking surface, radius,
+   level-1 shadow and 4px inset row, over the same input box (see `.searchBar` / `.searchInput`), so the
+   two popups read as one family. */
+.gotoHost {
+  display: inline-flex;
+}
+
+.gotoLayer {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+}
+
+/* Side by side there are two code boxes rather than one, and the reader reads the RIGHT one, so the popup
+   is centred on that pane: the two columns split the root evenly, and the right half starts at its middle.
+   What is not code is cut off inside that half too — the scroller's own vertical bar along its right edge,
+   and the pinned strips row along the bottom of the root (8px + its 1px border-top). */
+.gotoLayerRight {
+  left: 50%;
+  right: var(--dsh-scrollbar-width, 8px);
+  bottom: calc(var(--dsh-scrollbar-width, 8px) + 1px);
+}
+
+/* A press anywhere at all dismisses it — the code view's own area included — and this layer paints
+   nothing, so the panel keeps its colours while the press is caught. */
+.gotoBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 29;
+}
+
 .gotoBox {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px;
-  border-radius: 12px;
-  background: var(--dsw-alias-bg-base);
-  box-shadow: var(--dsw-shadow-lv2);
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-markdown-code-block);
+  box-shadow: var(--dsw-shadow-lv1);
 }
 
 .gotoInput {
-  width: 8em;
-  padding: 4px 8px;
-  border-radius: 8px;
+  /* A line number is a few digits: the field is the size of one, not the size of the bar. */
+  flex: none;
+  width: 9em;
+  padding: 3px 8px;
   border: 1px solid var(--dsw-alias-border-l2);
-  background: transparent;
-  color: inherit;
-  font: inherit;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  outline: none;
+}
+
+.gotoInput:focus {
+  border-color: var(--dsw-alias-state-business-primary);
+}
+
+/* The two buttons keep their own size and their label on one line: squeezed in the row, their text
+   wrapped onto two, which is what made the box look ragged. */
+.gotoAction {
+  flex: none;
+  white-space: nowrap;
 }
 
 /* Vertical divider between grouped toolbar controls (e.g. search | view mode). */
