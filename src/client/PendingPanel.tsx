@@ -8206,8 +8206,13 @@ export function PendingPanel({
     return files
       .map(file => ({
         fileId: file.id,
-        // The file's own name: what the file list shows it as, and what the reader calls it.
+        // The file's own name: what the file list shows it as, and what the reader calls it. Two files of
+        // the same name in different directories then share a heading, which is what the path in each
+        // comment's own reference is for (`:8` names the lines there, the block names the file in full).
         name: basenameOf(file.path),
+        // …and the full path, which is what an item names on hover: a name can be shared, and this is how
+        // the reader tells which file a comment is in without opening it.
+        path: file.path,
         entries: (threads[file.id] ?? []).map(discussion => {
           const written = commentTitle(discussion)
           const empty = written === ''
@@ -8347,7 +8352,11 @@ export function PendingPanel({
               <div data-diff-comment-list>
                 {commentGroups.map(group => (
                   <div key={group.fileId} className={css.commentGroup} data-diff-comment-group={group.fileId}>
-                    <h4 className={css.commentGroupName} data-diff-comment-group-name>{group.name}</h4>
+                    {/* The group names the file the short way the file list does, and a name can be shared:
+                        a hover here is where the file is named in full. */}
+                    <Tooltip label={group.path} delayMs={500} maxWidth={560}>
+                      <h4 className={css.commentGroupName} data-diff-comment-group-name>{group.name}</h4>
+                    </Tooltip>
                     <ul className={css.rows}>
                       {group.entries.map(entry => (
                         <li key={entry.id} className={css.row}>

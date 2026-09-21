@@ -1074,7 +1074,7 @@ describe('PendingPanel', () => {
     expect(Number.parseFloat(/width:\s*([\d.]+)px/.exec(rule('fileList'))?.[1] ?? '0')).toBeGreaterThanOrEqual(needed)
   })
 
-  it('lists the comments the open files carry in a second tab, and jumps to one', () => {
+  it('lists the comments the open files carry in a second tab, and jumps to one', async () => {
     // The list pane has two tabs: the pending files, and every comment the files in the list carry.
     // A comment is a block of rows in one file, so its item is the rows it hangs on, the first
     // sentence of what was asked, and — when the code under it has moved on — that it is outdated.
@@ -1176,6 +1176,14 @@ describe('PendingPanel', () => {
     expect(group).not.toBeNull()
     expect(group.querySelector('[data-diff-comment-group-name]')?.textContent).toBe('rows.txt')
     expect(items[0]!.parentElement?.parentElement?.tagName).toBe('UL')
+    // The group names the file the short way the file list does, and a name can be shared: a hover on that
+    // name is where the file it belongs to is named in full — the comment items under it carry no tooltip.
+    const groupName = group.querySelector('[data-diff-comment-group-name]') as HTMLElement
+    fireEvent.mouseEnter(groupName)
+    await waitFor(() => { expect(screen.getByRole('tooltip').textContent).toBe('/repo/rows.txt') })
+    fireEvent.mouseLeave(groupName)
+    act(() => { items[0]!.focus() })
+    expect(screen.queryByRole('tooltip')).toBeNull()
 
     // Clicking one lands on the comment the way a jump to a change block lands: the row is left the
     // configured lead rows below the code view's top edge. (The code view needs its scroll range:
