@@ -8208,19 +8208,26 @@ export function PendingPanel({
         fileId: file.id,
         // The file's own name: what the file list shows it as, and what the reader calls it.
         name: basenameOf(file.path),
-        entries: (threads[file.id] ?? []).map(discussion => ({
-          id: discussion.id,
-          fileId: file.id,
-          row: discussion.anchor.start,
-          // The row the thread's box hangs below, which is what an outdated thread is landed on.
-          end: discussion.anchor.end,
-          // The file itself is the group above, so the reference is cut to what is left of it: the lines
-          // it names — `[8]`, or `[10-17]` for a range — bracketed so the row opens with a marker rather
-          // than with a bare digit that could be anything.
-          label: `[${lineRangeLabel(discussion.anchor.startLine, discussion.anchor.endLine)}]`,
-          title: commentTitle(discussion) || t('panel.commentEmptyTitle'),
-          lost: discussion.lost === true,
-        })),
+        entries: (threads[file.id] ?? []).map(discussion => {
+          const written = commentTitle(discussion)
+          const empty = written === ''
+          return {
+            id: discussion.id,
+            fileId: file.id,
+            row: discussion.anchor.start,
+            // The row the thread's box hangs below, which is what an outdated thread is landed on.
+            end: discussion.anchor.end,
+            // The file itself is the group above, so the reference is cut to what is left of it: the lines
+            // it names — `[8]`, or `[10-17]` for a range — bracketed so the row opens with a marker rather
+            // than with a bare digit that could be anything.
+            label: `[${lineRangeLabel(discussion.anchor.startLine, discussion.anchor.endLine)}]`,
+            // Nothing written yet: the item says what the comment box is asking for, in the box's own
+            // words (the reader may be looking at a box placed and left empty on some other file).
+            title: empty ? t('discussion.placeholder') : written,
+            empty,
+            lost: discussion.lost === true,
+          }
+        }),
       }))
       .filter(group => group.entries.length > 0)
   }, [files, current, commentsTick, t])
@@ -8378,7 +8385,11 @@ export function PendingPanel({
                                 the room and reads from the left, the line numbers sit at the row's right
                                 edge, so a file's comments line up on the side the eye scans them by. */}
                             <span className={css.commentHead}>
-                              <span className={css.commentTitle} data-diff-comment-title>{entry.title}</span>
+                              <span
+                                className={entry.empty ? `${css.commentTitle} ${css.commentTitleEmpty}` : css.commentTitle}
+                                data-diff-comment-title
+                                data-diff-comment-empty={entry.empty ? '' : undefined}
+                              >{entry.title}</span>
                               {entry.lost && (
                                 <span className={css.commentLost} data-diff-comment-lost>{t('panel.commentOutdated')}</span>
                               )}

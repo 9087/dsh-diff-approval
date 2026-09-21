@@ -1794,6 +1794,13 @@
   line-height: 18px;
 }
 
+/* A comment box the reader placed and left empty has no title of its own to list, so the item carries
+   the box's own placeholder text — and wears the tone a placeholder wears (the same tertiary the input's
+   own `::placeholder` is set to), or "写下你的评论…" would read as something the reader wrote. */
+.commentTitleEmpty {
+  color: var(--dsw-alias-label-tertiary);
+}
+
 /* The comments tab with nothing in it. Same tone as the list's other notes. */
 .listEmpty {
   margin: 8px 12px;

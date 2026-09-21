@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 // PendingPanel: badge, per-path grouping, per-operation rows, actions, jump
 // navigation, live-state warnings, and the line-selection copy toolbar.
 
@@ -1127,9 +1127,19 @@ describe('PendingPanel', () => {
     // at its own first full stop like any other title.
     expect(items[2]!.textContent).toContain('还没发送的内容。')
     expect(items[2]!.textContent).not.toContain('后面的句子')
-    // …and a comment box placed and left empty has nothing to quote, so it says so instead of
-    // listing as a blank line.
-    expect(items[3]!.querySelector('[data-diff-comment-title]')?.textContent).toBe('panel.commentEmptyTitle')
+    // …and a comment box placed and left empty has nothing of the reader's to quote, so the item says
+    // what that box is asking for — its own placeholder — and wears the tone a placeholder wears, so it
+    // does not read as something already written.
+    const blank = items[3]!.querySelector('[data-diff-comment-title]') as HTMLElement
+    expect(blank.textContent).toBe('discussion.placeholder')
+    expect(blank.getAttribute('data-diff-comment-empty')).toBe('')
+    expect(blank.className).not.toBe(items[0]!.querySelector('[data-diff-comment-title]')?.className)
+    expect(items[0]!.querySelector('[data-diff-comment-title]')?.getAttribute('data-diff-comment-empty')).toBeNull()
+    // …and the cascade really does tell the two apart, rather than the item merely wearing another class:
+    // the empty one resolves to the input placeholder's own tone, the written one to the content colour.
+    const normalTitle = items[0]!.querySelector('[data-diff-comment-title]') as HTMLElement
+    expect(getComputedStyle(blank).color).toBe('var(--dsw-alias-label-tertiary)')
+    expect(getComputedStyle(normalTitle).color).toBe('var(--dsw-alias-label-primary)')
     // Pocket's copy-file button is refused on these items, and so is its narrow-layout click guard:
     // that one swallows the press on any `button, a` whose text looks like a file path, so the item
     // is a control without being one of those elements.
@@ -1155,6 +1165,12 @@ describe('PendingPanel', () => {
     expect(title).toContain('flex: 1')
     expect(title).toContain('text-align: left')
     expect(title).toContain('text-overflow: ellipsis')
+    // The empty item's tone is the input's own placeholder tone, read off that rule rather than repeated
+    // here, so the two cannot drift apart.
+    const inputPlaceholder = /^\.discussionInput::placeholder \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
+    const placeholderTone = /color:\s*([^;]+);/.exec(inputPlaceholder)?.[1] ?? ''
+    expect(placeholderTone).not.toBe('')
+    expect(/^\.commentTitleEmpty \{([^}]*)\}/m.exec(sheet)?.[1] ?? '').toContain(`color: ${placeholderTone}`)
     // …and each item sits in its file's own group, under that file's name.
     const group = items[0]!.closest('[data-diff-comment-group]') as HTMLElement
     expect(group).not.toBeNull()
