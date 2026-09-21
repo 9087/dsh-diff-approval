@@ -1105,10 +1105,10 @@ describe('PendingPanel', () => {
     const items = [...document.querySelectorAll('[data-diff-comment-link]')] as HTMLElement[]
     expect(items.length).toBe(4)
     expect(items[0]!.querySelector('[data-diff-comment-label]')?.textContent).toContain(':8')
-    expect(items[0]!.textContent).toContain('这一行为什么要改？')
-    expect(items[0]!.textContent).not.toContain('后面这句')
     expect(items[0]!.querySelector('[data-diff-comment-lost]')).toBeNull()
     expect(items[1]!.querySelector('[data-diff-comment-lost]')).not.toBeNull()
+    expect(items[0]!.textContent).toContain('这一行为什么要改？')
+    expect(items[0]!.textContent).not.toContain('后面这句')
     // A thread that has not been sent yet has no turn to quote: its draft is what the item shows, cut
     // at its own first full stop like any other title.
     expect(items[2]!.textContent).toContain('还没发送的内容。')
@@ -1128,7 +1128,11 @@ describe('PendingPanel', () => {
     const comment = /^\.commentRow \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
     expect(comment).toContain('padding: 6px 8px')
     expect(comment).toContain('border-radius: 10px')
-    expect(items[0]!.parentElement?.className).toBe(document.querySelector('[data-diff-comment-list]')?.firstElementChild?.className ?? '')
+    // …and each item sits in its file's own group, under that file's name.
+    const group = items[0]!.closest('[data-diff-comment-group]') as HTMLElement
+    expect(group).not.toBeNull()
+    expect(group.querySelector('[data-diff-comment-group-name]')?.textContent).toBe('rows.txt')
+    expect(items[0]!.parentElement?.parentElement?.tagName).toBe('UL')
 
     // Clicking one lands on the comment the way a jump to a change block lands: the row is left the
     // configured lead rows below the code view's top edge. (The code view needs its scroll range:
@@ -1142,6 +1146,62 @@ describe('PendingPanel', () => {
     } finally {
       restore()
     }
+  })
+
+  it('groups the session\'s comments by the file they hang in', () => {
+    // The tab is the whole session's comments, and the file is how they are grouped: one group per file
+    // that carries any, under the name the list knows that file by. Nothing folds — every group is open —
+    // so the group is a heading and the comments under it, exactly as they were.
+    act(() => { setCommentModeEnabled(true) })
+    const alpha = entry({ id: 'entry-grouped-a', path: '/repo/alpha.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
+    const beta = entry({ id: 'entry-grouped-b', path: '/repo/deep/beta.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
+    const quiet = entry({ id: 'entry-grouped-c', path: '/repo/gamma.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
+    const thread = (id: string, line: number, text: string): unknown => ({
+      id,
+      anchor: { start: line - 1, end: line - 1, startLine: line, endLine: line },
+      collapsed: false,
+      draft: '',
+      lost: false,
+      messages: [{ role: 'user', text }],
+    })
+    rememberDiscussions(S1, {
+      [alpha.id]: [thread('d-alpha-one', 1, '第一处'), thread('d-alpha-two', 2, '第二处')],
+      [beta.id]: [thread('d-beta-one', 1, '另一份里的一处')],
+      [quiet.id]: [],
+    } as unknown as Parameters<typeof rememberDiscussions>[1])
+    // Handed over in the order beta, quiet, alpha: the groups follow the list's own order (by displayed
+    // name), which is the order the file rows are in.
+    render(<PendingPanel {...panelProps({ read: true, files: [beta, quiet, alpha], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+
+    const groups = [...document.querySelectorAll('[data-diff-comment-group]')] as HTMLElement[]
+    // Two files carry comments; the third carries none, and gets no group rather than an empty one.
+    expect(groups.map(group => group.getAttribute('data-diff-comment-group'))).toEqual([alpha.id, beta.id])
+    expect(groups.map(group => group.querySelector('[data-diff-comment-group-name]')?.textContent))
+      .toEqual(['alpha.txt', 'beta.txt'])
+    expect(groups.map(group => group.querySelectorAll('[data-diff-comment-link]').length)).toEqual([2, 1])
+    for (const group of groups) {
+      // The comments hang under their own group, and the group's name is a heading rather than a control:
+      // there is nothing to open or close.
+      for (const item of group.querySelectorAll('[data-diff-comment-link]')) {
+        expect(item.closest('[data-diff-comment-group]')).toBe(group)
+      }
+      const name = group.querySelector('[data-diff-comment-group-name]') as HTMLElement
+      expect(name.tagName).toBe('H4')
+      expect(name.closest('button, [role="button"]')).toBeNull()
+    }
+    // The tab counts the comments themselves, not the groups.
+    expect(document.querySelector('[data-diff-list-count]')?.textContent).toBe('3')
+
+    // The name is smaller and quieter than the comments under it. jsdom lays nothing out and cascades
+    // nothing, so the two rules are compared in the sheet: 11px against the title's 12px, and the tone
+    // the list's own faint notes wear.
+    const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const rule = (name: string): string => new RegExp(`^\\.${name} \\{([^}]*)\\}`, 'm').exec(sheet)?.[1] ?? ''
+    const size = (name: string): number => Number.parseFloat(/font-size:\s*([\d.]+)px/.exec(rule(name))?.[1] ?? '0')
+    expect(size('commentGroupName')).toBeLessThan(size('commentTitle'))
+    expect(rule('commentGroupName')).toContain('color: var(--dsw-alias-label-tertiary)')
   })
 
   it('ends a comment from the list, and takes its block with it', () => {

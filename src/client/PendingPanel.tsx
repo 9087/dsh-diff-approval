@@ -905,7 +905,8 @@ export function frameInsets(): { top: number; bottom: number; left: number; righ
  * A thread that has not been sent yet has no turn at all: what the reader has typed so far is its
  * draft, and that is what the item shows, so a comment being written is not listed as a blank line.
  * A thread with neither has nothing to quote — an empty comment box the reader placed and left — and
- * the caller passes in the word for that (see the list).
+ * the caller names it with the box's own placeholder, so the item says what that box is asking for
+ * rather than claiming a title (see the list).
  *
  * @param discussion - the thread to name.
  * @returns the title, or an empty string when there is nothing to say yet.
@@ -8183,28 +8184,46 @@ export function PendingPanel({
     forgetDiscussionsNotIn(current, listedIds)
   }, [current, snapshot.read, listedIds])
   /**
-   * Every comment the files in the list carry, in list order and then in the order their rows run:
-   * what the comments tab shows. A comment IS a block of rows in one file, so its label is the same
-   * `path:lines` reference the thread's own header wears, its title is the first sentence of what
-   * the reader asked (the first turn is the annotation; later ones are follow-ups), and an outdated
-   * one says so — the same state the block itself is wearing (see `[data-lost]`).
+   * Every comment the session's files carry, grouped by the file it hangs in: what the comments tab
+   * shows. The session is the scope — every file of it that is still in the list, whether or not the
+   * reader has opened it, and however many files that is — and the file is what the comments are
+   * grouped by, under the file's own name.
+   *
+   * A comment IS a block of rows in one file, so its label is the lines it names — the `path:lines`
+   * reference the thread's own header wears, with the path left off (the group above IS that file) and
+   * nothing in front of the numbers, which are the whole label at that point. Its title is the first
+   * sentence of what the reader asked (the first turn is the annotation; later ones are follow-ups), and
+   * an outdated one says so — the same state the block itself is wearing (see `[data-lost]`). Within a
+   * group the comments keep the order their rows run, and the groups keep the list's own order (the file
+   * name).
    *
    * The threads are held by the file detail, which is one mount at a time, so they are read back
-   * out of the memory the two share, and re-read whenever they change (`commentsTick`).
+   * out of the memory the two share, and re-read whenever they change (`commentsTick`). A file with
+   * no threads is left out rather than shown with nothing under it.
    */
-  const commentEntries = useMemo(() => {
+  const commentGroups = useMemo(() => {
     const threads = rememberedDiscussions(current)
-    return files.flatMap(file => (threads[file.id] ?? []).map(discussion => ({
-      id: discussion.id,
-      fileId: file.id,
-      row: discussion.anchor.start,
-      // The row the thread's box hangs below, which is what an outdated thread is landed on.
-      end: discussion.anchor.end,
-      label: referenceLabelOf(file.path, snapshot.workspacePath, discussion.anchor.startLine, discussion.anchor.endLine),
-      title: commentTitle(discussion) || t('panel.commentEmptyTitle'),
-      lost: discussion.lost === true,
-    })))
-  }, [files, current, snapshot.workspacePath, commentsTick, t])
+    return files
+      .map(file => ({
+        fileId: file.id,
+        // The file's own name: what the file list shows it as, and what the reader calls it.
+        name: basenameOf(file.path),
+        entries: (threads[file.id] ?? []).map(discussion => ({
+          id: discussion.id,
+          fileId: file.id,
+          row: discussion.anchor.start,
+          // The row the thread's box hangs below, which is what an outdated thread is landed on.
+          end: discussion.anchor.end,
+          // The `path:lines` reference the thread's own header wears, so the item names where it sits.
+          label: referenceLabelOf(file.path, snapshot.workspacePath, discussion.anchor.startLine, discussion.anchor.endLine),
+          title: commentTitle(discussion) || t('panel.commentEmptyTitle'),
+          lost: discussion.lost === true,
+        })),
+      }))
+      .filter(group => group.entries.length > 0)
+  }, [files, current, commentsTick, t])
+  /** The same comments, flat: what the tab counts and what says whether there are any. */
+  const commentEntries = useMemo(() => commentGroups.flatMap(group => group.entries), [commentGroups])
   /** Open the file a comment hangs in and land on the comment: the rows it names, or — for an outdated
    *  thread, whose code is gone — its own box, which is the only place that says anything. */
   const jumpToComment = (fileId: string, row: number, card = false): void => {
@@ -8313,50 +8332,61 @@ export function PendingPanel({
           {commentEntries.length === 0
             ? <p className={css.listEmpty} data-diff-comments-empty>{t('panel.commentsEmpty')}</p>
             : (
-              <ul className={css.rows} data-diff-comment-list>
-                {commentEntries.map(entry => (
-                  <li key={entry.id} className={css.row}>
-                    {/* A control, but deliberately NOT a `<button>`: dsh-pocket's narrow-layout guard
-                        swallows the click on any `button, a` whose text looks like a file path — it
-                        answers with "you cannot open a file from the phone" instead of letting the
-                        press through — and this item's text can look like one (the label is a
-                        `path:lines` reference, and the reader's own words often name a file). It is
-                        still reachable and operable: focusable, and Enter or Space jumps.
-                        `data-mobile-nav-copy` is pocket's own "already handled" mark, kept so it adds
-                        no copy-file button here either — this is a way to a comment, not a file. */}
-                    <div
-                      role="button"
-                      tabIndex={0}
-                      className={css.commentRow}
-                      data-diff-comment-link={entry.id}
-                      data-mobile-nav-copy="1"
-                      // An outdated thread is landed on its own box: the code it named is gone, so the row
-                      // its numbers point at is not where the reader wants to be.
-                      onClick={() => { jumpToComment(entry.fileId, entry.lost ? entry.end : entry.row, entry.lost) }}
-                      onContextMenu={(event) => {
-                        // The browser's own menu has nothing to say about a comment, and the one
-                        // action a thread has is the whole of what it could offer — the same press
-                        // on a file row opens that row's actions (see `PendingFileRow`).
-                        event.preventDefault()
-                        setCommentMenu({ id: entry.id, fileId: entry.fileId, x: event.clientX, y: event.clientY })
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key !== 'Enter' && event.key !== ' ') return
-                        event.preventDefault()
-                        jumpToComment(entry.fileId, entry.lost ? entry.end : entry.row, entry.lost)
-                      }}
-                    >
-                      <span className={css.commentHead}>
-                        <span className={css.commentLabel} data-diff-comment-label>{entry.label}</span>
-                        {entry.lost && (
-                          <span className={css.commentLost} data-diff-comment-lost>{t('panel.commentOutdated')}</span>
-                        )}
-                      </span>
-                      <span className={css.commentTitle} data-diff-comment-title>{entry.title}</span>
-                    </div>
-                  </li>
+              /* The session's comments as one tree, a file to a group. Nothing folds: every group is
+                 open, and its name is a heading rather than a control, so the list stays a way to the
+                 comments themselves. */
+              <div data-diff-comment-list>
+                {commentGroups.map(group => (
+                  <div key={group.fileId} className={css.commentGroup} data-diff-comment-group={group.fileId}>
+                    <h4 className={css.commentGroupName} data-diff-comment-group-name>{group.name}</h4>
+                    <ul className={css.rows}>
+                      {group.entries.map(entry => (
+                        <li key={entry.id} className={css.row}>
+                          {/* A control, but deliberately NOT a `<button>`: dsh-pocket's narrow-layout guard
+                              swallows the click on any `button, a` whose text looks like a file path — it
+                              answers with "you cannot open a file from the phone" instead of letting the
+                              press through — and this item's text can look like one (its label is a line
+                              reference, and the reader's own words often name a file). It is still
+                              reachable and operable: focusable, and Enter or Space jumps.
+                              `data-mobile-nav-copy` is pocket's own "already handled" mark, kept so it adds
+                              no copy-file button here either — this is a way to a comment, not a file. */}
+                          <div
+                            role="button"
+                            tabIndex={0}
+                            className={css.commentRow}
+                            data-diff-comment-link={entry.id}
+                            data-mobile-nav-copy="1"
+                            // An outdated thread is landed on its own box: the code it named is gone, so the row
+                            // its numbers point at is not where the reader wants to be.
+                            onClick={() => { jumpToComment(entry.fileId, entry.lost ? entry.end : entry.row, entry.lost) }}
+                            onContextMenu={(event) => {
+                              // The browser's own menu has nothing to say about a comment, and the one
+                              // action a thread has is the whole of what it could offer — the same press
+                              // on a file row opens that row's actions (see `PendingFileRow`).
+                              event.preventDefault()
+                              setCommentMenu({ id: entry.id, fileId: entry.fileId, x: event.clientX, y: event.clientY })
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key !== 'Enter' && event.key !== ' ') return
+                              event.preventDefault()
+                              jumpToComment(entry.fileId, entry.lost ? entry.end : entry.row, entry.lost)
+                            }}
+                          >
+                            {/* The rows the comment hangs on, and the first sentence of what was asked. */}
+                            <span className={css.commentHead}>
+                              <span className={css.commentLabel} data-diff-comment-label>{entry.label}</span>
+                              {entry.lost && (
+                                <span className={css.commentLost} data-diff-comment-lost>{t('panel.commentOutdated')}</span>
+                              )}
+                            </span>
+                            <span className={css.commentTitle} data-diff-comment-title>{entry.title}</span>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 ))}
-              </ul>
+              </div>
             )}
         </div>
       ) : (

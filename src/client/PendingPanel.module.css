@@ -1700,6 +1700,29 @@
   color: var(--dsw-alias-label-primary);
 }
 
+/* One file's comments in that tab. The session's comments arrive grouped by the file they hang in, and
+   a group is a heading plus its comments: every group is open, so the group is nothing but the space
+   one file's comments take — a little air under the last of them, to separate it from the next file. */
+.commentGroup {
+  margin: 0 0 6px;
+}
+
+.commentGroup:last-child {
+  margin-bottom: 0;
+}
+
+/* The file a group belongs to: the name it is known by in the list, smaller and quieter than the
+   comments under it — it is the group's label, not one of the comments, and the rows the eye has to
+   find here are the comment titles. It starts on the comments' own column (the same 8px inset). */
+.commentGroupName {
+  margin: 0;
+  padding: 4px 8px 2px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 500;
+}
+
 /* One comment in that tab: the rows it hangs on, and the first sentence of what was asked. A plain
    button — the list is a way to reach a comment, not a selection — carrying the file rows' own box
    (see `.row` / `.rowHead`): the same 8px inset and the same 2px of air between items, so the two
