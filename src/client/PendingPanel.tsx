@@ -2179,19 +2179,60 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     sync('right')
   }, [pairs, langWrap, tabWidthSpaces, bodyWidth])
 
-  // Dragging a pinned strip scrolls only that column's content — and, with it, the half of an
-  // outdated thread's quote that stands for that column. The quote is drawn in the card over both
-  // halves rather than inside them (see `DiscussionQuote`), so nothing else would move it with its
-  // own code.
+  // Whether Ctrl (or ⌘) is down RIGHT NOW. The strips are native scrollbars, so dragging one dispatches no
+  // pointer events at all — a modifier cannot be read off the gesture itself, and this key state is what
+  // tells a plain drag (move this pane) apart from a Ctrl drag (move both). A window that loses focus
+  // never sees the keyup, so blur releases it too.
+  const ctrlHeldRef = useRef(false)
+  useEffect(() => {
+    const track = (event: KeyboardEvent): void => { ctrlHeldRef.current = event.ctrlKey || event.metaKey }
+    const release = (): void => { ctrlHeldRef.current = false }
+    window.addEventListener('keydown', track)
+    window.addEventListener('keyup', track)
+    window.addEventListener('blur', release)
+    return () => {
+      window.removeEventListener('keydown', track)
+      window.removeEventListener('keyup', track)
+      window.removeEventListener('blur', release)
+    }
+  }, [])
+
+  /** A strip offset this view wrote itself, so the follow-up scroll event is not read as a new drag. */
+  const mirroredRef = useRef<{ side: 'left' | 'right'; value: number } | undefined>(undefined)
+
+  // Dragging a pinned strip scrolls that column's content — and, with it, the half of an outdated thread's
+  // quote that stands for that column. The quote is drawn in the card over both halves rather than inside
+  // them (see `DiscussionQuote`), so nothing else would move it with its own code.
+  //
+  // With Ctrl (or ⌘) held the OTHER pane follows the one being dragged, both its column and its strip: the
+  // two panes of a side-by-side diff are read against each other, and lining them up by hand is what the
+  // modifier is for. Whichever strip is dragged leads; the follower's own scroll event is marked as ours so
+  // it cannot drag the leader back into the follower's own range.
   const onHScroll = useCallback((side: 'left' | 'right') => {
     const strip = side === 'left' ? leftHScrollRef.current : rightHScrollRef.current
-    const col = side === 'left' ? leftColRef.current : rightColRef.current
-    if (strip === null || col === null) return
-    col.scrollLeft = strip.scrollLeft
-    const quotes = splitRootRef.current?.querySelectorAll<HTMLElement>(
-      `[data-diff-quote-text][data-diff-quote-side="${side}"]`,
-    )
-    for (const text of quotes ?? []) text.scrollLeft = strip.scrollLeft
+    if (strip === null) return
+    const mirrored = mirroredRef.current
+    const follows = mirrored !== undefined && mirrored.side === side && mirrored.value === strip.scrollLeft
+    if (follows) mirroredRef.current = undefined
+    const move = (which: 'left' | 'right', offset: number): void => {
+      const col = which === 'left' ? leftColRef.current : rightColRef.current
+      if (col !== null) col.scrollLeft = offset
+      const quotes = splitRootRef.current?.querySelectorAll<HTMLElement>(
+        `[data-diff-quote-text][data-diff-quote-side="${which}"]`,
+      )
+      for (const text of quotes ?? []) text.scrollLeft = offset
+    }
+    move(side, strip.scrollLeft)
+    if (follows || !ctrlHeldRef.current) return
+    const otherSide = side === 'left' ? 'right' : 'left'
+    const otherStrip = otherSide === 'left' ? leftHScrollRef.current : rightHScrollRef.current
+    move(otherSide, strip.scrollLeft)
+    // The follower's thumb is brought along too, so the two visible controls read as one; nothing is marked
+    // when the value already matches, because then no scroll event follows to consume the mark.
+    if (otherStrip !== null && otherStrip.scrollLeft !== strip.scrollLeft) {
+      mirroredRef.current = { side: otherSide, value: strip.scrollLeft }
+      otherStrip.scrollLeft = strip.scrollLeft
+    }
   }, [])
   // Search: pair indices whose left or right text contains the query.
   const searchMatches = useMemo(() => searchPairs(pairs, searchQuery, search.options), [pairs, searchQuery, search.options])

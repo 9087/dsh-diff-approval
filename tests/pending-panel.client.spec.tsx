@@ -7724,6 +7724,54 @@ describe('PendingPanel', () => {
     expect(leftText.scrollLeft).toBe(40)
   })
 
+  it('scrolls both panes together when a horizontal strip is dragged with Ctrl held', () => {
+    // The strips are native scrollbars, so a drag on one reaches this view only as a scroll event — the
+    // modifier is read from the key state. Ctrl (or ⌘) makes the other pane follow: its column and its own
+    // strip, because the two panes of a side-by-side diff are read against each other.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const file = entry({
+      id: 'entry-split-ctrl',
+      path: '/repo/sc.txt',
+      oldText: 'aaaa\nbbbb\n',
+      newText: 'aaaa modified\nbbbb modified\n',
+    })
+    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('sc.txt'))
+
+    const leftCol = document.querySelector('[data-diff-split-side="left"]') as HTMLElement
+    const rightCol = document.querySelector('[data-diff-split-side="right"]') as HTMLElement
+    const leftStrip = document.querySelector('[data-diff-hscroll="left"]') as HTMLElement
+    const rightStrip = document.querySelector('[data-diff-hscroll="right"]') as HTMLElement
+
+    // Without the modifier a drag moves that pane alone, as it always has.
+    leftStrip.scrollLeft = 30
+    fireEvent.scroll(leftStrip)
+    expect(leftCol.scrollLeft).toBe(30)
+    expect(rightCol.scrollLeft).toBe(0)
+
+    // Ctrl held: the other pane follows, column and strip both.
+    fireEvent.keyDown(window, { key: 'Control', ctrlKey: true })
+    leftStrip.scrollLeft = 40
+    fireEvent.scroll(leftStrip)
+    expect(leftCol.scrollLeft).toBe(40)
+    expect(rightCol.scrollLeft).toBe(40)
+    expect(rightStrip.scrollLeft).toBe(40)
+
+    // The follower's own scroll event is this view's, so it cannot drag the leader back.
+    fireEvent.scroll(rightStrip)
+    expect(leftStrip.scrollLeft).toBe(40)
+    expect(leftCol.scrollLeft).toBe(40)
+    expect(rightCol.scrollLeft).toBe(40)
+
+    // Releasing the key hands the panes back their independence.
+    fireEvent.keyUp(window, { key: 'Control' })
+    rightStrip.scrollLeft = 12
+    fireEvent.scroll(rightStrip)
+    expect(rightCol.scrollLeft).toBe(12)
+    expect(leftCol.scrollLeft).toBe(40)
+  })
+
   it('marks a side-by-side comment outdated by the same rule the one-column view uses', () => {
     // The outdated decision is made from the model, not from the view: a file rewritten under a
     // side-by-side comment leaves that comment outdated exactly as it would in one column, with the
