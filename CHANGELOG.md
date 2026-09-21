@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.28.0](https://github.com/9087/dsh-diff-approval/compare/v0.27.0...v0.28.0) (2026-09-21)
+
+### Features
+
+* **client:** add the diff ruler to the side-by-side view ([8551800](https://github.com/9087/dsh-diff-approval/commit/8551800d4d02138abfb144a582b9615489a791c3))
+* **client:** centre the go-to popup and give it the search bar's look ([cc4f647](https://github.com/9087/dsh-diff-approval/commit/cc4f647435a50c1e3f502214cae3e5f31fbcde69))
+* **client:** drop a file's comments when it leaves the list ([d332564](https://github.com/9087/dsh-diff-approval/commit/d33256413960fda669314c5304c4fe707f62e73d))
+* **client:** group the comments tab's comments by file ([5f8ad7d](https://github.com/9087/dsh-diff-approval/commit/5f8ad7d286d6ef4e0ead21971800b596cfca5089))
+* **client:** list a comment on one line, named by its lines ([4351dd1](https://github.com/9087/dsh-diff-approval/commit/4351dd1a955537056eee7eaa630c67279d3d5655))
+* **client:** name a comment group's file in full on hover ([ebd42d3](https://github.com/9087/dsh-diff-approval/commit/ebd42d3554cea7d3c9df920ec69ba972ad086543))
+* **client:** name an unwritten comment by its box's placeholder ([a5bbf6e](https://github.com/9087/dsh-diff-approval/commit/a5bbf6eb7c9c70486094e667b128d7291049ef4e))
+* **client:** scroll both panes together when a strip is dragged with Ctrl held ([c7ea9fc](https://github.com/9087/dsh-diff-approval/commit/c7ea9fc4be4b798c0b232c9218e28921db7c29fd))
+
+### Bug Fixes
+
+* **client:** measure a comment block's content, not its own reservation ([7e28ef9](https://github.com/9087/dsh-diff-approval/commit/7e28ef93a1e62b52cc0b65cd02a93c9b562749d5)), references [#185](https://github.com/9087/dsh-diff-approval/issues/185)
+* **client:** publish a turn's end through the session stores ([06f5a1b](https://github.com/9087/dsh-diff-approval/commit/06f5a1bccc48f05e7c2f60a1322d58f8e034da1b))
+* **client:** say once when the pending state cannot be written to disk ([de9290a](https://github.com/9087/dsh-diff-approval/commit/de9290a9bec25920f29fca473bc087c4ce21b3dc))
+* **client:** wrap to the first change after the last block is handled ([ca85c49](https://github.com/9087/dsh-diff-approval/commit/ca85c49a36cedb5e2c8557024d51a6ef299e0de4))
+* **host:** carry the persist failure on the list value, so the panel can report it ([a5cb420](https://github.com/9087/dsh-diff-approval/commit/a5cb420e2ea6c0f607982aff8eda6a54298deeeb))
+
 ## [0.27.0](https://github.com/9087/dsh-diff-approval/compare/v0.26.0...v0.27.0) (2026-09-20)
 
 ### Features
