@@ -3087,6 +3087,16 @@
   opacity: 0.5;
 }
 
+/* The side-by-side view's ruler, over that view's own vertical bar. Two differences from the single
+   column's strip, both because it is read as two columns: it spans the WHOLE bar (each half is 4px, so a
+   deletion and the addition beside it are both legible — only the markers paint, so the thumb stays
+   visible wherever nothing changed), and it stops above the pinned horizontal row BELOW the scroller
+   rather than above a bar inside it (that row is a sibling, not part of the scroller). */
+.overviewRulerSplit {
+  width: var(--dsh-scrollbar-width, 8px);
+  bottom: calc(var(--dsh-scrollbar-width, 8px) + 1px);
+}
+
 /* One changed-line marker; a 2px floor keeps a single changed line visible
    on a long file even though its fraction is tiny. */
 .overviewMarker {
@@ -3103,6 +3113,24 @@
 
 .markerAdd {
   background-color: var(--dsw-alias-state-success-primary);
+}
+
+/* A split-view marker takes one half of that strip, like the pane it stands for: the left half is the
+   left (old) pane, the right half the right (new) one, so an aligned change fills both halves in the same
+   band — a red bar beside a green one — instead of one colour painting over the other.
+   These come AFTER `.overviewMarker` on purpose: that rule sets `width: 100%` and `right: 0`, and they
+   share its specificity, so an earlier definition would lose the cascade and every marker would cover the
+   whole strip again (which is exactly how the left half went missing once). */
+.markerSplitDel {
+  left: 0;
+  right: auto;
+  width: 50%;
+}
+
+.markerSplitAdd {
+  left: auto;
+  right: 0;
+  width: 50%;
 }
 
 /* No wrapping, no word-break: a diff is read by its indentation. A table

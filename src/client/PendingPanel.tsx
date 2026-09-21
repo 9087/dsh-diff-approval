@@ -1912,7 +1912,9 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   renderDiscussion?: (discussion: Discussion, bodyWidth: number, split: boolean) => ReactNode
   /** The comment action for the current selection, when the panel offers one for it. */
   selectionComment?: ReactNode
-}>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert, onWrapToast, onVisibleLines, discussions, renderDiscussion, selectionComment }, ref) {
+  /** The changed-line runs the overview ruler draws, in whole-file row indices. */
+  rulerRuns: readonly RulerRun[]
+}>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert, onWrapToast, onVisibleLines, discussions, renderDiscussion, selectionComment, rulerRuns }, ref) {
   // Use the configured line height for the split virtual window and jump math
   // (the rendered split rows already size to the same value).
   // eslint-disable-next-line @typescript-eslint/no-shadow
@@ -2119,6 +2121,31 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   }, [pairHeights, pairCount, discussionPx, pairDiscussions])
   const totalHeight = pairOffsets === null ? pairCount * ROW_HEIGHT_PX : (pairOffsets[pairCount] ?? 0)
   const off = (k: number): number => (pairOffsets === null ? k * ROW_HEIGHT_PX : (pairOffsets[Math.max(0, Math.min(k, pairCount))] ?? 0))
+  /**
+   * The overview ruler's markers, in the height table's own units: a run's rows are mapped to the PAIRS
+   * they sit in, because pairs are what this view's offsets measure. A change that renders on both sides
+   * — a del pair with the add beside it — lands in the same band and contributes both markers, exactly
+   * like the preview's double column: the ruler says "this stretch changed", and which side changed is
+   * what the two columns themselves show.
+   */
+  const rulerMarkersNow = useMemo(() => {
+    if (totalHeight <= 0 || pairCount === 0) return []
+    const at = (k: number): number => pairOffsets === null ? k * ROW_HEIGHT_PX : (pairOffsets[Math.max(0, Math.min(k, pairCount))] ?? 0)
+    return rulerRuns.flatMap(run => {
+      let first = -1
+      let last = -1
+      for (let row = run.start; row <= run.end; row++) {
+        const pair = pairOfRow.get(row)
+        if (pair === undefined) continue
+        if (first === -1) first = pair
+        last = pair
+      }
+      if (first === -1) return []
+      const top = pairOffsets === null ? first / pairCount : at(first) / totalHeight
+      const bottom = pairOffsets === null ? (last + 1) / pairCount : at(last + 1) / totalHeight
+      return [{ top: top * 100, height: Math.max(0, bottom - top) * 100, kind: run.kind }]
+    })
+  }, [rulerRuns, pairOfRow, pairCount, pairOffsets, totalHeight])
   // Fixed height for a pair's row: both columns must hold this exact value so
   // the shorter side keeps an empty slot and the halves never desync.
   const pairHeightAt = (k: number): number => (pairHeights === null ? ROW_HEIGHT_PX : (pairHeights[k] ?? ROW_HEIGHT_PX))
@@ -2790,6 +2817,27 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
           })}
         </div>
       </div>
+      {/* The diff ruler, over this view's own vertical bar. It stops above the pinned horizontal row
+          below, which is a sibling of the scroller rather than a bar inside it — hence its own class
+          (see `.overviewRulerSplit`); the single column measures an inner scrollbar instead.
+
+          The strip is read as TWO columns, like the panes it overlays: its left half is the left pane
+          (what the file had) and its right half the right pane (what it has now), so a deletion marks
+          the left half, an addition the right, and an aligned change fills both — instead of one colour
+          painting over the other in a single band (see `.markerSplitDel` / `.markerSplitAdd`). */}
+      {rulerMarkersNow.length > 0 && (
+        <div className={`${css.overviewRuler} ${css.overviewRulerSplit}`} data-diff-approval-ruler aria-hidden="true">
+          {rulerMarkersNow.map((marker, index) => (
+            <div
+              key={index}
+              className={`${css.overviewMarker} ${marker.kind === 'del' ? `${css.markerDel} ${css.markerSplitDel}` : `${css.markerAdd} ${css.markerSplitAdd}`}`}
+              data-diff-ruler-marker={marker.kind}
+              data-diff-ruler-side={marker.kind === 'del' ? 'left' : 'right'}
+              style={{ top: `${marker.top}%`, height: `${marker.height}%` }}
+            />
+          ))}
+        </div>
+      )}
       {/* The selection's own frame: a range in either half offers the comment, which is the one
           action this view takes on a selection (keep/revert belong to the change blocks' own frames
           here). It is placed against the scroller the two halves share — the content offset of the
@@ -3134,6 +3182,13 @@ function rowRangeOf(selection: Selection | null): RowRange | undefined {
   if (lineOffsetAt(range.endContainer, range.endOffset) === 0) end -= 1
   if (start > end) return undefined
   return { start, end }
+}
+
+/** One maximal run of same-kind changed rows: what both views' rulers are built from. */
+interface RulerRun {
+  start: number
+  end: number
+  kind: 'del' | 'add'
 }
 
 /** One ruler marker for the rendered Markdown preview. */
@@ -6656,6 +6711,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
           onVisibleLines={onSplitVisibleLines}
           discussions={laidDiscussions}
           renderDiscussion={renderDiscussion}
+          rulerRuns={rulerMarkers}
           // A range in either half offers the comment; keep/revert stay with the change blocks' own
           // frames here (see `frameForSelection`).
           selectionComment={splitView && selectionCommentOffered ? (

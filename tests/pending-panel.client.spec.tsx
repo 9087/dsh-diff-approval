@@ -2916,6 +2916,57 @@ describe('PendingPanel', () => {
     expect(add.style.height).toBe('50%')
   })
 
+  it('marks the side-by-side view\'s own ruler, one half per pane', () => {
+    // The two columns are aligned, so a change that renders on both sides — the deleted line with the
+    // added one beside it — shares one band, and the strip is read as two columns: its left half is the
+    // left (old) pane, its right half the right (new) one. A deletion marks the left half, an addition the
+    // right, and an aligned change fills both, instead of one colour painting over the other.
+    // Positions come from the pair height table, which is what this view's offsets measure (a row fraction
+    // would be wrong here: a del row and its add are two rows but one pair).
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const file = entry({
+      id: 'entry-split-ruler',
+      path: '/repo/sr.txt',
+      oldText: 'const alpha = 1\nkeep\nconst beta = 2\nkeep two\n',
+      newText: 'const alpha = 9\nkeep\nconst beta = 8\nkeep two\n',
+    })
+    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('sr.txt'))
+
+    const ruler = document.querySelector('[data-diff-approval-ruler]') as HTMLElement
+    expect(ruler).not.toBeNull()
+    const markers = [...ruler.querySelectorAll('[data-diff-ruler-marker]')] as HTMLElement[]
+    // Four pairs: [alpha|alpha] [keep|keep] [beta|beta] [keep two|keep two]. Two changes, each a deletion
+    // on the left half and an addition on the right half of the same band.
+    expect(markers.map(marker => marker.dataset.diffRulerMarker)).toEqual(['del', 'add', 'del', 'add'])
+    expect(markers.map(marker => marker.dataset.diffRulerSide)).toEqual(['left', 'right', 'left', 'right'])
+    expect(markers.map(marker => marker.style.top)).toEqual(['0%', '0%', '50%', '50%'])
+    expect(markers.map(marker => marker.style.height)).toEqual(['25%', '25%', '25%', '25%'])
+    // Each marker is one half of the strip, so the two halves of a band sit side by side rather than on
+    // top of each other (the class carries that; jsdom has no layout to measure it with).
+    expect(markers[0]!.className).not.toBe(markers[1]!.className)
+  })
+
+  it('keeps the side-by-side ruler two-column: the full bar, halves after the base marker', () => {
+    // jsdom computes no cascade and lays nothing out, so neither of these can be caught by rendering: the
+    // split strip has to span the whole bar (each half 4px, or a 2px half is hard to see), and its
+    // half-width rules have to come AFTER `.overviewMarker` in the sheet — that rule sets `width: 100%`
+    // and `right: 0` at the same specificity, so an earlier definition loses the cascade and every marker
+    // covers the whole strip again, with the later one painting over the earlier. That is exactly how the
+    // left half went missing in the browser, so the sheet is asserted here.
+    const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const rule = (name: string): string => new RegExp(`^\\.${name} \\{([^}]*)\\}`, 'm').exec(sheet)?.[1] ?? ''
+    expect(rule('overviewRulerSplit')).toContain('width: var(--dsh-scrollbar-width, 8px)')
+    // The rule the halves have to beat.
+    expect(rule('overviewMarker')).toContain('width: 100%')
+    const base = sheet.indexOf('.overviewMarker {')
+    for (const name of ['markerSplitDel', 'markerSplitAdd']) {
+      expect(sheet.indexOf(`.${name} {`)).toBeGreaterThan(base)
+      expect(rule(name)).toContain('width: 50%')
+    }
+  })
+
   it('shows per-block keep/revert on hover and calls the block action with its line range', () => {
     const twoBlocks = entry({ id: 'entry-blocks', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [twoBlocks], busy: new Set() })
