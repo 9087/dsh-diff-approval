@@ -1740,6 +1740,23 @@ function blockResolvesWholeFile(file: PendingFileDiff, block: DiffApprovalBlockR
     && block.newStart <= newMin && block.newEnd >= newMax
 }
 
+/**
+ * Which change block to focus once the operated one has left the diff.
+ *
+ * The operated block(s) are gone, so the change that followed them slid into the slot they held: focusing
+ * that same index is what recenters and flashes the NEXT change. An operated range that reached the END of
+ * the diff has no such change — every block still pending is above the reader — so the walk wraps to the
+ * first one, the same wrap the prev/next stepping does. Clamping to the last index instead left the focus
+ * pointing past the shorter diff, and then nothing was focused, flashed or scrolled at all.
+ *
+ * @param operated - the index the operated range started at.
+ * @param count - how many blocks the diff holds NOW, after the action.
+ * @returns the block index to focus.
+ */
+function blockAfterAction(operated: number, count: number): number {
+  return operated >= count ? 0 : operated
+}
+
 /** Row indices whose text matches `query` under the options; empty for ''. Counted
  *  through the same matcher the highlights use, so the tally can never disagree
  *  with what is drawn. */
@@ -2255,7 +2272,15 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   }
   // Keep/revert the hovered block, then advance focus to the next change block
   // (if there is one), mirroring the single-column behaviour. The remaining
-  // blocks shift into the operated block's slot, so that index is the next one.
+  // blocks shift into the operated block's slot, so that index is the next one —
+  // and an operated range that reached the end of the diff wraps to the first
+  // (see `blockAfterAction`).
+  //
+  // The count is read back through a ref: the action removes the operated blocks, and this view is
+  // re-rendered with the shorter diff before the action's promise settles, so the count captured here is
+  // the pre-action one.
+  const blockCountRef = useRef(0)
+  blockCountRef.current = model.blocks.length
   const handleBlockAction = async (action: 'keep' | 'revert'): Promise<void> => {
     const operated = hoveredBlock ?? hoveredBlockRef.current
     if (operated === undefined) return
@@ -2264,9 +2289,9 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     await (action === 'keep'
       ? onBlockKeep(file.sessionId, file.id, range)
       : onBlockRevert(file.sessionId, file.id, range))
-    const count = model.blocks.length
+    const count = blockCountRef.current
     if (count === 0) return
-    const next = Math.max(0, Math.min(operated, count - 1))
+    const next = blockAfterAction(operated, count)
     setFocus(next)
     setHoveredBlock(undefined)
     bumpFlash(false)
@@ -5550,18 +5575,27 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     bumpFlash(false)
   }
 
+  // The diff as the CONTINUATION below has to read it. A block action takes the operated blocks out of
+  // the list, and the panel is re-rendered with the shorter diff before that action's promise settles
+  // (the store re-reads the list before it resolves) — so the count this handler was created with is the
+  // pre-action one, and "is there a change after the operated slot?" is a question about the diff that
+  // exists NOW.
+  const blockCountRef = useRef(0)
+  blockCountRef.current = model.blocks.length
+
   // Run one block (or combined multi-block) keep/revert, then advance focus to
   // the next change block: the operated block(s) leave the list, so the next
   // block shifts into the `operated` slot, and focusing that slot recenters and
   // flashes the following change. Shared by the hover frame and the selection
-  // frame so the two stay aligned.
+  // frame so the two stay aligned; an operated range that reached the end of the
+  // diff wraps to the first block (see `blockAfterAction`).
   const runBlockAction = async (action: 'keep' | 'revert', range: DiffApprovalBlockRange, operated: number): Promise<void> => {
     await (action === 'keep'
       ? onBlockKeep(file.sessionId, file.id, range)
       : onBlockRevert(file.sessionId, file.id, range))
-    const count = model.blocks.length
+    const count = blockCountRef.current
     if (count === 0) return
-    const next = Math.max(0, Math.min(operated, count - 1))
+    const next = blockAfterAction(operated, count)
     setFocus(next)
     setHoveredBlock(undefined)
     setScrollTick(tick => tick + 1)

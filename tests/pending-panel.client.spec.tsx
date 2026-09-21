@@ -2735,6 +2735,90 @@ describe('PendingPanel', () => {
     resetPanelMemory()
   })
 
+  it('wraps to the first change when the last block is handled and others are still pending', async () => {
+    // Handling a block takes it out of the diff, so the change that followed it slides into the slot it
+    // held — which is why the panel focuses that same index afterwards. At the END of the diff there is no
+    // such change: everything still pending is above the reader, so the walk wraps to the first one, the
+    // same wrap the prev/next stepping does. Without it the focus pointed past the shorter diff and
+    // nothing was focused, flashed or scrolled at all.
+    const file = entry({ id: 'entry-wrap', path: '/repo/wrap.txt', oldText: 'a\nb\nc\nd\ne\nf\n', newText: 'A\nb\nC\nd\nE\nf\n' })
+    // Keeping the last change adopts it into the baseline, which leaves the two above it pending.
+    const after = entry({ id: 'entry-wrap', path: '/repo/wrap.txt', oldText: 'a\nb\nc\nd\nE\nf\n', newText: 'A\nb\nC\nd\nE\nf\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    const view = { rerender: (_node: ReactNode): void => {} }
+    props.onBlockKeep = vi.fn(async () => {
+      // The host's rewrite lands while the action is still in flight — the order the store produces, since
+      // it re-reads the list before its promise resolves. That is what makes the shorter diff a fact the
+      // continuation can see.
+      view.rerender(<PendingPanel {...panelProps({ read: true, files: [after], busy: new Set() })} />)
+    })
+    const restore = stubCodeScroll()
+    try {
+      view.rerender = render(<PendingPanel {...props} />).rerender
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      fireEvent.click(screen.getByText('wrap.txt'))
+
+      // Three change blocks, and the reader acts on the last one.
+      const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+      const lastChange = rows.find(row => (row.querySelector('[data-diff-code]')?.textContent ?? '') === 'E')
+      expect(lastChange).toBeDefined()
+      fireEvent.mouseEnter(lastChange!)
+      const actions = document.querySelector('[data-diff-block-actions]') as HTMLElement
+      expect(actions.querySelector('[data-diff-block-position]')?.textContent).toContain('3')
+      // Parked further down the file, so landing on the FIRST change shows up in the scroll.
+      codeBody().scrollTop = 200
+
+      fireEvent.click(actions.querySelector('[data-diff-block-keep]') as HTMLElement)
+
+      await waitFor(() => {
+        expect(codeBody().scrollTop).toBe(0)
+        expect(document.querySelector('[data-diff-block-flash]')).not.toBeNull()
+      })
+      // The flash frames the first change — its two rows, at the top of the file.
+      const flash = document.querySelector('[data-diff-block-flash]') as HTMLElement
+      expect(flash.style.top).toBe('0px')
+      expect(flash.style.height).toBe(`${2 * diffLineHeight()}px`)
+    } finally {
+      restore()
+    }
+  })
+
+  it('wraps to the first change in the side-by-side frame too', async () => {
+    // The side-by-side view keeps its own copy of the post-action walk, so the wrap has to hold there as
+    // well: the same three changes, the last one handled, the diff two blocks shorter afterwards.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const file = entry({ id: 'entry-split-wrap', path: '/repo/sw.txt', oldText: 'a\nb\nc\nd\ne\nf\n', newText: 'A\nb\nC\nd\nE\nf\n' })
+    const after = entry({ id: 'entry-split-wrap', path: '/repo/sw.txt', oldText: 'a\nb\nc\nd\nE\nf\n', newText: 'A\nb\nC\nd\nE\nf\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    const view = { rerender: (_node: ReactNode): void => {} }
+    props.onBlockKeep = vi.fn(async () => {
+      view.rerender(<PendingPanel {...panelProps({ read: true, files: [after], busy: new Set() })} />)
+    })
+    view.rerender = render(<PendingPanel {...props} />).rerender
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('sw.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-split-row]')] as HTMLElement[]
+    const lastChange = rows.find(row => (row.querySelector('[data-diff-code]')?.textContent ?? '') === 'E')
+    expect(lastChange).toBeDefined()
+    fireEvent.mouseEnter(lastChange!)
+    const actions = document.querySelector('[data-diff-block-actions]') as HTMLElement
+    expect(actions.querySelector('[data-diff-block-position]')?.textContent).toContain('3')
+    const before = document.querySelector('[data-diff-block-flash]') as HTMLElement | null
+
+    fireEvent.click(actions.querySelector('[data-diff-block-keep]') as HTMLElement)
+
+    // Focused on the first change: the flash is drawn — out of range, none is drawn at all — and it has
+    // moved up to the top of the file from the last change's frame.
+    const beforeTop = Number.parseFloat(before?.style.top ?? '0')
+    await waitFor(() => {
+      const flash = document.querySelector('[data-diff-block-flash]') as HTMLElement | null
+      expect(flash).not.toBeNull()
+      expect(Number.parseFloat(flash!.style.top)).toBeLessThan(beforeTop === 0 ? 1 : beforeTop)
+    })
+    expect(Number.parseFloat((document.querySelector('[data-diff-block-flash]') as HTMLElement).style.top)).toBe(0)
+  })
+
   it('marks changed lines on the scrollbar overview ruler in diff colors', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     const view = render(<PendingPanel {...props} />)
