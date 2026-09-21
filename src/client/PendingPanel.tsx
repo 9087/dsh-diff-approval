@@ -39,7 +39,7 @@ import type { DockSnapshot } from './dock.tsx'
 import type { HighlightSpan } from './highlight.ts'
 import { highlightWindow } from './highlight.ts'
 import { langFromPath, suffixOfPath } from './lang.ts'
-import { referenceLabelOf } from './reference.ts'
+import { lineRangeLabel, referenceLabelOf } from './reference.ts'
 import { OPEN_FILE_EVENT } from './produced-diff.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
 import { OPEN_PANEL_FILE_EVENT, PANEL_STATE_EVENT, SHOW_PANEL_EVENT, TOGGLE_PANEL_EVENT } from './dock.tsx'
@@ -8214,8 +8214,10 @@ export function PendingPanel({
           row: discussion.anchor.start,
           // The row the thread's box hangs below, which is what an outdated thread is landed on.
           end: discussion.anchor.end,
-          // The `path:lines` reference the thread's own header wears, so the item names where it sits.
-          label: referenceLabelOf(file.path, snapshot.workspacePath, discussion.anchor.startLine, discussion.anchor.endLine),
+          // The file itself is the group above, so the reference is cut to what is left of it: the lines
+          // it names — `[8]`, or `[10-17]` for a range — bracketed so the row opens with a marker rather
+          // than with a bare digit that could be anything.
+          label: `[${lineRangeLabel(discussion.anchor.startLine, discussion.anchor.endLine)}]`,
           title: commentTitle(discussion) || t('panel.commentEmptyTitle'),
           lost: discussion.lost === true,
         })),
@@ -8372,14 +8374,16 @@ export function PendingPanel({
                               jumpToComment(entry.fileId, entry.lost ? entry.end : entry.row, entry.lost)
                             }}
                           >
-                            {/* The rows the comment hangs on, and the first sentence of what was asked. */}
+                            {/* One line: what was asked, then where in the file it sits — the title takes
+                                the room and reads from the left, the line numbers sit at the row's right
+                                edge, so a file's comments line up on the side the eye scans them by. */}
                             <span className={css.commentHead}>
-                              <span className={css.commentLabel} data-diff-comment-label>{entry.label}</span>
+                              <span className={css.commentTitle} data-diff-comment-title>{entry.title}</span>
                               {entry.lost && (
                                 <span className={css.commentLost} data-diff-comment-lost>{t('panel.commentOutdated')}</span>
                               )}
+                              <span className={css.commentLabel} data-diff-comment-label>{entry.label}</span>
                             </span>
-                            <span className={css.commentTitle} data-diff-comment-title>{entry.title}</span>
                           </div>
                         </li>
                       ))}

@@ -1086,7 +1086,7 @@ describe('PendingPanel', () => {
       [file.id]: [
         { id: 'd-eight', anchor: { start: 7, end: 7, startLine: 8, endLine: 8 }, collapsed: false, draft: '', lost: false, messages: [{ role: 'user', text: '这一行为什么要改？后面这句不该进标题。' }] },
         { id: 'd-lost', anchor: { start: 7, end: 7, startLine: 8, endLine: 8 }, collapsed: false, draft: '', lost: true, quote: 'const gone = 1', quoteLines: [{ old: 8, new: 8, side: 'add' }], messages: [{ role: 'user', text: '这段代码已经不在了' }] },
-        { id: 'd-draft', anchor: { start: 7, end: 7, startLine: 8, endLine: 8 }, collapsed: false, draft: '还没发送的内容。后面的句子不算。', lost: false, messages: [] },
+        { id: 'd-draft', anchor: { start: 6, end: 7, startLine: 7, endLine: 8 }, collapsed: false, draft: '还没发送的内容。后面的句子不算。', lost: false, messages: [] },
         { id: 'd-blank', anchor: { start: 7, end: 7, startLine: 8, endLine: 8 }, collapsed: false, draft: '', lost: false, messages: [] },
       ],
     } as unknown as Parameters<typeof rememberDiscussions>[1])
@@ -1104,9 +1104,23 @@ describe('PendingPanel', () => {
     fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
     const items = [...document.querySelectorAll('[data-diff-comment-link]')] as HTMLElement[]
     expect(items.length).toBe(4)
-    expect(items[0]!.querySelector('[data-diff-comment-label]')?.textContent).toContain(':8')
+    // The item names the lines, not the file: the group above it IS the file, so only the numbers are
+    // left, in brackets — a marker at the head of the row rather than a bare digit.
+    const label = items[0]!.querySelector('[data-diff-comment-label]') as HTMLElement
+    expect(label.textContent).toBe('[8]')
+    // A range is the two numbers and the dash between them, in the same brackets.
+    expect(items[2]!.querySelector('[data-diff-comment-label]')?.textContent).toBe('[7-8]')
+    expect(items[0]!.textContent).not.toContain('rows.txt')
     expect(items[0]!.querySelector('[data-diff-comment-lost]')).toBeNull()
     expect(items[1]!.querySelector('[data-diff-comment-lost]')).not.toBeNull()
+    // Where it sits and what was asked are the row's one line: both live in the same flex row, so nothing
+    // stacks a title under a reference any more — and the title comes first, with the line numbers last,
+    // which is what puts them against the row's right edge.
+    const row = items[0]!.firstElementChild as HTMLElement
+    expect(row.children).toHaveLength(2)
+    expect(row.firstElementChild?.hasAttribute('data-diff-comment-title')).toBe(true)
+    expect(row.lastElementChild?.hasAttribute('data-diff-comment-label')).toBe(true)
+    expect(row.querySelector('[data-diff-comment-title]')?.parentElement).toBe(row)
     expect(items[0]!.textContent).toContain('这一行为什么要改？')
     expect(items[0]!.textContent).not.toContain('后面这句')
     // A thread that has not been sent yet has no turn to quote: its draft is what the item shows, cut
@@ -1128,6 +1142,19 @@ describe('PendingPanel', () => {
     const comment = /^\.commentRow \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
     expect(comment).toContain('padding: 6px 8px')
     expect(comment).toContain('border-radius: 10px')
+    // The line numbers never shrink and the first sentence is the only thing that gives way: the row is
+    // one line even when the column is narrow. Titles read from the left, the numbers sit on the right.
+    const labelRule2 = /^\.commentLabel \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
+    expect(labelRule2).toContain('flex: none')
+    expect(labelRule2).toContain('text-align: right')
+    // The label is bold, and it has to be declared after the `font` shorthand: that shorthand carries a
+    // weight of its own, so a weight written before it is silently set back.
+    expect(labelRule2).toContain('font-weight: 700')
+    expect(labelRule2.indexOf('font-weight')).toBeGreaterThan(labelRule2.indexOf('font:'))
+    const title = /^\.commentTitle \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
+    expect(title).toContain('flex: 1')
+    expect(title).toContain('text-align: left')
+    expect(title).toContain('text-overflow: ellipsis')
     // …and each item sits in its file's own group, under that file's name.
     const group = items[0]!.closest('[data-diff-comment-group]') as HTMLElement
     expect(group).not.toBeNull()

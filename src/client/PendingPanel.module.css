@@ -1744,6 +1744,8 @@
   background: var(--dsw-alias-interactive-bg-hover-solid);
 }
 
+/* One comment: what was asked and where it sits in the file, on the row's single line — the title from
+   the left, the line numbers against the right edge. The item is one line the way a file row is. */
 .commentHead {
   display: flex;
   align-items: baseline;
@@ -1751,17 +1753,22 @@
   min-width: 0;
 }
 
-/* The reference, in the code face: `path:lines` is the panel's own vocabulary for "there", and it
-   is the line numbers the reader is looking for. */
+/* The lines the comment names, in the code face, last on the row and held to its right edge: `path:lines`
+   is the panel's own vocabulary for "there", and with the path gone (the group above IS that file) the
+   numbers are the whole label — bracketed, so it reads as a marker, and bold, so that marker reads as
+   one. Tabular, so a file's comments line up down that edge. */
 .commentLabel {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex: none;
   white-space: nowrap;
+  text-align: right;
   color: var(--dsw-alias-label-secondary);
   font: var(--dsw-font-markdown-code-block);
   font-size: 11px;
   line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  /* After the `font` shorthand, which would otherwise set the weight back: 700 is what a code font
+     ships (see `.discussionBody strong`). */
+  font-weight: 700;
 }
 
 /* Outdated: the same grey word the block's own quote label carries, and it never shrinks — the
@@ -1773,11 +1780,15 @@
   line-height: 16px;
 }
 
+/* The first sentence of what was asked: the one item on the row that takes the room that is left, and
+   the only one that is ever cut short. It reads from the left, so every title starts on one column. */
 .commentTitle {
-  display: block;
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-align: left;
   color: var(--dsw-alias-label-primary);
   font-size: 12px;
   line-height: 18px;
