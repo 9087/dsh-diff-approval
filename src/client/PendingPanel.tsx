@@ -624,6 +624,18 @@ const DISCUSSION_BUBBLE_MARGIN_ROWS = 0.3
 const THREAD_ROW_PX = 22
 
 /**
+ * How close to a row's own height a measured block may sit and still count as that row, in px.
+ *
+ * A block whose content is a whole number of rows lands on either side of the pixel grid from one pass
+ * to the next — the browser snaps the paint, so the same block measures 572.0004 one pass and 571.9996
+ * the next. Rounding up without a band reads that as 27 rows and then 26, and every flip is a state
+ * write from a layout effect: React counts those as nested updates and throws at fifty (minified #185,
+ * which took the whole panel down). One pixel is far below any real change — the measurement is a row
+ * grid — so a figure this close to the row below it IS that row.
+ */
+const DISCUSSION_ROW_SNAP_PX = 1
+
+/**
  * The inline-code chip's own side padding, in px (mirrors `.discussionCode`'s `padding`): the
  * chip is wider than its text, so the row measurement takes that width off the line it sits in.
  * Without it a line whose chip ends near the wrap point would wrap in the DOM where the count
@@ -5265,12 +5277,20 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       const body = card.children[1]
       const last = body?.lastElementChild
       if (id === undefined || body === undefined || last === null || last === undefined) continue
+      // Measure the CONTENT only. The slack above the writing row is the placeholder that fills whatever
+      // height the block was reserved and is not spent (`.discussionSlack`), so counting it measures the
+      // reservation that was just written rather than the thread: the correction would feed its own output
+      // back in, and at a whole-row height the pixel snapping described on `DISCUSSION_ROW_SNAP_PX`
+      // turned that into an endless write. Taking it out leaves a figure that does not depend on what the
+      // block is holding, so the correction settles — and it settles closer to what the block draws.
+      const slack = body.querySelector<HTMLElement>('[data-diff-discussion-slack]')
       const drawn = last.getBoundingClientRect().bottom
         + (Number.parseFloat(getComputedStyle(last).marginBottom) || 0)
         - body.getBoundingClientRect().top
+        - (slack?.getBoundingClientRect().height ?? 0)
       // A collapsed or not-yet-laid-out card measures zero; leave it to a later pass.
       if (drawn <= 0) continue
-      const want = Math.max(1, Math.ceil(drawn / THREAD_ROW_PX))
+      const want = Math.max(1, Math.ceil((drawn - DISCUSSION_ROW_SNAP_PX) / THREAD_ROW_PX))
       if (next[id] !== want) {
         next[id] = want
         changed = true

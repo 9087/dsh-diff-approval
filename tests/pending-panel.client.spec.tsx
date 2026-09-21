@@ -6438,6 +6438,75 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('first answer\nsecond line')
   })
 
+  /**
+   * The acceptance test for the runaway the live panel hit.
+   *
+   * The block's height is corrected to what it draws, and the measurement used to take the slack with it:
+   * `.discussionSlack` is the placeholder that fills whatever height the block was reserved and did not
+   * spend, so counting it measured the reservation that had just been written — the correction feeding on
+   * its own output. At a whole-row height that becomes a loop, because the browser snaps the paint to the
+   * pixel grid: the same block comes back 88.0004 one pass and 87.9996 the next, `ceil` reads those as
+   * five rows and four, and every flip is a state write from a layout effect. React counts nested updates
+   * and gives up at fifty — minified #185, "panel crashed".
+   *
+   * This stages that layout — three rows of content, the slack filling the leftover, the paint snapping —
+   * and requires both halves of the reader-visible failure to be gone: no endless updating, and a
+   * reservation that settles on the rows the content needs rather than on a figure the loop left behind.
+   * Without the correction's two measures (the slack taken out of the figure, and the one-pixel band
+   * before the row rounding) this test is red, with React's "Maximum update depth exceeded".
+   */
+  it('does not let a self-referential measurement run away', async () => {
+    const CONTENT_PX = 66
+    const ROW_PX = 22
+    const file = entry({ id: 'entry-runaway', path: '/repo/runaway.txt', oldText: 'a\n', newText: 'b\n' })
+    rememberDiscussions(S1, {
+      [file.id]: [{
+        id: 'd-runaway',
+        anchor: { start: 1, end: 1, startLine: 2, endLine: 2 },
+        collapsed: false,
+        draft: '',
+        messages: [{ role: 'user', text: 'why?' }],
+      }],
+    } as unknown as Parameters<typeof rememberDiscussions>[1])
+    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('runaway.txt'))
+
+    const card = document.querySelector('[data-diff-discussion]') as HTMLElement
+    const body = card.children[1] as HTMLElement
+    const last = body.lastElementChild as HTMLElement
+    const slack = body.querySelector('[data-diff-discussion-slack]') as HTMLElement
+    const space = card.closest('[data-diff-discussion-space]') as HTMLElement
+    expect(slack).not.toBeNull()
+    const rect = (top: number, bottom: number): DOMRect =>
+      ({ top, bottom, left: 0, right: 400, width: 400, height: bottom - top, x: 0, y: top, toJSON: () => ({}) }) as DOMRect
+    // The leftover the reservation has, which the slack fills up to its one row.
+    const slackHeight = (): number =>
+      Math.max(0, Math.min((Number.parseFloat(space.style.height) || 0) - CONTENT_PX, ROW_PX))
+    // The paint is snapped to the pixel grid, so a whole-row figure comes back a hair above or below it.
+    let pass = 0
+    const jitter = (): number => (pass++ % 2 === 0 ? 0.0004 : -0.0004)
+    vi.spyOn(card, 'getBoundingClientRect').mockImplementation(() => rect(0, 0))
+    vi.spyOn(body, 'getBoundingClientRect').mockImplementation(() => rect(0, 0))
+    vi.spyOn(slack, 'getBoundingClientRect').mockImplementation(() => rect(0, slackHeight()))
+    vi.spyOn(last, 'getBoundingClientRect').mockImplementation(() => rect(0, CONTENT_PX + slackHeight() + jitter()))
+    const errors: string[] = []
+    const quiet = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { errors.push(args.map(String).join(' ')) })
+    try {
+      // Let the correction run: a frame for the width to settle, then whatever passes it takes.
+      await new Promise((resolve) => { window.setTimeout(resolve, 500) })
+      // 1. It did not update itself to death.
+      expect(errors.filter(message => message.includes('Maximum update depth'))).toEqual([])
+      // 2. It settled on what the content needs — three rows of thread plus the header row — instead of a
+      //    figure the loop left behind.
+      expect(space.style.height).toBe('88px')
+      // 3. And the panel is still the panel.
+      expect(document.querySelector('[data-diff-discussion]')).not.toBeNull()
+    } finally {
+      quiet.mockRestore()
+    }
+  })
+
   it('shows the selection frame for a single covered block too', async () => {
     // 'a\n' -> 'b\n' has one block (both rows).
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
