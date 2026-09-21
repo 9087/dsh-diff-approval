@@ -15,7 +15,7 @@
 
 ### Bug Fixes
 
-* **client:** measure a comment block's content, not its own reservation ([7e28ef9](https://github.com/9087/dsh-diff-approval/commit/7e28ef93a1e62b52cc0b65cd02a93c9b562749d5)), references [#185](https://github.com/9087/dsh-diff-approval/issues/185)
+* **client:** measure a comment block's content, not its own reservation ([7e28ef9](https://github.com/9087/dsh-diff-approval/commit/7e28ef93a1e62b52cc0b65cd02a93c9b562749d5))
 * **client:** publish a turn's end through the session stores ([06f5a1b](https://github.com/9087/dsh-diff-approval/commit/06f5a1bccc48f05e7c2f60a1322d58f8e034da1b))
 * **client:** say once when the pending state cannot be written to disk ([de9290a](https://github.com/9087/dsh-diff-approval/commit/de9290a9bec25920f29fca473bc087c4ce21b3dc))
 * **client:** wrap to the first change after the last block is handled ([ca85c49](https://github.com/9087/dsh-diff-approval/commit/ca85c49a36cedb5e2c8557024d51a6ef299e0de4))
