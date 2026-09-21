@@ -101,6 +101,39 @@ export function forgetDiscussion(
 }
 
 /**
+ * Drop every thread whose file the list no longer holds.
+ *
+ * A thread is a block of rows in one file's diff, so a file the reader has kept or reverted out of the
+ * list leaves nothing for its comments to hang on: they go with it, and the same path coming back later
+ * in this visit starts clean. A new object is published only when something actually goes, so the panes
+ * that adopt this record (see `COMMENTS_CHANGED_EVENT`) do not re-adopt an equal object on every poll.
+ *
+ * @param sessionId - the session the panel is reviewing; nothing is dropped without one.
+ * @param listed - the pending entry ids the list is holding.
+ */
+export function forgetDiscussionsNotIn(sessionId: string | undefined, listed: readonly string[]): void {
+  // No session means nothing was ever recorded for one, and a session that holds no threads has nothing
+  // to drop: both are silent, not errors.
+  if (sessionId === undefined) return
+  const before = threads.get(sessionId)
+  if (before === undefined) return
+  // Rebuild the record: a file the list still holds keeps its threads as they are, anything else is left
+  // out of it. `dropped` remembers whether that actually removed something.
+  const held = new Set(listed)
+  const kept: Record<string, readonly Discussion[]> = {}
+  let dropped = false
+  for (const [fileId, list] of Object.entries(before)) {
+    if (held.has(fileId)) kept[fileId] = list
+    else dropped = true
+  }
+  // Nothing went, so nothing is published: the record keeps its identity and the panes that hold it are
+  // left alone. This is called on every poll, and an equal-but-new object would have them re-adopt it
+  // every time — a render, a write, an event, for no change at all (see `rememberDiscussions`).
+  if (!dropped) return
+  rememberDiscussions(sessionId, kept)
+}
+
+/**
  * The files this page has been told to stop asking about, by session.
  *
  * Keeping or reverting a file asks whether the row should leave the list, and a reader working

@@ -951,6 +951,82 @@ describe('PendingPanel', () => {
     expect(tab?.querySelector('[data-diff-list-count]')).toBeNull()
   })
 
+  it('still lets a range be commented when the file has no change left', () => {
+    // A file that matches its baseline again is all context rows — identical content diffs to every line,
+    // never to an empty list — so there is nothing to keep or revert and no change block for a selection
+    // to cover. The range still reads as the current file's lines, so the frame offers the comment alone:
+    // keep and revert stay in the DOM with `hidden`, which is what takes them out of the layout.
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-same', path: '/repo/same.txt', oldText: 'one\ntwo\nthree\n', newText: 'one\ntwo\nthree\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('same.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    expect(rows.length).toBe(3)
+    // Nothing to act on as a whole: no change block exists, so no block frame.
+    expect(document.querySelector('[data-diff-block-actions]')).toBeNull()
+
+    const cell = rows[1]!.querySelector('[data-diff-code]') ?? rows[1]!
+    const node = cell.firstChild ?? cell
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+      toString: () => 'two',
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    expect(document.querySelector('[data-diff-selection-actions]')).not.toBeNull()
+    const comment = document.querySelector('[data-diff-selection-comment]') as HTMLElement | null
+    expect(comment).not.toBeNull()
+    expect(comment!.hasAttribute('hidden')).toBe(false)
+    expect((document.querySelector('[data-diff-selection-keep]') as HTMLElement).hasAttribute('hidden')).toBe(true)
+    expect((document.querySelector('[data-diff-selection-revert]') as HTMLElement).hasAttribute('hidden')).toBe(true)
+    // …and no hairline: it separates the two groups, and only one of them is here.
+    expect(document.querySelector('[data-diff-selection-divider]')).toBeNull()
+  })
+
+  it('takes a file\'s comments with it when the file leaves the list', () => {
+    // A thread hangs on the rows of one file's diff. Keeping or reverting that file out of the list
+    // leaves nothing for it to hang on, so its comments go with it — and the same path coming back
+    // later in this visit starts with none.
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-kept', path: '/repo/kept.txt' })
+    rememberDiscussions(S1, {
+      [file.id]: [{
+        id: 'd-kept',
+        anchor: { start: 0, end: 0, startLine: 1, endLine: 1 },
+        collapsed: false,
+        draft: '',
+        messages: [{ role: 'user', text: '这条会跟着文件一起消失' }],
+      }],
+    } as unknown as Parameters<typeof rememberDiscussions>[1])
+    const view = render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(document.querySelector('[data-diff-list-tab="comments"]')?.textContent).toBe('panel.tab.comments1')
+
+    // An empty list that has not been READ says nothing: an unread panel — and a connection reset,
+    // which publishes the same shape — must not be taken for "the reader finished with these files".
+    view.rerender(<PendingPanel {...panelProps({ read: false, files: [], busy: new Set() })} />)
+    expect(rememberedDiscussions(S1)[file.id]?.length).toBe(1)
+
+    // The file leaves the list: its comments go with it, out of the memory and out of the tab (which
+    // counts what it would show, so nothing left to show means no number beside its name).
+    view.rerender(<PendingPanel {...panelProps({ read: true, files: [], busy: new Set() })} />)
+    expect(rememberedDiscussions(S1)[file.id]).toBeUndefined()
+    expect(document.querySelector('[data-diff-list-tab="comments"] [data-diff-list-count]')).toBeNull()
+
+    // The same path becoming pending again in this visit starts clean: the comments went with the
+    // entry, so there is nothing left to re-hang on the new rows.
+    view.rerender(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    expect(document.querySelector('[data-diff-list-tab="comments"] [data-diff-list-count]')).toBeNull()
+  })
+
   it('shows a heading instead of tabs while the pane has only one view', () => {
     // With comment mode off there are no comments to list, so the pane has one view and no switch to
     // offer: the tab row's place carries that view's own name. (The suite starts each test with the

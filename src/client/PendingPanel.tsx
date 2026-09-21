@@ -44,7 +44,7 @@ import { OPEN_FILE_EVENT } from './produced-diff.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
 import { OPEN_PANEL_FILE_EVENT, PANEL_STATE_EVENT, SHOW_PANEL_EVENT, TOGGLE_PANEL_EVENT } from './dock.tsx'
 import type { PanelFileDetail, PanelStateDetail } from './dock.tsx'
-import { COMMENTS_CHANGED_EVENT, forgetDiscussion, lastPanelFile, panelFileOffset, quietenRemovalAsk, rememberDiscussions, rememberedDiscussions, rememberPanelView, removalAskQuiet } from './panel-memory.ts'
+import { COMMENTS_CHANGED_EVENT, forgetDiscussion, forgetDiscussionsNotIn, lastPanelFile, panelFileOffset, quietenRemovalAsk, rememberDiscussions, rememberedDiscussions, rememberPanelView, removalAskQuiet } from './panel-memory.ts'
 import { composerCoveredByPanel, leaveComposerCaret } from './composer-cover.ts'
 import { commentModeEnabled, COMMENT_MODE_CHANGED_EVENT, confirmFileRemoveEnabled, COVER_CHANGED_EVENT, discussionRoundLimit, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
@@ -8032,6 +8032,20 @@ export function PendingPanel({
   }
 
   const selectedFile = files.find(file => file.id === selected)
+  /**
+   * A file that leaves the list takes its comments with it: the reader who kept or reverted that file
+   * out of the list is done with it, and a thread is a block of rows in a diff the list no longer
+   * holds — so the rows it was written about are gone with the entry (see `forgetDiscussionsNotIn`).
+   *
+   * Only a list that has actually been READ may say a file is gone. An unread panel, a connection
+   * reset (`read` goes back to false, with the files) and a sessionless page all publish an empty
+   * list, and none of those means the reader finished with the files it names.
+   */
+  const listedIds = useMemo(() => files.map(file => file.id), [files])
+  useEffect(() => {
+    if (current === undefined || !snapshot.read) return
+    forgetDiscussionsNotIn(current, listedIds)
+  }, [current, snapshot.read, listedIds])
   /**
    * Every comment the files in the list carry, in list order and then in the order their rows run:
    * what the comments tab shows. A comment IS a block of rows in one file, so its label is the same
