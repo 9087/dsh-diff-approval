@@ -11,6 +11,7 @@ import {
   diffAddColor, diffDelColor, diffFontScale, diffLineHeight, fileListFloat, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, quickSummonKey,
   panelCover, panelPresentation,
   commentModeEnabled, setCommentModeEnabled,
+  codeFontEnabled, setCodeFontEnabled, CODE_FONT_CHANGED_EVENT,
   setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setFileListFloat, setLanguageForSuffix, setMdMaxWidth, setMdPreviewEnabled, setQuickSummonKey, setTabWidth, tabWidth,
   setPanelCover, setPanelPresentation,
 } from '../src/client/settings.ts'
@@ -89,6 +90,52 @@ describe('settings.mdPreview', () => {
     setMdPreviewEnabled(true)
     expect(localStorage.getItem(MD_PREVIEW_KEY)).toBe('1')
     expect(mdPreviewEnabled()).toBe(true)
+  })
+})
+
+describe('settings.codeFont', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('defaults to off: the bundled slices are traffic the reader opts into', () => {
+    expect(codeFontEnabled()).toBe(false)
+  })
+
+  it('describes the traffic cost, and marks the font name as the link', () => {
+    // The row's copy carries the numbers a reader needs to decide, and the
+    // `{link}` token is what the settings row turns into an anchor around the
+    // font name. Losing the token would silently drop the upstream link.
+    for (const [dictionary, phrase] of [[zh, '默认关闭'], [en, 'Off by default']] as const) {
+      expect(dictionary['panel.codeFontDesc']).toContain('{link}')
+      expect(dictionary['panel.codeFontDesc']).toContain(phrase)
+      expect(dictionary['panel.codeFontDesc']).toContain('KB')
+    }
+    // The Chinese sentence keeps its 「」 quotation marks around the token — the
+    // panel's own convention for a product name — so the token sits inside them
+    // and only the name is the anchor.
+    expect(zh['panel.codeFontDesc']).toContain('「{link}」')
+    // The English sentence keeps its own quoting.
+    expect(en['panel.codeFontDesc']).toContain('"{link}"')
+  })
+
+  it('persists the opt-in and reads it back', () => {
+    setCodeFontEnabled(true)
+    expect(localStorage.getItem('diff-approval:code-font')).toBe('1')
+    expect(codeFontEnabled()).toBe(true)
+    setCodeFontEnabled(false)
+    expect(codeFontEnabled()).toBe(false)
+  })
+
+  it('tells the panel to re-read it', () => {
+    const seen: string[] = []
+    const onChanged = (event: Event): void => { seen.push(event.type) }
+    window.addEventListener(CODE_FONT_CHANGED_EVENT, onChanged)
+    try {
+      setCodeFontEnabled(true)
+      setCodeFontEnabled(false)
+    } finally {
+      window.removeEventListener(CODE_FONT_CHANGED_EVENT, onChanged)
+    }
+    expect(seen).toEqual([CODE_FONT_CHANGED_EVENT, CODE_FONT_CHANGED_EVENT])
   })
 })
 

@@ -1,4 +1,4 @@
-﻿// @vitest-environment jsdom
+// @vitest-environment jsdom
 // PendingPanel: badge, per-path grouping, per-operation rows, actions, jump
 // navigation, live-state warnings, and the line-selection copy toolbar.
 
@@ -891,7 +891,7 @@ describe('PendingPanel', () => {
     expect(fold).toContain('height: 26px')
   })
 
-  it('opens a row\'s actions on right-click, with the same pair its toolbar shows', () => {
+  it('opens a row\'s actions on right-click, and names both ways to keep and to put back', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
@@ -900,13 +900,42 @@ describe('PendingPanel', () => {
     const row = screen.getByText('a.txt').closest('button') as HTMLElement
     expect(fireEvent.contextMenu(row, { clientX: 40, clientY: 60 })).toBe(false)
 
-    // A row with a diff offers exactly what the open file's toolbar offers…
+    // Keeping is two decisions and the menu names both: plain 保留 leaves the row in the list, while
+    // 保留并移出 — one character apart in the tail — is today's keep, which folds the entry away.
+    // Putting back gets the same pair: 回退 leaves the row listed so one operation can go back at a
+    // time, 回退并移出 puts the file back and drops the row.
     const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
-    expect(items.map(item => item.textContent)).toEqual(['action.keep', 'action.revert'])
+    expect(items.map(item => item.textContent)).toEqual([
+      'row.keepListed',
+      'row.keepRemove',
+      'action.revert',
+      'row.revertRemove',
+    ])
 
-    // …and the choice runs for that row's own file, without opening it.
     fireEvent.click(items[0]!)
-    expect(props.onKeep).toHaveBeenCalledWith(FILE.sessionId, FILE.id)
+    expect(props.onKeep).toHaveBeenCalledWith(FILE.sessionId, FILE.id, true)
+    expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
+
+    // …and the explicit one runs without the flag, which is how the host has always read "keep and drop".
+    fireEvent.contextMenu(row, { clientX: 40, clientY: 60 })
+    const again = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+    fireEvent.click(again[1]!)
+    expect(props.onKeep).toHaveBeenLastCalledWith(FILE.sessionId, FILE.id)
+    expect(props.onRevert).not.toHaveBeenCalled()
+    expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
+
+    // 回退 asks the toolbar's default question, which here means no flag at all.
+    fireEvent.contextMenu(row, { clientX: 40, clientY: 60 })
+    const plain = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+    fireEvent.click(plain[2]!)
+    expect(props.onRevert).toHaveBeenLastCalledWith(FILE.sessionId, FILE.id)
+    expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
+
+    // 回退并移出 answers it up front: it puts the file back and takes the row out of the list.
+    fireEvent.contextMenu(row, { clientX: 40, clientY: 60 })
+    const last = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+    fireEvent.click(last[3]!)
+    expect(props.onRevert).toHaveBeenLastCalledWith(FILE.sessionId, FILE.id, true)
     expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
   })
 

@@ -8152,20 +8152,32 @@ export function PendingPanel({
   const rowMenuItems = useMemo<MenuEntry[]>(() => {
     if (rowMenu === null) return []
     if (fileHasNoDiff(rowMenu.file)) return [{ id: 'remove', label: t('row.dismiss') }]
+    // Put back wins a second reading too: 回退 puts the file back and leaves it listed, so a file
+    // with more than one operation can be put back one at a time while staying in view.
+    const revertLabel = rowMenu.file.kind === 'create' ? t('action.delete') : t('action.revert')
     return [
-      { id: 'keep', label: t('action.keep') },
-      { id: 'revert', label: rowMenu.file.kind === 'create' ? t('action.delete') : t('action.revert') },
+      // Keeping is two decisions, not one, and the row menu names both: plain 保留 accepts the change
+      // and leaves the file in the list, 保留并移出 does the same and takes the row out. The pair is
+      // one character apart by design — the tail says what happens to the list.
+      { id: 'keep-listed', label: t('row.keepListed') },
+      { id: 'keep-remove', label: t('row.keepRemove') },
+      { id: 'revert', label: revertLabel },
+      // 回退并移出 is the same pair on the other decision: put the file back and take the row out.
+      { id: 'revert-remove', label: t('row.revertRemove') },
     ]
   }, [rowMenu, t])
 
   /** Run a row-menu choice through the same handlers the open file uses. 移出 is a keep: the
-   *  host folds the content and drops the entry, so the file itself is left alone. */
+   *  host folds the content and drops the entry, so the file itself is left alone. The `并移出`
+   *  rows say so explicitly rather than taking the toolbar's confirm-first default. */
   const runRowMenu = (id: string): void => {
     const target = rowMenu
     setRowMenu(null)
     if (target === null) return
-    if (id === 'keep' || id === 'remove') void onKeep(target.file.sessionId, target.file.id)
+    if (id === 'keep-listed') void onKeep(target.file.sessionId, target.file.id, true)
+    else if (id === 'keep-remove' || id === 'remove') void onKeep(target.file.sessionId, target.file.id)
     else if (id === 'revert') void onRevert(target.file.sessionId, target.file.id)
+    else if (id === 'revert-remove') void onRevert(target.file.sessionId, target.file.id, true)
   }
 
   const selectedFile = files.find(file => file.id === selected)
