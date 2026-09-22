@@ -92,4 +92,8 @@ corepack pnpm install
 pnpm run typecheck   # tsc over both faces
 pnpm run build       # emits lib/index.js and lib/client.js
 pnpm test
+pnpm run fonts:check # the bundled code font: 138 slices, every range covered exactly once
+pnpm run fonts:plan  # what a page actually downloads, by how many hanzi it shows
 ```
+
+The bundled font is [JetBrains Maple Mono](https://github.com/SpaceTimee/Fusion-JetBrainsMapleMono) (SIL OFL 1.1), subset and sliced by `scripts/fonts` — see [`assets/fonts/README.md`](assets/fonts/README.md) for the pipeline, the licence and what the slices cost.

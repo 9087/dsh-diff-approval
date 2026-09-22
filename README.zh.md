@@ -92,4 +92,8 @@ corepack pnpm install
 pnpm run typecheck   # 两个编译面的 tsc
 pnpm run build       # 产出 lib/index.js 与 lib/client.js
 pnpm test
+pnpm run fonts:check # 内置代码字体：138 个切片，每个码位恰好被覆盖一次
+pnpm run fonts:plan  # 页面上出现多少汉字时实际会下载多少
 ```
+
+内置字体是 [JetBrains Maple Mono](https://github.com/SpaceTimee/Fusion-JetBrainsMapleMono)（SIL OFL 1.1），由 `scripts/fonts` 子集化并切片——流水线、许可证与各切片的体积见 [`assets/fonts/README.md`](assets/fonts/README.md)。
