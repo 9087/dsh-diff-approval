@@ -238,9 +238,14 @@ describe('the comment-answering skill', () => {
   it('is the skill the comment prompt tells the agent to load', () => {
     // The prompt carries the short rules for builds without a registry and names the
     // skill for the full ones; the two halves must not drift apart.
-    for (const dictionary of [zh, en]) {
+    for (const [dictionary, supports, limit] of [[zh, '只支持 Markdown 的行内代码和加粗', '3 行'], [en, 'only Markdown inline code and bold', '3 lines']] as const) {
       expect(dictionary['discussion.promptRule']).toContain(COMMENT_SKILL_NAME)
-      expect(dictionary['discussion.promptRule']).toContain('3')
+      // The inline floor states what IS rendered rather than listing what is not: "plain text, no
+      // Markdown decoration" was read as "no bold or italics", and tables came back.
+      expect(dictionary['discussion.promptRule']).toContain(supports)
+      // …and it carries no length limit of its own: how long an answer may be is the skill's business,
+      // and the two must not disagree.
+      expect(dictionary['discussion.promptRule']).not.toContain(limit)
       // The skill-only shape names it too, as a parameter the panel fills in.
       expect(dictionary['discussion.promptRuleSkill']).toContain('{skill}')
       expect(dictionary['discussion.promptRuleSkill'].length)
