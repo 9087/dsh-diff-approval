@@ -26,6 +26,7 @@
   },
   "files": [
     "src/comment-skill.ts",
+    "src/font-slices.ts",
     "src/index.ts",
     "src/open.ts",
     "src/pending.ts",

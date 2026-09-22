@@ -34,8 +34,9 @@
  * @module dsh-diff-approval
  */
 
-import { readFile, rm } from 'node:fs/promises'
-import { isAbsolute, relative, resolve } from 'node:path'
+import { readFile, rm, stat } from 'node:fs/promises'
+import { isAbsolute, join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { expandHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
@@ -51,6 +52,8 @@ import { PendingPersistence, defaultStorageDir } from './persist.ts'
 import { defaultOpenPath } from './open.ts'
 import type { OpenAction } from './open.ts'
 import { COMMENT_SKILL, COMMENT_SKILL_NAME } from './comment-skill.ts'
+import { FONT_ASSET_DIR, FONT_ROUTE } from './font-slices.ts'
+import type { FontSlice } from './font-slices.ts'
 import { detectVcsRoot, listVcsChanges } from './vcs.ts'
 import type { VcsChange, VcsImportInput, ShellExecutorLike } from './vcs.ts'
 import type {
@@ -1667,6 +1670,21 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       : service.rpc.handle(DIFF_APPROVAL_CHANNEL, handle, { authority: 'trusted-host' })
   }, 'diff-approval: review channel')
 
+  // Serve the bundled code font's slices. The panel asks for a family whose one
+  // CJK glyph is exactly twice one Latin glyph, and the files that back it ship
+  // with the plugin: a CDN is not an option (Google Fonts is unreachable in
+  // mainland China, and a handful of sliced woff2 files is not what any font CDN
+  // distributes) and asking the reader to install a font is not one either.
+  ctx.effect(() => {
+    const route = fontRoute()
+    const server = ctx.get('webServer') as WebServerSurface | undefined
+    if (route === undefined || typeof server?.register !== 'function') {
+      ctx.logger.debug('diff-approval: no web server, so the bundled code font is not served')
+      return () => {}
+    }
+    return server.register(route)
+  }, 'diff-approval: code font slices')
+
   // Observe the mutation intent seams without owning the decision: capture
   // the pre-write basis, then hand the chain on untouched so policy plugins
   // and the tool's default remain in charge. `prepend` matters: the harness
@@ -1804,4 +1822,95 @@ function openTargetOf(payload: unknown): { sessionId: SessionId; id: string; act
   const action = (payload as Record<string, unknown>).action
   if (action !== 'open' && action !== 'reveal') return undefined
   return { ...target, action }
+}
+
+/**
+ * The `webServer` surface this plugin uses: one prefix route whose handler owns
+ * the whole response. Structural on purpose — the service ships with the web
+ * bundle, and a non-web composition (Electron, the SDK profile) has neither, so
+ * the font is simply not served there and the panel keeps the system stack.
+ */
+interface WebServerSurface {
+  register(route: { kind: 'prefix'; path: string; handler: (req: WebServerRequest, res: WebServerResponse) => void | Promise<void> }): () => void
+}
+
+/** The parts of node's request the font handler reads. */
+interface WebServerRequest {
+  readonly url?: string | undefined
+  readonly method?: string | undefined
+}
+
+/** The parts of node's response the font handler writes. */
+interface WebServerResponse {
+  statusCode: number
+  setHeader(name: string, value: string): unknown
+  end(body?: Uint8Array | string): unknown
+}
+
+/** The font slices the host is willing to serve, read once from the manifest. */
+let fontSlicesPromise: Promise<Map<string, FontSlice> | undefined> | undefined
+
+/** Read `assets/fonts/manifest.json` next to the built bundle, once. */
+function fontSlices(): Promise<Map<string, FontSlice> | undefined> {
+  fontSlicesPromise ??= (async () => {
+    try {
+      const dir = fileURLToPath(new URL(FONT_ASSET_DIR, import.meta.url))
+      const text = await readFile(join(dir, 'manifest.json'), 'utf8')
+      const manifest = JSON.parse(text) as { slices?: FontSlice[] }
+      const slices = new Map<string, FontSlice>()
+      for (const slice of manifest.slices ?? []) slices.set(slice.file, slice)
+      return slices
+    } catch {
+      return undefined
+    }
+  })()
+  return fontSlicesPromise
+}
+
+/**
+ * Answer one font request. Exported so the route's behaviour is testable
+ * without a listening server: only files the manifest lists are ever read, and
+ * everything else — including a path traversal attempt — is a 404.
+ *
+ * @param req - the request, for its path.
+ * @param res - the response, whose lifecycle this owns.
+ */
+export async function serveFontSlice(req: WebServerRequest, res: WebServerResponse): Promise<void> {
+  const slices = await fontSlices()
+  if (slices === undefined) {
+    res.statusCode = 404
+    res.end('font unavailable')
+    return
+  }
+  const name = decodeURIComponent((req.url ?? '').split('?')[0] ?? '').split('/').pop() ?? ''
+  const slice = slices.get(name)
+  if (slice === undefined || !/^[a-z]+-[a-z0-9-]*\.woff2$/.test(name)) {
+    res.statusCode = 404
+    res.end('no such font slice')
+    return
+  }
+  try {
+    const path = join(fileURLToPath(new URL(FONT_ASSET_DIR, import.meta.url)), slice.file)
+    const info = await stat(path)
+    const body = await readFile(path)
+    res.statusCode = 200
+    res.setHeader('content-type', 'font/woff2')
+    res.setHeader('content-length', String(info.size))
+    // The file name carries the face and the slice; a rebuild that changes a
+    // slice changes the bytes the manifest pins, and the panel re-reads the
+    // manifest on every page load, so a long cache is safe for the files.
+    res.setHeader('cache-control', 'public, max-age=31536000, immutable')
+    res.end(body)
+  } catch {
+    res.statusCode = 404
+    res.end('font slice missing')
+  }
+}
+
+/**
+ * The route serving the bundled font, or undefined when the slices were never
+ * generated (a source checkout without the build step).
+ */
+function fontRoute(): { kind: 'prefix'; path: string; handler: (req: WebServerRequest, res: WebServerResponse) => Promise<void> } | undefined {
+  return { kind: 'prefix', path: FONT_ROUTE, handler: serveFontSlice }
 }

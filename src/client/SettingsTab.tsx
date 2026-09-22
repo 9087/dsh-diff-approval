@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconChevronDownOutline14, IconRefreshOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
-import { DEFAULT_KEYBINDINGS, DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, COVER_CHANGED_EVENT, commentModeEnabled, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, discussionRoundLimit, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, pasteOnCopyEnabled, quickSummonKey, setCommentModeEnabled, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setDiscussionRoundLimit, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPanelCover, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN,
+import { DEFAULT_KEYBINDINGS, DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, COVER_CHANGED_EVENT, codeFontEnabled, commentModeEnabled, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, discussionRoundLimit, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, pasteOnCopyEnabled, quickSummonKey, setCodeFontEnabled, setCommentModeEnabled, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setDiscussionRoundLimit, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPanelCover, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN,
   DISCUSSION_ROUNDS_MAX, DISCUSSION_ROUNDS_MIN } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
 import type { DiffApprovalKey } from './locales.ts'
@@ -44,20 +44,44 @@ function OnOffToggle({
 
 /** One Agent-preset-style preference row: title + description, toggle right. */
 function PreferenceRow({
-  title, description, value, onSelect, dataAttribute, t,
+  title, description, link, value, onSelect, dataAttribute, t,
 }: {
   title: string
   description: string
+  /**
+   * A link to hang on the `{link}` token inside the description. A row that
+   * names a third-party font should say where it comes from, and the name
+   * itself is the natural thing to click — a URL printed after the sentence is
+   * neither.
+   */
+  link?: { href: string; label: string }
   value: boolean
   onSelect: (value: boolean) => void
   dataAttribute: string
   t: Translator
 }) {
+  const [before, after] = description.split('{link}')
   return (
     <div className={css.settingsRow}>
       <div className={css.settingsRowText}>
         <div className={css.settingsRowTitle}>{title}</div>
-        <div className={css.settingsRowDesc}>{description}</div>
+        <div className={css.settingsRowDesc}>
+          {before}
+          {link !== undefined && (
+            <a
+              className={css.settingsRowLink}
+              href={link.href}
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              {link.label}
+            </a>
+          )}
+          {/* A translation missing the `{link}` token still gets the link, after
+              the sentence: better a link in the wrong place than a third-party
+              font named with no way to check it. */}
+          {after ?? ' '}
+        </div>
       </div>
       <OnOffToggle
         value={value}
@@ -409,6 +433,9 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   // current; line height defaults to the fixed 22px).
   const [fontScale, setFontScaleState] = useState(diffFontScale)
   const [lineHeight, setLineHeightState] = useState(diffLineHeight)
+  // Off by default: the bundled font is downloaded on demand, so it is the
+  // reader's call (see `codeFontEnabled`).
+  const [codeFont, setCodeFontState] = useState(codeFontEnabled)
   const [addColor, setAddColorState] = useState(() => diffAddColor() ?? currentDiffAddColor())
   const [delColor, setDelColorState] = useState(() => diffDelColor() ?? currentDiffDelColor())
   // The theme's current added/removed base colors, shown as the palette default.
@@ -495,6 +522,10 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
     setLineHeightState(value)
     setDiffLineHeight(value)
   }
+  const setCodeFont = (value: boolean): void => {
+    setCodeFontState(value)
+    setCodeFontEnabled(value)
+  }
   const setAddColor = (value: string): void => {
     setAddColorState(value)
     setDiffAddColor(value)
@@ -548,6 +579,23 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
               min={DIFF_LINE_HEIGHT_MIN}
               max={DIFF_LINE_HEIGHT_MAX}
               dataAttribute="data-diff-line-height"
+              t={t}
+            />
+            {/* The font switch sits with the other code-appearance rows, and its
+                description carries the traffic cost: the slices are downloaded
+                the moment it is on. */}
+            <PreferenceRow
+              title={t('panel.codeFont')}
+              description={t('panel.codeFontDesc')}
+              link={{
+                href: 'https://github.com/SpaceTimee/Fusion-JetBrainsMapleMono',
+                // The name itself is the link: the description says which font
+                // it is, and clicking the name is how a reader checks it.
+                label: 'JetBrains Maple Mono',
+              }}
+              value={codeFont}
+              onSelect={setCodeFont}
+              dataAttribute="data-diff-code-font"
               t={t}
             />
             <ColorRow

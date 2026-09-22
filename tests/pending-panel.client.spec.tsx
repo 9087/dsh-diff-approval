@@ -7577,6 +7577,37 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-del-color]')).not.toBeNull()
     expect(document.querySelector('[data-diff-tab-width-select]')).not.toBeNull()
     expect(document.querySelector('[data-diff-split-mode-select]')).not.toBeNull()
+    // The bundled code font is one of the appearance rows, off by default (the
+    // slices are traffic, so `codeFontEnabled` is opt-in), and the font name in
+    // its description IS the link to the upstream project: clicking the name is
+    // how a reader checks which face this is.
+    const codeFont = document.querySelector('[data-diff-code-font]') as HTMLButtonElement
+    expect(codeFont).not.toBeNull()
+    expect(codeFont.getAttribute('aria-checked')).toBe('false')
+    const upstream = document.querySelector('a[href^="https://github.com/SpaceTimee/"]') as HTMLAnchorElement
+    expect(upstream).not.toBeNull()
+    expect(upstream.textContent).toBe('JetBrains Maple Mono')
+    // The sentence still reads as one piece, with the `{link}` token replaced by
+    // the anchor rather than the token being dropped. (The stub `t` returns the
+    // key, so the token is absent here and the row falls back to putting the
+    // link after the sentence — the label must be there either way.)
+    const row = upstream.closest('[class*="settingsRowDesc"]') as HTMLElement
+    expect(row.textContent).toContain('panel.codeFontDesc')
+    expect(row.textContent).toContain('JetBrains Maple Mono')
+    expect(row.textContent).not.toContain('{link}')
+    expect(upstream.getAttribute('target')).toBe('_blank')
+    // Opened in a new tab without handing it `window.opener`.
+    expect(upstream.getAttribute('rel')).toContain('noopener')
+    expect(upstream.getAttribute('rel')).toContain('noreferrer')
+    // The underline belongs to the hover state only: a permanent one would sit
+    // in the description as decoration, and jsdom has no hover so the sheet is
+    // the only place this can be checked.
+    const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const link = /\.settingsRowLink \{([^}]*)\}/.exec(sheet)?.[1] ?? ''
+    const hover = /\.settingsRowLink:hover \{([^}]*)\}/.exec(sheet)?.[1] ?? ''
+    expect(link).toContain('text-decoration: none')
+    expect(link).not.toContain('underline')
+    expect(hover).toContain('text-decoration: underline')
     // The auto-paste switch is not here: it belongs to the comments group, which is about writing.
     expect(document.querySelector('[data-diff-paste-on-copy-select]')).toBeNull()
 

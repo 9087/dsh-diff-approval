@@ -31,6 +31,7 @@ const FILE_LIST_FLOAT_KEY = 'diff-approval:file-list-float'
 // over as if the user had chosen it under the new default.
 const COMMENT_MODE_PREVIEW_KEY = 'diff-approval:comment-mode-preview'
 const WRAP_PREFIX = 'diff-approval:wrap:'
+const CODE_FONT_KEY = 'diff-approval:code-font'
 
 /** Where the review panel shows: floating over the app, or docked as a tab in the
  *  app's right sidebar. What the floating panel covers is a separate setting —
@@ -439,6 +440,32 @@ export function setCommentModeEnabled(value: boolean): void {
   // The panel and the Settings section are separate mounts, so the event is how a switch
   // flipped in one reaches the other straight away — the same hand-off the cover uses.
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(COMMENT_MODE_CHANGED_EVENT))
+}
+
+/**
+ * Whether the diff's code uses the font this plugin bundles.
+ *
+ * Defaults to **off**: the bundled face is JetBrains Maple Mono subset and
+ * sliced into 138 woff2 files, and a page pulls the slices its characters land
+ * in — tens of kilobytes for a comment, up to ~120 KB for a rare character. That
+ * is real traffic, so it is the reader's decision, not a default they discover.
+ * Only an explicit `'1'` enables it.
+ * @returns whether the bundled code font is enabled.
+ */
+export function codeFontEnabled(): boolean {
+  return localStorage.getItem(CODE_FONT_KEY) === '1'
+}
+
+/** Window event: the bundled code font was turned on or off (see {@link setCodeFontEnabled}). */
+export const CODE_FONT_CHANGED_EVENT = 'diff-approval:code-font'
+
+/** Persist the bundled-code-font preference. */
+export function setCodeFontEnabled(value: boolean): void {
+  localStorage.setItem(CODE_FONT_KEY, value ? '1' : '0')
+  // The Settings section and the panel are separate mounts and the font is
+  // injected into the document, so the event is how a switch flipped in one
+  // reaches the other straight away — the same hand-off the cover uses.
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(CODE_FONT_CHANGED_EVENT))
 }
 
 /**

@@ -23,6 +23,7 @@ import type { PendingPanelFace } from './slots.ts'
 import { attachDiffDock, createDockState, DIFF_DOCK_ID, DiffDockBody, DiffDockTitle } from './dock.tsx'
 import type { DockHostContext } from './dock.tsx'
 import { DiffApprovalHeaderEntry } from './header-entry.tsx'
+import { attachCodeFont } from './code-font.ts'
 import { en, NS, zh } from './locales.ts'
 
 export type { PendingPanelProps } from './PendingPanel.tsx'
@@ -140,6 +141,10 @@ function injectFooterStackStyle(): void {
  */
 export function apply(ctx: ClientContext): void {
   injectFooterStackStyle()
+  // The bundled code font: fetched manifest, injected `@font-face` rules, and
+  // the one rule that puts the code column on its 2:1 grid — mobile only, code
+  // only, ligatures off. Silent when the host does not serve the slices.
+  ctx.effect(() => attachCodeFont(), 'diff-approval: code font')
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-diff-approval: dictionaries')
   const t = ctx.locale.bind(NS)
 

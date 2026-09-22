@@ -1,0 +1,4 @@
+# The upstream font archive and the TTFs unpacked from it. Both are large and
+# reproducible from the pinned URL + sha256 in assets/fonts/manifest.json, so
+# they are fetched on demand (`python -m scripts.fonts.build --download`).
+vendor/

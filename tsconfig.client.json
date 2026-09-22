@@ -27,6 +27,7 @@
   },
   "include": [
     "src/client",
+    "src/font-slices.ts",
     "src/types.ts",
     "src/css-modules.d.ts"
   ]

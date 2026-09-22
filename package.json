@@ -31,6 +31,11 @@
     "lib/index.js",
     "lib/client.js",
     "lib/types/**/*.d.ts",
+    "assets/fonts/*.woff2",
+    "assets/fonts/manifest.json",
+    "assets/fonts/OFL.txt",
+    "assets/fonts/FONTLOG.md",
+    "assets/fonts/README.md",
     "cordis.patch.yml",
     "docs/images/**"
   ],
@@ -53,6 +58,8 @@
     "build": "tsc -b tsconfig.json && tsdown --env.DSH_BUILD_FACE client",
     "test": "vitest run",
     "compat": "node scripts/dsh-compat.mjs",
+    "fonts:check": "python -m scripts.fonts.build --check",
+    "fonts:plan": "python -m scripts.fonts.build --plan",
     "prepare": "tsc -b tsconfig.json && tsdown --env.DSH_BUILD_FACE client",
     "release": "release-it"
   },

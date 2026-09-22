@@ -13,3 +13,11 @@ lib/
 # directly under docs/images/; the raw screenshots that produce them are kept
 # here and are not committed.
 docs/images/source/
+
+# Python bytecode from the font pipeline (`scripts/fonts`). A tool artifact; the
+# scripts themselves are committed.
+__pycache__/
+
+# Scratch space for the throwaway scripts that carve a working tree into
+# separate commits (a partial-stage helper). Not part of the project.
+.tmp-hunks/
