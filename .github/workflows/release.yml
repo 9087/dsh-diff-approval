@@ -19,6 +19,11 @@ jobs:
           cache: pnpm
           registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
+      # Before anything ships: the suite is the gate that would have caught the
+      # 0.29.0 code font, which injected a rule naming a class the panel never
+      # renders (its tests only compared the rule's text, never the rendered
+      # element). A red test must stop the release rather than publish a tag.
+      - run: pnpm test
       - run: pnpm run build
       - run: npm publish --provenance
       - uses: softprops/action-gh-release@v2
