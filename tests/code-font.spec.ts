@@ -135,6 +135,24 @@ describe('the bundled code font', () => {
     expect(Buffer.from(res.body as Uint8Array).subarray(0, 4).toString('latin1')).toBe('wOF2')
   })
 
+  it('serves the manifest the client reads before it can install any rule', async () => {
+    const { slices } = await manifest()
+    const res = responseStub()
+    await serveFontSlice({ url: `${FONT_ROUTE}/manifest.json`, method: 'GET' }, res)
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-type']).toContain('application/json')
+    // The reader re-reads it on every page load and a plugin upgrade changes it.
+    expect(res.headers['cache-control']).toBe('no-store')
+    const body = JSON.parse(res.body as string) as { slices: { file: string; unicodeRange: string; weight: number }[] }
+    // Exactly the three fields the client's `ListedSlice` reads.
+    expect([...body.slices].map(row => row.file).sort()).toEqual(slices.map(row => row.file).sort())
+    for (const row of body.slices) {
+      expect(row.file).toMatch(/^[a-z]+-[a-z0-9-]*\.woff2$/)
+      expect(row.unicodeRange).toContain('U+')
+      expect([400, 600]).toContain(row.weight)
+    }
+  })
+
   it('answers 404 for anything the manifest does not list', async () => {
     const cases = [
       `${FONT_ROUTE}/nope.woff2`,

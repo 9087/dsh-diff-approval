@@ -1676,9 +1676,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   // mainland China, and a handful of sliced woff2 files is not what any font CDN
   // distributes) and asking the reader to install a font is not one either.
   ctx.effect(() => {
-    const route = fontRoute()
+    const route = fontRoute((message) => ctx.logger.warn(message))
     const server = ctx.get('webServer') as WebServerSurface | undefined
-    if (route === undefined || typeof server?.register !== 'function') {
+    if (typeof server?.register !== 'function') {
       ctx.logger.debug('diff-approval: no web server, so the bundled code font is not served')
       return () => {}
     }
@@ -1850,39 +1850,92 @@ interface WebServerResponse {
 /** The font slices the host is willing to serve, read once from the manifest. */
 let fontSlicesPromise: Promise<Map<string, FontSlice> | undefined> | undefined
 
-/** Read `assets/fonts/manifest.json` next to the built bundle, once. */
-function fontSlices(): Promise<Map<string, FontSlice> | undefined> {
-  fontSlicesPromise ??= (async () => {
-    try {
-      const dir = fileURLToPath(new URL(FONT_ASSET_DIR, import.meta.url))
-      const text = await readFile(join(dir, 'manifest.json'), 'utf8')
-      const manifest = JSON.parse(text) as { slices?: FontSlice[] }
-      const slices = new Map<string, FontSlice>()
-      for (const slice of manifest.slices ?? []) slices.set(slice.file, slice)
-      return slices
-    } catch {
-      return undefined
-    }
-  })()
+/** Read `assets/fonts/manifest.json` next to the built bundle. */
+async function loadFontSlices(): Promise<Map<string, FontSlice> | undefined> {
+  try {
+    const dir = fileURLToPath(new URL(FONT_ASSET_DIR, import.meta.url))
+    const text = await readFile(join(dir, 'manifest.json'), 'utf8')
+    const manifest = JSON.parse(text) as { slices?: FontSlice[] }
+    const slices = new Map<string, FontSlice>()
+    for (const slice of manifest.slices ?? []) slices.set(slice.file, slice)
+    return slices
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The manifest, cached for the life of the host — but only once it has been
+ * read. A missing `assets/fonts` is deliberately not cached: a deployment that
+ * puts the assets beside a running bundle (a profile reinstall after the
+ * package's file list grew) starts serving slices on the next request instead
+ * of needing a restart, at the cost of one failed read per request until then.
+ */
+async function fontSlices(): Promise<Map<string, FontSlice> | undefined> {
+  if (fontSlicesPromise === undefined) {
+    const pending = loadFontSlices()
+    fontSlicesPromise = pending
+    const slices = await pending
+    if (slices === undefined) fontSlicesPromise = undefined
+    return slices
+  }
   return fontSlicesPromise
 }
 
 /**
+ * Drop the cached slice list, so the next request reads the manifest again.
+ *
+ * The cache exists so a served page costs one read, which makes it state that
+ * outlives a test: tests that need the "no manifest" path call this between
+ * cases. Nothing in the app calls it.
+ */
+export function resetFontSlicesForTests(): void {
+  fontSlicesPromise = undefined
+}
+
+/**
  * Answer one font request. Exported so the route's behaviour is testable
- * without a listening server: only files the manifest lists are ever read, and
- * everything else — including a path traversal attempt — is a 404.
+ * without a listening server: the manifest itself is answered from the parsed
+ * list, only files that list names are ever read, and everything else —
+ * including a path traversal attempt — is a 404.
  *
  * @param req - the request, for its path.
  * @param res - the response, whose lifecycle this owns.
+ * @param nominate - how to report a missing manifest, called at most once per
+ *   route by {@link fontRoute}. Without the manifest every slice is a 404, and
+ *   that is a deployment problem the reader cannot see from the panel: the
+ *   switch is on, the font is simply absent, and nothing else says why.
  */
-export async function serveFontSlice(req: WebServerRequest, res: WebServerResponse): Promise<void> {
+export async function serveFontSlice(
+  req: WebServerRequest,
+  res: WebServerResponse,
+  nominate?: (message: string) => void,
+): Promise<void> {
   const slices = await fontSlices()
   if (slices === undefined) {
+    nominate?.(
+      `diff-approval: no code-font manifest at ${join(fileURLToPath(new URL(FONT_ASSET_DIR, import.meta.url)), 'manifest.json')}, ` +
+      'so the bundled font cannot be served (reinstall the plugin so its assets arrive, then restart the host)',
+    )
     res.statusCode = 404
     res.end('font unavailable')
     return
   }
   const name = decodeURIComponent((req.url ?? '').split('?')[0] ?? '').split('/').pop() ?? ''
+  // The client's first request, and the only one that tells it which slices the
+  // bundled face has and what unicode-range each covers. Built from the parsed
+  // map rather than from the file, so the list a reader receives is exactly the
+  // set this route will serve; the two cannot drift.
+  if (name === 'manifest.json') {
+    res.statusCode = 200
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    // The client re-reads it on every page load, and a plugin upgrade changes it.
+    res.setHeader('cache-control', 'no-store')
+    res.end(JSON.stringify({
+      slices: [...slices.values()].map(({ file, unicodeRange, weight }) => ({ file, unicodeRange, weight })),
+    }))
+    return
+  }
   const slice = slices.get(name)
   if (slice === undefined || !/^[a-z]+-[a-z0-9-]*\.woff2$/.test(name)) {
     res.statusCode = 404
@@ -1908,9 +1961,22 @@ export async function serveFontSlice(req: WebServerRequest, res: WebServerRespon
 }
 
 /**
- * The route serving the bundled font, or undefined when the slices were never
- * generated (a source checkout without the build step).
+ * The route serving the bundled font.
+ *
+ * @param warn - where the once-per-route "no manifest beside the bundle" line
+ *   goes. It is the only signal a reader's switch gives when the deployment,
+ *   not the switch, is what is missing.
+ * @returns the prefix route.
  */
-function fontRoute(): { kind: 'prefix'; path: string; handler: (req: WebServerRequest, res: WebServerResponse) => Promise<void> } | undefined {
-  return { kind: 'prefix', path: FONT_ROUTE, handler: serveFontSlice }
+export function fontRoute(warn: (message: string) => void): { kind: 'prefix'; path: string; handler: (req: WebServerRequest, res: WebServerResponse) => Promise<void> } {
+  let reported = false
+  return {
+    kind: 'prefix',
+    path: FONT_ROUTE,
+    handler: (req, res) => serveFontSlice(req, res, (message) => {
+      if (reported) return
+      reported = true
+      warn(message)
+    }),
+  }
 }
