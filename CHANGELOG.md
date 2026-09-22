@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.1](https://github.com/9087/dsh-diff-approval/compare/v0.29.0...v0.29.1) (2026-09-22)
+
+### Bug Fixes
+
+* **font:** put the code column on the font through the class the panel renders ([09779ac](https://github.com/9087/dsh-diff-approval/commit/09779ac2a9e9c9143d213b03e6338459bf2443ae))
+* **font:** serve the manifest the client asks for, and say when the slices are missing ([2ce2506](https://github.com/9087/dsh-diff-approval/commit/2ce250611af9628f6323dfb3e46b623797d94d4b))
+
 ## [0.29.0](https://github.com/9087/dsh-diff-approval/compare/v0.28.0...v0.29.0) (2026-09-22)
 
 ### Features
