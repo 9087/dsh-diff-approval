@@ -971,8 +971,15 @@ interface PendingDiffProps {  file: PendingFileDiff
   onOpen: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
   /** Inline one workspace image as a base64 data URI for the Markdown preview. */
   onPreviewImage: (sessionId: SessionId, path: string) => Promise<string | undefined>
-  /** Open the path typed into the header field: false when it could not be opened. */
-  onAddTypedPath: (path: string) => Promise<boolean>
+  /**
+   * Open the path typed into the header field: false when it could not be opened.
+   *
+   * The detail's field and the list's Add button both land here. The field does not
+   * select directly — it goes through {@link OPEN_PANEL_FILE_EVENT}, so the overlay
+   * and the docked tab agree on what is open and the landing is the one every other
+   * way of opening a file uses.
+   */
+  onAddTypedPath: (path: string) => Promise<{ openPath?: string } | undefined>
 }
 
 /** The diff body's row class per line kind. */
@@ -6454,9 +6461,17 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
               event.preventDefault()
               const typed = (pathDraft ?? '').trim()
               if (typed === '' || typed === file.path) { setPathDraft(null); return }
-              // Either way the draft goes: a file that opened shows its own path, and one that
-              // did not leaves the path that was showing before.
-              void onAddTypedPath(typed).finally(() => { setPathDraft(null) })
+              // Either way the draft goes: a file that opened shows its own path, one that was
+              // refused says why in a toast and leaves the path that was showing.
+              void onAddTypedPath(typed).then((result) => {
+                setPathDraft(null)
+                // Opening is the panel's own event, not this view's state: the overlay and the
+                // docked tab follow the same one, and the landing is a file's first change —
+                // the file already listed included, which is what typing its path asks for.
+                if (result?.openPath === undefined) return
+                window.dispatchEvent(new CustomEvent<PanelFileDetail>(
+                  OPEN_PANEL_FILE_EVENT, { detail: { fileId: result.openPath } }))
+              })
             } else if (event.key === 'Escape') {
               // Escape is this field's own: it puts the path back and leaves the field, rather
               // than closing the whole review (see the panel's own Escape handler).
@@ -8102,24 +8117,51 @@ export function PendingPanel({
 
   /**
    * Open a path typed into the detail header's field: add it to the list when it is not there
-   * yet, then select the file the host says it landed as. Only one exact file counts — a path
-   * that is missing, is a directory, or has nothing readable in it leaves the list untouched,
-   * and the field falls back to the path it was showing.
+   * yet, then select the file the host says it landed as.
+   *
+   * The host is the one that judges the path, and its refusal is the only thing the reader can
+   * act on — "nothing happened" is what sent them looking for a bug. So every refusal says why:
+   * the same wording the browse dialog uses for the same outcomes, plus the two this field can
+   * hit and that dialog cannot (a directory named as one file, and an add that raises).
    *
    * @param path - the path as typed.
-   * @returns whether a file was opened.
+   * @returns what to select: the entry opened (the one already listed, for a duplicate), or
+   *   undefined when the host refused the path.
    */
-  const addTypedPath = async (path: string): Promise<boolean> => {
-    if (current === undefined) return false
-    const value = await onAddPath(current, path, true, true).catch(() => undefined)
-    if (value === undefined) return false
-    if (value.outcome !== 'added' && value.outcome !== 'duplicate') return false
-    if (value.id !== undefined) setPendingSelect(value.id)
-    // The id is the host's answer, and the panel can only select ids its own list holds: ask for
-    // the list now instead of waiting for the next poll. The field is a way to open a file, and
-    // opening it a second later is not that.
-    onRefresh(current)
-    return true
+  const addTypedPath = async (path: string): Promise<{ openPath?: string } | undefined> => {
+    if (current === undefined) {
+      showCopyToast(t('panel.fileNotPending'))
+      return undefined
+    }
+    const value = await onAddPath(current, path, true, true).catch((error: unknown) => {
+      showCopyToast(t('panel.addFailed', { message: error instanceof Error ? error.message : String(error) }))
+      return undefined
+    })
+    if (value === undefined) return undefined
+    if (value.outcome === 'added' || value.outcome === 'duplicate') {
+      if (value.id !== undefined) {
+        setPendingSelect(value.id)
+        // The id is the host's answer, and the panel can only select ids its own list holds: ask
+        // for the list now instead of waiting for the next poll. The field is a way to open a
+        // file, and opening it a second later is not that.
+        onRefresh(current)
+        return { openPath: value.id }
+      }
+      // Landed, but the host named no single entry (a directory scan): nothing to open.
+      onRefresh(current)
+      return {}
+    }
+    if (value.outcome === 'missing') showCopyToast(t('panel.addMissing'))
+    else if (value.outcome === 'outside') showCopyToast(t('panel.addOutside'))
+    else if (value.outcome === 'not-a-file') showCopyToast(t('panel.addNotAFile'))
+    else if (value.outcome === 'unchanged') {
+      // The same case the browse dialog names: the file has to be asked for by name
+      // (`includeUnchanged`) or it will not be listed at all.
+      showCopyToast(t('panel.addUnchanged'))
+    } else if (value.outcome === 'empty') showCopyToast(t('panel.addEmpty'))
+    else if (value.outcome === 'no-vcs') showCopyToast(t('panel.importNoVcs'))
+    else showCopyToast(t('panel.addFailed', { message: value.message ?? '' }))
+    return undefined
   }
 
   const renderEntry = (entry: PendingFileDiff) => (

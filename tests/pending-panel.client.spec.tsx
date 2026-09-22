@@ -2576,7 +2576,7 @@ describe('PendingPanel', () => {
     await waitFor(() => { expect(shownPath()).toBe('/repo/new.txt') })
   })
 
-  it('puts the shown path back when the typed one cannot be opened', async () => {
+  it('puts the shown path back when the typed one cannot be opened, and says why', async () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     ;(props.onAddPath as unknown as { mockResolvedValueOnce: (v: unknown) => void })
       .mockResolvedValueOnce({ outcome: 'missing', added: 0, duplicates: 0 })
@@ -2590,6 +2590,51 @@ describe('PendingPanel', () => {
     // Nothing was added, so the field falls back to the file that is open, which stays open.
     await waitFor(() => { expect(shownPath()).toBe(FILE.path) })
     expect(document.querySelector('[data-diff-approval-diff]')).not.toBeNull()
+    // …and the refusal is named: a field that silently reverts reads as a bug.
+    await waitFor(() => {
+      expect(screen.getByText('panel.addMissing')).not.toBeNull()
+    })
+  })
+
+  it('says why each refused path was refused, the way the browse dialog does', async () => {
+    // One case per outcome the host can answer with: the field has no tree to browse, so the
+    // toast is the only thing that tells the reader which way their path was wrong.
+    const cases: Array<[string, string, string]> = [
+      ['/elsewhere/x.txt', 'outside', 'panel.addOutside'],
+      ['/repo/dir', 'not-a-file', 'panel.addNotAFile'],
+      ['/repo/clean.txt', 'unchanged', 'panel.addUnchanged'],
+      ['/repo/emptydir', 'empty', 'panel.addEmpty'],
+      ['/repo', 'no-vcs', 'panel.importNoVcs'],
+    ]
+    for (const [path, outcome, expected] of cases) {
+      const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+      ;(props.onAddPath as unknown as { mockResolvedValueOnce: (v: unknown) => void })
+        .mockResolvedValueOnce({ outcome, added: 0, duplicates: 0 })
+      const view = render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      const field = document.querySelector('[data-diff-path-input]') as HTMLInputElement
+      fireEvent.change(field, { target: { value: path } })
+      fireEvent.keyDown(field, { key: 'Enter' })
+      await waitFor(() => { expect(screen.getByText(expected)).not.toBeNull() })
+      // The file that was open is still the one showing: a refused path changes nothing.
+      expect(shownPath()).toBe(FILE.path)
+      view.unmount()
+    }
+  })
+
+  it('names the reason when the host itself raises on a typed path', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    ;(props.onAddPath as unknown as { mockRejectedValueOnce: (v: unknown) => void })
+      .mockRejectedValueOnce(new Error('channel closed'))
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const field = document.querySelector('[data-diff-path-input]') as HTMLInputElement
+    fireEvent.change(field, { target: { value: '/repo/anything.txt' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+    await waitFor(() => {
+      // The stub `t` renders the key with its parameters, so the message is part of the text.
+      expect(screen.getByText(/panel\.addFailed/)).not.toBeNull()
+    })
   })
 
   it('keeps the header field\'s Escape to itself, so the review stays up', () => {
