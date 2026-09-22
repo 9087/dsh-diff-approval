@@ -97,3 +97,11 @@ pnpm run fonts:plan  # 页面上出现多少汉字时实际会下载多少
 ```
 
 内置字体是 [JetBrains Maple Mono](https://github.com/SpaceTimee/Fusion-JetBrainsMapleMono)（SIL OFL 1.1），由 `scripts/fonts` 子集化并切片——流水线、许可证与各切片的体积见 [`assets/fonts/README.md`](assets/fonts/README.md)。
+
+`file:` 方式安装的 profile 只复制**安装当时** `files` 列出的文件，所以本地 checkout 后来新增的文件（如 `assets/fonts`）必须先刷新安装，宿主才拿得到：
+
+```sh
+npx @deepseek-ai/dsh plugin --profile web install   # 然后重启 `dsh web`
+```
+
+客户端那半会自己热更新（它的 bundle 被监听），所以客户端改动刷新页面即可；宿主那半的改动（例如提供字体的这条路由）要等重启才生效。

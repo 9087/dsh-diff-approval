@@ -97,3 +97,11 @@ pnpm run fonts:plan  # what a page actually downloads, by how many hanzi it show
 ```
 
 The bundled font is [JetBrains Maple Mono](https://github.com/SpaceTimee/Fusion-JetBrainsMapleMono) (SIL OFL 1.1), subset and sliced by `scripts/fonts` — see [`assets/fonts/README.md`](assets/fonts/README.md) for the pipeline, the licence and what the slices cost.
+
+A `file:` profile install copies what the package's `files` list named *at install time*, so a checkout whose list grew needs a refresh before the host can hand the new files out:
+
+```sh
+npx @deepseek-ai/dsh plugin --profile web install   # then restart `dsh web`
+```
+
+Only the client half reloads on its own (its bundle is watched), so a client change shows up on a page refresh while a host-half change — like the route that serves the font — waits for the restart.
