@@ -30,6 +30,7 @@
  */
 
 import { FONT_FACES, FONT_FAMILY, FONT_ROUTE, FONT_STACK } from '../font-slices.ts'
+import panelCss from './PendingPanel.module.css'
 import { CODE_FONT_CHANGED_EVENT, codeFontEnabled } from './settings.ts'
 
 /** The style element this module owns, marked so it is never injected twice. */
@@ -37,6 +38,17 @@ const STYLE_MARKER = 'data-diff-approval-code-font'
 
 /** The manifest path, resolved against the document's own origin. */
 const MANIFEST_URL = `${FONT_ROUTE}/manifest.json`
+
+/**
+ * The class the panel puts on the code table, read from the stylesheet module
+ * that defines it.
+ *
+ * A literal `.lines` selector is a no-op: the build prefixes every class in that
+ * module (`Ay7oXG_lines`), so a rule naming the source name matches no element
+ * and the font silently never applies. The module's own export is the one value
+ * that cannot drift from what the panel renders.
+ */
+const CODE_TABLE_CLASS = panelCss.lines ?? ''
 
 /** One slice as the manifest lists it. */
 interface ListedSlice {
@@ -53,8 +65,13 @@ interface ListedSlice {
  * font immediately, and swapping when the slices land only changes the column
  * width, never the row height that the virtual window and the jump math are
  * built on.
+ *
+ * @param slices - the manifest's slice list.
+ * @param codeClass - the class the code table carries, defaulting to the one the
+ *   panel's stylesheet exports. It is a parameter so a test can pin the emitted
+ *   selector without importing the panel.
  */
-export function codeFontCss(slices: readonly ListedSlice[]): string {
+export function codeFontCss(slices: readonly ListedSlice[], codeClass: string = CODE_TABLE_CLASS): string {
   const rules: string[] = []
   for (const face of FONT_FACES) {
     for (const slice of slices) {
@@ -69,26 +86,43 @@ export function codeFontCss(slices: readonly ListedSlice[]): string {
     }
   }
   // One rule, one selector: the diff's code table. Comment bubbles, the file
-  // list and the panel's chrome are outside `.lines` and keep the shell's stack,
-  // which keeps the change to the place where the grid is the point.
-  rules.push(`.lines{font-family:${FONT_STACK}}`)
+  // list and the panel's chrome are outside it and keep the shell's stack,
+  // which keeps the change to the place where the grid is the point. An empty
+  // class means the stylesheet module stopped exporting `lines`, and a rule
+  // written without one would match nothing: emit none, and let the test that
+  // pins the export fail instead of the font doing nothing in silence.
+  if (codeClass !== '') rules.push(`.${codeClass}{font-family:${FONT_STACK}}`)
   return rules.join('\n')
 }
 
 /** The manifest, read once per page: the slices it lists never change under us. */
 let manifestPromise: Promise<readonly ListedSlice[] | undefined> | undefined
 
+/** Whether the one "the switch is on but the host serves no slices" line was written. */
+let reportedMissing = false
+
 /** Fetch (or reuse) the slice list. Undefined when the host serves no slices. */
 function fetchSlices(): Promise<readonly ListedSlice[] | undefined> {
   manifestPromise ??= (async () => {
     try {
       const response = await fetch(MANIFEST_URL, { credentials: 'same-origin' })
-      if (!response.ok) return undefined
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const manifest = (await response.json()) as { slices?: ListedSlice[] }
       const slices = manifest.slices ?? []
-      return slices.length > 0 ? slices : undefined
-    } catch {
-      // No slices, no font: the system stack stands.
+      if (slices.length === 0) throw new Error('the manifest lists no slices')
+      return slices
+    } catch (error) {
+      // Off is the default and silent by design; on is not. A reader who turned
+      // the switch on and sees the system font has a deployment problem — the
+      // host bundle has no `assets/fonts` beside it — and nothing else in the
+      // panel would ever say so. The failure is not cached either, so flipping
+      // the switch again retries (a host that was reinstalled mid-page starts
+      // serving without a reload).
+      manifestPromise = undefined
+      if (!reportedMissing) {
+        reportedMissing = true
+        console.warn(`diff-approval: the bundled code font is unavailable (${MANIFEST_URL})`, error)
+      }
       return undefined
     }
   })()
@@ -109,6 +143,7 @@ function styleElement(): HTMLStyleElement | null {
  */
 export function resetCodeFontForTests(): void {
   manifestPromise = undefined
+  reportedMissing = false
   styleElement()?.remove()
 }
 
@@ -139,9 +174,10 @@ async function apply(live: () => boolean): Promise<void> {
 
 /**
  * Follow the preference for as long as the client lives: apply it now, and again
- * whenever the Settings switch flips. Silent on every failure — a host without
- * the slices (a source checkout that never ran the font build) simply keeps the
- * system stack, which is what the panel did before this existed.
+ * whenever the Settings switch flips. A host without the slices (a source
+ * checkout that never ran the font build, or an install that arrived without
+ * `assets/`) keeps the system stack, and says so once on the console: the
+ * switch is on, so silence would read as "the font does nothing".
  *
  * @returns a disposer that stops following and removes the injected rules.
  */

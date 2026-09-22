@@ -5,6 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { attachCodeFont, codeFontCss, resetCodeFontForTests } from '../src/client/code-font.ts'
+import panelCss from '../src/client/PendingPanel.module.css'
 import { CODE_FONT_CHANGED_EVENT, codeFontEnabled, setCodeFontEnabled } from '../src/client/settings.ts'
 import { FONT_FAMILY, FONT_ROUTE, FONT_STACK } from '../src/font-slices.ts'
 
@@ -70,8 +71,8 @@ describe('the injected code font rules', () => {
   })
 
   it('puts only the code column on the font', () => {
-    const css = codeFontCss(SLICES)
-    expect(css).toContain(`.lines{font-family:${FONT_STACK}}`)
+    const css = codeFontCss(SLICES, 'panel_lines')
+    expect(css).toContain(`.panel_lines{font-family:${FONT_STACK}}`)
     // No device or width gate: the grid is what the diff needs on every screen.
     expect(css).not.toContain('@media')
     expect(css).not.toContain('max-width')
@@ -80,6 +81,18 @@ describe('the injected code font rules', () => {
     for (const selector of ['.discussionAnswer', '.discussionUser', '.rowPath', '.panel']) {
       expect(css).not.toContain(`${selector}{font-family`)
     }
+  })
+
+  it('names the class the panel actually renders, not the source-level name', () => {
+    // The stylesheet module prefixes its classes (`Ay7oXG_lines`), so a rule
+    // written as `.lines` matches no element and the font silently never
+    // applies — on every platform, whatever the host serves. The selector has to
+    // be the class the panel puts on the table, which is the module's own export.
+    expect(panelCss.lines).not.toBe('lines')
+    expect(panelCss.lines).toContain('lines')
+    const css = codeFontCss(SLICES)
+    expect(css).toContain(`.${panelCss.lines}{font-family:${FONT_STACK}}`)
+    expect(css).not.toContain('.lines{')
   })
 })
 
@@ -103,7 +116,7 @@ describe('the code font switch', () => {
     await settle()
     expect(fetchStub).toHaveBeenCalledTimes(1)
     expect(injected()?.textContent).toContain(FONT_ROUTE)
-    expect(injected()?.textContent).toContain(`.lines{font-family:${FONT_STACK}}`)
+    expect(injected()?.textContent).toContain(`.${panelCss.lines}{font-family:${FONT_STACK}}`)
     setCodeFontEnabled(false)
     await settle()
     expect(injected()).toBeNull()
@@ -119,12 +132,25 @@ describe('the code font switch', () => {
     expect(injected()).not.toBeNull()
   })
 
-  it('keeps the system stack when the host serves no slices', async () => {
+  it('keeps the system stack when the host serves no slices, and says why once', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     stubFetch({}, false)
     setCodeFontEnabled(true)
     attach()
     await settle()
     expect(injected()).toBeNull()
+    // The switch is on, so the failure cannot be silent: the system stack plus a
+    // line naming the manifest is what a reader with a deployment problem gets.
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0]?.[0])).toContain(FONT_ROUTE)
+    // The failure is not cached either: a host that gains its assets while the
+    // page is open is picked up by the next flip, not by a reload.
+    stubFetch({ slices: SLICES })
+    setCodeFontEnabled(false)
+    setCodeFontEnabled(true)
+    await settle()
+    expect(injected()).not.toBeNull()
+    warn.mockRestore()
   })
 
   it('follows the preference only while attached', async () => {

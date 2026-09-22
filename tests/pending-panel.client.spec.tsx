@@ -11,6 +11,8 @@ import type { ComponentProps, ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingFileDiff } from '../src/types.ts'
 import { PendingPanel, frameInsets, makeMeasurer, wrapChipRows, MIN_LIST_WIDTH_PX } from '../src/client/PendingPanel.tsx'
+import panelCss from '../src/client/PendingPanel.module.css'
+import { codeFontCss } from '../src/client/code-font.ts'
 import { zh } from '../src/client/locales.ts'
 import { lastPanelFile, panelFileOffset, rememberDiscussions, rememberedDiscussions, removalAskQuiet, resetPanelMemory } from '../src/client/panel-memory.ts'
 import { diffLineHeight, navLeadRows, setCommentModeEnabled } from '../src/client/settings.ts'
@@ -7675,6 +7677,29 @@ describe('PendingPanel', () => {
     fireEvent.click(document.querySelector('[data-diff-view-toggle]') as HTMLButtonElement)
     expect(document.querySelector('[data-diff-font-size]')).toBeNull()
     expect(document.querySelector('[data-diff-view-preview]')).toBeNull()
+  })
+
+  it('injects the code font against the class the rendered code table carries', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    // The code table's class comes from the stylesheet module, so it is prefixed
+    // (`Ay7oXG_lines`) — which is why an injected rule written as the source-level
+    // `.lines` matches no element and the font silently never applies, whatever
+    // the host serves. The rule and the element have to name the same class.
+    const lines = panelCss.lines as string
+    const table = codeBody().querySelector(`.${lines}`) as HTMLElement | null
+    expect(table).not.toBeNull()
+    expect(lines).not.toBe('lines')
+    // …and it is the code column alone: the file list keeps the shell's stack.
+    const list = document.querySelector('[data-diff-approval-file-list]') as HTMLElement
+    expect(list.querySelector(`.${lines}`)).toBeNull()
+
+    const css = codeFontCss([{ file: 'regular-latin.woff2', unicodeRange: 'U+0020-007E', weight: 400 }])
+    expect(css).toContain(`.${table!.className}{font-family:`)
+    expect(css).not.toContain('.lines{')
   })
 
   it('lets the status bar pick the highlight language', () => {
