@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.29.0](https://github.com/9087/dsh-diff-approval/compare/v0.28.0...v0.29.0) (2026-09-22)
+
+### Features
+
+* **font:** bundle a 2:1 CJK code font, off until asked for ([90981cc](https://github.com/9087/dsh-diff-approval/commit/90981cc350a42471cbe4d451c22ddc3fb76e8fe9))
+* **panel:** name both ways to keep and to put back in a row's menu ([ebefe5a](https://github.com/9087/dsh-diff-approval/commit/ebefe5aa6e0d5a16a99a79f2ee0870e7c2502851))
+
+### Bug Fixes
+
+* **comments:** list only the inline syntax a comment can render ([804f5a9](https://github.com/9087/dsh-diff-approval/commit/804f5a9480855141139d9d709962ad1ca855b0e1))
+* **panel:** say why a typed path could not be opened ([09ebfbc](https://github.com/9087/dsh-diff-approval/commit/09ebfbc458a7f610ecdf30b46ffe3c94b15037f4))
+
 ## [0.28.0](https://github.com/9087/dsh-diff-approval/compare/v0.27.0...v0.28.0) (2026-09-21)
 
 ### Features
