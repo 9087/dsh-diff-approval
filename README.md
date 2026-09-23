@@ -38,8 +38,8 @@ For Markdown files, the source-line diff can also be shown as a rendered before/
 - **Customizable appearance**: from the "Diff view" settings group, adjust the diff's code font size (%), line height (px), and the added / removed line colors, with a live preview.
 - **External changes**: files already in the pending list are monitored — if one is later modified outside the reviewed edits (another tool, an editor), the panel adopts the new content and flags the divergence.
 - **Open / Reveal**: while reviewing a file's diff, open it in its default app or reveal it in the system file manager with one click.
-- **Import workspace changes**: when the list is empty, click the button to import the workspace's local changes from **Git / SVN / Perforce** — modified, deleted, and (opt-in) untracked files. The VCS root is found by walking up from the workspace, so a workspace inside a subdirectory works too.
-- **Settings**: a "Diff Approval" section in DeepSeek Harness settings, grouped into **Diff view** (code font size, line height, added / removed colors), **Shortcuts** (rebind the panel's keyboard chords), and **Floating coverage** (the same four edge switches the panel's own popover offers) plus preferences for auto-paste on copy, whether untracked files are included when importing, the diff's tab width (2 / 4 / 8 spaces), the side-by-side split view, the block-jump lead rows, the Markdown preview default and width, and the quick-summon chord.
+- **Import version-control changes**: when the list is empty, click the button to import the workspace's local changes from **Git / SVN / Perforce** — everything that is **not committed yet, staged or not** (Git is read against the last commit, the `git diff HEAD` view), plus deleted files and, opt-in, files the VCS has never seen (untracked / unversioned). The VCS root is found by walking up from the workspace, so a workspace inside a subdirectory works too.
+- **Settings**: a "Diff Approval" section in DeepSeek Harness settings, grouped into **Diff view** (code font size, line height, added / removed colors), **Shortcuts** (rebind the panel's keyboard chords), and **Floating coverage** (the same four edge switches the panel's own popover offers) plus preferences for auto-paste on copy, whether to include files version control has not seen when importing, the diff's tab width (2 / 4 / 8 spaces), the side-by-side split view, the block-jump lead rows, the Markdown preview default and width, and the quick-summon chord.
 - **Persistence**: pending state is stored per workspace at `<dshHome>/diff-approval/workspaces/<workspaceId>.json` and survives restarts — unhandled changes are still there when you come back, even in a fresh session.
 
 ## 📦 Install
@@ -74,12 +74,12 @@ Then restart `dsh web`.
 
 1. Work with the agent as usual — successful `edit` / `write` / editor (`str_replace_editor`) calls are recorded automatically.
 2. Click the **Pending changes** action at the sidebar footer, review each file's diff, and **Keep** / **Revert**.
-3. When the list is empty, **Import workspace changes** pulls in the workspace's local Git/SVN/Perforce changes.
+3. When the list is empty, **Import version-control changes** pulls in what the workspace has not committed yet.
 
 ## 📝 Notes
 
 - Only tracked mutations (`edit`, `write`, and `str_replace_editor` editor calls) are recorded automatically. Deletions made outside these tools (e.g. shell `rm`) are sensed only for tracked files: the entry turns "File is gone" and its Revert restores the file.
-- The VCS import runs read-only Git/SVN/Perforce commands through the deployment's shell executor, so the respective CLI must be on `PATH`. Importing untracked files (default off) scans the whole workspace, which can be slow on large trees.
+- The VCS import runs read-only Git/SVN/Perforce commands through the deployment's shell executor, so the respective CLI must be on `PATH`. Including files version control has not seen (default off) scans the whole workspace, which can be slow on large trees.
 - For a newly-created file, the whole-file revert action reads **Delete** and removes the file.
 - Reverting a file writes it back with its current line endings (LF / CRLF) preserved.
 - Sessions with no workspace keep their entries memory-only; corrupt persistence files are rejected and can be deleted to reset.
