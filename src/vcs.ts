@@ -9,13 +9,17 @@
  * directory.
  *
  * Scope of one import (mirrors the panel's preferences):
- * - modified files (git: working tree vs index — "仅未暂存"; svn: vs BASE;
- *   p4: opened edits), imported as `edit` (old = baseline, new = working);
+ * - modified files, imported as `edit` (old = baseline, new = working). The GIT baseline is the
+ *   last commit, not the index: this list answers "what is not committed yet", so a change the
+ *   reader already `git add`ed is as much a review item as one they have not — staging is a step
+ *   towards a commit, not a decision this panel records (`git diff HEAD` semantics). svn compares
+ *   against BASE and p4 against `#have`, which are their "last commit" already;
  * - deleted files, imported as `edit` with an empty new side (revert restores);
- * - new/untracked files (git `??`, svn `?`, p4 not-yet-opened files), imported
- *   as `create` ONLY when the untracked preference is on. For p4 that means a
- *   full workspace scan (`p4 status`, which can be slow); with the preference
- *   off only already-opened files are read.
+ * - new/untracked files, imported as `create` ONLY when the untracked preference is on: git `??`
+ *   (never added), svn unversioned, p4 not-yet-opened. For p4 that means a full workspace scan
+ *   (`p4 status`, which can be slow); with the preference off only already-opened files are read.
+ *   A file that is new but already under version control (git `A`, svn `added`) needs no
+ *   preference: it is an uncommitted change like any other.
  * @module dsh-diff-approval/vcs
  */
 
@@ -186,15 +190,46 @@ function parseGitPorcelainZ(output: string): { xy: string; rel: string }[] {
   return records
 }
 
+/** The status command both the import and the per-file refresh read. Rename detection is off, so
+ * a rename reads as its two halves (a delete and an add) rather than a row the review cannot
+ * express. */
+const GIT_STATUS_COMMAND = 'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all'
+
+/**
+ * Read one file's content at a revision (`<rev>:<path>`), or undefined when that revision has no
+ * such path (a new file, or a repo whose HEAD is unborn).
+ *
+ * The blob is read straight off `git show` with a per-call stdout budget raised to the blob's own
+ * size the way `git cat-file -s` reports it, so the executor cannot truncate a large baseline.
+ * Read-only, no temp-file write, so it works even where the sandbox denies a write to the repo
+ * root.
+ * @param root - the repository root (the command's working directory).
+ * @param revision - the revision to read, e.g. `HEAD`.
+ * @param rel - the repository-relative path.
+ * @param shell - the deployment's shell executor.
+ * @param signal - the caller's abort signal.
+ * @returns the file's content at that revision, or undefined when it has none.
+ */
+async function readGitBlob(
+  root: string,
+  revision: string,
+  rel: string,
+  shell: ShellExecutorLike,
+  signal: AbortSignal | undefined,
+): Promise<string | undefined> {
+  try {
+    const reported = Number.parseInt((await runShell(shell, `git cat-file -s ${revision}:${shq(rel)}`, root, signal)).trim(), 10)
+    const size = Number.isFinite(reported) ? reported : 0
+    return await runShell(shell, `git show ${revision}:${shq(rel)}`, root, signal, size + GIT_BLOB_STDOUT_SLACK)
+  } catch {
+    return undefined
+  }
+}
+
 /** Enumerate the workspace's local changes in a git checkout. */
 async function gitChanges(input: VcsImportInput): Promise<VcsChange[]> {
   const { root, workspaceRoot, includeUntracked, scope, shell, readText, signal } = input
-  const stdout = await runShell(
-    shell,
-    'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all',
-    root,
-    signal,
-  )
+  const stdout = await runShell(shell, GIT_STATUS_COMMAND, root, signal)
   const changes: VcsChange[] = []
   for (const { xy, rel } of parseGitPorcelainZ(stdout)) {
     const absolute = resolve(root, rel)
@@ -205,33 +240,19 @@ async function gitChanges(input: VcsImportInput): Promise<VcsChange[]> {
       changes.push({ path: absolute, kind: 'create', oldText: '', newText })
       continue
     }
-    // The second column is the worktree status: import only unstaged changes
-    // (the "仅未暂存" baseline). Staged-only rows (second column blank) are
-    // left alone.
+    // The baseline is the LAST COMMIT, not the index. Both columns of the status row are read
+    // together: `M ` is a change the reader already staged and ` M` one they have not, and against
+    // HEAD the two are the same kind of thing — work that is not committed yet, which is what this
+    // list is for (`git diff HEAD` semantics). Reading the index instead would silently drop
+    // every staged change from the review (see the module docs).
+    const baseline = await readGitBlob(root, 'HEAD', rel, shell, signal)
     const worktree = xy[1] ?? ' '
-    if (worktree !== 'M' && worktree !== 'D') continue
-    // Baseline = the index (stage 0) content, i.e. what `git diff` compares
-    // against. It is read straight off `git show :0:` with a per-call stdout
-    // budget (`stdoutMaxBytes`) large enough for the blob, so the executor does
-    // not truncate a large blob — read-only, no temp-file write, so it works
-    // even where the sandbox denies a write to the repo root.
-    let oldText = ''
-    try {
-      let size = 0
-      try {
-        size = Number.parseInt((await runShell(shell, `git cat-file -s :0:${shq(rel)}`, root, signal)).trim(), 10)
-      } catch {
-        size = 0
-      }
-      if (Number.isFinite(size) && size > 0) {
-        oldText = await runShell(shell, `git show :0:${shq(rel)}`, root, signal, size + GIT_BLOB_STDOUT_SLACK)
-      }
-    } catch {
-      oldText = ''
-    }
+    const oldText = baseline ?? ''
     const newText = worktree === 'D' ? '' : (await readText(absolute) ?? '')
     if (oldText === '' && newText === '') continue
-    changes.push({ path: absolute, kind: 'edit', oldText, newText })
+    // A path with no version at HEAD is a new file: its baseline is empty, and `create` is what a
+    // revert of it means (remove the file).
+    changes.push({ path: absolute, kind: baseline === undefined ? 'create' : 'edit', oldText, newText })
   }
   return changes
 }

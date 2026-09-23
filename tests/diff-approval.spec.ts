@@ -1096,10 +1096,10 @@ describe('vcs detection and import', () => {
     const shell = fakeShell({
       'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all':
         ' M sub/a.txt\u0000 D sub/gone.txt\u0000?? sub/new.txt\u0000',
-      'git cat-file -s :0:sub/a.txt': '13',
-      'git show :0:sub/a.txt': 'old content\n',
-      'git cat-file -s :0:sub/gone.txt': '9',
-      'git show :0:sub/gone.txt': 'gone old\n',
+      'git cat-file -s HEAD:sub/a.txt': '13',
+      'git show HEAD:sub/a.txt': 'old content\n',
+      'git cat-file -s HEAD:sub/gone.txt': '9',
+      'git show HEAD:sub/gone.txt': 'gone old\n',
     })
     const { handle } = await harness({
       sessionIds: [SessionId('session-1')],
@@ -1122,14 +1122,50 @@ describe('vcs detection and import', () => {
     expect(files[2]).toMatchObject({ kind: 'create', oldText: '', newText: 'fresh\n' })
   })
 
+  it('imports a staged change too, because the baseline is the last commit and not the index', async () => {
+    // The list answers "what is not committed yet", so a change the reader already `git add`ed is
+    // as much a review item as an unstaged one: the status row's FIRST column (`M `) counts, and
+    // the baseline it is diffed against is the last commit. Reading the index here would drop every
+    // staged change from the review (the shape 0.29.x and earlier shipped).
+    const { workspace } = await gitRepo()
+    await writeFile(join(workspace, 'staged.txt'), 'staged content\n')
+    await writeFile(join(workspace, 'added.txt'), 'brand new\n')
+    const shell = fakeShell({
+      'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all':
+        'M  sub/staged.txt\u0000A  sub/added.txt\u0000',
+      'git cat-file -s HEAD:sub/staged.txt': '18',
+      'git show HEAD:sub/staged.txt': 'committed content\n',
+      // `added.txt` has no version at HEAD: its size lookup fails, no blob is read for it, and it
+      // lands as a `create` whose revert removes the file.
+    })
+    const { handle } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (ctx) => { ctx.provide('shell', shell) },
+    })
+
+    const answer = await handle('vcs-import', { sessionId: 'session-1', includeUntracked: false }, signal())
+    expect(answer).toEqual({ ok: true, value: { imported: 2, detected: true } })
+
+    const files = await listEntries(handle, 'session-1')
+    expect(files.map(file => file.path).sort()).toEqual([
+      join(workspace, 'added.txt'),
+      join(workspace, 'staged.txt'),
+    ])
+    const staged = files.find(file => file.path === join(workspace, 'staged.txt'))!
+    expect(staged).toMatchObject({ kind: 'edit', oldText: 'committed content\n', newText: 'staged content\n' })
+    const added = files.find(file => file.path === join(workspace, 'added.txt'))!
+    expect(added).toMatchObject({ kind: 'create', oldText: '', newText: 'brand new\n' })
+  })
+
   it('reads a large baseline blob via git show with a raised stdout budget (no temp file)', async () => {
     const { workspace } = await gitRepo()
     await writeFile(join(workspace, 'big.txt'), 'big new content\n')
     const resolves: { command: string; stdoutMaxBytes?: number }[] = []
     const routes: Record<string, string> = {
       'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all': ' M sub/big.txt\u0000',
-      'git cat-file -s :0:sub/big.txt': '70000', // > the default stdout cap
-      'git show :0:sub/big.txt': 'big old content\n',
+      'git cat-file -s HEAD:sub/big.txt': '70000', // > the default stdout cap
+      'git show HEAD:sub/big.txt': 'big old content\n',
     }
     const shell = {
       resolve: (request: { command: string; stdoutMaxBytes?: number }) => {
@@ -1154,9 +1190,9 @@ describe('vcs detection and import', () => {
     const files = await listEntries(handle, 'session-1')
     expect(files).toHaveLength(1)
     expect(files[0]).toMatchObject({ kind: 'edit', oldText: 'big old content\n', newText: 'big new content\n' })
-    // The baseline came off `git show :0:` with a raised per-command stdout
+    // The baseline came off `git show HEAD:` with a raised per-command stdout
     // budget, not a temp-file write to the repo root.
-    const show = resolves.find(request => request.command.startsWith('git show :0:'))
+    const show = resolves.find(request => request.command.startsWith('git show HEAD:'))
     expect(show).toBeDefined()
     expect(show!.stdoutMaxBytes).toBeGreaterThanOrEqual(70000)
     expect(resolves.some(request => request.command.includes('checkout-index'))).toBe(false)
@@ -1169,8 +1205,8 @@ describe('vcs detection and import', () => {
     const shell = fakeShell({
       'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all':
         ' M sub/a.txt\u0000?? sub/new.txt\u0000',
-      'git cat-file -s :0:sub/a.txt': '13',
-      'git show :0:sub/a.txt': 'old content\n',
+      'git cat-file -s HEAD:sub/a.txt': '13',
+      'git show HEAD:sub/a.txt': 'old content\n',
     })
     const { handle } = await harness({
       sessionIds: [SessionId('session-1')],
@@ -1251,8 +1287,8 @@ describe('vcs detection and import', () => {
     await writeFile(aPath, 'new\n')
     const shell = fakeShell({
       'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all': ' M sub/a.txt\u0000',
-      'git cat-file -s :0:sub/a.txt': '4',
-      'git show :0:sub/a.txt': 'old\n',
+      'git cat-file -s HEAD:sub/a.txt': '4',
+      'git show HEAD:sub/a.txt': 'old\n',
     })
     const { ctx, handle } = await harness({
       sessionIds: [SessionId('session-1')],
@@ -1313,8 +1349,8 @@ describe('hand-adding paths to the review list', () => {
       'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all': status,
     }
     for (const [path, text] of Object.entries(baselines)) {
-      routes[`git cat-file -s :0:${path}`] = String(Buffer.byteLength(text))
-      routes[`git show :0:${path}`] = text
+      routes[`git cat-file -s HEAD:${path}`] = String(Buffer.byteLength(text))
+      routes[`git show HEAD:${path}`] = text
     }
     return fakeShell(routes)
   }
@@ -1678,8 +1714,8 @@ describe('per-file VCS refresh', () => {
     await writeFile(file, 'work v1\n')
     const routes: Record<string, string> = {
       'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all': ' M sub/a.txt\u0000',
-      'git cat-file -s :0:sub/a.txt': '9',
-      'git show :0:sub/a.txt': 'base v1\n',
+      'git cat-file -s HEAD:sub/a.txt': '9',
+      'git show HEAD:sub/a.txt': 'base v1\n',
     }
     const { handle } = await harness({
       sessionIds: [SessionId('session-1')],
@@ -1696,7 +1732,7 @@ describe('per-file VCS refresh', () => {
     const { handle, entryId, file, routes } = await imported()
     // The file AND its baseline moved on since the review captured it.
     await writeFile(file, 'work v2\n')
-    routes['git show :0:sub/a.txt'] = 'base v2\n'
+    routes['git show HEAD:sub/a.txt'] = 'base v2\n'
 
     await expect(handle('vcs-refresh', { sessionId: 'session-1', id: entryId, includeUntracked: false }, signal()))
       .resolves.toEqual({ ok: true, value: { outcome: 'refreshed' } })
