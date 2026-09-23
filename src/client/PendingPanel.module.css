@@ -3103,13 +3103,54 @@
 
 /* The range label reads as code, at the thread's own size: the wrapper carries the theme's code
    font shorthand, and nothing scales it — the label follows the thread, which keeps its size
-   whatever the reader sets the code's font scale to. */
+   whatever the reader sets the code's font scale to.
+
+   It is also the one thing in the header that is allowed to give: the label is a path, so it is as
+   long as the checkout is deep, and the row's two controls (the fold arrow and the ⋯) refuse to
+   shrink. `min-width: 0` is what lets a flex item go below its content width at all — without it
+   the row keeps its full length, and the ⋯ is the item that pays: it is last, so it is the part
+   that ends up outside the block (which clips). The overflow lands on the label instead. */
 .discussionRangeWrap {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
   font: var(--dsw-font-markdown-code-block);
 }
 
+/* Everything else in the header keeps its room: the fold arrow, and the ⋯ — which `Menu` hands over
+   wrapped in a `<span>` of its own, so the flex item that has to be pinned is that span rather than
+   the 18px button inside it (a wrapper that shrinks lets the button overflow it, which the block
+   then clips: the same loss, one level down). The spacer takes the slack when the label is short,
+   so it is put back to growing below this rule. */
+.discussionHead > :not(.discussionRangeWrap) {
+  flex: none;
+}
+
+.discussionHead > .flexSpacer {
+  flex: 1;
+}
+
+/* A path says which file it is by its TAIL (`…/client/PendingPanel.tsx:5235`), so the ellipsis
+   takes the front: a header that reads `C:\PROJECTS\dsh-diff-appr…` spends the whole row on
+   directories every thread in the file shares, and never names the file. `direction: rtl` is what
+   moves the overflow — and so the ellipsis — to the left edge, and `text-align: left` keeps a label
+   that does fit exactly where it was.
+
+   `unicode-bidi: plaintext` looks like the obvious guard for the path's own order and is the
+   opposite: it takes the paragraph direction from the content, which for a path is left-to-right,
+   so the overflow goes back to the right edge and the ellipsis with it. Measured in Chromium, a long
+   path in a 200px box: with `plaintext` the text ran 255px past the box on the right, without it
+   255px past on the left. The order is kept by isolating the label in the markup instead
+   (`<bdi dir="ltr">`), which is an inline run and cannot turn the box around. Without that isolate
+   the bidi algorithm reads the leading separator against the right-to-left box and moves it to the
+   far end — `/repo/a.ts:1` draws as `repo/a.ts:1/`. */
 .discussionRange {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
   color: var(--dsw-alias-label-tertiary);
   font-family: inherit;
 }

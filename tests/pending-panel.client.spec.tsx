@@ -5504,6 +5504,77 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-selection-comment]')).not.toBeNull()
   })
 
+  it('keeps the thread header’s ⋯ in the row and gives a long path the ellipsis instead', () => {
+    // The header's label IS a path (`referenceLabelOf(file.path, …)`), so it is as long as the
+    // checkout is deep, and the row's two controls refuse to shrink. Before, the row kept its full
+    // length and the ⋯ — being last — was the item that paid: it ended up outside the block, which
+    // clips, so the thread lost its only action on exactly the deep files that need it most. jsdom
+    // lays nothing out, so the two halves are pinned where they live: the DOM order the flex row
+    // depends on, and the stylesheet rules that make the label the only thing that gives.
+    const deep = entry({
+      id: 'entry-deep',
+      path: '/repo/packages/client/src/deeply/nested/directory/PendingPanel.tsx',
+      oldText: 'a\n',
+      newText: 'b\n',
+    })
+    render(<PendingPanel {...panelProps({ read: true, files: [deep], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('PendingPanel.tsx'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const code = rows[0]!.querySelector('[data-diff-code]') ?? rows[0]!
+    const node = code.firstChild ?? code
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+
+    const label = document.querySelector('[data-diff-discussion-range]') as HTMLElement
+    const menu = document.querySelector('[data-diff-discussion-menu]') as HTMLElement
+    expect(label).not.toBeNull()
+    expect(menu).not.toBeNull()
+    // The label names the file and the rows, and the ⋯ shares its row — `Menu` wrapping the button
+    // in a span of its own, which is the flex item the stylesheet has to pin.
+    expect(label.textContent).toContain('PendingPanel.tsx:1')
+    const head = label.parentElement!.parentElement!
+    expect(head.contains(menu)).toBe(true)
+    expect(head.lastElementChild).toBe(menu.parentElement)
+
+    const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const wrap = /\.discussionRangeWrap \{([^}]*)\}/.exec(sheet)?.[1] ?? ''
+    const range = /\.discussionRange \{([^}]*)\}/.exec(sheet)?.[1] ?? ''
+    // It shrinks below its content and clips — `min-width: 0` is what a flex item needs to be
+    // allowed to do that at all…
+    expect(wrap).toContain('flex: 0 1 auto')
+    expect(wrap).toContain('min-width: 0')
+    expect(wrap).toContain('overflow: hidden')
+    // …and it ellipsises from the FRONT, because a path is told apart by its tail.
+    expect(range).toContain('white-space: nowrap')
+    expect(range).toContain('overflow: hidden')
+    expect(range).toContain('text-overflow: ellipsis')
+    expect(range).toContain('direction: rtl')
+    expect(range).toContain('text-align: left')
+    // NOT `unicode-bidi: plaintext`: it takes the paragraph direction from the content, which for a
+    // path is left-to-right, so the overflow (and the ellipsis with it) goes back to the right edge.
+    // Measured in Chromium: 255px past the box on the right with it, 255px past on the left without.
+    expect(range).not.toContain('unicode-bidi')
+    // The path keeps its own order through the markup, as one isolated left-to-right run: the box
+    // is right-to-left and would otherwise move a leading separator to the far end.
+    const isolate = label.querySelector('bdi[dir="ltr"]')
+    expect(isolate).not.toBeNull()
+    expect(isolate!.textContent).toBe(label.textContent)
+    // Nothing else in the row may give — including `Menu`'s span wrapper around the ⋯ — while the
+    // spacer above it stays the item that takes the slack.
+    expect(sheet).toContain('.discussionHead > :not(.discussionRangeWrap) {\n  flex: none;\n}')
+    expect(/\.discussionHead > \.flexSpacer \{\s*flex: 1;/.test(sheet)).toBe(true)
+  })
+
   it('refuses a second question while the session is still answering the first', async () => {
     // One ask at a time. An answer is read out of the session's transcript by matching the prompt
     // it answers, and only one of those is tracked at a time (see `pendingAskRef`): a second block

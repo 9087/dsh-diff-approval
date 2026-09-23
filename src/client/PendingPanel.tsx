@@ -1242,7 +1242,15 @@ function DiscussionBlock({
             : <IconChevronUpOutline14 size={12} />}
         </button>
         <span className={css.discussionRangeWrap}>
-          <span className={css.discussionRange} data-diff-discussion-range>{label}</span>
+          {/* One isolated left-to-right run inside a right-to-left box: the box is what makes a long
+              path ellipsise from the FRONT — a path is told apart by its tail, and the header's own
+              left edge is the least informative character it has (see `.discussionRange`) — while the
+              isolate is what keeps the path in its own order. Without it the bidi algorithm reads the
+              leading separator against the box and moves it to the far end (`/repo/a.ts:1` draws as
+              `repo/a.ts:1/`). */}
+          <span className={css.discussionRange} data-diff-discussion-range>
+            <bdi dir="ltr">{label}</bdi>
+          </span>
         </span>
         <span className={css.flexSpacer} />
         <Menu
