@@ -4117,12 +4117,31 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    *  only just mounted can be refused. The ask is then kept and re-applied on the pane's own measurement
    *  (see the retry effect beside the landing) instead of being spent on a write that did not happen. */
   const landingPendingRef = useRef(false)
-  /** The block a landing named when its write fell SHORT of it (see the block branch and the retry
-   *  effect): a file-list or chip jump lands a change block, and a pane still the previous layout's size
-   *  clamps that write to a range that was not the reader's. Held as the block's first row, so the retry
-   *  re-lands the same block rather than whatever `focus` has become. Cleared as soon as the reader
-   *  scrolls, so a landing never fights a view they have taken over. */
-  const shortBlockRef = useRef<number | undefined>(undefined)
+  /**
+   * A landing that did not end where it asked to be: the place itself, and how long to keep trying it.
+   *
+   * The write is clamped to the box's range, and the box's range is not the reader's yet when the pane has
+   * only just mounted for the file — the float card is still opening, this file's rows are not laid out,
+   * the comment model may still be arriving — so the write lands short. Nothing re-lands it afterwards
+   * (the request has been spent), which is why the same jump is exact on a file already on screen and
+   * "somewhere" on one it just opened, at the mercy of which of those is true on the frame the jump runs.
+   *
+   * Held as the PLACE rather than re-derived, so the retry lands the same spot whatever `focus` or the
+   * ranges have become in between, and dropped as soon as the reader scrolls, so it never fights a view
+   * they have taken over (see the retry effect beside the landing).
+   */
+  const landingGoalRef = useRef<{
+    /** When to stop trying (a landing is a jump, not a standing order). */
+    until: number
+    /** The row a comment/row landing named, or `undefined` for a change-block landing. */
+    row: number | undefined
+    /** The block a block landing named, or `undefined` for a row landing. */
+    blockStart: number | undefined
+    card: boolean
+    comment: string | undefined
+  } | undefined>(undefined)
+  /** Bumped when a landing is left unfinished, to start the retry loop (see `landingGoalRef`). */
+  const [landingVerify, setLandingVerify] = useState(0)
   // The plain text of the last valid (single-line) diff selection, so opening
   // search auto-fills the query even after clicking the search button collapses
   // the native selection.
@@ -5895,18 +5914,21 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    * @param wantedCard - the thread the landing named, when it named one.
    * @returns whether the box could REACH the offset (see below).
    */
-  const applyRowLanding = (rowBody: HTMLElement, row: number, toCard: boolean, wantedCard: string | undefined): boolean => {
+  const rowLandingTarget = (row: number, toCard: boolean, wantedCard: string | undefined): number => {
     const stackBase = offsetOf(row + 1) - (discussionExtras.get(row) ?? 0) * THREAD_ROW_PX
     const cardTop = stackBase + (wantedCard === undefined ? 0 : (discussionStack.get(wantedCard) ?? 0) * THREAD_ROW_PX)
     const target = toCard ? cardTop : offsetOf(row)
-    const wanted = target - leadRows * ROW_HEIGHT_PX
+    return target - leadRows * ROW_HEIGHT_PX
+  }
+  const applyRowLanding = (rowBody: HTMLElement, row: number, toCard: boolean, wantedCard: string | undefined): boolean => {
+    const wanted = rowLandingTarget(row, toCard, wantedCard)
     const written = Math.max(0, Math.min(wanted, rowBody.scrollHeight - rowBody.clientHeight))
     applyScrollTop(rowBody, written)
     // Whether the box could reach it: a range SHORTER than the target — a pane still the previous
-    // layout's size, a scroll box whose content is not laid out yet — leaves the write short of where the
-    // reader asked to go, and the ask is then kept for the pane's own measurement (see the row branch and
-    // the retry effect). A target past the end of a fully measured file is a legitimate clamp and counts
-    // as reached: that is the bottom of the file, not a pane that cannot show it.
+    // layout's size, rows that are not laid out yet — leaves the write short of where the reader asked to
+    // go, and the ask is then kept for the retry below (see `landingGoalRef`). A target past the end of a
+    // fully measured file is a legitimate clamp and counts as reached: that is the bottom of the file,
+    // not a pane that cannot show it.
     return wanted - written < 1
   }
   /** Spend the row landing that has just been applied: the refs beside the pending flag ARE the ask. */
@@ -5963,13 +5985,14 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       }
       const rowBody = bodyRef.current
       if (rowBody !== null && !applyRowLanding(rowBody, row, toCard, wantedCard)) {
-        // The box refused the offset: the pane is still its previous size (a file this pane has only
-        // just mounted, a float card still opening). The ask is KEPT rather than spent — a jump the box
-        // refused is not a jump the reader got — and the retry effect below lands it as soon as the pane
-        // can hold it. Spending it here is what left the reader at whatever offset the box already had,
-        // which is the place they were in before: an "it jumped somewhere" that only a file the jump
-        // opened could show, and that a file already on screen (measured, grown) never did.
+        // The box could not reach the offset: something it needs is not there yet (its own size, this
+        // file's rows, the comment model). The ask is KEPT — a jump the box could not land is not a jump
+        // the reader got — and the retry below keeps trying it for a moment. Spending it here is what left
+        // the reader at whatever offset the box already had: an "it jumped somewhere" that only a file
+        // this pane has only just mounted could show, and only on some frames.
         landingPendingRef.current = true
+        landingGoalRef.current = { until: Date.now() + LANDING_RETRY_MS, row, blockStart: undefined, card: toCard, comment: wantedCard }
+        setLandingVerify(n => n + 1)
         return
       }
       if (rowBody !== null) landRowDone()
@@ -6000,10 +6023,14 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const target = offsetOf(block.start) - leadRows * ROW_HEIGHT_PX
     const written = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
     applyScrollTop(body, written)
-    // A write that fell short of the block is the pane's range, not the reader's target: kept here, and
-    // re-applied on the pane's own measurement (see the retry effect above). A target past the end of a
-    // fully measured file is the bottom of the file, not a short write.
-    shortBlockRef.current = target - written < 1 ? undefined : block.start
+    // A write that fell short of the block is the pane's range, not the reader's target: kept, and retried
+    // for a moment (see `landingGoalRef`). A target past the end of a fully measured file is the bottom of
+    // the file, not a short write.
+    if (target - written < 1) landingGoalRef.current = undefined
+    else {
+      landingGoalRef.current = { until: Date.now() + LANDING_RETRY_MS, row: undefined, blockStart: block.start, card: false, comment: undefined }
+      setLandingVerify(n => n + 1)
+    }
     // Re-run once when wrapped offsets go from "not measured yet" to ready, so
     // an open-with-wrap-on file centers on the block's real (wrapped) offset
     // instead of the initial fixed-22px guess. `rowOffsets === null` flips only
@@ -6020,35 +6047,53 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     // simply annotates a line would be a jump they did not ask for.
   }, [scrollTick, offsetsFromWrap, previewActive])
 
-  // A row landing that fell SHORT (see the row branch and `applyRowLanding`): re-applied on the pane's
-  // own measurement, because the pane growing to its real size is what makes the target reachable — a
-  // file the jump opened whose pane is still the previous layout's height, or a float card still opening,
-  // lands here instead of leaving the reader at the bottom of a range that was not theirs yet.
+  /** How long a landing that fell short keeps trying (see `landingGoalRef`). A jump is a moment, not a
+   *  standing order: this covers a float card opening, a first layout and a model arriving, and then
+   *  stops — it is not a "keep the reader here" rule. */
+  const LANDING_RETRY_MS = 1500
+  // A landing that did not end where it asked to be (see `landingGoalRef`): tried again on the frames that
+  // follow, because whatever the pane was missing when the jump ran — its own size, this file's rows, the
+  // comment model — is exactly what stands between the write and the target, and none of them are facts
+  // this effect can watch. It writes directly (no re-render per frame) and stops as soon as the target is
+  // reached, when the reader scrolls, or after `LANDING_RETRY_MS`.
   //
-  // Scoped to a landing that is still PENDING, and spent on the first measurement after it: the block
-  // landing above is deliberately not re-run for a resize, or a reader who resized the pane would be
-  // dragged back to the block they had scrolled away from.
-  useLayoutEffect(() => {
-    if (previewActive) return
-    const body = bodyRef.current
-    if (body === null) return
-    if (landingPendingRef.current) {
-      const row = landingRowRef.current
-      if (row === undefined) return
-      const toCard = landingCardRef.current
-      applyRowLanding(body, row, toCard, toCard ? landingCommentRef.current : undefined)
-      landRowDone()
-      return
+  // The block landing is still not re-run for a bare resize: this waits for a write that FELL SHORT, so a
+  // reader who resizes a pane they have already landed in is not dragged anywhere.
+  useEffect(() => {
+    if (landingGoalRef.current === undefined) return
+    // A frame, spelled so an environment without `requestAnimationFrame` (a bare DOM in a test) still
+    // retries rather than throwing: the retry is the point, not the particular scheduler.
+    const schedule = (callback: () => void): number => (
+      typeof requestAnimationFrame === 'function' ? requestAnimationFrame(callback) : (setTimeout(callback, 16) as unknown as number)
+    )
+    const cancel = (handle: number): void => {
+      if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(handle)
+      else clearTimeout(handle)
     }
-    // A jump to a CHANGE BLOCK — the file list's row, the chip — whose write fell short of it: the block
-    // the landing named is landed again now that the pane can hold it, rather than leaving the reader at
-    // the bottom of a range that was the previous layout's.
-    const blockStart = shortBlockRef.current
-    if (blockStart === undefined) return
-    shortBlockRef.current = undefined
-    const target = offsetOf(blockStart) - leadRows * ROW_HEIGHT_PX
-    applyScrollTop(body, Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight)))
-  }, [viewportHeight])
+    let frame = schedule(function tick(): void {
+      const goal = landingGoalRef.current
+      if (goal === undefined) return
+      const body = bodyRef.current
+      if (body !== null && !previewActive) {
+        const wanted = goal.row === undefined
+          ? offsetOf(goal.blockStart ?? 0) - leadRows * ROW_HEIGHT_PX
+          : rowLandingTarget(goal.row, goal.card, goal.comment)
+        const written = Math.max(0, Math.min(wanted, body.scrollHeight - body.clientHeight))
+        applyScrollTop(body, written)
+        if (wanted - written < 1) {
+          landingGoalRef.current = undefined
+          landRowDone()
+          return
+        }
+      }
+      if (Date.now() >= goal.until) {
+        landingGoalRef.current = undefined
+        return
+      }
+      frame = schedule(tick)
+    })
+    return () => { cancel(frame) }
+  }, [landingVerify])
 
   // At the wrap boundary (last block + down, first block + up) a guarded press
   // (keyboard or toolbar) only toasts; the next press in the same direction
@@ -6369,10 +6414,9 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   const onScroll = () => {
     const body = bodyRef.current
     if (body === null) return
-    // The reader has taken over: a landing that is still waiting for the pane to be able to hold it is
-    // theirs to abandon (see the retry effect beside the landing), so it must not pull them back here on
-    // the next resize.
-    shortBlockRef.current = undefined
+    // The reader has taken over: a landing that is still trying for a place they have left is theirs to
+    // abandon (see `landingGoalRef`), so it must not pull them back here on the next frame.
+    landingGoalRef.current = undefined
     landingPendingRef.current = false
     syncQuoteScroll(body)
     // The reader's place in this file, recorded as they read it rather than only on the way out: a

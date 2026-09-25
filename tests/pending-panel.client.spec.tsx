@@ -3624,7 +3624,7 @@ describe('PendingPanel', () => {
     }
   })
 
-  it('lands a file row jump when the pane grows, not at the range the pane had', () => {
+  it('lands a file row jump when the pane grows, not at the range the pane had', async () => {
     // The report: clicking a file's row in the list while that file is NOT open lands "somewhere" — the
     // place the reader was in before — while the same click after the file has been open is exact. A pane
     // that has only just mounted still reports the PREVIOUS layout's scroll range (the float card is
@@ -3670,11 +3670,12 @@ describe('PendingPanel', () => {
       // As far as that range reaches: short of the change, and therefore not where the reader asked to be.
       expect(codeBody().scrollTop).toBe(metrics.scrollHeight - metrics.clientHeight)
 
-      // The pane reaches its real size and its own measurement fires.
+      // The pane reaches its real size and its own measurement fires. The landing is retried on the frames
+      // that follow a write that fell short, so it is the target that is asserted, not a single write.
       metrics.scrollHeight = 20000
       metrics.clientHeight = 800
       act(() => { for (const fire of observers) fire() })
-      expect(codeBody().scrollTop).toBe(wanted)
+      await vi.waitFor(() => { expect(codeBody().scrollTop).toBe(wanted) })
     } finally {
       restore()
       if (originalObserver === undefined) delete globals.ResizeObserver
