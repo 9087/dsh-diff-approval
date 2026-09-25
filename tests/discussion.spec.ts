@@ -261,6 +261,59 @@ describe('discussions in the diff row stream', () => {
     expect(remap(blank, rows([1, 2, 3, 4], ['a', 'const x = 1', 'b', ''])).lost).toBe(true)
   })
 
+  it('condemns a comment whose own row is the deletion that removed it', () => {
+    // The report, from a real Unreal header: a comment written on line 378 quoting `FString WidgetPath;`.
+    // The line was deleted afterwards — so the pending diff carries it as a DELETION — and an identical
+    // field stands 74 lines further down. The anchor's line number matches the deleted row FIRST (the
+    // deleted row still carries that old-file number, and it comes before the row that took the number
+    // over), and that row still reads exactly like the quote — so the "the numbers still hold the quote"
+    // shortcut below took the deletion for the comment being current. The card kept its colour, its quote
+    // stayed hidden and nothing said the code was gone, while the host — which resolves against the
+    // file's own lines, where a deletion does not exist — had already answered that it cannot place the
+    // quote at all. The search path refuses exactly this copy (`hasNewLine`); the shortcut must too.
+    const field = '\tFString WidgetPath;'
+    const property = '\tUPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SlateBot")'
+    /** That file's rows: the quoted line as a DELETION that still carries old-file 378, the row that
+     *  took 378 over, and the field's live copy on `liveLine` (the `UPROPERTY` line above it, blank
+     *  below). `lineOf` reads them the way the panel does — a deleted row has no new-file line of its
+     *  own, so its old-file number is what it answers with. */
+    const afterDeletion = (liveLine: number) => {
+      const rows: { oldLine?: number; newLine?: number; text: string }[] = [
+        { oldLine: 378, text: field },
+        { oldLine: 382, newLine: 378, text: '\tFString PropertyName;' },
+      ]
+      for (let line = 379; line <= liveLine - 2; line++) rows.push({ oldLine: line, newLine: line, text: `\t// filler ${line}` })
+      rows.push(
+        { oldLine: liveLine - 1 + 4, newLine: liveLine - 1, text: property },
+        { oldLine: liveLine + 4, newLine: liveLine, text: field },
+        { oldLine: liveLine + 5, newLine: liveLine + 1, text: '' },
+      )
+      return {
+        lineOf: (row: number): number | undefined => rows[row]?.newLine ?? rows[row]?.oldLine,
+        textOf: (row: number): string => rows[row]?.text ?? '',
+        rowCount: rows.length,
+        hasNewLine: (row: number): boolean => rows[row]?.newLine !== undefined,
+      }
+    }
+    const comment: Discussion = {
+      ...discussion('a', 0, 0),
+      anchor: { start: 0, end: 0, startLine: 378, endLine: 378 },
+      quote: field,
+      quoteContext: `${property}\n${field}\n`,
+    }
+
+    // The report's shape: the live copy is 74 rows away, past the bound, so nothing may be followed and
+    // the thread says its code is gone — hung where the reader last saw it, on the lines its header names.
+    const refused = remap(comment, afterDeletion(452))
+    expect(refused.lost).toBe(true)
+    expect(refused.anchor).toMatchObject({ startLine: 378, endLine: 378 })
+
+    // The same deleted row with the live copy nearby is the code having MOVED: followed, as before.
+    const followed = remap(comment, afterDeletion(400))
+    expect(followed.lost).toBeUndefined()
+    expect(followed.anchor).toMatchObject({ startLine: 400, endLine: 400 })
+  })
+
   it('condemns a comment whose code survives only in the pending deletions', () => {
     // The code was moved and then rewritten where it landed: the new side no longer reads like the
     // quote, but the old side — the deletion the diff is offering to take away — still does. Following

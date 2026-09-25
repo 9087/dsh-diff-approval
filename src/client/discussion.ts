@@ -578,10 +578,47 @@ function remapOne(
     if (start === -1) return gone()
     return live(start, end)
   }
-  // The numbers still hold the quoted window: the ordinary case, and the one an edit above the block
-  // leaves behind. An empty window is compared the same way — those lines were blank, and "blank there"
-  // is what says they still are.
-  if (start !== -1 && textAt(start) === quote) return live(start, end)
+  /**
+   * Whether the window at `row` is code the file still HAS, in some part.
+   *
+   * A window that survives only among the pending deletions has no new-file line at all: it is the
+   * copy the diff is offering to take away, not the lines the file reads now. Both places that accept
+   * a window have to ask this (the shortcut below and the search under it), because matching a deleted
+   * copy is what leaves a comment looking current after the very lines it was written on are gone.
+   *
+   * @param row - the first row of the window.
+   * @returns whether any row of it is code the file still has.
+   */
+  const windowIsCurrent = (row: number): boolean => {
+    for (let index = row; index <= row + span; index++) if (hasNewLine(index)) return true
+    return false
+  }
+  /**
+   * Whether the thread was written ON a row the diff was REMOVING, rather than on code that has since
+   * been deleted.
+   *
+   * The two look identical in the row stream — a comment on a deletion and a comment whose own line was
+   * deleted later both hold a row with no new-file line — and the record is the only thing that tells
+   * them apart: `quoteLines` keeps the side each quoted row was on when the reader wrote (see
+   * `DiscussionQuoteLine`). A quotation of a removed row is an annotation of the change the reader is
+   * being asked to review, and it stays live for as long as that deletion is in front of them; a comment
+   * whose quoted line was CONTEXT when it was written and reads as a deletion now lost its code to a
+   * later edit, which is exactly what the outdated mark is for.
+   */
+  const writtenOnRemoval = discussion.quoteLines?.some(line => line.kind === 'del') === true
+  // The numbers still hold the quoted window AND that window is code the file still has — or the reader
+  // wrote the comment on the removal itself: the ordinary case, the one an edit above the block leaves
+  // behind, and the annotation of a change being reviewed. An empty window is compared the same way —
+  // those lines were blank, and "blank there" is what says they still are.
+  //
+  // The middle condition is not decoration. The anchor's line numbers match BOTH sides of a change — a
+  // deleted row still carries its old-file number — and the row stream puts the deletion first, so a
+  // comment whose own line was deleted takes `start` on that deletion, which reads exactly like the
+  // quote it took away. Taking it for "the numbers still hold" is what kept such a card looking current
+  // — no outdated note, none of the grey, its quote never shown — while the host, which resolves against
+  // the file's own lines and has no deletions to match against, had already answered that it cannot
+  // place the quote at all. The two halves of one panel disagreed about one comment.
+  if (start !== -1 && textAt(start) === quote && (windowIsCurrent(start) || writtenOnRemoval)) return live(start, end)
   // They do not hold it: follow the quote instead. Where the same code appears more than once the
   // nearest occurrence wins, since that is where the reader last saw it — the windows are already
   // joined, so this is a lookup rather than a scan. The recorded context has to agree as well wherever
@@ -591,18 +628,12 @@ function remapOne(
     const fingerprint = discussion.quoteContext
     let found = -1
     for (const row of windows(span).get(quote) ?? []) {
-      // The window has to be code the file still HAS, in some part: a copy that survives only among the
+      // The window has to be code the file still has, in some part: a copy that survives only among the
       // pending deletions is the one the diff is offering to take away, not the lines the comment is
-      // about. Following it is what left a comment live after the code it named had been moved to
-      // another place in the file and rewritten there — the old copy still read exactly like the quote.
-      let current = false
-      for (let index = row; index <= row + span; index++) {
-        if (hasNewLine(index)) {
-          current = true
-          break
-        }
-      }
-      if (!current) continue
+      // about (see `windowIsCurrent`). Following it is what left a comment live after the code it named
+      // had been moved to another place in the file and rewritten there — the old copy still read
+      // exactly like the quote.
+      if (!windowIsCurrent(row)) continue
       if (fingerprint !== undefined && contextAt(row) !== fingerprint) continue
       // …and it has to be NEAR the rows the comment names (see `REANCHOR_MAX_LINES` in the shared
       // rule). Another declaration that reads the same, tens or hundreds of rows away, is another
