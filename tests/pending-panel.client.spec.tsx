@@ -3624,6 +3624,64 @@ describe('PendingPanel', () => {
     }
   })
 
+  it('lands a file row jump when the pane grows, not at the range the pane had', () => {
+    // The report: clicking a file's row in the list while that file is NOT open lands "somewhere" — the
+    // place the reader was in before — while the same click after the file has been open is exact. A pane
+    // that has only just mounted still reports the PREVIOUS layout's scroll range (the float card is
+    // still opening, the box has not been laid out for this file), so the write to the target offset was
+    // clamped into a range that was not the reader's, and the ask was spent there. It is kept now, and
+    // re-applied on the pane's own measurement.
+    const observers: Array<() => void> = []
+    class FakeResizeObserver {
+      constructor(private readonly callback: () => void) {}
+      observe(): void { observers.push(this.callback) }
+      disconnect(): void {}
+    }
+    const globals = globalThis as unknown as Record<string, unknown>
+    const originalObserver = globals.ResizeObserver
+    globals.ResizeObserver = FakeResizeObserver
+    const restore = stubCodeScroll(20000, 800)
+    try {
+      const lines = Array.from({ length: 400 }, (_, index) => `line-${index + 1}`)
+      const changed = [...lines]
+      changed[300] = 'CHANGED'
+      const deep = entry({
+        id: 'entry-deep', path: '/repo/deep.txt', kind: 'edit',
+        oldText: `${lines.join('\n')}\n`, newText: `${changed.join('\n')}\n`,
+      })
+      const other = entry({ id: 'entry-other', path: '/repo/other.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
+      render(<PendingPanel {...panelProps({ read: true, files: [deep], busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      expect(shownPath()).toBe('/repo/deep.txt')
+
+      // The range the pane reports before it has been laid out for the file the jump is about to open.
+      const box = codeBody()
+      const metrics = { scrollHeight: 1200, clientHeight: 400 }
+      Object.defineProperty(box, 'scrollHeight', { configurable: true, get: () => metrics.scrollHeight })
+      Object.defineProperty(box, 'clientHeight', { configurable: true, get: () => metrics.clientHeight })
+      // The pane measuring itself while it is still that size: this is the measurement the retry waits
+      // for, and it is taken before the jump so the growth below is what changes.
+      act(() => { for (const fire of observers) fire() })
+
+      act(() => {
+        window.dispatchEvent(new CustomEvent('diff-approval:open-file', { detail: { path: '/repo/deep.txt' } }))
+      })
+      const wanted = 300 * diffLineHeight() - navLeadRows() * diffLineHeight()
+      // As far as that range reaches: short of the change, and therefore not where the reader asked to be.
+      expect(codeBody().scrollTop).toBe(metrics.scrollHeight - metrics.clientHeight)
+
+      // The pane reaches its real size and its own measurement fires.
+      metrics.scrollHeight = 20000
+      metrics.clientHeight = 800
+      act(() => { for (const fire of observers) fire() })
+      expect(codeBody().scrollTop).toBe(wanted)
+    } finally {
+      restore()
+      if (originalObserver === undefined) delete globals.ResizeObserver
+      else globals.ResizeObserver = originalObserver
+    }
+  })
+
   it('hands the remembered place to the docked tab, which resumes it', () => {
     // The floating overlay and the docked tab are separate mounts of one panel:
     // the presentation switch must not lose the reader's place.

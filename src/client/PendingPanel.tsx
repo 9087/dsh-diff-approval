@@ -4112,6 +4112,17 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    *  row a jump points at, and the landing has to put the reader at THIS one's top edge rather than at
    *  the top of the stack (see `discussionStack`). Held beside the row so the two are spent together. */
   const landingCommentRef = useRef<string | undefined>(undefined)
+  /** Whether a row landing has been asked for and the scroll box could not take it yet (see
+   *  `applyScrollTop`): the pane is still its previous size while it opens, so a jump into a file it has
+   *  only just mounted can be refused. The ask is then kept and re-applied on the pane's own measurement
+   *  (see the retry effect beside the landing) instead of being spent on a write that did not happen. */
+  const landingPendingRef = useRef(false)
+  /** The block a landing named when its write fell SHORT of it (see the block branch and the retry
+   *  effect): a file-list or chip jump lands a change block, and a pane still the previous layout's size
+   *  clamps that write to a range that was not the reader's. Held as the block's first row, so the retry
+   *  re-lands the same block rather than whatever `focus` has become. Cleared as soon as the reader
+   *  scrolls, so a landing never fights a view they have taken over. */
+  const shortBlockRef = useRef<number | undefined>(undefined)
   // The plain text of the last valid (single-line) diff selection, so opening
   // search auto-fills the query even after clicking the search button collapses
   // the native selection.
@@ -5849,13 +5860,62 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    *
    * @param body - the code view's scroll box.
    * @param offset - the offset to settle it at.
+   * @returns whether the box TOOK the offset (see the note on a refused write below).
    */
-  const applyScrollTop = (body: HTMLElement, offset: number): void => {
+  const applyScrollTop = (body: HTMLElement, offset: number): boolean => {
     if (body.scrollTop !== offset) body.scrollTop = offset
+    // A pane that is not its final size yet — the float card still opening, a pane that has just mounted
+    // for the file a jump opened — refuses an offset past its own range and keeps the one it had.
+    // Mirroring that write into this pane's state and into the page's memory is what left a jump looking
+    // like it landed "somewhere": the place the reader was in before, which is also the place a pane that
+    // mounts again would resume.
+    const took = Math.abs(body.scrollTop - offset) < 1
+    if (!took) return false
     setScrollTop(offset)
     rememberPanelView(sessionId, { fileId: file.id, scrollTop: offset })
+    return true
   }
 
+  /**
+   * Put one row's landing where it belongs, and say whether the box took it (see `applyScrollTop`).
+   *
+   * A thread's box hangs just below the row its range ends in, so it starts where that row's own height
+   * ends — the reserving rows charged to it are the box itself, not part of the row.
+   *
+   * That end is the BASE of the row's stack, and several boxes can share it: the row stream draws one
+   * reserving box per thread, in the order the threads are held, so the box that was asked for starts
+   * that many boxes further down. Taking the whole charge off (`discussionExtras`) is what landed the
+   * FIRST box under the row whatever thread the jump named — the two boxes then could not be told apart
+   * by where the jump went. `discussionStack` is that same drawing order, as the reserved height of the
+   * boxes before this one.
+   *
+   * @param rowBody - the code view's scroll box.
+   * @param row - the row the landing names.
+   * @param toCard - whether the landing is the thread's own box rather than the row.
+   * @param wantedCard - the thread the landing named, when it named one.
+   * @returns whether the box could REACH the offset (see below).
+   */
+  const applyRowLanding = (rowBody: HTMLElement, row: number, toCard: boolean, wantedCard: string | undefined): boolean => {
+    const stackBase = offsetOf(row + 1) - (discussionExtras.get(row) ?? 0) * THREAD_ROW_PX
+    const cardTop = stackBase + (wantedCard === undefined ? 0 : (discussionStack.get(wantedCard) ?? 0) * THREAD_ROW_PX)
+    const target = toCard ? cardTop : offsetOf(row)
+    const wanted = target - leadRows * ROW_HEIGHT_PX
+    const written = Math.max(0, Math.min(wanted, rowBody.scrollHeight - rowBody.clientHeight))
+    applyScrollTop(rowBody, written)
+    // Whether the box could reach it: a range SHORTER than the target — a pane still the previous
+    // layout's size, a scroll box whose content is not laid out yet — leaves the write short of where the
+    // reader asked to go, and the ask is then kept for the pane's own measurement (see the row branch and
+    // the retry effect). A target past the end of a fully measured file is a legitimate clamp and counts
+    // as reached: that is the bottom of the file, not a pane that cannot show it.
+    return wanted - written < 1
+  }
+  /** Spend the row landing that has just been applied: the refs beside the pending flag ARE the ask. */
+  const landRowDone = (): void => {
+    landingRowRef.current = undefined
+    landingCardRef.current = false
+    landingCommentRef.current = undefined
+    landingPendingRef.current = false
+  }
   useLayoutEffect(() => {
     if (rowCount === 0) return
     // Nothing is placed before the placement effect has decided where this file opens: this runs in
@@ -5889,37 +5949,30 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     if (row !== undefined && !previewActive) {
       const toCard = landingCardRef.current
       // The thread this landing named, if it named one: several boxes can hang under one row, and the
-      // reader asked for THEIRS (see the comment on `cardTop` below).
+      // reader asked for THEIRS (see `applyRowLanding`).
       const wantedCard = toCard ? landingCommentRef.current : undefined
-      landingRowRef.current = undefined
-      landingCardRef.current = false
-      landingCommentRef.current = undefined
       // A frame a block jump raises frames the block, not the row a go-to-line framed last.
       flashRowRef.current = undefined
       // The split view owns its own scroller — this component's `bodyRef` is null while it is up — so
-      // the row is landed there, at the pair it is in, by the same rule.
+      // the row is landed there, at the pair it is in, by the same rule. It has no refused write to
+      // retry: its own effect lands the pair on `landKey`.
       if (splitView) {
         splitDiffRef.current?.land(row, toCard, false, wantedCard)
+        landRowDone()
         return
       }
       const rowBody = bodyRef.current
-      if (rowBody !== null) {
-        // A thread's box hangs just below the row its range ends in, so it starts where that row's own
-        // height ends — the reserving rows charged to it are the box itself, not part of the row.
-        //
-        // That end is the BASE of the row's stack, and several boxes can share it: the row stream draws
-        // one reserving box per thread, in the order the threads are held, so the box that was asked
-        // for starts that many boxes further down. Taking the whole charge off (`discussionExtras`) is
-        // what landed the FIRST box under the row whatever thread the jump named — the two boxes then
-        // could not be told apart by where the jump went. `discussionStack` is that same drawing order,
-        // as the reserved height of the boxes before this one.
-        const stackBase = offsetOf(row + 1) - (discussionExtras.get(row) ?? 0) * THREAD_ROW_PX
-        const cardTop = stackBase + (wantedCard === undefined ? 0 : (discussionStack.get(wantedCard) ?? 0) * THREAD_ROW_PX)
-        const target = toCard ? cardTop : offsetOf(row)
-        const wanted = target - leadRows * ROW_HEIGHT_PX
-        const written = Math.max(0, Math.min(wanted, rowBody.scrollHeight - rowBody.clientHeight))
-        applyScrollTop(rowBody, written)
+      if (rowBody !== null && !applyRowLanding(rowBody, row, toCard, wantedCard)) {
+        // The box refused the offset: the pane is still its previous size (a file this pane has only
+        // just mounted, a float card still opening). The ask is KEPT rather than spent — a jump the box
+        // refused is not a jump the reader got — and the retry effect below lands it as soon as the pane
+        // can hold it. Spending it here is what left the reader at whatever offset the box already had,
+        // which is the place they were in before: an "it jumped somewhere" that only a file the jump
+        // opened could show, and that a file already on screen (measured, grown) never did.
+        landingPendingRef.current = true
+        return
       }
+      if (rowBody !== null) landRowDone()
       return
     }
     const block = model.blocks[focus]
@@ -5945,7 +5998,12 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     // Leave the configured lead rows above the block's top edge; when the block
     // is too close to the top or bottom to afford it, clamp to the scroll range.
     const target = offsetOf(block.start) - leadRows * ROW_HEIGHT_PX
-    applyScrollTop(body, Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight)))
+    const written = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
+    applyScrollTop(body, written)
+    // A write that fell short of the block is the pane's range, not the reader's target: kept here, and
+    // re-applied on the pane's own measurement (see the retry effect above). A target past the end of a
+    // fully measured file is the bottom of the file, not a short write.
+    shortBlockRef.current = target - written < 1 ? undefined : block.start
     // Re-run once when wrapped offsets go from "not measured yet" to ready, so
     // an open-with-wrap-on file centers on the block's real (wrapped) offset
     // instead of the initial fixed-22px guess. `rowOffsets === null` flips only
@@ -5961,6 +6019,36 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     // rows also materializes that table, and recentering the view when the user
     // simply annotates a line would be a jump they did not ask for.
   }, [scrollTick, offsetsFromWrap, previewActive])
+
+  // A row landing that fell SHORT (see the row branch and `applyRowLanding`): re-applied on the pane's
+  // own measurement, because the pane growing to its real size is what makes the target reachable — a
+  // file the jump opened whose pane is still the previous layout's height, or a float card still opening,
+  // lands here instead of leaving the reader at the bottom of a range that was not theirs yet.
+  //
+  // Scoped to a landing that is still PENDING, and spent on the first measurement after it: the block
+  // landing above is deliberately not re-run for a resize, or a reader who resized the pane would be
+  // dragged back to the block they had scrolled away from.
+  useLayoutEffect(() => {
+    if (previewActive) return
+    const body = bodyRef.current
+    if (body === null) return
+    if (landingPendingRef.current) {
+      const row = landingRowRef.current
+      if (row === undefined) return
+      const toCard = landingCardRef.current
+      applyRowLanding(body, row, toCard, toCard ? landingCommentRef.current : undefined)
+      landRowDone()
+      return
+    }
+    // A jump to a CHANGE BLOCK — the file list's row, the chip — whose write fell short of it: the block
+    // the landing named is landed again now that the pane can hold it, rather than leaving the reader at
+    // the bottom of a range that was the previous layout's.
+    const blockStart = shortBlockRef.current
+    if (blockStart === undefined) return
+    shortBlockRef.current = undefined
+    const target = offsetOf(blockStart) - leadRows * ROW_HEIGHT_PX
+    applyScrollTop(body, Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight)))
+  }, [viewportHeight])
 
   // At the wrap boundary (last block + down, first block + up) a guarded press
   // (keyboard or toolbar) only toasts; the next press in the same direction
@@ -6281,6 +6369,11 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   const onScroll = () => {
     const body = bodyRef.current
     if (body === null) return
+    // The reader has taken over: a landing that is still waiting for the pane to be able to hold it is
+    // theirs to abandon (see the retry effect beside the landing), so it must not pull them back here on
+    // the next resize.
+    shortBlockRef.current = undefined
+    landingPendingRef.current = false
     syncQuoteScroll(body)
     // The reader's place in this file, recorded as they read it rather than only on the way out: a
     // pane that remounts under them (a poll that lost the entry for a moment, a presentation
