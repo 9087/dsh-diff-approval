@@ -65,6 +65,19 @@ try {
     constructor(ctx) { super(ctx, 'sessions') }
     get() { return undefined }
   }
+  // The pair a comment is submitted through and watched on. The plugin reaches for both
+  // LAZILY (`ctx.get(...)` inside the asker), but cordis still defers a plugin whose `inject`
+  // is unsatisfied until the services exist — so a harness without them never runs the
+  // plugin's `apply` at all, and the missing channel route then reads as a failure on every
+  // release, the one the plugin actually runs on included.
+  class SessionController extends Service {
+    constructor(ctx) { super(ctx, 'sessionController') }
+    async prompt() { return { id: 'compat-prompt' } }
+  }
+  class Agents extends Service {
+    constructor(ctx) { super(ctx, 'agents') }
+    get() { return undefined }
+  }
   // The real skill registry of this release, when it is installed: the comment rules are
   // registered as a RUNTIME skill, so only the release's own registry proves that works.
   // Without the package the plugin's feature detection leaves the inline rules in charge.
@@ -84,7 +97,7 @@ try {
   }
 
   const app = new Context()
-  for (const ServiceClass of [WebServer, Credentials, Fs, WorkspaceRegistry, Sessions]) {
+  for (const ServiceClass of [WebServer, Credentials, Fs, WorkspaceRegistry, Sessions, SessionController, Agents]) {
     await app.plugin(ServiceClass)
   }
   if (SkillRegistry !== null) await app.plugin(SkillRegistry)
