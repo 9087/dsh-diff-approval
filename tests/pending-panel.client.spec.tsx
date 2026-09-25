@@ -3684,6 +3684,64 @@ describe('PendingPanel', () => {
     }
   })
 
+  it('keeps a landing when its own write raises the scroll event a browser sends', async () => {
+    // A real browser fires a scroll event for a programmatic write (only an unchanged value does not), so the
+    // panel's own landing comes back as "the reader scrolled" — and treating it as that abandons the landing
+    // before it can be corrected, which is what left a jump a few rows short. The panel's write is remembered
+    // so `onScroll` can tell its own event from the reader's.
+    const observers: Array<() => void> = []
+    class FakeResizeObserver {
+      constructor(private readonly callback: () => void) {}
+      observe(): void { observers.push(this.callback) }
+      disconnect(): void {}
+    }
+    const globals = globalThis as unknown as Record<string, unknown>
+    const originalObserver = globals.ResizeObserver
+    globals.ResizeObserver = FakeResizeObserver
+    const restore = stubCodeScroll(500000, 800)
+    try {
+      const lines = Array.from({ length: 400 }, (_, index) => `line-${index + 1}`)
+      const changed = [...lines]
+      changed[0] = 'CHANGED'
+      const deep = entry({
+        id: 'entry-deep', path: '/repo/deep.txt', kind: 'edit',
+        oldText: `${lines.join('\n')}\n`, newText: `${changed.join('\n')}\n`,
+      })
+      const other = entry({ id: 'entry-other', path: '/repo/other.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
+      const note = comment({
+        id: 'd-deep', entryId: 'entry-deep', text: '这一行。',
+        anchor: { startLine: 301, endLine: 301 }, quote: 'line-301',
+      })
+      render(<PendingPanel {...panelProps({
+        read: true, files: [other, deep], busy: new Set(),
+        comments: [note], commentLines: { 'd-deep': { start: 301, end: 301 } },
+      })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      clickFileRow('other.txt')
+
+      const box = codeBody()
+      const metrics = { scrollHeight: 2000, clientHeight: 400 }
+      Object.defineProperty(box, 'scrollHeight', { configurable: true, get: () => metrics.scrollHeight })
+      Object.defineProperty(box, 'clientHeight', { configurable: true, get: () => metrics.clientHeight })
+      act(() => { for (const fire of observers) fire() })
+
+      fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+      fireEvent.click(document.querySelector('[data-diff-comment-link="d-deep"]') as HTMLElement)
+      // The event the browser sends for the write the landing just made.
+      act(() => { fireEvent.scroll(box) })
+
+      metrics.scrollHeight = 500000
+      metrics.clientHeight = 800
+      act(() => { for (const fire of observers) fire() })
+      const wanted = (301 + 1) * diffLineHeight() - navLeadRows() * diffLineHeight()
+      await vi.waitFor(() => { expect(codeBody().scrollTop).toBe(wanted) })
+    } finally {
+      restore()
+      if (originalObserver === undefined) delete globals.ResizeObserver
+      else globals.ResizeObserver = originalObserver
+    }
+  })
+
   it('lands a file row jump when the pane grows, not at the range the pane had', async () => {
     // The report: clicking a file's row in the list while that file is NOT open lands "somewhere" — the
     // place the reader was in before — while the same click after the file has been open is exact. A pane

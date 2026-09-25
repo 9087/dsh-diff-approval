@@ -4142,6 +4142,16 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   } | undefined>(undefined)
   /** Bumped when a landing is left unfinished, to start the retry loop (see `landingGoalRef`). */
   const [landingVerify, setLandingVerify] = useState(0)
+  /**
+   * The offset the panel itself last wrote, so `onScroll` can tell its own write's event from the reader's.
+   *
+   * A programmatic `scrollTop` DOES fire a scroll event in a real browser (only an unchanged value does
+   * not) — the panel's own note here claims otherwise, which is why this went unnoticed — so without this
+   * marker every write the panel makes for a landing comes back as "the reader scrolled away". That is what
+   * abandoned a landing that was still being kept true (see `armLandingGoal`), and it is invisible in a DOM
+   * without scroll events: the jump that was a few rows short stayed a few rows short.
+   */
+  const selfScrollRef = useRef<number | undefined>(undefined)
   // The plain text of the last valid (single-line) diff selection, so opening
   // search auto-fills the query even after clicking the search button collapses
   // the native selection.
@@ -5865,10 +5875,10 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   // little context stays visible above it; near the top or bottom the scroll
   // clamps to the scrollable range instead. Arithmetic on the fixed row height
   // works even when the block's rows are outside the rendered window. A
-  // programmatic scrollTop does not fire a scroll event, so the DOM write is
-  // mirrored into state to re-render the window; onScroll covers real user
-  // scrolling. Layout timing matters: the block-flash overlay reads scrollTop
-  // while rendering, so the scroll must settle BEFORE the browser paints —
+  // programmatic scrollTop DOES fire a scroll event in a real browser (only an unchanged value does not),
+  // so the DOM write is mirrored into state to re-render the window AND remembered as the panel's own —
+  // `onScroll` uses that to tell its write from the reader's. Layout timing matters: the block-flash
+  // overlay reads scrollTop while rendering, so the scroll must settle BEFORE the browser paints —
   /**
    * Move the code view to one offset, and take the page's memory with it.
    *
@@ -5890,6 +5900,8 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     // mounts again would resume.
     const took = Math.abs(body.scrollTop - offset) < 1
     if (!took) return false
+    // Written by the panel: the scroll event this raises is not the reader taking over (see `selfScrollRef`).
+    selfScrollRef.current = body.scrollTop
     setScrollTop(offset)
     rememberPanelView(sessionId, { fileId: file.id, scrollTop: offset })
     return true
@@ -5954,6 +5966,21 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     landingGoalRef.current = { ...goal, until: Date.now() + LANDING_RETRY_MS }
     setLandingVerify(n => n + 1)
   }
+  /**
+   * Where a goal's place sits in the CURRENT heights, read afresh every render.
+   *
+   * The retry loop below runs across many frames and many renders, and the whole reason it exists is that
+   * the heights move under it: read through a closure captured when the loop started, it would keep
+   * re-asserting the offset that was right one frame ago — which is the difference between a jump that
+   * lands and one that stops a few rows short, and it is exactly what a jump from one comment to another
+   * shows (the first landing's own card has just changed the heights above the second one).
+   */
+  const landingTargetRef = useRef<(goal: { row: number | undefined; blockStart: number | undefined; card: boolean; comment: string | undefined }) => number>(() => 0)
+  landingTargetRef.current = goal => (
+    goal.row === undefined
+      ? offsetOf(goal.blockStart ?? 0) - leadRows * ROW_HEIGHT_PX
+      : rowLandingTarget(goal.row, goal.card, goal.comment)
+  )
   useLayoutEffect(() => {
     if (rowCount === 0) return
     // Nothing is placed before the placement effect has decided where this file opens: this runs in
@@ -6079,9 +6106,9 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       if (goal === undefined) return
       const body = bodyRef.current
       if (body !== null && !previewActive) {
-        const wanted = goal.row === undefined
-          ? offsetOf(goal.blockStart ?? 0) - leadRows * ROW_HEIGHT_PX
-          : rowLandingTarget(goal.row, goal.card, goal.comment)
+        // Through the ref: the heights this place is measured against are the ones that stand NOW, not the
+        // ones the loop was started with (see `landingTargetRef`).
+        const wanted = landingTargetRef.current(goal)
         // The place is what is kept true, not the offset that stood for it when it was first written: a
         // thread that grew, a wrapped row that got taller or a pane that reached its real size all move
         // it, and each of those turns an exact landing into one a few rows out.
@@ -6417,10 +6444,15 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   const onScroll = () => {
     const body = bodyRef.current
     if (body === null) return
-    // The reader has taken over: a landing that is still trying for a place they have left is theirs to
-    // abandon (see `landingGoalRef`), so it must not pull them back here on the next frame.
-    landingGoalRef.current = undefined
-    landingPendingRef.current = false
+    // The panel's own write raises a scroll event too (see `selfScrollRef`): only a scroll that lands
+    // somewhere the panel did NOT put the view is the reader taking over, and only that abandons a landing
+    // still being kept true (see `landingGoalRef`) — anything else would cancel a jump's own correction.
+    const written = selfScrollRef.current
+    selfScrollRef.current = undefined
+    if (written === undefined || Math.abs(body.scrollTop - written) >= 1) {
+      landingGoalRef.current = undefined
+      landingPendingRef.current = false
+    }
     syncQuoteScroll(body)
     // The reader's place in this file, recorded as they read it rather than only on the way out: a
     // pane that remounts under them (a poll that lost the entry for a moment, a presentation
