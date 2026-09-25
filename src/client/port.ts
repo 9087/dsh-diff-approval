@@ -7,12 +7,37 @@
 
 import type { ClientConnectionRpc, SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type {
-  DiffApprovalActionValue, DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalBulkValue, DiffApprovalListValue,
+  CommentAnchor, CommentAsk, CommentQuoteLine, CommentRecord,
+  DiffApprovalActionValue, DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalBulkValue,
+  DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveValue,
+  DiffApprovalListValue,
   DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue, PendingFileDiff, VcsImportValue,
 } from '../types.ts'
 
 /** The channel the host half registers and this port calls. */
 export const DIFF_APPROVAL_CHANNEL = '/diff-approval'
+
+/**
+ * One annotation as the panel hands it over: what the reader wrote and where they
+ * wrote it. The display path is not part of it — the entry a comment hangs off is the
+ * host's authority on what the file is called.
+ */
+export interface CommentDraft {
+  /** Caller-minted id, so a retried write lands on the same comment. */
+  id: string
+  /** The listed entry the annotation hangs off. */
+  entryId: string
+  /** The lines it was made on, as new-file line numbers. */
+  anchor: CommentAnchor
+  /** The anchored lines as they read then (the re-anchor fingerprint). */
+  quote: string
+  /** `quote` with one line of context on each side, as it read then. */
+  quoteContext?: string | undefined
+  /** The gutter numbers of `quote`'s lines, in the same order. */
+  quoteLines?: CommentQuoteLine[] | undefined
+  /** What the reader wrote. */
+  text: string
+}
 
 /** This package's business verbs over the review channel. */
 export interface DiffApprovalPort {
@@ -49,6 +74,15 @@ export interface DiffApprovalPort {
   revertAll(sessionId: SessionId): Promise<DiffApprovalBulkValue>
   /** Read one workspace image and inline it as a base64 data URI (for the Markdown preview). */
   previewImage(sessionId: SessionId, path: string): Promise<DiffApprovalPreviewImageValue>
+  /**
+   * Write one annotation down. The host refuses a comment whose entry is not in the
+   * session's list, and the refusal is reported rather than retried.
+   */
+  commentAdd(sessionId: SessionId, comment: CommentDraft): Promise<DiffApprovalCommentAddValue>
+  /** Drop one annotation (what "a comment dies with its entry" does by hand). */
+  commentRemove(sessionId: SessionId, id: string): Promise<DiffApprovalCommentRemoveValue>
+  /** Ask one stored comment as its own turn of the session. */
+  commentAsk(sessionId: SessionId, id: string, prompt: string, text: string): Promise<DiffApprovalCommentAskValue>
 }
 
 /** Build the port over one generic RPC caller.
@@ -112,6 +146,17 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
     async revertAll(sessionId) {
       return bulkOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'revert-all', { sessionId }))
     },
+    async commentAdd(sessionId, comment) {
+      return commentAddValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'comment-add', { sessionId, ...comment }))
+    },
+    async commentRemove(sessionId, id) {
+      return commentRemoveValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'comment-remove', { sessionId, id }))
+    },
+    async commentAsk(sessionId, id, prompt, text) {
+      // `prompt` is what the agent is asked; `text` is the reader's own words inside it, which the
+      // host stores on the question so the thread can draw what was written.
+      return commentAskValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'comment-ask', { sessionId, id, prompt, text }))
+    },
   }
 }
 
@@ -143,7 +188,76 @@ function pendingFileOf(value: unknown): PendingFileDiff | undefined {
   }
 }
 
-/** Narrow the list endpoint's value; a malformed wire value is a read failure. */
+/** Narrow one comment record from the wire; malformed rows are skipped. */
+function commentOf(value: unknown): CommentRecord | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const row = value as Record<string, unknown>
+  const { id, sessionId, entryId, path, anchor, quote, text, createdAt, updatedAt } = row
+  if (typeof id !== 'string' || id.length === 0) return undefined
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
+  if (typeof entryId !== 'string' || entryId.length === 0) return undefined
+  if (typeof path !== 'string' || path.length === 0) return undefined
+  if (typeof anchor !== 'object' || anchor === null) return undefined
+  const lines = anchor as Record<string, unknown>
+  if (typeof lines.startLine !== 'number' || typeof lines.endLine !== 'number') return undefined
+  if (typeof quote !== 'string' || typeof text !== 'string') return undefined
+  if (typeof createdAt !== 'number' || typeof updatedAt !== 'number') return undefined
+  const context = row.quoteContext
+  const quoteLines = Array.isArray(row.quoteLines)
+    ? row.quoteLines.filter((line): line is CommentQuoteLine => typeof line === 'object' && line !== null)
+    : []
+  const asks = asksOf(row.asks)
+  return {
+    id,
+    sessionId: sessionId as SessionId,
+    entryId,
+    path,
+    anchor: { startLine: lines.startLine, endLine: lines.endLine },
+    quote,
+    text,
+    createdAt,
+    updatedAt,
+    ...(typeof context === 'string' && context !== '' ? { quoteContext: context } : {}),
+    ...(quoteLines.length > 0 ? { quoteLines } : {}),
+    ...(asks.length > 0 ? { asks } : {}),
+  }
+}
+
+/** Narrow a thread's questions from the wire; malformed rows are skipped. */
+function asksOf(value: unknown): CommentAsk[] {
+  if (!Array.isArray(value)) return []
+  const asks: CommentAsk[] = []
+  for (const row of value) {
+    if (typeof row !== 'object' || row === null || Array.isArray(row)) continue
+    const record = row as Record<string, unknown>
+    const requestId = record.requestId
+    if (typeof requestId !== 'string' || requestId.length === 0) continue
+    const turn = record.turn
+    const text = record.text
+    asks.push({
+      requestId,
+      ...(typeof text === 'string' && text !== '' ? { text } : {}),
+      ...(typeof turn === 'number' ? { turn } : {}),
+      ...(record.dropped === true ? { dropped: true } : {}),
+      ...(record.ended === true ? { ended: true } : {}),
+    })
+  }
+  return asks
+}
+
+/** Narrow the map of derived answers, dropping entries that carry no text. */
+function answersOf(value: unknown): Record<string, string> {
+  const answers: Record<string, string> = {}
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return answers
+  for (const [id, text] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof text === 'string' && text !== '') answers[id] = text
+  }
+  return answers
+}
+
+/**
+ * Narrow the list endpoint's value; a malformed wire value is a read failure.
+ */
 function listValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffApprovalListValue {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
   const value: unknown = result.value
@@ -169,9 +283,48 @@ function listValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): 
   // restart is something the reader cannot find out from the list itself.
   const persisted = (value as Record<string, unknown>).persistError
   const persistError = typeof persisted === 'string' && persisted.length > 0 ? persisted : undefined
-  return redoCleared === true
-    ? { files, workspacePath, redoCleared: true, commentSkill, persistError }
-    : { files, workspacePath, commentSkill, persistError }
+  // …and the comment files' own, which are separate files: one may be writable while the
+  // other is not, so the two never share a report.
+  const commentsPersisted = (value as Record<string, unknown>).commentPersistError
+  const commentPersistError = typeof commentsPersisted === 'string' && commentsPersisted.length > 0
+    ? commentsPersisted : undefined
+  // The comments ride this same read, so the entries and the comments that hang off
+  // them are one snapshot; the answers are derived by the host on every read.
+  const comments: CommentRecord[] = []
+  const rawComments = (value as Record<string, unknown>).comments
+  if (Array.isArray(rawComments)) {
+    for (const row of rawComments) {
+      const comment = commentOf(row)
+      if (comment !== undefined) comments.push(comment)
+    }
+  }
+  const revision = (value as Record<string, unknown>).commentsRevision
+  // The lines the host resolved each comment to, keyed by comment id. Narrowed row by row like the
+  // comments themselves: a malformed figure is dropped rather than trusted, and the caller then
+  // falls back to the record's own anchor (`commentLines` in `slots.ts`).
+  const commentLines: Record<string, { start: number; end: number }> = {}
+  const rawLines = (value as Record<string, unknown>).commentLines
+  if (typeof rawLines === 'object' && rawLines !== null && !Array.isArray(rawLines)) {
+    for (const [id, row] of Object.entries(rawLines as Record<string, unknown>)) {
+      if (typeof row !== 'object' || row === null || Array.isArray(row)) continue
+      const { start, end } = row as Record<string, unknown>
+      if (typeof start !== 'number' || !Number.isFinite(start)) continue
+      if (typeof end !== 'number' || !Number.isFinite(end)) continue
+      commentLines[id] = { start, end }
+    }
+  }
+  return {
+    files,
+    comments,
+    commentLines,
+    commentsRevision: typeof revision === 'number' && Number.isFinite(revision) ? revision : 0,
+    commentAnswers: answersOf((value as Record<string, unknown>).commentAnswers),
+    workspacePath,
+    commentSkill,
+    persistError,
+    commentPersistError,
+    ...(redoCleared === true ? { redoCleared: true } : {}),
+  }
 }
 
 /** Narrow one action endpoint's value; a malformed wire value is an action failure. */
@@ -306,4 +459,56 @@ function bulkOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffA
     throw new Error('the bulk action returned a malformed value')
   }
   return { affected }
+}
+
+/** Narrow the comment-add endpoint's value; a malformed wire value is a write failure. */
+function commentAddValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffApprovalCommentAddValue {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+  const value: unknown = result.value
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('the comment add returned a malformed value')
+  }
+  const outcome = (value as Record<string, unknown>).outcome
+  // `missing` is a real answer — the entry left the list before the write — and the
+  // caller reports it rather than pretending the comment was stored.
+  if (outcome === 'missing') return { outcome }
+  if (outcome !== 'added') throw new Error('the comment add returned a malformed outcome')
+  const comment = commentOf((value as Record<string, unknown>).comment)
+  if (comment === undefined) throw new Error('the comment add returned a malformed value')
+  return { outcome, comment }
+}
+
+/** Narrow the comment-remove endpoint's value. */
+function commentRemoveValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffApprovalCommentRemoveValue {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+  const value: unknown = result.value
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('the comment remove returned a malformed value')
+  }
+  const outcome = (value as Record<string, unknown>).outcome
+  if (outcome !== 'removed' && outcome !== 'missing') {
+    throw new Error('the comment remove returned a malformed outcome')
+  }
+  return { outcome }
+}
+
+/** Narrow the comment-ask endpoint's value. */
+function commentAskValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffApprovalCommentAskValue {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+  const value: unknown = result.value
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('the comment ask returned a malformed value')
+  }
+  const record = value as Record<string, unknown>
+  const outcome = record.outcome
+  if (outcome !== 'asked' && outcome !== 'missing' && outcome !== 'no-agent' && outcome !== 'failed') {
+    throw new Error('the comment ask returned a malformed outcome')
+  }
+  const requestId = record.requestId
+  const message = record.message
+  return {
+    outcome,
+    requestId: typeof requestId === 'string' && requestId.length > 0 ? requestId : undefined,
+    message: typeof message === 'string' && message.length > 0 ? message : undefined,
+  }
 }

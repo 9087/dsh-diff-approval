@@ -1,5 +1,6 @@
 /**
- * Where the review panel was left, for this page's lifetime.
+ * Where the review panel was left, and what the reader has typed but not sent, for
+ * this page's lifetime.
  *
  * Closing the panel is not "done reviewing": reopening it should put the reader
  * back on the file they were in, at the offset they were at. That is a fact about
@@ -14,7 +15,7 @@
  * @module dsh-diff-approval/client/panel-memory
  */
 
-import type { Discussion } from './discussion.ts'
+import type { Discussion, DiscussionQuoteLine } from './discussion.ts'
 
 /** One session's remembered view: its last file, and how far down each file was. */
 interface SessionView {
@@ -27,110 +28,203 @@ interface SessionView {
 const views = new Map<string, SessionView>()
 
 /**
- * One session's comment threads, by pending entry id.
+ * What the panel keeps about one thread that is NOT the host's to keep: what the reader is
+ * typing, whether the block is folded, and the body height the panel last measured for it.
  *
- * A thread is not a preference and not the host's to keep: it is what this visit put on the
- * diff, and the panel unmounts whenever it is closed or its presentation changes (the
- * floating overlay and the docked tab are two mounts). Module state gives them one memory,
- * so the threads are still there when the panel comes back, and a page reload starts clean -
- * which is the lifetime the comments are supposed to have.
+ * A thread itself is the host's record now (see `pending.comments`), so nothing here may
+ * hold a turn: the panel renders the snapshot, and this only remembers the page-local
+ * presentation of it. That split is what makes a poll harmless — a poll replaces the
+ * snapshot, and a draft typed a moment ago is not in it, so keeping the draft here is what
+ * stops the poll from clearing the field under the reader's hands.
  */
-const threads = new Map<string, Readonly<Record<string, readonly Discussion[]>>>()
+export interface ThreadLocal {
+  /** What the reader has typed into the compose row (not sent yet). */
+  draft: string
+  /** Folded to the one-row header. */
+  collapsed: boolean
+  /**
+   * The last send of this thread was refused (no live agent, or the ask itself failed). It is a
+   * page-local fact because nothing was stored: the host has no question to record, so the block
+   * could only say so from here. Cleared by the next send.
+   */
+  failed?: boolean | undefined
+  /**
+   * How many rows the block's body was last measured to occupy, or absent before the first
+   * measurement. The reservation follows the drawing rather than the other way round (see
+   * the panel's read-back), and it is kept here so a mount that comes back draws the thread
+   * at the size it was already measured at instead of reserving the model's estimate again.
+   */
+  bodyRows?: number | undefined
+}
+
+/** Nothing is known about a thread until the reader types or folds it. */
+const NO_THREAD_STATE: Readonly<Record<string, ThreadLocal>> = {}
 
 /**
- * Fired on `window` whenever a session's threads change. The threads are written by the file
- * detail (which owns them) and read by the list pane (whose comments tab shows them all), so the
- * event is what keeps the two in step: a reader who posts a comment sees it in the list at once
- * instead of on the next poll.
+ * One session's page-local thread state, by comment id.
+ *
+ * Written on every change and read back by a mount that appears later (the other
+ * presentation, or the panel reopened), so a draft survives both a poll and a remount.
+ * The record is republished only when it actually changes, so a mount that reads it back
+ * keeps the identity it adopted and does not re-adopt an equal object on every render.
  */
-export const COMMENTS_CHANGED_EVENT = 'dsh-diff-approval:comments-changed'
+const localThreads = new Map<string, Readonly<Record<string, ThreadLocal>>>()
 
 /**
- * The comment threads a session's panel is holding.
+ * The page-local thread state a session's panel is holding.
  * @param sessionId - the session, if any.
- * @returns the threads by pending entry id; empty when there are none.
+ * @returns the state by comment id; empty when there is none.
  */
-export function rememberedDiscussions(
-  sessionId: string | undefined,
-): Readonly<Record<string, readonly Discussion[]>> {
-  return sessionId === undefined ? {} : threads.get(sessionId) ?? {}
+export function rememberedThreads(sessionId: string | undefined): Readonly<Record<string, ThreadLocal>> {
+  return sessionId === undefined ? NO_THREAD_STATE : localThreads.get(sessionId) ?? NO_THREAD_STATE
 }
 
 /**
- * Remember the comment threads a session's panel holds. Called on every change, so a mount
- * that appears later (another presentation, or the panel reopened) starts from them.
+ * Remember one session's page-local thread state. Called on every change, so a mount that
+ * appears later starts from it.
  * @param sessionId - the session the panel is reviewing; nothing is recorded without one.
- * @param byFile - the threads, by pending entry id.
+ * @param threads - the state by comment id.
  */
-export function rememberDiscussions(
+export function rememberThreads(
   sessionId: string | undefined,
-  byFile: Readonly<Record<string, readonly Discussion[]>>,
+  threads: Readonly<Record<string, ThreadLocal>>,
 ): void {
   if (sessionId === undefined) return
-  const before = threads.get(sessionId)
-  threads.set(sessionId, byFile)
-  if (before === byFile) return
-  if (typeof window === 'undefined') return
-  window.dispatchEvent(new CustomEvent(COMMENTS_CHANGED_EVENT, { detail: { sessionId } }))
+  // The same object back is not a change: republishing it would only hand every reader a new
+  // record to adopt for nothing (and the panel writes this on every render that measures).
+  if (localThreads.get(sessionId) === threads) return
+  localThreads.set(sessionId, threads)
 }
 
 /**
- * End one comment, wherever it came from.
+ * A block the reader has PLACED on a file's lines but has not written down yet.
  *
- * The threads belong to the file detail, which writes them here on every change — but the list
- * pane shows them all and ends them too, and it has no way to reach into another component's
- * state. So the list asks the memory, and the detail reads the memory back on the event this
- * fires (see `COMMENTS_CHANGED_EVENT`): one record, one action, whichever pane the reader used.
- *
- * @param sessionId - the session the panel is reviewing; nothing is forgotten without one.
- * @param fileId - the pending entry the thread hangs in.
- * @param discussionId - the thread to end; an id that is not there changes nothing.
+ * It has no host record (see `sendDiscussion`), so nothing else on this page holds it: without this
+ * the reader's complaint was right — placing a comment, typing a first thought and closing the panel
+ * threw the whole block away, because only the words were remembered and a comment id to hang them
+ * under does not exist until the block is sent. Everything a mount needs to draw the block again is
+ * here: the entry it was placed on, the lines, the quote it was placed against, and the words.
  */
-export function forgetDiscussion(
-  sessionId: string | undefined,
-  fileId: string,
-  discussionId: string,
-): void {
-  if (sessionId === undefined) return
-  const before = threads.get(sessionId)
-  const list = before?.[fileId]
-  if (list === undefined) return
-  const next = list.filter(entry => entry.id !== discussionId)
-  if (next.length === list.length) return
-  rememberDiscussions(sessionId, { ...before, [fileId]: next })
+export interface PlacedThread {
+  /**
+   * The block's page-local id, minted when it was placed. The comment's own id is minted when the
+   * block is written (see `sendDiscussion`), and this is only ever the name of an unsent block.
+   */
+  id: string
+  /** The pending entry whose rows it was placed on. */
+  fileId: string
+  /**
+   * The rows it was made on, plus the new-file lines that survive a rebuild. The lines are what a
+   * mount re-anchors from (see `remapDiscussions`); the row indices are the placement's own hint,
+   * stale the moment the model moves.
+   */
+  anchor: Discussion['anchor']
+  /** The anchored lines as they read when it was placed (the re-anchor fingerprint). */
+  quote: string
+  /** `quote` with one line of context on each side, as it read then. */
+  quoteContext?: string | undefined
+  /** The gutter numbers of `quote`'s lines, in the same order. */
+  quoteLines?: readonly DiscussionQuoteLine[] | undefined
+  /** What the reader had typed into it. */
+  draft: string
+}
+
+/** No blocks are placed until the reader places one. */
+const NO_PLACED: readonly PlacedThread[] = []
+
+/**
+ * One session's placed-but-unsent blocks, oldest placement first.
+ *
+ * Kept with the rest of the page's memory — a poll cannot disturb it (it is not in the snapshot) and
+ * a reload starts clean, which is the lifetime a comment that was never sent is supposed to have.
+ */
+const placedThreads = new Map<string, readonly PlacedThread[]>()
+
+/**
+ * The placed-but-unsent blocks a session's panel is holding.
+ * @param sessionId - the session, if any.
+ * @returns the blocks, oldest placement first; empty when there are none.
+ */
+export function rememberedPlacedThreads(sessionId: string | undefined): readonly PlacedThread[] {
+  return sessionId === undefined ? NO_PLACED : placedThreads.get(sessionId) ?? NO_PLACED
 }
 
 /**
- * Drop every thread whose file the list no longer holds.
+ * Whether two placements say the same thing.
  *
- * A thread is a block of rows in one file's diff, so a file the reader has kept or reverted out of the
- * list leaves nothing for its comments to hang on: they go with it, and the same path coming back later
- * in this visit starts clean. A new object is published only when something actually goes, so the panes
- * that adopt this record (see `COMMENTS_CHANGED_EVENT`) do not re-adopt an equal object on every poll.
+ * The panel republishes this on every render that touches its own state — a keystroke, a fold, the
+ * measurement writing a body height down — so an equal-but-new list must be recognised: storing it
+ * would hand every reader of this memory a new array to adopt for no change at all, which is exactly
+ * what the identity discipline above exists to prevent.
+ *
+ * @param a - the placements held now.
+ * @param b - the placements the panel just built.
+ * @returns true when they are the same placements with the same words.
+ */
+function samePlaced(a: readonly PlacedThread[], b: readonly PlacedThread[]): boolean {
+  if (a.length !== b.length) return false
+  for (let index = 0; index < a.length; index++) {
+    const left = a[index]!
+    const right = b[index]!
+    if (left.id !== right.id || left.fileId !== right.fileId || left.draft !== right.draft) return false
+    if (left.anchor.start !== right.anchor.start || left.anchor.end !== right.anchor.end) return false
+    if (left.anchor.startLine !== right.anchor.startLine || left.anchor.endLine !== right.anchor.endLine) return false
+    if (left.quote !== right.quote || left.quoteContext !== right.quoteContext) return false
+    if (left.quoteLines?.length !== right.quoteLines?.length) return false
+    if (left.quoteLines !== undefined && right.quoteLines !== undefined) {
+      for (let line = 0; line < left.quoteLines.length; line++) {
+        const one = left.quoteLines[line]!
+        const other = right.quoteLines[line]!
+        if (one.old !== other.old || one.new !== other.new || one.kind !== other.kind) return false
+      }
+    }
+  }
+  return true
+}
+
+/**
+ * Remember one session's placed-but-unsent blocks. Called on every change, so a mount that comes
+ * back draws them again on the same lines with the same words.
+ *
+ * A list that says the same thing as the one held is not stored: the caller rebuilds it per render,
+ * and only a real change (a placement, a draft, a block written or discarded) may republish it.
+ *
+ * @param sessionId - the session the panel is reviewing; nothing is recorded without one.
+ * @param threads - the placements, oldest first.
+ */
+export function rememberPlacedThreads(sessionId: string | undefined, threads: readonly PlacedThread[]): void {
+  if (sessionId === undefined) return
+  const before = placedThreads.get(sessionId)
+  if (before === threads) return
+  if (before !== undefined && samePlaced(before, threads)) return
+  placedThreads.set(sessionId, threads)
+}
+
+/**
+ * Drop every placed block whose file the list no longer holds.
+ *
+ * A placement is a block of rows in ONE file's diff, so a file the reader has kept or
+ * reverted out of the list leaves nothing for its block to hang on: it goes with the file,
+ * exactly as the comments on those rows do (the host drops those; see `comments.ts`). The
+ * entry ids ARE paths, so a path that comes back later is the same id again — without this
+ * the placement was resurrected onto a file the reader had already dealt with, and
+ * `discussionOverlapping` went on refusing a fresh comment on those very rows because a
+ * block that is not on screen still counted as theirs.
+ *
+ * Nothing is published when nothing is dropped, so a poll that changes no file is not a
+ * change to the page's memory (see the identity discipline in `rememberPlacedThreads`).
  *
  * @param sessionId - the session the panel is reviewing; nothing is dropped without one.
  * @param listed - the pending entry ids the list is holding.
  */
-export function forgetDiscussionsNotIn(sessionId: string | undefined, listed: readonly string[]): void {
-  // No session means nothing was ever recorded for one, and a session that holds no threads has nothing
-  // to drop: both are silent, not errors.
+export function forgetPlacedThreadsNotIn(sessionId: string | undefined, listed: readonly string[]): void {
   if (sessionId === undefined) return
-  const before = threads.get(sessionId)
+  const before = placedThreads.get(sessionId)
   if (before === undefined) return
-  // Rebuild the record: a file the list still holds keeps its threads as they are, anything else is left
-  // out of it. `dropped` remembers whether that actually removed something.
   const held = new Set(listed)
-  const kept: Record<string, readonly Discussion[]> = {}
-  let dropped = false
-  for (const [fileId, list] of Object.entries(before)) {
-    if (held.has(fileId)) kept[fileId] = list
-    else dropped = true
-  }
-  // Nothing went, so nothing is published: the record keeps its identity and the panes that hold it are
-  // left alone. This is called on every poll, and an equal-but-new object would have them re-adopt it
-  // every time — a render, a write, an event, for no change at all (see `rememberDiscussions`).
-  if (!dropped) return
-  rememberDiscussions(sessionId, kept)
+  const kept = before.filter(thread => held.has(thread.fileId))
+  if (kept.length === before.length) return
+  placedThreads.set(sessionId, kept)
 }
 
 /**
@@ -139,7 +233,7 @@ export function forgetDiscussionsNotIn(sessionId: string | undefined, listed: re
  * Keeping or reverting a file asks whether the row should leave the list, and a reader working
  * through one file's blocks answers that the same way every time. Ticking the box in that prompt is
  * a fact about this visit rather than a preference — it is not the host's to keep, and a reload
- * starts clean, exactly like the threads above.
+ * starts clean, exactly like the thread state above.
  */
 const quietRemovals = new Map<string, Set<string>>()
 
@@ -221,6 +315,7 @@ export function panelFileOffset(sessionId: string | undefined, fileId: string): 
  */
 export function resetPanelMemory(): void {
   views.clear()
-  threads.clear()
+  localThreads.clear()
+  placedThreads.clear()
   quietRemovals.clear()
 }

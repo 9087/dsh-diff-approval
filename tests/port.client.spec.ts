@@ -23,6 +23,25 @@ describe('list', () => {
         ok: true,
         value: {
           workspacePath: '/repo',
+          commentsRevision: 7,
+          comments: [
+            {
+              id: 'c1', sessionId: 'session-1', entryId: 'e1', path: '/repo/a.txt',
+              anchor: { startLine: 3, endLine: 4 }, quote: 'a', text: 'why?',
+              createdAt: 11, updatedAt: 12, asks: [{ requestId: 'req-1', text: 'why?', turn: 2 }],
+            },
+            { id: 'c2' },
+          ],
+          // A blank answer is dropped rather than shown as an empty bubble.
+          commentAnswers: { 'req-1': 'because it guards the edge', 'req-2': '' },
+          // The lines the host resolved each comment to. Narrowed row by row: only a pair of real
+          // numbers is a figure, and a caller handed nothing falls back to the record's anchor.
+          commentLines: {
+            c1: { start: 4, end: 5 },
+            c2: { start: '4', end: 5 },
+            c3: { start: 4 },
+            c4: null,
+          },
           files: [
             {
               id: 'e1', sessionId: 'session-1', path: '/repo/a.txt', kind: 'edit',
@@ -40,6 +59,17 @@ describe('list', () => {
     const port = createDiffApprovalPort(seam.rpc)
     await expect(port.list(S1)).resolves.toEqual({
       workspacePath: '/repo',
+      commentsRevision: 7,
+      comments: [
+        {
+          id: 'c1', sessionId: 'session-1', entryId: 'e1', path: '/repo/a.txt',
+          anchor: { startLine: 3, endLine: 4 }, quote: 'a', text: 'why?',
+          // The question's own words ride the record: the panel draws them as the follow-up's turn.
+          createdAt: 11, updatedAt: 12, asks: [{ requestId: 'req-1', text: 'why?', turn: 2 }],
+        },
+      ],
+      commentAnswers: { 'req-1': 'because it guards the edge' },
+      commentLines: { c1: { start: 4, end: 5 } },
       files: [
         {
           id: 'e1', sessionId: 'session-1', path: '/repo/a.txt', kind: 'edit',
@@ -58,7 +88,10 @@ describe('list', () => {
 
   it('omits workspacePath when the host sends none', async () => {
     const seam = fakeRpc({ list: { ok: true, value: { files: [] } } })
-    await expect(createDiffApprovalPort(seam.rpc).list(S1)).resolves.toEqual({ workspacePath: undefined, files: [] })
+    // The comments ride the same read, so a host that sends none reads as "no comments
+    // yet" rather than leaving the panel with fields it has to guess at.
+    await expect(createDiffApprovalPort(seam.rpc).list(S1))
+      .resolves.toEqual({ workspacePath: undefined, files: [], comments: [], commentLines: {}, commentsRevision: 0, commentAnswers: {} })
   })
 
   it('passes the host\'s skill capability through', async () => {
@@ -169,5 +202,82 @@ describe('block keep/revert', () => {
   it('rejects a malformed open outcome', async () => {
     const seam = fakeRpc({ open: { ok: true, value: { outcome: 'maybe' } } })
     await expect(createDiffApprovalPort(seam.rpc).open(S1, 'e1', 'open')).rejects.toThrow('malformed outcome')
+  })
+})
+
+describe('comments', () => {
+  const draft = {
+    id: 'c1',
+    entryId: 'entry-1',
+    anchor: { startLine: 3, endLine: 4 },
+    quote: 'const a = 1',
+    quoteContext: 'before\nconst a = 1\nafter',
+    quoteLines: [{ old: 3, new: 3, kind: 'context' as const }],
+    text: 'why is this here?',
+  }
+
+  it('posts one annotation and narrows the stored record', async () => {
+    const seam = fakeRpc({
+      'comment-add': {
+        ok: true,
+        value: {
+          outcome: 'added',
+          comment: {
+            id: 'c1', sessionId: 'session-1', entryId: 'entry-1', path: '/repo/a.txt',
+            anchor: { startLine: 3, endLine: 4 }, quote: 'const a = 1', text: 'why is this here?',
+            createdAt: 1, updatedAt: 2,
+          },
+        },
+      },
+    })
+    await expect(createDiffApprovalPort(seam.rpc).commentAdd(S1, draft)).resolves.toEqual({
+      outcome: 'added',
+      comment: {
+        id: 'c1', sessionId: 'session-1', entryId: 'entry-1', path: '/repo/a.txt',
+        anchor: { startLine: 3, endLine: 4 }, quote: 'const a = 1', text: 'why is this here?',
+        createdAt: 1, updatedAt: 2,
+      },
+    })
+    // The display path is the host's to fill: the entry the comment hangs off is its
+    // authority on what the file is called.
+    expect(seam.call).toHaveBeenCalledWith('/diff-approval', 'comment-add', { sessionId: 'session-1', ...draft })
+  })
+
+  it('reports a refused write rather than inventing a stored comment', async () => {
+    // The entry left the list between the panel's read and its write.
+    const seam = fakeRpc({ 'comment-add': { ok: true, value: { outcome: 'missing' } } })
+    await expect(createDiffApprovalPort(seam.rpc).commentAdd(S1, draft)).resolves.toEqual({ outcome: 'missing' })
+    // An `added` that carries no record is a broken host, not an empty comment.
+    const broken = fakeRpc({ 'comment-add': { ok: true, value: { outcome: 'added' } } })
+    await expect(createDiffApprovalPort(broken.rpc).commentAdd(S1, draft)).rejects.toThrow('malformed value')
+  })
+
+  it('removes one annotation', async () => {
+    const seam = fakeRpc({ 'comment-remove': { ok: true, value: { outcome: 'removed' } } })
+    await expect(createDiffApprovalPort(seam.rpc).commentRemove(S1, 'c1')).resolves.toEqual({ outcome: 'removed' })
+    expect(seam.call).toHaveBeenCalledWith('/diff-approval', 'comment-remove', { sessionId: 'session-1', id: 'c1' })
+  })
+
+  it('asks one comment and narrows what became of it', async () => {
+    const seam = fakeRpc({ 'comment-ask': { ok: true, value: { outcome: 'asked', requestId: 'req-1' } } })
+    await expect(createDiffApprovalPort(seam.rpc).commentAsk(S1, 'c1', 'the prompt', 'why?'))
+      .resolves.toEqual({ outcome: 'asked', requestId: 'req-1' })
+    // Both strings cross the wire: the prompt is what the agent is asked, the words are what the
+    // thread draws.
+    expect(seam.call).toHaveBeenCalledWith('/diff-approval', 'comment-ask', {
+      sessionId: 'session-1', id: 'c1', prompt: 'the prompt', text: 'why?',
+    })
+
+    // A host with no live agent says so, and a failure carries the reason.
+    const noAgent = fakeRpc({ 'comment-ask': { ok: true, value: { outcome: 'no-agent' } } })
+    await expect(createDiffApprovalPort(noAgent.rpc).commentAsk(S1, 'c1', 'p', 'w')).resolves.toEqual({ outcome: 'no-agent' })
+    const failed = fakeRpc({ 'comment-ask': { ok: true, value: { outcome: 'failed', message: 'no live agent' } } })
+    await expect(createDiffApprovalPort(failed.rpc).commentAsk(S1, 'c1', 'p', 'w'))
+      .resolves.toEqual({ outcome: 'failed', message: 'no live agent' })
+  })
+
+  it('rejects a malformed ask outcome', async () => {
+    const seam = fakeRpc({ 'comment-ask': { ok: true, value: { outcome: 'perhaps' } } })
+    await expect(createDiffApprovalPort(seam.rpc).commentAsk(S1, 'c1', 'p', 'w')).rejects.toThrow('malformed outcome')
   })
 })

@@ -3,8 +3,12 @@
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { DockSnapshot } from './dock.tsx'
-import type { ChatView } from './chat-bridge.ts'
-import type { DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalOpenAction, DiffApprovalRefreshValue, PendingFileDiff, VcsImportValue } from '../types.ts'
+import type { CommentDraft } from './port.ts'
+import type { CommentLineRange } from '../comment-lines.ts'
+import type {
+  CommentRecord, DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalCommentAddValue,
+  DiffApprovalCommentAskValue, DiffApprovalCommentRemoveValue, DiffApprovalOpenAction, DiffApprovalRefreshValue, PendingFileDiff, VcsImportValue,
+} from '../types.ts'
 
 /** What the panel reads and drives: the pending list plus in-flight entries. */
 export interface PendingDiffSnapshot {
@@ -12,6 +16,25 @@ export interface PendingDiffSnapshot {
   read: boolean
   /** Pending entries, one per file, oldest capture first. */
   files: PendingFileDiff[]
+  /**
+   * The session's comment threads, oldest first. They arrive on the same read as the
+   * entries, from the host — the one copy every client of this session shares, so two
+   * browsers show the same threads instead of two private ones.
+   */
+  comments: CommentRecord[]
+  /**
+   * The new-file lines each comment sits on NOW, keyed by comment id, as the HOST resolved them
+   * against the entry's current content (see the wire type). One map for the whole panel: the list
+   * pane's label, the card's own chip and the jump all draw it, so a comment cannot read one line in
+   * the list and another in the code view — and a file nobody has opened is named just as rightly,
+   * which is what the reader asked for. A comment the host could not place is absent, and its
+   * callers fall back to `record.anchor`.
+   */
+  commentLines: Readonly<Record<string, CommentLineRange>>
+  /** The host's comment revision counter, bumped on every comment change. */
+  commentsRevision: number
+  /** Derived answer text per comment id, read by the host from the session's transcript. */
+  commentAnswers: Record<string, string>
   /** A read failure's message; absent while the latest read succeeded. */
   error?: string
   /** Entry ids whose keep/revert is in flight; their controls are disabled. */
@@ -32,6 +55,20 @@ export interface PendingDiffSnapshot {
    * told finds the list gone later with nothing to explain it (see the wire type).
    */
   persistError?: string | undefined
+  /**
+   * The last failure to write the session's COMMENT files, or absent while those writes are
+   * working. Their own field (and their own copy) because they are their own files: a comment
+   * that only exists in the host's memory is erased by a restart exactly like an unpersisted
+   * list, and the panel says so once — the same way, and for the same reason, as `persistError`.
+   */
+  commentPersistError?: string | undefined
+  /**
+   * Why the last undo/redo was refused by the host, or absent when there is nothing to say.
+   * The host answers a refused undo with its reason (the divergence guard's "the file changed
+   * outside the review"), and the reader who pressed the key has to be told: the panel surfaces
+   * this once as a toast and clears it, so the next refusal is news again.
+   */
+  undoNotice?: string | undefined
   /** Latched when an external change created a fresh undo checkpoint that
    * superseded the redo history; the panel surfaces it once (deferred if the
    * panel is closed) via a bottom-right notice. */
@@ -78,15 +115,6 @@ export interface PendingPanelFace {
   onPreviewImage: (sessionId: SessionId, path: string) => Promise<string | undefined>
   /** Paste a copied reference into the session's chat input and focus it. */
   onPasteReference: (sessionId: SessionId, reference: string) => void
-  /**
-   * Send one prompt into the session as a real turn (the discussion's answer
-   * comes back through `watchChat`).
-   * @returns whether a send verb was available; false means the caller should
-   * fall back to the composer route.
-   */
-  onAskAgent: (sessionId: SessionId, text: string) => boolean
-  /** Watch a session's transcript and turn state for a discussion's answer. */
-  watchChat: (sessionId: SessionId, listener: (view: ChatView) => void) => () => void
   /** Undo the session's last keep/revert, then refresh the list; resolves to the affected entry id when it is still pending. */
   onUndo: (sessionId: SessionId) => Promise<string | undefined>
   /** Redo the session's last undone keep/revert, then refresh the list; resolves to the affected entry id when it is still pending. */
@@ -104,8 +132,25 @@ export interface PendingPanelFace {
   onKeepAll: (sessionId: SessionId) => Promise<void>
   /** Revert every pending entry of one session in a single host call (bulk). */
   onRevertAll: (sessionId: SessionId) => Promise<void>
+  /**
+   * Write one annotation down in the session's comment store. The host owns the
+   * record from here on, so the next read is what shows it (and every other client
+   * of this session sees it too).
+   */
+  onCommentAdd: (sessionId: SessionId, comment: CommentDraft) => Promise<DiffApprovalCommentAddValue>
+  /** Drop one annotation from the session's comment store. */
+  onCommentRemove: (sessionId: SessionId, id: string) => Promise<DiffApprovalCommentRemoveValue>
+  /**
+   * Ask one stored comment as its own turn of the session; the answer arrives on the
+   * next read, derived by the host from the transcript. `prompt` is what the agent is
+   * asked and `text` is the reader's own words inside it, which the host stores on the
+   * question so the thread can draw what was written.
+   */
+  onCommentAsk: (sessionId: SessionId, id: string, prompt: string, text: string) => Promise<DiffApprovalCommentAskValue>
   /** Acknowledge the redo-cleared notice so it is only surfaced once. */
   onAckRedoCleared: () => void
+  /** Acknowledge a refused-undo notice once the panel has said it (see `undoNotice`). */
+  onAckUndoNotice: () => void
   /** Collapse the DSH sidebar (no-op when already collapsed) before the floating
    *  modal opens on a narrow window, so the sidebar can't overlap it. */
   collapseSidebar: () => void

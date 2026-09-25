@@ -3,12 +3,16 @@
 import { Component, Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
-import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconFolderOpenOutline16, IconListPenOutline16, IconPanelLeftOutline16, IconPlusOutline16, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconEllipsisOutline16, IconFolderOpenOutline16, IconListPenOutline16, IconPanelLeftOutline16, IconPlusOutline16, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import type { DiffApprovalBlockRange, DiffApprovalOpenAction, DiffApprovalRefreshOutcome, PendingFileDiff } from '../types.ts'
+import type {
+  CommentQuoteLine, CommentRecord, DiffApprovalBlockRange, DiffApprovalCommentAddValue, DiffApprovalCommentAskValue,
+  DiffApprovalCommentRemoveValue, DiffApprovalOpenAction, DiffApprovalRefreshOutcome, PendingFileDiff,
+} from '../types.ts'
+import type { CommentDraft } from './port.ts'
 import type { PendingPanelFace } from './slots.ts'
 import type { Translator } from './locales.ts'
 import { PathPicker, pathPickerOpen } from './PathPicker.tsx'
@@ -20,12 +24,11 @@ import { chordLabel, closeHint, summonHint, withChord } from './chords.ts'
 import { blockRangesOf, changeBlocksOf, computeIntraLineDiff, computeWholeFileDiff } from './whole-file-diff.ts'
 import {
   DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, discussionOverlapping,
-  discussionRowExtras, discussionRows, discussionRounds, discussionRuns, discussionText,
-  remapDiscussions, selectionFrame, stripBlankLines,
+  discussionRowExtras, discussionRows, discussionRounds, discussionRuns, discussionStackOffsets,
+  discussionText, remapDiscussions, selectionFrame,
 } from './discussion.ts'
 import type { Discussion, DiscussionMessage, DiscussionQuoteLine } from './discussion.ts'
 import { frameFollowIsAnimated, frameFollowKeyframes } from './scroll-follow.ts'
-import type { ChatView } from './chat-bridge.ts'
 import { renderMarkdownPreview } from './markdown-preview.ts'
 import { resolvePreviewImages } from './markdown-images.ts'
 import type { ChangeBlock, IntraRun, WholeFileDiffRow } from './whole-file-diff.ts'
@@ -44,7 +47,8 @@ import { OPEN_FILE_EVENT } from './produced-diff.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
 import { OPEN_PANEL_FILE_EVENT, PANEL_STATE_EVENT, SHOW_PANEL_EVENT, TOGGLE_PANEL_EVENT } from './dock.tsx'
 import type { PanelFileDetail, PanelStateDetail } from './dock.tsx'
-import { COMMENTS_CHANGED_EVENT, forgetDiscussion, forgetDiscussionsNotIn, lastPanelFile, panelFileOffset, quietenRemovalAsk, rememberDiscussions, rememberedDiscussions, rememberPanelView, removalAskQuiet } from './panel-memory.ts'
+import { forgetPlacedThreadsNotIn, lastPanelFile, panelFileOffset, quietenRemovalAsk, rememberPlacedThreads, rememberThreads, rememberedPlacedThreads, rememberedThreads, rememberPanelView, removalAskQuiet } from './panel-memory.ts'
+import type { PlacedThread, ThreadLocal } from './panel-memory.ts'
 import { composerCoveredByPanel, leaveComposerCaret } from './composer-cover.ts'
 import { commentModeEnabled, COMMENT_MODE_CHANGED_EVENT, confirmFileRemoveEnabled, COVER_CHANGED_EVENT, discussionRoundLimit, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
@@ -253,9 +257,9 @@ function MarkdownModeIcon({ preview, size = 14 }: { preview: boolean; size?: num
 function GotoLineIcon({ size = 14 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-      {/* The line it lands on … */}
+      {/* The line it lands on —*/}
       <path d="M1.5 10.6h11" stroke="currentColor" strokeWidth="1.3" />
-      {/* … and the arrow coming down onto it. */}
+      {/* — and the arrow coming down onto it. */}
       <path d="M7 1.9v5.9" stroke="currentColor" strokeWidth="1.3" />
       <path d="M4.3 5.2 7 7.9l2.7-2.7" stroke="currentColor" strokeWidth="1.3" fill="none" />
     </svg>
@@ -590,11 +594,6 @@ export function makeMeasurer(font: string | undefined): ((text: string) => numbe
     return width
   }
 }
-/** How long a question the session has let go stays "queued" before the block hands
- * its writing row back. The local submission echo and the host's queue row are a
- * round trip apart, so releasing on the first idle notification would take the row
- * back while the prompt is still on its way. */
-const DISCUSSION_RELEASE_GRACE_MS = 2500
 /** The overview ruler's width in px (mirrors `.overviewRuler`). The flash is
  * kept off it even when the scroller has no vertical scrollbar. */
 const OVERVIEW_RULER_WIDTH_PX = 4
@@ -668,8 +667,6 @@ const DISCUSSION_CODE_FONT_SCALE = 0.875
 const DISCUSSION_BODY_INSET_PX = 12
 /** Rows rendered beyond the visible window in each direction. */
 const OVERSCAN_ROWS = 8
-/** The identity a file with no discussions shares, so memos stay stable. */
-const EMPTY_DISCUSSIONS: readonly Discussion[] = []
 /** Height of the floating per-block Keep/Revert frame in px: 26px actions +
  * 5px frame padding on each side + 1px border on each side, plus a little
  * breathing room so the bottom padding never sits flush against it. */
@@ -897,29 +894,192 @@ export function frameInsets(): { top: number; bottom: number; left: number; righ
 }
 
 /**
- * The one-line title a comment is listed under in the comments tab: the first sentence of the first
- * thing the reader said in it. The thread's first turn IS the annotation (later turns are follow-ups
- * on the same rows), so that is the comment's own voice; the sentence is cut at its own full stop,
- * and the list ellipsises whatever is still too long for the column (see `.commentTitle`).
+ * The one-line title a comment is listed under in the comments tab: the first sentence of what the
+ * reader wrote in it. A record's text IS the annotation (later turns are follow-ups on the same
+ * rows, questions the host keeps separately), so that is the comment's own voice; the sentence is
+ * cut at its own full stop, and the list ellipsises whatever is still too long for the column (see
+ * `.commentTitle`).
  *
- * A thread that has not been sent yet has no turn at all: what the reader has typed so far is its
- * draft, and that is what the item shows, so a comment being written is not listed as a blank line.
- * A thread with neither has nothing to quote — an empty comment box the reader placed and left — and
- * the caller names it with the box's own placeholder, so the item says what that box is asking for
- * rather than claiming a title (see the list).
+ * A record with no text has nothing to quote — the caller names it with the comment box's own
+ * placeholder, so the item says what that box is asking for rather than claiming a title.
  *
- * @param discussion - the thread to name.
+ * @param text - the comment's text.
  * @returns the title, or an empty string when there is nothing to say yet.
  */
-function commentTitle(discussion: Discussion): string {
-  const asked = discussion.messages.find(message => message.role === 'user')?.text ?? discussion.draft ?? ''
-  const line = asked.split('\n').find(text => text.trim() !== '') ?? ''
+function commentTitle(text: string): string {
+  const line = text.split('\n').find(part => part.trim() !== '') ?? ''
   const stop = /[。！？!?]/.exec(line)
   return (stop === null ? line : line.slice(0, stop.index + 1)).trim()
 }
 
+/**
+ * The model row that holds one new-file line, or the last row that reads before it.
+ *
+ * The list's comments tab names a comment by the LINES it was written on (it draws no rows, so it has
+ * no row index to give), and a jump has to land the way every other jump does. A line the model no
+ * longer holds — an outdated thread — lands on the last row before it, which is exactly where
+ * `remapDiscussion` hangs a thread whose range is gone, so the box the reader came for is on screen.
+ *
+ * A row the file STILL HAS wins over one it is offering to take away, because a modified file numbers
+ * both sides and the same number is often carried by each: the row for old line 378 sits in the row
+ * stream just above the row for new line 378 (that is what a four-line deletion above the line looks
+ * like), and reading `newLine ?? oldLine` in one pass answers with the DELETED row. Landing there put
+ * the view above the code the number names — which is a comment's box with its top edge cut off by the
+ * viewport, the report this answers. The deleted row is still the right answer when the line exists
+ * nowhere else, and the last row before it when the file has moved past the number altogether.
+ *
+ * @param rows - the current model's rows.
+ * @param line - the new-file line to find.
+ * @returns the row index, or undefined when no row reads before that line.
+ */
+function rowOfLine(rows: readonly WholeFileDiffRow[], line: number): number | undefined {
+  let before: number | undefined
+  let removed: number | undefined
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index]!
+    const value = row.newLine ?? row.oldLine
+    if (value === undefined) continue
+    if (row.newLine === line) return index
+    if (value === line && removed === undefined) removed = index
+    if (value < line) before = index
+  }
+  return removed ?? before
+}
+
+/**
+ * The record's gutter pairs as the thread's own quote lines.
+ *
+ * The record's type is the host's (a wire record, where a side may simply be absent); the thread's
+ * is the renderer's (each side is a `number | undefined` it always reads). They say the same thing,
+ * so this is the one place that says so.
+ *
+ * @param lines - the record's quoted gutter pairs.
+ * @returns the same pairs as the block reads them.
+ */
+function quoteLinesOf(lines: readonly CommentQuoteLine[]): DiscussionQuoteLine[] {
+  return lines.map(line => ({
+    old: line.old,
+    new: line.new,
+    ...(line.kind === undefined ? {} : { kind: line.kind }),
+  }))
+}
+
+/**
+ * Whether two answer maps say the same thing.
+ *
+ * The panel derives its threads from these, and a poll hands it a freshly built map every second.
+ * Comparing them by content is what keeps an unchanged read from re-deriving every thread (a
+ * re-anchor joins the file's row windows) and from handing every block a new object to draw.
+ *
+ * @param a - the answers the pane last derived from.
+ * @param b - the answers the snapshot now carries.
+ * @returns true when every question has the same answer text.
+ */
+function sameAnswers(a: Readonly<Record<string, string>>, b: Readonly<Record<string, string>>): boolean {
+  const keys = Object.keys(a)
+  if (keys.length !== Object.keys(b).length) return false
+  for (const key of keys) if (a[key] !== b[key]) return false
+  return true
+}
+
+/**
+ * One host record as the block that draws it.
+ *
+ * The record's `anchor` line numbers are the thread's position; the ROW indices are not in it (they
+ * are model-relative, so the host could not keep them — see `CommentRecord`), and the caller
+ * re-anchors what this returns against the current model.
+ *
+ * The turns are the annotation and then, for each question in the order it was asked, the question's
+ * own words and the answer to it when one exists. The first question is the annotation itself — its
+ * words ARE `record.text` — so it is not drawn a second time: a three-question thread reads
+ * annotation, Q2, A2, Q3, A3. A question still in flight contributes its words and then nothing,
+ * which is what the block's waiting note sits under; a dropped question says so instead of waiting
+ * for an answer that is not coming, and a question whose turn has ended with no answer says the
+ * answer was stopped (the transcript decides: `ended` only says the turn is over).
+ *
+ * @param record - the stored comment.
+ * @param answers - the derived answer text per question id.
+ * @param local - the page-local state of every thread (draft, fold, measured body).
+ * @returns the discussion the block draws.
+ */
+function discussionOfRecord(
+  record: CommentRecord,
+  answers: Readonly<Record<string, string>>,
+  local: Readonly<Record<string, ThreadLocal>>,
+): Discussion {
+  const asks = record.asks ?? []
+  const last = asks.at(-1)
+  const answered = last === undefined ? undefined : answers[last.requestId]
+  const messages: DiscussionMessage[] = [{ role: 'user', text: record.text }]
+  asks.forEach((ask, index) => {
+    // The first question IS the annotation: the reader popped the compose row on those rows and its
+    // words became `record.text`, so drawing `ask.text` too would show the same sentence twice.
+    if (index > 0 && typeof ask.text === 'string' && ask.text !== '') {
+      messages.push({ role: 'user', text: ask.text })
+    }
+    const answer = answers[ask.requestId]
+    if (answer !== undefined) messages.push({ role: 'assistant', text: answer })
+  })
+  const state = local[record.id]
+  return {
+    id: record.id,
+    anchor: { start: 0, end: 0, startLine: record.anchor.startLine, endLine: record.anchor.endLine },
+    messages,
+    draft: state?.draft ?? '',
+    collapsed: state?.collapsed ?? false,
+    quote: record.quote,
+    ...(record.quoteContext === undefined ? {} : { quoteContext: record.quoteContext }),
+    ...(record.quoteLines === undefined ? {} : { quoteLines: quoteLinesOf(record.quoteLines) }),
+    // Waiting is "the newest question has no answer yet, and nothing has said it is over": a question
+    // the session dropped is the failure the block has always reported for one that will never be
+    // answered, and one whose turn ENDED is the stop note below. A send this pane refused outright is
+    // page-local (`failed` below), because no question was ever stored for the host to know about.
+    ...(last !== undefined && answered === undefined && last.dropped !== true && last.ended !== true
+      ? { asking: true } : {}),
+    ...(state?.failed === true || (last !== undefined && last.dropped === true) ? { failed: true } : {}),
+    // The turn that claimed the newest question is over and the transcript holds no answer for it:
+    // the question was cut off, and the reader is told so rather than left waiting on a turn that
+    // ended. Only ever read when there is no answer — the transcript is what decides that.
+    ...(last !== undefined && answered === undefined && last.ended === true && last.dropped !== true
+      ? { stopped: true } : {}),
+  }
+}
+
+/**
+ * One placed-but-unsent block as the block that draws it: the reader's compose row, and nothing else
+ * yet. Its words come from the placement itself (they are the only copy of an unsent question), and
+ * the fold and the measured body from the page-local thread state, as for any other thread.
+ * @param thread - the placement, as the page's memory holds it.
+ * @param local - the page-local state of every thread.
+ * @returns the discussion the block draws.
+ */
+function discussionOfDraft(
+  thread: PlacedThread,
+  local: Readonly<Record<string, ThreadLocal>>,
+): Discussion {
+  const state = local[thread.id]
+  return {
+    id: thread.id,
+    anchor: thread.anchor,
+    messages: [],
+    draft: thread.draft,
+    collapsed: state?.collapsed ?? false,
+    quote: thread.quote,
+    ...(thread.quoteContext === undefined ? {} : { quoteContext: thread.quoteContext }),
+    ...(thread.quoteLines === undefined ? {} : { quoteLines: thread.quoteLines }),
+    ...(state?.failed === true ? { failed: true } : {}),
+  }
+}
+
 /** The right detail pane for one selected file: actions plus the merged diff. */
 interface PendingDiffProps {  file: PendingFileDiff
+  /**
+   * The session the panel is VIEWING: the one whose list is on screen, and the only one
+   * that can answer a comment. Deliberately not `file.sessionId`, which names the session
+   * that most recently TOUCHED the file — often a subagent whose agent is gone by the time
+   * the reader comments, which is why asking there could only fail with "no agent".
+   */
+  sessionId: SessionId
   busy: boolean
   /** The current workspace root, for workspace-relative copied references. */
   workspacePath?: string | undefined
@@ -936,9 +1096,23 @@ interface PendingDiffProps {  file: PendingFileDiff
    *  open (the produced-file chip, clicked twice) lands again. */
   landingTick?: number | undefined
   /** A model row to land on — a jump to a comment, from the list's comments tab. It lands the way a
-   *  jump to a change block does: the configured lead rows above the row, and a flash around the
-   *  block that holds it (see the landing effect), because that is the jump the reader knows. */
+   *  jump to a change block does: the configured lead rows above the row. No frame is drawn around the
+   *  block that holds it, though — the reader asked for the comment, not for the change (see the
+   *  landing effect). */
   landingRow?: number | undefined
+  /**
+   * A new-file LINE to land on — a jump to a comment from the list's comments tab. The list draws no
+   * rows, so it names the line the comment was written on and this pane resolves it against the model
+   * it is holding (see `rowOfLine`). It lands exactly like `landingRow` once resolved, and it is the
+   * FALLBACK: when `landingComment` names a thread this pane draws, the row its box hangs at is a fact
+   * here — the line is a number the record may have outlived, or one the added side of the diff does
+   * not own (see `rowOfLine`).
+   */
+  landingLine?: number | undefined
+  /** The comment a jump is for, when it came from the list's comments tab. This pane draws that
+   *  thread, so its `anchor.end` IS the row its box hangs at — the one place the row can be read
+   *  without going through a line number at all. */
+  landingComment?: string | undefined
   /** Land on the thread's own box rather than on the row above: what an outdated comment gets, since
    *  the code it was written about is gone and the position its numbers point at says nothing. */
   landingCard?: boolean | undefined
@@ -954,10 +1128,39 @@ interface PendingDiffProps {  file: PendingFileDiff
   commentSkill?: string | undefined
   /** Paste a copied reference into the session's chat input and focus it. */
   onPasteReference: (sessionId: SessionId, reference: string) => void
-  /** Send one prompt into the session as a real turn (false = no send verb). */
-  onAskAgent: (sessionId: SessionId, text: string) => boolean
-  /** Watch a session's transcript and turn state for a discussion's answer. */
-  watchChat: (sessionId: SessionId, listener: (view: ChatView) => void) => () => void
+  /**
+   * The session's comment records, as the host holds them. This file's are the threads the pane
+   * draws: a thread is the host's record, not the page's, so the panel renders the snapshot
+   * rather than a copy of it (see `PendingDiffSnapshot.comments`).
+   */
+  comments: readonly CommentRecord[]
+  /** The derived answer text per question id, read by the host from the session's transcript. */
+  commentAnswers: Readonly<Record<string, string>>
+  /** The host's comment revision counter: a changed value means the records themselves changed. */
+  commentsRevision: number
+  /**
+   * The new-file lines the HOST resolved each comment to, keyed by comment id (see the wire type).
+   *
+   * Every number this pane PRINTS for a comment comes from here — the card's own chip, and the
+   * reference a question carries — so the card and the list cannot name two lines for one thread. A
+   * comment the host could not place is absent, and its card prints `record.anchor`: the line it was
+   * written on, which is what an outdated thread shows. Where the card is DRAWN is still this pane's
+   * own business (`remapDiscussions`): that is layout, not a number.
+   */
+  commentLines: Readonly<Record<string, { start: number; end: number }>>
+  /**
+   * Write one annotation down. The host refuses a comment on an entry that has left the list,
+   * which the pane reports instead of drawing a thread the host does not have.
+   */
+  onCommentAdd: (sessionId: SessionId, comment: CommentDraft) => Promise<DiffApprovalCommentAddValue>
+  /** Drop one annotation (the host's record goes; the next read is what shows it). */
+  onCommentRemove: (sessionId: SessionId, id: string) => Promise<DiffApprovalCommentRemoveValue>
+  /**
+   * Ask one stored comment; the answer arrives on a later read, derived by the host. `prompt` is
+   * what the agent is asked and `text` is the reader's own words inside it — the host stores those
+   * on the question, which is the only place a follow-up's words exist (see `CommentAsk`).
+   */
+  onCommentAsk: (sessionId: SessionId, id: string, prompt: string, text: string) => Promise<DiffApprovalCommentAskValue>
   /** Show a transient toast (used when a reference is copied to the clipboard). */
   onToast: (text: string) => void
   t: Translator
@@ -1176,7 +1379,7 @@ interface DiscussionBlockProps {
   lang: string | undefined
   /** Whether this block's ⋯ menu is the open one. */
   menuOpen: boolean
-  /** Whether a question is already in flight anywhere: the session answers one at a time. */
+  /** Whether THIS thread is waiting on an answer: only its own send button is refused then. */
   asking: boolean
   t: Translator
   onToggle: (id: string) => void
@@ -1191,7 +1394,7 @@ interface DiscussionBlockProps {
 }
 
 /**
- * A thread's card: the header (range, fold, ⋯), the quote when the code it was written about is
+ * A thread's card: the header (range, fold, ⋯ , the quote when the code it was written about is
  * gone, the turns, and the writing row.
  *
  * Every view draws the same card — the single-column code view hangs it in a row of its own below
@@ -1207,10 +1410,6 @@ function DiscussionBlock({
   onToggle, onMenuOpen, onRemove, onDraft, onSend, registerInput, split,
 }: DiscussionBlockProps) {
   const rows = discussionRows(discussion)
-  // The turn is answering and text has arrived: the streamed answer takes the branch the thinking
-  // note used to hold, so the line that says the answer is still coming is drawn with it — and
-  // `layoutDiscussion` reserves that row.
-  const writingNote = discussion.asking === true && discussion.reply !== undefined && discussion.reply !== ''
   const menuItems: MenuEntry[] = [{ id: 'delete', label: t('action.discussionEnd') }]
   return (
     <div
@@ -1299,11 +1498,6 @@ function DiscussionBlock({
               {t('discussion.hidden', { count: discussion.hidden })}
             </p>
           )}
-          {/* The turn was stopped: the question stays in the thread, the note says why there is no
-              answer, and the writing row below comes back so it can be asked again. */}
-          {discussion.stopped === true && (discussion.reply === undefined || discussion.reply === '') && discussion.failed !== true && (
-            <p className={css.discussionNote} data-diff-discussion-stopped>{t('discussion.stopped')}</p>
-          )}
           {discussion.messages.map((message, index) => (
             message.role === 'user' ? (
               <p className={css.discussionUser} data-diff-discussion-user key={`u${index}`}>{discussionNodes(message.text)}</p>
@@ -1311,75 +1505,70 @@ function DiscussionBlock({
               <p className={css.discussionAnswer} data-diff-discussion-reply key={`a${index}`}>{discussionNodes(message.text)}</p>
             )
           ))}
-          {discussion.reply !== undefined && discussion.reply !== '' ? (
-            <>
-              <p className={css.discussionAnswer} data-diff-discussion-reply>{discussionNodes(discussion.reply)}</p>
-              {/* The turn is still writing. The note below it said it was thinking only until the
-                  first token landed — this branch takes over then, and without the line the block
-                  would say nothing at all about the rest of the answer coming, while the text above
-                  it grows line by line. It sits under the streamed text, at the thread's own left
-                  edge, where the next line of that answer will appear. */}
-              {writingNote && (
-                <p className={css.discussionNote} data-diff-discussion-answering>
-                  {t('discussion.answering')}
-                  <span className={css.discussionDots} data-diff-discussion-dots aria-hidden="true">
-                    <span>.</span><span>.</span><span>.</span>
-                  </span>
-                </p>
-              )}
-            </>
-          ) : discussion.failed === true ? (
+          {/* What became of the newest question: it is still being answered, the session let it go
+              without one, or the turn that claimed it has stopped. Whichever it is, the writing row
+              below STAYS — a thread the reader is waiting on is still a thread they may write a
+              follow-up in, and the row is where that starts — so the note and the writing row are two
+              separate pieces of the block's height (see `layoutDiscussion`), and only this thread's
+              own button is refused while it waits. */}
+          {discussion.failed === true ? (
             <p className={css.discussionNote} data-diff-discussion-failed>{t('discussion.failed')}</p>
           ) : discussion.asking === true ? (
             <p className={css.discussionNote} data-diff-discussion-asking>
-              {discussion.queued === true ? t('discussion.queued') : t('discussion.thinking')}
+              {t('discussion.thinking')}
               {/* Decorative: the words above say it all, and a screen reader should not read the
                   dots. */}
               <span className={css.discussionDots} data-diff-discussion-dots aria-hidden="true">
                 <span>.</span><span>.</span><span>.</span>
               </span>
             </p>
-          ) : (
-            <>
-              {/* At most one spare row of the block's own measurement, and only here, next to the
-                  writing row it belongs to (see `.discussionSlack`). */}
-              <div className={css.discussionSlack} data-diff-discussion-slack aria-hidden="true" />
-              <div className={css.discussionCompose}>
-                {/* An outdated thread writes like any other: what the thread was about is quoted
-                    above this row, so a reply still has something to be about, and the row stays
-                    where the writing would happen so the block's shape does not change under the
-                    reader when the code moves on. */}
-                <input
-                  className={css.discussionInput}
-                  data-diff-discussion-input
-                  ref={(element) => { registerInput(discussion.id, element) }}
-                  value={discussion.draft}
-                  placeholder={t('discussion.placeholder')}
-                  onChange={(event) => { onDraft(discussion.id, event.target.value) }}
-                  onKeyDown={(event) => {
-                    if (event.key !== 'Enter') return
-                    // An IME's "confirm the candidate" Enter must not send: composing is the signal
-                    // for it, and 229 is the code some engines send when they will not say so.
-                    if (event.nativeEvent.isComposing || event.keyCode === 229) return
-                    event.preventDefault()
-                    onSend(discussion.id)
-                  }}
-                />
-                <button
-                  type="button"
-                  className={`${css.action} ${css.actionPrimary} ${css.discussionSend}`}
-                  data-diff-discussion-send
-                  // A question is already in flight: the session answers one at a time, and the
-                  // answer would have nowhere to land.
-                  disabled={asking}
-                  onClick={() => { onSend(discussion.id) }}
-                >
-                  {t('action.comment')}
-                  <ReturnIcon />
-                </button>
-              </div>
-            </>
-          )}
+          ) : discussion.stopped === true ? (
+            /* The turn that claimed this question is over and the transcript holds no answer for it:
+               the reader is told rather than left waiting on a turn that ended. An `ended` ask that
+               DOES have an answer never reaches this note — the transcript decides, and the answer
+               is above it. */
+            <p className={css.discussionNote} data-diff-discussion-stopped>{t('discussion.stopped')}</p>
+          ) : null}
+          {/* At most one spare row of the block's own measurement, and only here, next to the
+              writing row it belongs to (see `.discussionSlack`). */}
+          <div className={css.discussionSlack} data-diff-discussion-slack aria-hidden="true" />
+          <div className={css.discussionCompose}>
+            {/* An outdated thread writes like any other: what the thread was about is quoted
+                above this row, so a reply still has something to be about, and the row stays
+                where the writing would happen so the block's shape does not change under the
+                reader when the code moves on. */}
+            <input
+              className={css.discussionInput}
+              data-diff-discussion-input
+              ref={(element) => { registerInput(discussion.id, element) }}
+              value={discussion.draft}
+              placeholder={t('discussion.placeholder')}
+              onChange={(event) => { onDraft(discussion.id, event.target.value) }}
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter') return
+                // An IME's "confirm the candidate" Enter must not send: composing is the signal
+                // for it, and 229 is the code some engines send when they will not say so.
+                if (event.nativeEvent.isComposing || event.keyCode === 229) return
+                event.preventDefault()
+                // The button's own rule, for the field's Enter: this thread is already waiting on an
+                // answer, and a second question would ride in on top of the first.
+                if (asking) return
+                onSend(discussion.id)
+              }}
+            />
+            <button
+              type="button"
+              className={`${css.action} ${css.actionPrimary} ${css.discussionSend}`}
+              data-diff-discussion-send
+              // THIS thread's question is still in flight: sending another one now would leave the
+              // first answer with nowhere to land, so its own button waits — the others are free.
+              disabled={asking}
+              onClick={() => { onSend(discussion.id) }}
+            >
+              {t('action.comment')}
+              <ReturnIcon />
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -1597,8 +1786,7 @@ function isTextFieldEvent(event: KeyboardEvent): boolean {
 
 /**
  * Whether a key event came from the chat composer. The coverage chords fire
- * there — the user is usually typing when the panel's edges need rearranging —
- * while every other text field (this panel's own search box, the add-path
+ * there — the user is usually typing when the panel's edges need rearranging — * while every other text field (this panel's own search box, the add-path
  * dialog's input) keeps its Ctrl+Shift+Arrow for word-wise selection.
  * @param event - the keydown event.
  * @returns whether the event came from the composer.
@@ -1902,11 +2090,15 @@ function SplitSideRow({ index, side, wrapped, runs, kind, isLeft, height, focuse
 
 /** Imperative surface the parent uses to drive block navigation from the
  *  shared toolbar/keyboard in split mode (its own `focus` is private here). */
-export interface SplitDiffHandle { jump: (direction: -1 | 1, wrapGuard?: boolean, singleToast?: boolean) => void; land: (row: number, toCard?: boolean, flash?: boolean) => void; openSearch: () => void; toggleSearch: () => void; closeSearch: () => boolean; searchNext: (direction: -1 | 1) => boolean; toggleMatchCase: () => boolean; toggleMatchWholeWord: () => boolean }
+export interface SplitDiffHandle { jump: (direction: -1 | 1, wrapGuard?: boolean, singleToast?: boolean) => void; land: (row: number, toCard?: boolean, flash?: boolean, comment?: string | undefined) => void; openSearch: () => void; toggleSearch: () => void; closeSearch: () => boolean; searchNext: (direction: -1 | 1) => boolean; toggleMatchCase: () => boolean; toggleMatchWholeWord: () => boolean }
 
 /** The two-column (side-by-side) whole-file diff view. */
 export const SplitDiff = forwardRef<SplitDiffHandle, {
   file: PendingFileDiff
+  /** The session the panel is VIEWING, which owns every decision made in this view (see
+   *  `PendingDiffProps.sessionId`). Not `file.sessionId`, which names the session that most
+   *  recently touched the file. */
+  sessionId: SessionId
   model: RowModel
   runs: HighlightSides | undefined
   langWrap: boolean
@@ -1932,7 +2124,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   rulerRuns: readonly RulerRun[]
   /** The go-to popup, which this view centres on its own box (see `gotoDialog`). */
   gotoDialog?: ReactNode
-}>(function SplitDiff({ file, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert, onWrapToast, onVisibleLines, discussions, renderDiscussion, selectionComment, rulerRuns, gotoDialog }, ref) {
+}>(function SplitDiff({ file, sessionId, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert, onWrapToast, onVisibleLines, discussions, renderDiscussion, selectionComment, rulerRuns, gotoDialog }, ref) {
   // Use the configured line height for the split virtual window and jump math
   // (the rendered split rows already size to the same value).
   // eslint-disable-next-line @typescript-eslint/no-shadow
@@ -1966,6 +2158,15 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   const [hoveredBlock, setHoveredBlock] = useState<number | undefined>(undefined)
   const [focus, setFocus] = useState(0)
   const [flashKey, setFlashKey] = useState(0)
+  /**
+   * Bumped by every landing this view is asked for, and the key the landing effect runs on.
+   *
+   * `flashKey` cannot be that key: a landing on a THREAD'S OWN BOX deliberately leaves the frame alone
+   * (it SETS the key back to 0 rather than raising one), so two jumps inside one pair would leave it
+   * unchanged and the second landing would never be placed at all. This one only ever moves, and only
+   * a landing moves it.
+   */
+  const [landKey, setLandKey] = useState(0)
   // When the flash is a "boundary pin" it shakes instead of fading. Set per-flash
   // by `bumpFlash` so the overlay className stays stable for its whole life.
   const pinShakeRef = useRef(false)
@@ -2102,17 +2303,22 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     return set
   }, [pairRowIndices, discussedRows])
   /** The threads that hang under each pair, by the row their anchor ends in. */
+  const pairOfDiscussion = useCallback(
+    (discussion: Discussion): number | undefined =>
+      pairOfRow.get(discussion.anchor.end) ?? pairOfRow.get(discussion.anchor.start),
+    [pairOfRow],
+  )
   const pairDiscussions = useMemo(() => {
     const map = new Map<number, Discussion[]>()
     for (const discussion of discussions ?? []) {
-      const pair = pairOfRow.get(discussion.anchor.end) ?? pairOfRow.get(discussion.anchor.start)
+      const pair = pairOfDiscussion(discussion)
       if (pair === undefined) continue
       const list = map.get(pair)
       if (list === undefined) map.set(pair, [discussion])
       else list.push(discussion)
     }
     return map
-  }, [discussions, pairOfRow])
+  }, [discussions, pairOfDiscussion])
   /**
    * The height a pair holds for the threads hanging under it, in px.
    *
@@ -2124,6 +2330,18 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   const discussionPx = useCallback(
     (k: number): number => (pairDiscussions.get(k) ?? []).reduce((px, discussion) => px + discussionRows(discussion) * THREAD_ROW_PX, 0),
     [pairDiscussions],
+  )
+  /**
+   * Where each thread's OWN box starts, in px, measured from the base of the pair's stack.
+   *
+   * The cards are drawn one below the other under their pair, in this list's order (see the card layer
+   * below), so the first card starts at the pair's end and the nth one a card later. A jump that names
+   * a thread has to add these to the base, or it lands the first card of the pair whatever thread the
+   * reader asked for — the same defect the single-column landing had.
+   */
+  const discussionStack = useMemo(
+    () => discussionStackOffsets(discussions ?? [], thread => pairOfDiscussion(thread) ?? -1),
+    [discussions, pairOfDiscussion],
   )
   const pairOffsets = useMemo(() => {
     // With no threads the cheap uniform-row path is the whole story (and `pairHeights` is null
@@ -2197,7 +2415,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     sync('right')
   }, [pairs, langWrap, tabWidthSpaces, bodyWidth])
 
-  // Whether Ctrl (or ⌘) is down RIGHT NOW. The strips are native scrollbars, so dragging one dispatches no
+  // Whether Ctrl (or ⌘ is down RIGHT NOW. The strips are native scrollbars, so dragging one dispatches no
   // pointer events at all — a modifier cannot be read off the gesture itself, and this key state is what
   // tells a plain drag (move this pane) apart from a Ctrl drag (move both). A window that loses focus
   // never sees the keyup, so blur releases it too.
@@ -2222,7 +2440,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   // quote that stands for that column. The quote is drawn in the card over both halves rather than inside
   // them (see `DiscussionQuote`), so nothing else would move it with its own code.
   //
-  // With Ctrl (or ⌘) held the OTHER pane follows the one being dragged, both its column and its strip: the
+  // With Ctrl (or ⌘ held the OTHER pane follows the one being dragged, both its column and its strip: the
   // two panes of a side-by-side diff are read against each other, and lining them up by hand is what the
   // modifier is for. Whichever strip is dragged leads; the follower's own scroll event is marked as ours so
   // it cannot drag the leader back into the follower's own range.
@@ -2373,8 +2591,8 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     const range = blockRanges[operated]
     if (range === undefined) return
     await (action === 'keep'
-      ? onBlockKeep(file.sessionId, file.id, range)
-      : onBlockRevert(file.sessionId, file.id, range))
+      ? onBlockKeep(sessionId, file.id, range)
+      : onBlockRevert(sessionId, file.id, range))
     const count = blockCountRef.current
     if (count === 0) return
     const next = blockAfterAction(operated, count)
@@ -2478,18 +2696,24 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
    * block's first pair, which is the precision the single-column view has; spent once, like every
    * landing.
    */
-  const landingRowRef = useRef<{ row: number; toCard: boolean } | undefined>(undefined)
+  const landingRowRef = useRef<{ row: number; toCard: boolean; comment?: string | undefined } | undefined>(undefined)
   /** A row this view was asked to frame and land on rather than a whole block (a go-to-line). */
   const flashRowRef = useRef<number | undefined>(undefined)
-  const land = useCallback((row: number, toCard = false, rowFlash = false): void => {
-    landingRowRef.current = { row, toCard }
+  const land = useCallback((row: number, toCard = false, rowFlash = false, comment?: string): void => {
+    landingRowRef.current = { row, toCard, comment }
     const pair = pairOfRow.get(row)
     const block = pair === undefined ? undefined : blockIndexByPair.get(pair)
     if (block !== undefined) setFocus(block)
     // A landing that means "here is the change you were looking for" flashes the whole block; a
     // go-to-line frames the one row it was asked for, and recenters without that block flash.
+    // Neither happens for a THREAD'S OWN BOX (`toCard`): the frame it would draw is the pair's whole
+    // change block, whose top edge sits above the viewport — a blinking line at the top of the pane,
+    // which is the noise the comments list's jump was reported for (see the single-column landing).
+    // So the frame already on screen is taken down rather than another one raised.
     flashRowRef.current = rowFlash ? row : undefined
-    setFlashKey(key => key + 1)
+    setLandKey(key => key + 1)
+    if (toCard) setFlashKey(0)
+    else setFlashKey(key => key + 1)
   }, [pairOfRow, blockIndexByPair])
 
   // Expose the block jump to the parent so the shared toolbar/keyboard drives
@@ -2508,7 +2732,15 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     const landed = landingRowRef.current
     landingRowRef.current = undefined
     const from = landed === undefined ? block.start : pairOfRow.get(landed.row) ?? block.start
-    const target = off(from) + (landed?.toCard === true ? pairHeightAt(from) : 0) - leadRows * ROW_HEIGHT_PX
+    // A landing that named a THREAD lands ITS box, not the first one under the pair: the cards are
+    // drawn one below the other in `pairDiscussions`' order (see the card layer), so the base the pair
+    // ends at is only the first card's top edge (see `discussionStack`). The offset is in the thread's
+    // OWN rows (`discussionRows`, the unit a card's height is drawn in), so it is scaled by
+    // `THREAD_ROW_PX` exactly as the single-column landing scales it.
+    const cardTop = landed?.toCard === true
+      ? pairHeightAt(from) + (landed.comment === undefined ? 0 : (discussionStack.get(landed.comment) ?? 0) * THREAD_ROW_PX)
+      : 0
+    const target = off(from) + cardTop - leadRows * ROW_HEIGHT_PX
     const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
     if (body.scrollTop !== clamped) body.scrollTop = clamped
     setScrollTop(clamped)
@@ -2516,7 +2748,10 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     // otherwise re-center the view and lose the user's scroll position. `focus`
     // is also NOT a dep: a scroll re-anchors `focus` to the block under the
     // viewport (see `onScroll`), and that must NOT recenter and fight the scroll.
-  }, [flashKey])
+    // `landKey` is what makes a LANDING run: `flashKey` alone misses the second jump inside one pair (a
+    // card landing leaves the frame alone, see `land`), and a landing placed nowhere is a jump the
+    // reader never took.
+  }, [flashKey, landKey])
 
   const onScroll = (): void => {
     const body = bodyRef.current
@@ -2773,8 +3008,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
                     intra={sideIndex?.left === undefined ? undefined : model.intra.get(sideIndex.left)}
                     discussed={discussedPairs.has(index)}
                   />
-                  {/* The rows a thread under this pair holds. Both halves reserve the same height —
-                      the card itself is drawn over both (see the layer below) — which is what keeps
+                  {/* The rows a thread under this pair holds. Both halves reserve the same height —                       the card itself is drawn over both (see the layer below) — which is what keeps
                       the two halves from drifting apart under a thread. */}
                   {discussionPx(index) > 0 && (
                     <div
@@ -3343,8 +3577,78 @@ function PendingFileRow({ file, selected, failedMessage, t, onSelect, onMenu }: 
   )
 }
 
+/** The gap the diff toolbar's left group lays its items out with, in px (mirrors `.diffActionInfo`). */
+const TOOLBAR_ITEM_GAP_PX = 8
+/** The overflow button's own width in px — a `.action .iconAction` chip around a 14px glyph — used
+ *  until the button itself has been measured. */
+const TOOLBAR_OVERFLOW_PX = 28
+
+/** One control in the diff toolbar's left group: a button, or the hairline that groups them. */
+type DiffToolbarItem =
+  | { kind: 'divider'; key: string }
+  | {
+      kind: 'button'
+      /** Stable identity: the key its width is remembered under and its row id in the overflow menu. */
+      key: string
+      /** The action's own name: the button's accessible name, and the whole tooltip when it carries
+       *  no chord. */
+      label: string
+      /** The tooltip text when it says more than the name — a chord appended to it. The overflow
+       *  menu titles its row with this, so a control that has moved into the menu still says
+       *  everything its own tooltip said. */
+      hint?: string
+      icon: ReactNode
+      /** The `data-*` marker the panel's tests and hosts find this control by. */
+      data: Record<string, string>
+      disabled?: boolean
+      onSelect: () => void
+    }
+
+/**
+ * How many leading toolbar items fit in `available` px, with `gap` between neighbours.
+ *
+ * The decisions at the right end of the row (Keep / Revert) are what the row is for, so the
+ * informational buttons on its left are the ones that give way. An item that has not been measured
+ * yet costs nothing here and is settled by the next pass.
+ *
+ * @param widths - each item's own width in px, in the order they are drawn.
+ * @param available - the width the items may occupy.
+ * @param gap - the space between two neighbouring items.
+ * @returns the number of leading items that fit; 0 when even the first one does not.
+ */
+export function fittingItems(widths: readonly number[], available: number, gap: number): number {
+  let used = 0
+  let count = 0
+  for (const width of widths) {
+    const cost = count === 0 ? width : width + gap
+    if (used + cost > available) break
+    used += cost
+    count += 1
+  }
+  return count
+}
+
+/**
+ * How many leading items the toolbar draws inline, given the room the group has.
+ *
+ * When they do not all fit, room has to be made for the overflow button that holds the rest — which
+ * can push one more item out — so the answer is asked twice, the second time with that button's
+ * width reserved. Reserving space can only shrink the count, so two passes settle it.
+ *
+ * @param widths - each item's own width in px, in the order they are drawn.
+ * @param available - the width the group may occupy.
+ * @param gap - the space between two neighbouring items.
+ * @param overflowWidth - the overflow button's width, reserved only when something is left over.
+ * @returns how many leading items to draw inline.
+ */
+export function inlineItemCount(widths: readonly number[], available: number, gap: number, overflowWidth: number): number {
+  const inline = fittingItems(widths, available, gap)
+  if (inline >= widths.length) return inline
+  return fittingItems(widths, available - (overflowWidth + gap), gap)
+}
+
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, landingCard, onLanded, failedMessage, commentSkill, onPasteReference, onAskAgent, watchChat, onToast, t, onAddTypedPath, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
+function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, landingLine, landingComment, landingCard, onLanded, failedMessage, commentSkill, comments, commentAnswers, commentsRevision, commentLines, onCommentAdd, onCommentRemove, onCommentAsk, onPasteReference, onToast, t, onAddTypedPath, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -3608,54 +3912,158 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   // offers to comment on a range at all. The event below is what re-renders the panel when
   // the Settings section flips it, since the two are separate mounts.
   const [commentMode, setCommentMode] = useState(commentModeEnabled)
-  // Discussions attached to a row range, kept per file so switching files (and
-  // coming back) does not lose them. Each one reserves rows in the height table
-  // (see `discussionRowExtras`) and paints its block below the range, so the code
-  // after it is pushed down rather than covered — the block is part of the row
-  // stream's arithmetic, not an overlay. Durable storage arrives later; this is
-  // the page's memory of them.
-  const [discussionsByFile, setDiscussionsByFile] = useState<Readonly<Record<string, readonly Discussion[]>>>(
-    // The threads this visit has put on the diff outlive any one mount of the panel: closing
-    // it, or switching between the overlay and the docked tab, is not "done commenting".
-    () => rememberedDiscussions(file.sessionId),
+  // Comment threads attached to a row range. A thread is the HOST's record (see
+  // `PendingDiffSnapshot.comments`) — one copy every client of the session shares, which is what a
+  // durable comment has to be — so nothing here is the thread itself: this pane renders the
+  // snapshot, and the work below only maps it onto the rows the current model draws. Each block
+  // reserves rows in the height table (see `discussionRowExtras`) and paints itself below the range,
+  // so the code after it is pushed down rather than covered — the block is part of the row stream's
+  // arithmetic, not an overlay.
+  //
+  // The comment state the derivation below reads, held still across polls that changed nothing. A
+  // poll rebuilds the snapshot — and with it these two values — once a second, and re-deriving every
+  // thread means re-anchoring it, which joins the file's row windows; doing that for a read that
+  // carried the same comments is work nobody asked for, and it would also hand every block a fresh
+  // object identity on every tick. `commentsRevision` says the records changed; the answers are
+  // compared by their content, because an answer arrives without a new revision (nothing about a
+  // record changed, the transcript merely answered it).
+  const commentSourceRef = useRef<{ revision: number; comments: readonly CommentRecord[]; answers: Readonly<Record<string, string>> }>(
+    { revision: -1, comments: [], answers: {} },
   )
-  const discussions = discussionsByFile[file.id] ?? EMPTY_DISCUSSIONS
-  // The one question this session is waiting on, if there is one — across the files, not just the
-  // open one. An ask goes to the session's chat, and the answer is read back out of that single
-  // transcript by matching the prompt it answers (see the watcher below). Only one such prompt is
-  // tracked, so a second block asking while the first waits would take that bookkeeping over and
-  // the answer would settle into the wrong thread: the other writing rows refuse instead.
-  const askingId = useMemo(() => {
-    for (const list of Object.values(discussionsByFile)) {
-      const waiting = list.find(entry => entry.asking === true)
-      if (waiting !== undefined) return waiting.id
-    }
-    return undefined
-  }, [discussionsByFile])
-  const setDiscussions = (update: (current: readonly Discussion[]) => readonly Discussion[]): void => {
-    setDiscussionsByFile(all => ({ ...all, [file.id]: update(all[file.id] ?? EMPTY_DISCUSSIONS) }))
+  if (commentSourceRef.current.revision !== commentsRevision
+    || !sameAnswers(commentSourceRef.current.answers, commentAnswers)) {
+    commentSourceRef.current = { revision: commentsRevision, comments, answers: commentAnswers }
   }
+  const commentSource = commentSourceRef.current
+  /** The comment records that hang off the file this pane is showing, oldest first. */
+  const fileComments = useMemo(
+    () => commentSource.comments.filter(record => record.entryId === file.id),
+    [commentSource, file.id],
+  )
+  /**
+   * The page-local half of every thread — the draft, the fold, the measured body — kept by comment
+   * id in the page's memory, so a poll (which replaces the snapshot under it) does not clear the
+   * field the reader is typing in, and a mount that comes back draws what they left.
+   *
+   * Keyed by the VIEWING session (`sessionId`), not by `file.sessionId`: the record below is the
+   * whole session's, every thread the panel could draw, so it belongs to the session whose panel
+   * this is. `file.sessionId` names the session that most recently TOUCHED the file, and one entry
+   * is shown in every session that touched it — keying the drafts on it would file them under
+   * whichever subagent edited the file last, and every session would read another's memory.
+   */
+  const [threadState, setThreadState] = useState<Readonly<Record<string, ThreadLocal>>>(
+    () => rememberedThreads(sessionId),
+  )
+  useEffect(() => { rememberThreads(sessionId, threadState) }, [sessionId, threadState])
+  /**
+   * A thread the reader has PLACED but not sent: 评论 opens a compose row on those rows before
+   * anything is written, and until `onCommentAdd` returns there is no host record to draw it from.
+   *
+   * It lives in the page's memory, not in this mount: the panel is unmounted by every close and by a
+   * presentation switch, and a block the reader had started — its lines and the words in it — must
+   * be there when the panel comes back (the same reason the draft of a stored thread is). The host
+   * learns about a comment when it is sent, which is why this half is the page's own record — and
+   * why it is the viewing session's, like the thread state above: a placement is a fact about this
+   * panel's visit, not about which session last wrote the file.
+   */
+  const [draftThreads, setDraftThreads] = useState<readonly PlacedThread[]>(
+    () => rememberedPlacedThreads(sessionId),
+  )
+  useEffect(() => { rememberPlacedThreads(sessionId, draftThreads) }, [sessionId, draftThreads])
+  /**
+   * The threads this pane draws, in the order their rows run: the host's records re-anchored, plus
+   * the blocks that have not been written yet.
+   *
+   * Re-anchoring runs here rather than in an effect that rewrites state: the anchor's new-file lines
+   * are what survive a rebuild, and the record's quote is what says whether they still hold the code
+   * the comment was written about. When they do not, the thread follows the quote; when even that
+   * finds nothing it is marked outdated — it stays where the reader last saw it, says so, and keeps
+   * the quote (see `remapDiscussion`).
+   */
+  const discussions = useMemo<readonly Discussion[]>(() => {
+    const mapped: Discussion[] = [
+      ...fileComments.map(record => discussionOfRecord(record, commentSource.answers, threadState)),
+      ...draftThreads.filter(thread => thread.fileId === file.id).map(thread => discussionOfDraft(thread, threadState)),
+    ]
+    return remapDiscussions(
+      mapped,
+      (row) => {
+        const entry = model.diff.rows[row]
+        return entry?.newLine ?? entry?.oldLine
+      },
+      (row) => model.diff.rows[row]?.text ?? '',
+      model.diff.rows.length,
+      // Whether a row is code the file still has (a deleted row has no new-file line): the quote may
+      // only be followed to a window that is current in some part, or a copy left behind in the
+      // deletions reads as the comment still holding.
+      (row) => model.diff.rows[row]?.newLine !== undefined,
+    )
+  }, [fileComments, commentSource, threadState, draftThreads, model])
+  /** Patch the page-local thread state in one commit, so a keystroke is one update. */
+  const patchThreads = useCallback((patch: Readonly<Record<string, Partial<ThreadLocal>>>): void => {
+    setThreadState(current => {
+      let next: Record<string, ThreadLocal> | undefined
+      for (const [id, change] of Object.entries(patch)) {
+        const before = current[id] ?? { draft: '', collapsed: false }
+        const after = { ...before, ...change }
+        // Only a real change republishes: the measurement pass reads this on every render, and a
+        // record handed back with equal fields would be adopted as a change by everyone holding it.
+        if (before.draft === after.draft && before.collapsed === after.collapsed
+          && before.failed === after.failed && before.bodyRows === after.bodyRows) continue
+        next = next ?? { ...current }
+        next[id] = after
+      }
+      return next ?? current
+    })
+  }, [])
+  /**
+   * Forget the page-local state of threads that are gone. A draft belongs to a comment, and a
+   * comment the host no longer holds is not coming back: keeping its key would only leave a field's
+   * worth of text waiting for an id that will never be drawn again.
+   * @param ids - the comment ids to forget.
+   */
+  const forgetThreads = useCallback((ids: readonly string[]): void => {
+    setThreadState(current => {
+      let next: Record<string, ThreadLocal> | undefined
+      for (const id of ids) {
+        if (current[id] === undefined) continue
+        next = next ?? { ...current }
+        delete next[id]
+      }
+      return next ?? current
+    })
+  }, [])
+  /**
+   * Forget the page's state for threads that are gone.
+   *
+   * A comment id is the host's, minted once and never reused, so state under an id nothing draws any
+   * more — a thread the reader ended, or one whose entry left the list — is dead weight, and a long
+   * visit would otherwise keep every draft ever typed. This runs AFTER the render that drew the
+   * threads, so a keystroke is never the thing that prunes it.
+   *
+   * The live set is the SESSION's, never this file's: `threadState` is one record for the whole
+   * session (see `rememberedThreads`), so pruning it against the open file's blocks deleted every
+   * other file's draft — switching A -> B and back left A's field empty. What is live is every
+   * comment the session holds, plus the page-local blocks this pane has placed (which have no host
+   * record yet). A comment the host no longer holds is in neither, so it is still dropped.
+   */
+  useEffect(() => {
+    const live = new Set<string>(commentSource.comments.map(record => record.id))
+    for (const placed of draftThreads) live.add(placed.id)
+    const gone = Object.keys(threadState).filter(id => !live.has(id))
+    if (gone.length > 0) forgetThreads(gone)
+  }, [commentSource, draftThreads, threadState, forgetThreads])
   /** Which block's overflow menu is open, if any. The card builds the menu's own row (see
    *  `DiscussionBlock`): finishing a thread takes the block, and its rows, away. */
   const [discussionMenuFor, setDiscussionMenuFor] = useState<string | undefined>(undefined)
-  /** The session's chat, watched so a discussion can show the answer it asked for. */
-  const [chat, setChat] = useState<ChatView>({ running: false, nodes: [], partial: '', error: undefined, queued: undefined })
-  /** The same view, readable from a timer callback (which closes over nothing fresh). */
-  const chatRef = useRef(chat)
-  chatRef.current = chat
-  /** The armed "the session let our prompt go" release, if any. */
-  const releaseTimerRef = useRef<number | undefined>(undefined)
-  /** The discussion waiting for an answer, and the transcript length it started at. */
-  const pendingAskRef = useRef<{ id: string; baseline: number; needle: string } | undefined>(undefined)
   /** The compose inputs, so a freshly created block can take the caret. */
   const discussionInputEls = useRef(new Map<string, HTMLInputElement>())
   /** The block whose input should be focused once it is on screen. */
   const focusPendingRef = useRef<string | undefined>(undefined)
   /**
-   * The block whose input should take the caret back when the compose row returns
-   * after a send. The row is gone while the turn runs, so the caret has nowhere to
-   * live; this is cleared by the first thing the user does anywhere, because that
-   * means they moved on and the caret is not ours to move again.
+   * The block whose input should take the caret back after a send: the reader is writing a
+   * follow-up there, and the send must not leave them with no caret at all. Cleared by the first
+   * thing the user does anywhere, because that means they moved on and the caret is not ours.
    */
   const discussionRefocusRef = useRef<string | undefined>(undefined)
   // The Markdown preview has no fixed row grid, so its block frames are placed by
@@ -3700,6 +4108,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
    *  place the file twice. */
   const onLandedRef = useRef(onLanded)
   onLandedRef.current = onLanded
+  /** The thread the landing effect was asked for, when it named one: several boxes can hang under the
+   *  row a jump points at, and the landing has to put the reader at THIS one's top edge rather than at
+   *  the top of the stack (see `discussionStack`). Held beside the row so the two are spent together. */
+  const landingCommentRef = useRef<string | undefined>(undefined)
   // The plain text of the last valid (single-line) diff selection, so opening
   // search auto-fills the query even after clicking the search button collapses
   // the native selection.
@@ -3725,6 +4137,20 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     // The preview draws the flash itself (from the rendered block, not from
     // rows), so the landing path is told to build one for the block it lands on.
     previewFlashPendingRef.current = true
+  }
+  /**
+   * Take the frame off the screen instead of starting another one.
+   *
+   * A jump that lands a comment's own box raises no flash (see the landing effect), and "no flash"
+   * has to mean the one already on screen goes too: opening a file flashes its first change, so a
+   * reader who opens a file and then clicks a comment in the list would otherwise keep looking at
+   * that frame — moved over the comment's block. Zero is the render gate's off state (see the
+   * overlay): the next `bumpFlash` is what puts a frame back.
+   */
+  const clearFlash = (): void => {
+    previewFlashPendingRef.current = false
+    setPreviewFlash(undefined)
+    setFlashKey(0)
   }
 
   // Reset transient viewer state whenever the selected file changes, take
@@ -3782,15 +4208,45 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     placedFileRef.current = file.id
     if (!landing && !opened) return
     if (landing) {
+      // The list's comments tab names a comment by its new-file LINE (it draws no rows to give an
+      // index); this pane owns the model, so that is where the line becomes a row — once, here, so
+      // everything below lands the one row like any other jump.
+      // The comment's OWN block answers first, and it is the whole answer when the list's click named
+      // one: this pane is the pane drawing that thread, so the row its box hangs at is a fact right
+      // here — `anchor.end`, clamped exactly as the row stream clamps it (`discussionsAtRow`) — rather
+      // than a new-file line to go looking for. That lookup is what the number cannot always survive:
+      // an outdated record names a line the file has moved past, and a line the file still has is often
+      // carried by the row DELETING that same number as well, so `rowOfLine` can answer with a row
+      // above the code the number names. The line stays as the fallback: a jump that named no comment,
+      // or a thread this model is not carrying at all.
+      const cardEnd = landingComment === undefined
+        ? undefined
+        : discussions.find(entry => entry.id === landingComment)?.anchor.end
+      const cardRow = cardEnd === undefined
+        ? undefined
+        : Math.max(0, Math.min(cardEnd, Math.max(0, model.diff.rows.length - 1)))
+      const row = landingRow
+        ?? cardRow
+        ?? (landingLine === undefined ? undefined : rowOfLine(model.diff.rows, landingLine))
       landingTopRef.current = landingTop
-      landingRowRef.current = landingRow
+      landingRowRef.current = row
       landingCardRef.current = landingCard === true
-      if (landingRow !== undefined) {
-        // A jump to a comment: focus the block the comment hangs on, so the flash that marks a jump
-        // is drawn around it, and let the landing effect below put the row itself where a jump to a
+      // The named thread travels with the row: several boxes can hang under that row, and the landing
+      // below has to put the reader at THIS thread's box rather than at the first one under it.
+      landingCommentRef.current = landingComment
+      if (row !== undefined) {
+        // A jump to a comment: focus the block the comment hangs on, so prev/next walk from where the
+        // reader arrived, and let the landing effect below put the row itself where a jump to a
         // change block would put the block — the configured lead rows above it.
-        setFocus(blockIndexAtOffset(offsetOf(landingRow)))
-        bumpFlash(false)
+        //
+        // No flash, though: the frame is the whole change BLOCK's, and the block a comment hangs in
+        // usually starts above the viewport, so the reader sees only its top edge blinking at the top
+        // of the pane. What the jump was for is the comment's own box, which the landing below puts on
+        // screen — and the request says so itself (`landingComment`/`landingCard`). A jump to a change
+        // block keeps its flash: there the frame IS the thing that says where the reader landed.
+        setFocus(blockIndexAtOffset(offsetOf(row)))
+        if (landingComment !== undefined || landingCard === true) clearFlash()
+        else bumpFlash(false)
       } else if (landingTop === undefined) {
         setFocus(0)
         bumpFlash(false)
@@ -3810,15 +4266,18 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     // scrolled opens at the top like any other, and there is no reason to move it.
     landingRowRef.current = undefined
     landingCardRef.current = false
-    const offset = panelFileOffset(file.sessionId, file.id)
+    landingCommentRef.current = undefined
+    const offset = panelFileOffset(sessionId, file.id)
     if (offset === undefined) return
     landingTopRef.current = offset
     setFocus(blockIndexAtOffset(offset))
     setScrollTick(tick => tick + 1)
-    // `landingTop`, `landingRow` and `landingTick` are deps as well as `file.id`: a fresh
-    // showing can re-land the *same* file (reopening where it was left), and the
-    // chip's own jump lands on the first change of the file already open.
-  }, [file.id, landingTop, landingTick, landingRow, landingCard])
+    // `landingTop`, `landingRow`, `landingLine`, `landingComment` and `landingTick` are deps as well as
+    // `file.id`: a fresh showing can re-land the *same* file (reopening where it was left), and the
+    // chip's own jump lands on the first change of the file already open. `discussions` is a dep
+    // because it is where a named comment's row is read from: the blocks are re-anchored against the
+    // model in the same render, so the row this effect resolves is the row the cards are drawn at.
+  }, [file.id, landingTop, landingTick, landingRow, landingLine, landingComment, landingCard, discussions, model])
 
   // An undo/redo that touched the currently open file re-selects the undone
   // diff the same way switching to a file does: reset to the first change
@@ -4202,7 +4661,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     }
     if (searchMatches.length === 0) return
     // A just-recorded cursor (a fresh selection made while the bar is open) sets
-    // the anchor: land on the selected occurrence first (so "选中这个作为第一个"
+    // the anchor: land on the selected occurrence first (so "选中这个作为第一个
     // holds), then subsequent presses advance normally.
     if (cursorPosRef.current !== undefined) {
       setSearchIndex(startIndexFor(searchQuery))
@@ -4511,8 +4970,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
    * @returns its size in code rows.
    */
   const messageSizeOf = useCallback((message: DiscussionMessage): number => {
-    // The text the turn DRAWS, markers included: `messageRowsOf` reads its runs, and a chip's box —
-    // its padding, its hairline and the code face it draws its text in — is only visible in the
+    // The text the turn DRAWS, markers included: `messageRowsOf` reads its runs, and a chip's box —     // its padding, its hairline and the code face it draws its text in — is only visible in the
     // markers. Measuring the plain text instead (which is what this did) counted every chip as
     // ordinary prose, so a line ending in one reserved a row less than it drew and the writing row
     // below it was pushed out of the block, which clips what it did not reserve.
@@ -4542,48 +5000,34 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
    * "measure it, do not reason about it" rule the code view's wrapped rows follow. The map only
    * ever holds what was measured, and an entry stops changing once the drawing settles.
    */
-  const [rowFix, setRowFix] = useState<Record<string, number>>({})
   const layoutDiscussion = useCallback((discussion: Discussion): { messages: readonly DiscussionMessage[]; hidden: number; rows: number } => {
     // Every trailing piece is a whole number of rows: a status note is one row, the
     // compose area two, an answer as many as its wrapped lines. There is no chrome
-    // left to round away, which is what keeps the thread on the code's grid. The
-    // answer in flight is stripped of blank lines here, once, so the emptiness test,
-    // the size and the render below all speak about the same text.
-    const answer = discussion.reply === undefined ? undefined : stripBlankLines(discussion.reply)
-    // A stopped turn adds a note of its own above the writing row it hands back, so its
-    // budget is that note plus the compose area.
-    const stoppedNote = discussion.stopped === true && (answer === undefined || answer === '') && discussion.failed !== true
+    // left to round away, which is what keeps the thread on the code's grid.
+    //
     // An outdated thread carries the code it was written about below the turns' label — the
     // state itself rides the header, beside the range. It is budgeted like any other turn, so
-    // the block still reserves exactly what it draws, and the writing row below is still there —
-    // an outdated thread is answerable like any other — and still costs its two rows. The quoted
+    // the block still reserves exactly what it draws, and the writing row below is still there —     // an outdated thread is answerable like any other — and still costs its two rows. The quoted
     // lines are CODE rows, though: the label above them is a thread row, and they are counted in
     // that unit scaled by the ratio of the two heights, so a line-height setting moves the block
     // by exactly the pixels the quote draws.
     const outdatedRows = discussion.lost === true && discussion.quote !== undefined && discussion.quote !== ''
       ? 1 + quoteRowsOf(discussion.quote, discussion.quoteLines, langWrap, splitView) * (ROW_HEIGHT_PX / THREAD_ROW_PX)
       : 0
-    // A turn that is still answering keeps a line under the text it has streamed so far
-    // (`discussion.answering`): the note that says it is thinking is drawn only while nothing has
-    // arrived, so from the first token on this line is the only thing that says the rest is
-    // coming. It is a row of its own, and the block reserves it here or it would draw a row the
-    // height table never counted — which clips what sits below it.
-    const writingNote = discussion.asking === true && answer !== undefined && answer !== ''
-    const trailing = outdatedRows + (answer !== undefined && answer !== ''
-      ? messageSizeOf({ role: 'assistant', text: answer }) + (writingNote ? 1 : 0)
-      : discussion.failed === true || discussion.asking === true
-        ? 1
-        : DISCUSSION_COMPOSE_ROWS + (stoppedNote ? 1 : 0))
+    // The status note and the writing row are BOTH drawn when a question is in flight, has failed or
+    // was stopped (see `DiscussionBlock`): the row stays so the reader can write on, and the note is
+    // a row of its own — reserved here, or the block would draw a row the height table never counted
+    // and clip whatever sits below it.
+    const statusNote = discussion.asking === true || discussion.failed === true || discussion.stopped === true
+    const trailing = outdatedRows + DISCUSSION_COMPOSE_ROWS + (statusNote ? 1 : 0)
     const tail = discussionRounds(discussion.messages, roundLimit, messageSizeOf)
     return {
       messages: tail.messages,
       hidden: tail.hidden,
-      // The cap is spent on whole older turns by the tail above; the newest piece (an
-      // answer, a note, the compose area) is always carried in full, even when it is
-      // longer than the cap. Clamping the total here is what cut the last paragraph in
-      // half: the text was rendered whole inside a box too short for it. Not rounded up
-      // either: the quote's share is fractional in thread rows but exact in pixels, and a
-      // whole row of round-up would leave that much air above the writing row.
+      // The cap is spent on whole older turns by the tail above; the newest piece (a note,
+      // the compose area) is always carried in full. Not rounded up either: the quote's share is
+      // fractional in thread rows but exact in pixels, and a whole row of round-up would leave
+      // that much air above the writing row.
       rows: tail.rows + trailing,
     }
   // `bodyWidth` is in the list explicitly, and not only through `messageSizeOf`/`quoteRowsOf`: those
@@ -4605,7 +5049,10 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       const laid = layoutDiscussion(discussion)
       return {
         ...discussion,
-        bodyRows: rowFix[discussion.id] ?? laid.rows,
+        // The measured body wins over the model's estimate once the block has drawn once (see the
+        // read-back below); it rides the page's memory with the draft, so a mount that comes back
+        // draws the thread at the size it already measured.
+        bodyRows: threadState[discussion.id]?.bodyRows ?? laid.rows,
         hidden: laid.hidden,
         // The wrap the rows above were counted with, handed to the quote that draws them: the
         // count and the drawing have to be the same decision. `bodyRows` is measured from the
@@ -4614,12 +5061,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
         // the unwrapped one (see `.discussionCompose`, which turns that difference into air).
         quoteWrap: langWrap,
         messages: laid.messages.map(message => ({ ...message, text: discussionText(message) })),
-        // Only set when there IS an answer in flight: both the type and the render
-        // read the absence of `reply` as "nothing streamed yet".
-        ...(discussion.reply === undefined ? {} : { reply: stripBlankLines(discussion.reply) }),
       }
     }),
-    [discussions, layoutDiscussion, rowFix],
+    [discussions, layoutDiscussion, threadState, langWrap],
   )
 
   // Discussion blocks reserve whole rows in the same height table the wrap model
@@ -4628,6 +5072,14 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   // uniform-row path is unchanged.
   const discussionExtras = useMemo(
     () => discussionRowExtras(laidDiscussions, rows.length),
+    [laidDiscussions, rows.length],
+  )
+  // Where each block's OWN box starts, in whole rows below the base of the stack it hangs in (see
+  // `discussionStackOffsets`): several blocks can end on one row, and the row stream draws them one
+  // below the other in this order, so a jump that names a block has to add these to the stack's base
+  // or it lands the first box of the row whatever block the reader asked for.
+  const discussionStack = useMemo(
+    () => discussionStackOffsets(laidDiscussions, thread => Math.max(0, Math.min(thread.anchor.end, Math.max(0, rows.length - 1)))),
     [laidDiscussions, rows.length],
   )
   // Blocks sharing a row render in insertion order, one row each, so their reserved
@@ -4721,250 +5173,6 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     body.scrollTop += shift
     setScrollTop(body.scrollTop)
   }, [discussions])
-  // Whatever the threads become, the page's memory gets them: the panel is unmounted by
-  // every close and by a presentation switch, and it has to come back holding the same ones.
-  useEffect(() => {
-    rememberDiscussions(file.sessionId, discussionsByFile)
-  }, [file.sessionId, discussionsByFile])
-  // …and the other direction, for the one change that does not start here: the list pane's
-  // comments tab ends a comment too (the same one action the block's own menu offers), and it
-  // writes the memory rather than this state. This holds the very object the write above stored,
-  // so its own changes come back as the same reference and this does nothing; a change that names
-  // another object came from the list, and the block goes without the reader having to leave and
-  // come back to the file.
-  useEffect(() => {
-    const changed = (): void => {
-      const next = rememberedDiscussions(file.sessionId)
-      setDiscussionsByFile(all => (all === next ? all : next))
-    }
-    window.addEventListener(COMMENTS_CHANGED_EVENT, changed)
-    return () => { window.removeEventListener(COMMENTS_CHANGED_EVENT, changed) }
-  }, [file.sessionId])
-
-  /** Patch one discussion in place, without touching the others or the file key. */
-  const updateDiscussion = useCallback((id: string, patch: Partial<Discussion>): void => {
-    setDiscussionsByFile(all => {
-      const list = all[file.id] ?? EMPTY_DISCUSSIONS
-      return { ...all, [file.id]: list.map(entry => (entry.id === id ? { ...entry, ...patch } : entry)) }
-    })
-  }, [file.id])
-
-  // A question that was still waiting when the panel went away is picked up again: the
-  // block, its turns and the transcript mark all came back from the page's memory, so the
-  // answer has somewhere to land. The needle is rebuilt exactly the way the send built it —
-  // the marker line plus the question's first line — and the stored baseline keeps an older,
-  // identical-looking prompt from being mistaken for this one.
-  useEffect(() => {
-    if (pendingAskRef.current !== undefined) return
-    const waiting = discussions.filter(entry => entry.asking === true).at(-1)
-    if (waiting === undefined) return
-    const baseline = waiting.baseline
-    if (baseline === undefined) return
-    const question = [...waiting.messages].reverse().find(message => message.role === 'user')
-    if (question === undefined) return
-    const marker = `${t('discussion.marker')} (${discussionLineRange(waiting.anchor)})`
-    pendingAskRef.current = {
-      id: waiting.id,
-      baseline,
-      needle: `${marker}\n${question.text.split('\n')[0] ?? ''}`,
-    }
-  }, [])
-
-  // Watch the session's chat while this file is open, so an answer can land in the
-  // discussion that asked for it. The subscriber is read through a ref: the face
-  // hands the panel fresh closures on every plugin render, and re-subscribing on
-  // each of those would fight the target activation the first subscription did.
-  const watchChatRef = useRef(watchChat)
-  watchChatRef.current = watchChat
-  useEffect(() => {
-    let stop: (() => void) | undefined
-    try {
-      stop = watchChatRef.current(file.sessionId, setChat)
-    } catch {
-      // A build without the chat surfaces simply never reports an answer.
-    }
-    return () => { stop?.() }
-  }, [file.sessionId])
-
-  // Move the watched chat into the discussion that is waiting for it: the streamed
-  // partial while the turn runs, then the finalized assistant text once it settles.
-  useEffect(() => {
-    const pending = pendingAskRef.current
-    if (pending === undefined) return
-    // Find our own prompt: the marker plus the range reference plus what we asked is
-    // what tells the annotation's turn apart from anything else the session is doing
-    // - including an EARLIER comment on the same rows, whose marker line is identical.
-    // The search starts at our own baseline, so nothing that was in the transcript
-    // before we sent can ever be mistaken for the prompt we are waiting on.
-    let asked = -1
-    for (let index = chat.nodes.length - 1; index >= pending.baseline; index--) {
-      const node = chat.nodes[index]!
-      if (node.kind === 'user' && node.text.includes(pending.needle)) { asked = index; break }
-    }
-    // Until that prompt is in the transcript there is nothing to show but the wait:
-    // the text streaming in the session belongs to whatever turn is running, and
-    // taking it would put someone else's words in this block.
-    const ours = asked >= 0
-    // ...and whether the session still holds our prompt at all. `undefined` means this
-    // build does not publish its queue, so the only honest thing is to keep waiting.
-    const held = chat.queued === undefined
-      ? undefined
-      : chat.queued.some(text => text.includes(pending.needle))
-    // Our turn's own segment: the nodes after our prompt, UP TO the next human turn. A
-    // later message - the user typing on, or the next comment - starts a new segment,
-    // and its answer can never be read as the answer to this one. That is exactly how a
-    // stopped comment used to swallow the next answer: the turn was cancelled, nothing
-    // was written, and the following turn's reply settled into this block.
-    let segmentEnd = chat.nodes.length
-    for (let index = Math.max(0, asked + 1); index < chat.nodes.length; index++) {
-      if (chat.nodes[index]?.kind === 'user') { segmentEnd = index; break }
-    }
-    const tail = asked >= 0 ? chat.nodes.slice(asked + 1, segmentEnd) : []
-    const answers = tail.filter(node => node.kind === 'assistant' && node.text !== '')
-    const settled = answers.at(-1)?.text ?? ''
-    // The runtime froze this turn when it was stopped: it is over, and it will not write
-    // anything more. A frozen node with text is still an answer (the partial that had
-    // arrived), so this only decides the empty case.
-    const stopped = ours && tail.some(node => node.kind === 'assistant' && node.interrupted === true)
-    // The question is over: no answer is coming. Clears the pending ask and closes the
-    // block out - with a "stopped" note when the turn actually ran and was cut off, and
-    // silently when the prompt never became a turn at all (the writing row simply comes
-    // back). Reads the LIVE view, because the timer fires after the render that armed it.
-    const closeOut = (): void => {
-      const current = pendingAskRef.current
-      if (current === undefined || current.id !== pending.id) return
-      const view = chatRef.current
-      if (view.running) return
-      let found = -1
-      for (let index = view.nodes.length - 1; index >= current.baseline; index--) {
-        const node = view.nodes[index]
-        if (node !== undefined && node.kind === 'user' && node.text.includes(current.needle)) { found = index; break }
-      }
-      if (found < 0) {
-        // Still in the session's hands: the round trip is not over, so keep waiting.
-        if (view.queued === undefined || view.queued.some(text => text.includes(current.needle))) return
-      } else if (view.nodes.slice(found + 1).some(node => node.kind === 'assistant' && node.text !== '')) {
-        // An answer did arrive after all; the effect will settle it.
-        return
-      }
-      pendingAskRef.current = undefined
-      updateDiscussion(current.id, found >= 0
-        ? { asking: false, queued: false, failed: false, reply: '', stopped: true }
-        : { asking: false, queued: false, failed: false, reply: '' })
-    }
-    // The question is alive again (its prompt is in the transcript, or the session is
-    // busy with it): any armed close-out is stale.
-    const clearRelease = (): void => {
-      if (releaseTimerRef.current === undefined) return
-      window.clearTimeout(releaseTimerRef.current)
-      releaseTimerRef.current = undefined
-    }
-    /** Arm the one "no answer is coming" timer, if it is not already running. */
-    const armCloseOut = (): void => {
-      if (releaseTimerRef.current !== undefined) return
-      releaseTimerRef.current = window.setTimeout(() => {
-        releaseTimerRef.current = undefined
-        closeOut()
-      }, DISCUSSION_RELEASE_GRACE_MS)
-    }
-    if (chat.error !== undefined) {
-      clearRelease()
-      pendingAskRef.current = undefined
-      updateDiscussion(pending.id, { asking: false, queued: false, failed: true, reply: '' })
-      return
-    }
-    if (chat.running) {
-      if (!ours) {
-        // The session is busy and our prompt is not in the transcript yet. The queue is what
-        // says whether it is still waiting its turn: while it holds ours the block waits,
-        // and once it has let go the session has taken it and is writing - calling that
-        // "queued" left the block waiting behind itself with the answer already coming.
-        // `undefined` is a build that does not publish its queue, so it still waits.
-        updateDiscussion(pending.id, { asking: true, queued: held !== false, failed: false, reply: '' })
-        return
-      }
-      // Ours, and the turn is running: it is being answered now, whether or not anything has
-      // streamed yet. Only writing this when text had arrived is what left a stale "queued"
-      // on the block for the whole thinking phase.
-      clearRelease()
-      const streaming = chat.partial !== '' ? chat.partial : settled
-      updateDiscussion(pending.id, { asking: true, queued: false, failed: false, reply: streaming })
-      return
-    }
-    if (settled === '') {
-      if (stopped) {
-        // Definitive: the runtime froze the turn, so nothing else is coming for it.
-        clearRelease()
-        closeOut()
-        return
-      }
-      if (!ours) {
-        // The session has let our prompt go without it ever becoming a turn - a turn
-        // stopped while the question was still queued, say. Waiting on would leave the
-        // block saying "queued" for a prompt that is not coming, so hand the writing
-        // row back. Not at once, though: the local submission echo and the host's own
-        // queue row are a round trip apart, so the first idle notification can arrive
-        // while the question is still on its way. The re-check reads the live view, so
-        // a prompt that turned up in the meantime keeps its block.
-        if (held === false) armCloseOut()
-        else clearRelease()
-        updateDiscussion(pending.id, { asking: true, queued: true, failed: false, reply: '' })
-        return
-      }
-      // Our turn is in the transcript but has written nothing yet: the same grace, so a
-      // turn that is merely between two steps is not pronounced dead, and one that was
-      // stopped (with no frozen node to prove it) still closes out.
-      armCloseOut()
-      return
-    }
-    // The answer settles into the thread as a real message, so the next question
-    // continues the conversation instead of replacing the last answer. A turn the runtime
-    // froze still gets its text kept - it is what the user was reading - but is marked
-    // stopped, so the block says the answer was cut off rather than presenting it whole.
-    clearRelease()
-    pendingAskRef.current = undefined
-    setDiscussionsByFile(all => {
-      const list = all[file.id] ?? EMPTY_DISCUSSIONS
-      return {
-        ...all,
-        [file.id]: list.map(entry => (
-          entry.id === pending.id
-            ? {
-                ...entry, asking: false, queued: false, failed: false, reply: '', stopped,
-                messages: [...entry.messages, { role: 'assistant' as const, text: settled }],
-              }
-            : entry
-        )),
-      }
-    })
-  }, [chat, updateDiscussion, file.id])
-
-  /**
-   * Re-anchor every block whenever the rows are rebuilt (a keep/revert or an edit
-   * rewrites them). The anchor's new-file lines are what survive, and the block's quote
-   * is what says whether they still hold the code it was written about: when they do
-   * not, the thread follows the quote instead, and when even that finds nothing it is
-   * marked outdated — it stays where the user last saw it, says so, and keeps the quote.
-   */
-  useEffect(() => {
-    setDiscussionsByFile(all => {
-      const list = all[file.id] ?? EMPTY_DISCUSSIONS
-      const next = remapDiscussions(
-        list,
-        (row) => {
-          const entry = model.diff.rows[row]
-          return entry?.newLine ?? entry?.oldLine
-        },
-        (row) => model.diff.rows[row]?.text ?? '',
-        model.diff.rows.length,
-        // Whether a row is code the file still has (a deleted row has no new-file line): the quote may
-        // only be followed to a window that is current in some part, or a copy left behind in the
-        // deletions reads as the comment still holding.
-        (row) => model.diff.rows[row]?.newLine !== undefined,
-      )
-      return next.some((discussion, index) => discussion !== list[index]) ? { ...all, [file.id]: next } : all
-    })
-  }, [model, file.id])
 
   // Nothing places a block: each one is a row in the code's own stream, so the browser
   // scrolls it vertically with the code, and its zero-width sticky pin (`.discussionPin`)
@@ -5012,8 +5220,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     }
   }, [])
 
-  // The discussion blocks — and the action frames and the search bar with them —
-  // are painted in the NON-scrolling wrapper, over the scroll box. A wheel over one
+  // The discussion blocks — and the action frames and the search bar with them —   // are painted in the NON-scrolling wrapper, over the scroll box. A wheel over one
   // of them therefore never reaches that box and the code view sits still under the
   // pointer, which reads as a dead zone exactly where the user is reading. Forward
   // the wheel by hand, but only the part the box can actually take: at either end
@@ -5068,7 +5275,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     if (body !== null && offsetOf(range.start) - body.scrollTop < 0) {
       pendingScrollShiftRef.current += (DISCUSSION_HEADER_ROWS + DISCUSSION_COMPOSE_ROWS) * THREAD_ROW_PX
     }
-    const id = `discussion-${Date.now().toString(36)}-${discussions.length}`
+    const id = `draft-${Date.now().toString(36)}-${draftThreads.length}`
     // What those lines read like right now, and the numbers the file showed beside them. The
     // anchor is line numbers, and the quote is what tells a later rebuild whether they still
     // point at the same code — see `remapDiscussion`. The gutter pair rides along so an
@@ -5084,15 +5291,19 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       .slice(Math.max(0, range.start - 1), Math.min(model.diff.rows.length, range.end + 2))
       .map(row => row.text)
       .join('\n')
-    setDiscussions(current => [...current, {
+    // The block the reader just placed is not a comment yet: nothing is written until they send it,
+    // so it goes into the page's own placement list — the host has nothing to hold for it (see
+    // `sendDiscussion`), and the next poll has no record to replace it with. It starts empty; the
+    // words arrive in `onDraft`, which is why they live on the placement rather than in the
+    // per-comment state (there is no comment id yet to hang them under).
+    setDraftThreads(current => [...current, {
       id,
+      fileId: file.id,
       anchor: { start: range.start, end: range.end, startLine, endLine },
       quote,
       quoteContext,
       quoteLines,
-      messages: [],
       draft: '',
-      collapsed: false,
     }])
     // The user asked to comment, so the caret belongs in the new block's input
     // once it is on screen (the effect below runs after the commit).
@@ -5129,49 +5340,78 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     if (body !== null && offsetOf(discussion.anchor.start) - body.scrollTop < 0) {
       pendingScrollShiftRef.current += shift
     }
-    setDiscussions(current => current.map(entry => entry.id === id ? { ...entry, collapsed: next } : entry))
+    patchThreads({ [id]: { collapsed: next } })
   }
 
   /** Fold or unfold one block from its header arrow. */
   const toggleDiscussion = (id: string): void => { setDiscussionCollapsed(id) }
 
   /**
+   * Ask one STORED comment, and report what the ask did.
+   *
+   * Nothing here tracks which turn belongs to which thread: the host mints the request id the answer
+   * is keyed by, and derives the answer text from the session's own transcript on every read (see
+   * `commentAnswers`). So a question asked before the panel was closed is still waiting when it comes
+   * back, and two threads may wait at once — each one's answer is keyed by its own request.
+   *
+   * The words come back to the field when the ask did not go through: the reader wrote them, and a
+   * session with no live agent is not a reason to make them write it again.
+   *
+   * @param id - the stored comment to ask.
+   * @param prompt - the question text to submit.
+   * @param text - the reader's own words, which the prompt wraps: the thread draws these.
+   */
+  const askComment = async (id: string, prompt: string, text: string): Promise<void> => {
+    // Sending empties the row, so the send reads as taken rather than as a field that did nothing.
+    patchThreads({ [id]: { draft: '', failed: false, collapsed: false } })
+    let value: DiffApprovalCommentAskValue
+    try {
+      value = await onCommentAsk(sessionId, id, prompt, text)
+    } catch (error: unknown) {
+      patchThreads({ [id]: { draft: text, failed: true } })
+      onToast(error instanceof Error ? error.message : String(error))
+      return
+    }
+    if (value.outcome === 'missing') {
+      // The host does not hold this comment any more (the entry left the list, which takes its
+      // comments with it): the next read drops the block, and the reader is told why it went.
+      onToast(t('discussion.askMissing'))
+      return
+    }
+    // `no-agent` and `failed` are the same surface the block has always had for a declined send:
+    // the note under the turns, and the writing row back with what was written still in it. When the
+    // host knows why (`failed` carries a message), the reader is told that too — a question that
+    // will not go through is not something the block alone can explain.
+    if (value.outcome !== 'asked') {
+      patchThreads({ [id]: { draft: text, failed: true } })
+      if (value.message !== undefined) onToast(value.message)
+    }
+  }
+
+  /**
    * Send one turn of a discussion to the agent.
    *
-   * The first turn is the annotation: the `(path:lines)` reference, the user's
-   * words and the length policy. Later turns are follow-ups in the same thread -
-   * the reference rides along so the agent keeps answering about these rows, and
-   * the answer is appended rather than replacing the previous one. When this build
-   * has no send verb, the text goes to the composer instead (the route the copy
-   * reference already used).
+   * The first turn is the annotation: the `(path:lines)` reference, the reader's words and the
+   * length policy. Later turns are follow-ups in the same thread - the reference rides along so the
+   * agent keeps answering about these rows, and the answer is appended rather than replacing the
+   * previous one, because it is a new question inside the same stored comment.
+   *
+   * A thread the host does not know yet is written down first: the comment IS the annotation, and a
+   * question can only be asked inside a stored one. Nothing local stands in for a write the host
+   * refused — the block goes, and the refusal is said out loud — so what the panel shows is always
+   * something the host will still be holding on the next read.
    *
    * @param id - the discussion to ask in.
    */
   const sendDiscussion = (id: string): void => {
     const discussion = discussions.find(entry => entry.id === id)
     if (discussion === undefined) return
-    // One question at a time: see `askingId`. The button says the same thing, and this is the
-    // belt to it — the field's own Enter comes through here too. The two lines below are that one
-    // refusal seen from its two sides: `askingId` is the rendered side (a flag the blocks carry
-    // across every file, a tick behind the send that set it) and `pendingAskRef` the synchronous
-    // one, written the instant a send starts — which is what a second send inside the same tick
-    // runs into, before React has re-rendered with the first one's `asking`. Both name the id
-    // they let through, so what is refused is another block's send; the block that is waiting
-    // carries the same id, and is not what either line is about.
-    if (askingId !== undefined && askingId !== id) return
-    if (pendingAskRef.current !== undefined && pendingAskRef.current.id !== id) return
-    // Trimmed once, for both jobs: a field holding nothing but spaces has nothing to send, and
-    // the trimmed text is what the prompt below is built from — and with it the needle the answer
-    // is matched back out of the transcript by, so the two can never disagree about the wording.
+    // Trimmed once: a field holding nothing but spaces has nothing to send, and the trimmed text is
+    // what the prompt below is built from.
     const text = discussion.draft.trim()
     if (text === '') return
-    const reference = `(${discussionLineRange(discussion.anchor)})`
+    const reference = `(${discussionLineRange(discussion)})`
     const marker = `${t('discussion.marker')} ${reference}`
-    // The needle is the marker AND the first line of what was asked. The marker alone
-    // is not unique: two comments on the same rows - which is exactly what a thread's
-    // follow-ups are - produce the same one, so an older prompt would match and its
-    // answer would land in this block.
-    const needle = `${marker}\n${text.split('\n')[0] ?? ''}`
     // The rules ride the message only when this host cannot deliver the skill: with a
     // skill the prompt is the marker, the question and a pointer at it, so a long rule
     // never costs tokens again (the catalog advertises the skill's own summary, and the
@@ -5184,39 +5424,46 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     // the quote of them stays on the block; the quoted text itself does not ride the prompt,
     // because the agent already has this thread's own transcript to answer in.
     const prompt = `${marker}\n${text}\n\n${rule}`
-    const asked: DiscussionMessage = { role: 'user', text }
-    const sent = onAskAgent(file.sessionId, prompt)
-    if (!sent) {
-      onPasteReference(file.sessionId, `${reference}\n${text}`)
-      setDiscussions(current => current.map(entry => (
-        entry.id === id ? { ...entry, messages: [...entry.messages, asked], draft: '' } : entry
-      )))
+    if (fileComments.some(record => record.id === id)) {
+      // Already written down: this is a follow-up, and it appends a question of its own rather than
+      // writing a second comment (see `CommentAsk`).
+      void askComment(id, prompt, text)
       return
     }
-    // Remember which turn asked, and where the transcript stood: the answer is the
-    // text of OUR prompt's turn, and nothing that was already there when we sent can
-    // be it.
-    pendingAskRef.current = { id, baseline: chat.nodes.length, needle }
-    // The compose row goes away while the answer runs, which drops the caret; ask
-    // for it back when the row returns, unless the user has moved on by then.
-    discussionRefocusRef.current = id
-    setDiscussions(current => current.map(entry => (
-      entry.id === id
-        ? {
-            ...entry,
-            messages: [...entry.messages, asked],
-            draft: '',
-            asking: true,
-            queued: false,
-            failed: false,
-            reply: '',
-            collapsed: false,
-            // Kept on the block as well as in the ref below, so this ask can be picked up
-            // again if the panel is closed while the answer is still on its way.
-            baseline: chat.nodes.length,
-          }
-        : entry
-    )))
+    // The id the host will know this thread by is minted here, not taken from the local block: the
+    // page's state for a thread is keyed by that id (see `threadState`), so the draft follows the id
+    // the snapshot will carry.
+    const commentId = crypto.randomUUID()
+    const draft: CommentDraft = {
+      id: commentId,
+      entryId: file.id,
+      anchor: { startLine: discussion.anchor.startLine, endLine: discussion.anchor.endLine },
+      quote: discussion.quote ?? '',
+      text,
+      ...(discussion.quoteContext === undefined ? {} : { quoteContext: discussion.quoteContext }),
+      ...(discussion.quoteLines === undefined ? {} : { quoteLines: [...discussion.quoteLines] }),
+    }
+    void (async () => {
+      let added = false
+      try {
+        added = (await onCommentAdd(sessionId, draft)).outcome === 'added'
+      } catch (error: unknown) {
+        onToast(error instanceof Error ? error.message : String(error))
+      }
+      if (!added) {
+        // The host refused it — in practice because the entry left the list while the reader was
+        // writing. The local block goes with the refusal: a compose row the host cannot answer for
+        // is worse than none, and the reader is told what happened.
+        onToast(t('discussion.addMissing'))
+        setDraftThreads(current => current.filter(thread => thread.id !== id))
+        return
+      }
+      // The host holds the comment now — the store re-read before its write resolved — so the local
+      // block is spent and the snapshot's record takes its place. The ask lands on that record.
+      setDraftThreads(current => current.filter(thread => thread.id !== id))
+      discussionRefocusRef.current = commentId
+      await askComment(commentId, prompt, text)
+    })()
   }
 
   /** Discard one block, keeping the code the user is reading in place. */
@@ -5229,19 +5476,40 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     if (body !== null && offsetOf(discussion.anchor.start) - body.scrollTop < 0) {
       pendingScrollShiftRef.current += shift
     }
-    setDiscussions(current => current.filter(entry => entry.id !== id))
+    if (fileComments.some(record => record.id === id)) {
+      // A written-down thread belongs to the host, so ending it is a host action and the next read is
+      // what takes the block away. A refusal is said out loud rather than leaving the block up with
+      // no explanation.
+      void onCommentRemove(sessionId, id).catch((error: unknown) => {
+        onToast(error instanceof Error ? error.message : String(error))
+      })
+      return
+    }
+    setDraftThreads(current => current.filter(thread => thread.id !== id))
+    forgetThreads([id])
   }
 
   /**
-   * The commented rows as a `path:lines` label - the same reference vocabulary the
-   * copy control uses, so a discussion names where it sits in the file. It reads
-   * the stored lines rather than the current rows, so a block whose lines are gone
-   * still says what it was about.
-   * @param anchor - the discussion's anchor.
+   * The commented lines as a `path:lines` label - the same reference vocabulary the copy control
+   * uses, so a discussion names where it sits in the file.
+   *
+   * The numbers are the HOST's answer for this comment (see `commentLines`): it resolved the quote
+   * against the file's current content, and the list pane, this card and the reference a question
+   * carries all read that one map — which is what stops one comment reading `[382]` in the list and
+   * 378 in the code view. A comment the host could not place keeps the lines its record holds: the
+   * anchor it was WRITTEN on, which is what an outdated block says too.
+   * @param discussion - the block being labelled.
    * @returns the reference label.
    */
-  const discussionLineRange = (anchor: Discussion['anchor']): string =>
-    referenceLabelOf(file.path, workspacePath, anchor.startLine, anchor.endLine)
+  const discussionLineRange = (discussion: Discussion): string => {
+    const resolved = commentLines[discussion.id]
+    return referenceLabelOf(
+      file.path,
+      workspacePath,
+      resolved?.start ?? discussion.anchor.startLine,
+      resolved?.end ?? discussion.anchor.endLine,
+    )
+  }
   const rowAtY = (y: number): number => {
     if (rowOffsets === null) return Math.floor(y / ROW_HEIGHT_PX)
     if (y <= 0) return 0
@@ -5370,13 +5638,13 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     if (width !== bodyWidth) setBodyWidth(width)
   })
 
-  // The reservation follows the drawing (see `rowFix`): what the card renders is measured here and
-  // the thread's rows are corrected to it. The last child's bottom edge IS the content's height —
-  // margins included, since the model counts a bubble's own margin as a row — and the box's
-  // `overflow: hidden` does not move it, so an under-reserved block grows and an over-reserved one
-  // gives its air back. One row of rounding is left to the writing row's own slack spacer.
-  const rowFixRef = useRef(rowFix)
-  rowFixRef.current = rowFix
+  // The reservation follows the drawing (see the page's `bodyRows`): what the card renders is
+  // measured here and the thread's rows are corrected to it. The last child's bottom edge IS the
+  // content's height — margins included, since the model counts a bubble's own margin as a row — and
+  // the box's `overflow: hidden` does not move it, so an under-reserved block grows and an
+  // over-reserved one gives its air back. One row of rounding is left to the writing row's own slack
+  // spacer. The measurement is written into the page's memory with the draft, so a mount that comes
+  // back draws the thread at the size it was already measured at.
   // The width the cards are drawn at, from the last pass. While it is still moving — the panel's
   // edge being dragged, a divider — the correction waits: a resize re-wraps every thread on every
   // frame, and correcting each one costs a second render per frame, which is what left the card's
@@ -5411,8 +5679,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       }
       return
     }
-    const next: Record<string, number> = { ...rowFixRef.current }
-    let changed = false
+    const measured: Record<string, Partial<ThreadLocal>> = {}
     for (const card of document.querySelectorAll<HTMLElement>('[data-diff-discussion]')) {
       const id = card.dataset.diffDiscussionId
       const body = card.children[1]
@@ -5432,12 +5699,135 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       // A collapsed or not-yet-laid-out card measures zero; leave it to a later pass.
       if (drawn <= 0) continue
       const want = Math.max(1, Math.ceil((drawn - DISCUSSION_ROW_SNAP_PX) / THREAD_ROW_PX))
-      if (next[id] !== want) {
-        next[id] = want
-        changed = true
-      }
+      if (threadState[id]?.bodyRows !== want) measured[id] = { bodyRows: want }
     }
-    if (changed) setRowFix(next)
+    if (Object.keys(measured).length > 0) patchThreads(measured)
+  })
+
+  // The writing field of the thread the reader is typing in must not move on the SCREEN when the file
+  // under it changes — a re-read from disk, an external write, a row above it that now wraps onto a
+  // line it did not have. The reader stays where they are, so a box that slides away from their eyes
+  // takes the caret's context with it; what has to stay is the field's place on the screen, not the
+  // line it hangs on, so the correction is the difference between the two drawings of one commit
+  // rather than the row delta between them.
+  //
+  // Those two drawings have to be read in their own moments. The OLD one is read here, in the render,
+  // while the DOM this render was planned against is still the one on screen; the NEW one is read in
+  // the layout pass below, after React has swapped the content in and after every other pass that
+  // could have moved the rows. A correction that read both of its figures in the same layout pass
+  // would be handed the new drawing as its "before" — the two would cancel out and the field would
+  // never be kept still — which is why the first reading cannot be deferred into an effect.
+  //
+  // A reading is a place on the SCREEN, so it is turned into a place in the CONTENT before the two
+  // are compared — the scroll it was taken at and the viewport's own top both come out of it (see
+  // the layout pass). The old reading carries its own scroll for exactly that reason: without it the
+  // comparison counts the scroll the last correction already applied, and the correction then chases
+  // its own output — 200, 400, —— until it hits the end of the file. The render that a correction's
+  // own `applyScrollTop` triggers is read like any other, so this is the common case, not an edge.
+  const composerBeforeRef = useRef<{ id: string; fileId: string; top: number; viewportTop: number; scrollTop: number } | undefined>(undefined)
+  /** The field the caret is in, if it is in one this panel is drawing. */
+  const focusedComposer = (): { id: string; input: HTMLElement } | undefined => {
+    const active = document.activeElement
+    if (!(active instanceof HTMLElement) || !active.matches('[data-diff-discussion-input]')) return undefined
+    const card = active.closest<HTMLElement>('[data-diff-discussion]')
+    const id = card?.dataset.diffDiscussionId
+    return id === undefined ? undefined : { id, input: active }
+  }
+  {
+    const typing = focusedComposer()
+    const planned = bodyRef.current
+    composerBeforeRef.current = typing === undefined || planned === null
+      ? undefined
+      : {
+          id: typing.id,
+          fileId: file.id,
+          top: typing.input.getBoundingClientRect().top,
+          viewportTop: planned.getBoundingClientRect().top,
+          scrollTop: planned.scrollTop,
+        }
+  }
+  useLayoutEffect(() => {
+    const before = composerBeforeRef.current
+    // The reading is this commit's, and it is spent here: the next render takes its own.
+    composerBeforeRef.current = undefined
+    if (before === undefined) return
+    const body = bodyRef.current
+    const typing = focusedComposer()
+    if (body === null || typing === undefined || typing.id !== before.id || before.fileId !== file.id) return
+    // Both readings are turned into CONTENT offsets before they are compared, each through the scroll
+    // it was taken at and the viewport top it was taken against. What is left is how far the content
+    // under the box moved; adding that to wherever the view is NOW keeps whatever another pass of
+    // this same commit did (a row shift, a landing, a card reveal) and corrects only the reflow.
+    const viewportTop = body.getBoundingClientRect().top
+    const beforeContentTop = before.top - before.viewportTop + before.scrollTop
+    const contentTop = typing.input.getBoundingClientRect().top - viewportTop + body.scrollTop
+    const shift = contentTop - beforeContentTop
+    if (shift === 0) return
+    const target = Math.max(0, Math.min(body.scrollTop + shift, body.scrollHeight - body.clientHeight))
+    if (target === body.scrollTop) return
+    applyScrollTop(body, target)
+  })
+
+  // A thread that grows while its reader watches must not end up half under the viewport's bottom
+  // edge: an answer arriving is the case that does it, because the block's reserved rows are being
+  // corrected at the same moment and the reader has already been left with a clipped last line.
+  // What is revealed is the bottom edge in full, and by the smallest scroll that gets it there: the
+  // write puts the bottom exactly on the edge, so the pass the write itself triggers asks for nothing
+  // and the correction cannot walk the view up a row at a time.
+  //
+  // Two things gate it, and both are the reader's own: a card that is not on screen is not dragged
+  // back into view (they scrolled away from it on purpose), and a card the block did not make BIGGER
+  // was not grown by an answer — the reader moved past it, or the text was only replaced.
+  //
+  // "Bigger" is a fact about the thread's own content — the rows it reserves in the height table
+  // (`discussionRows`, the figure `data-diff-discussion-space` draws) and the turns it draws — read
+  // against the previous pass, NOT the box the browser handed back. The drawn box is exactly what the
+  // read-back above then corrects to the reservation, so the pass an answer arrives on may well
+  // measure a box still at an older height; the box is the panel's output, and reading growth off it
+  // is reading the correction's own subject. An answer ARRIVING is a turn the thread did not draw
+  // before, and a replacement of its text is not: the turn count separates the two even when the
+  // rows do not move, because the row the note of a question in flight took is the row the answer
+  // then takes. A card with no reading from an earlier pass is a thread that just arrived — the file
+  // opened, the panel came back — and its clipped bottom is a real thing to reveal. The reading is
+  // taken before the card's box is even looked at, so a card that draws nothing yet — a collapsed or
+  // not-yet-laid-out box — still answers for the pass that draws it for real.
+  const cardThreadRef = useRef(new Map<string, { rows: number; turns: number }>())
+  useLayoutEffect(() => {
+    const body = bodyRef.current
+    if (body === null) return
+    const viewport = body.getBoundingClientRect()
+    const scrollTop = body.scrollTop
+    // What each block holds now, off the same model the height table was built from.
+    const shapeNow = new Map<string, { rows: number; turns: number }>()
+    for (const discussion of laidDiscussions) {
+      shapeNow.set(discussion.id, { rows: discussionRows(discussion), turns: discussion.messages.length })
+    }
+    const seen = cardThreadRef.current
+    const ids = new Set<string>()
+    let shift = 0
+    for (const card of document.querySelectorAll<HTMLElement>('[data-diff-discussion]')) {
+      const id = card.dataset.diffDiscussionId
+      if (id === undefined) continue
+      ids.add(id)
+      const shape = shapeNow.get(id)
+      if (shape === undefined) continue
+      const before = seen.get(id)
+      seen.set(id, shape)
+      const box = card.getBoundingClientRect()
+      if (box.height <= 0) continue
+      const needs = box.bottom <= viewport.bottom ? 0 : box.bottom - viewport.bottom
+      const onScreen = box.top < viewport.bottom && box.bottom > viewport.top
+      const grew = before === undefined || shape.rows > before.rows || shape.turns > before.turns
+      if (needs <= 0 || !onScreen || !grew) continue
+      shift = Math.max(shift, needs)
+    }
+    // Threads the page no longer draws: their reading would answer for a card that comes back at
+    // the same id (a re-opened file) with a stale shape.
+    for (const id of seen.keys()) if (!ids.has(id)) seen.delete(id)
+    if (shift <= 0) return
+    const reveal = Math.min(scrollTop + shift, body.scrollHeight - body.clientHeight)
+    if (reveal === scrollTop) return
+    applyScrollTop(body, reveal)
   })
 
   // Scroll the focused change block into view after focus, content changes, or
@@ -5463,7 +5853,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   const applyScrollTop = (body: HTMLElement, offset: number): void => {
     if (body.scrollTop !== offset) body.scrollTop = offset
     setScrollTop(offset)
-    rememberPanelView(file.sessionId, { fileId: file.id, scrollTop: offset })
+    rememberPanelView(sessionId, { fileId: file.id, scrollTop: offset })
   }
 
   useLayoutEffect(() => {
@@ -5472,7 +5862,9 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     // the layout phase, and a fresh mount's wrap measurement becomes ready in the same commit — it
     // would land the first block on a file whose reader had scrolled it elsewhere (see
     // `placedFileRef`).
-    if (placedFileRef.current !== file.id) return
+    if (placedFileRef.current !== file.id) {
+      return
+    }
     // A resumed view wins over the focused block: the reader comes back to the
     // line they left, and the exact stored offset is a better answer than the
     // change block the anchor in `blockIndexAtOffset` approximated. Spent here,
@@ -5489,29 +5881,44 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       return
     }
     // A jump to a comment (the list's comments tab): the row it hangs on, landed on the way a jump
-    // to a change block lands — the same lead rows above it, clamped to the scroll range, with the
-    // flash the focus above already asked for. The preview has no rows to scroll by, so it falls
-    // through to the block path below and lands the block the comment is in.
+    // to a change block lands — the same lead rows above it, clamped to the scroll range, and no
+    // flash (the ask is the comment's own box, not the block around it; see the landing effect
+    // above). The preview has no rows to scroll by, so it falls through to the block path below and
+    // lands the block the comment is in.
     const row = landingRowRef.current
     if (row !== undefined && !previewActive) {
       const toCard = landingCardRef.current
+      // The thread this landing named, if it named one: several boxes can hang under one row, and the
+      // reader asked for THEIRS (see the comment on `cardTop` below).
+      const wantedCard = toCard ? landingCommentRef.current : undefined
       landingRowRef.current = undefined
       landingCardRef.current = false
-      // A flash asked for by a block jump frames the block, not the row a go-to-line framed last.
+      landingCommentRef.current = undefined
+      // A frame a block jump raises frames the block, not the row a go-to-line framed last.
       flashRowRef.current = undefined
       // The split view owns its own scroller — this component's `bodyRef` is null while it is up — so
       // the row is landed there, at the pair it is in, by the same rule.
       if (splitView) {
-        splitDiffRef.current?.land(row, toCard)
+        splitDiffRef.current?.land(row, toCard, false, wantedCard)
         return
       }
       const rowBody = bodyRef.current
       if (rowBody !== null) {
         // A thread's box hangs just below the row its range ends in, so it starts where that row's own
         // height ends — the reserving rows charged to it are the box itself, not part of the row.
-        const cardTop = offsetOf(row + 1) - (discussionExtras.get(row) ?? 0) * THREAD_ROW_PX
+        //
+        // That end is the BASE of the row's stack, and several boxes can share it: the row stream draws
+        // one reserving box per thread, in the order the threads are held, so the box that was asked
+        // for starts that many boxes further down. Taking the whole charge off (`discussionExtras`) is
+        // what landed the FIRST box under the row whatever thread the jump named — the two boxes then
+        // could not be told apart by where the jump went. `discussionStack` is that same drawing order,
+        // as the reserved height of the boxes before this one.
+        const stackBase = offsetOf(row + 1) - (discussionExtras.get(row) ?? 0) * THREAD_ROW_PX
+        const cardTop = stackBase + (wantedCard === undefined ? 0 : (discussionStack.get(wantedCard) ?? 0) * THREAD_ROW_PX)
         const target = toCard ? cardTop : offsetOf(row)
-        applyScrollTop(rowBody, Math.max(0, Math.min(target - leadRows * ROW_HEIGHT_PX, rowBody.scrollHeight - rowBody.clientHeight)))
+        const wanted = target - leadRows * ROW_HEIGHT_PX
+        const written = Math.max(0, Math.min(wanted, rowBody.scrollHeight - rowBody.clientHeight))
+        applyScrollTop(rowBody, written)
       }
       return
     }
@@ -5793,8 +6200,8 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   // diff wraps to the first block (see `blockAfterAction`).
   const runBlockAction = async (action: 'keep' | 'revert', range: DiffApprovalBlockRange, operated: number): Promise<void> => {
     await (action === 'keep'
-      ? onBlockKeep(file.sessionId, file.id, range)
-      : onBlockRevert(file.sessionId, file.id, range))
+      ? onBlockKeep(sessionId, file.id, range)
+      : onBlockRevert(sessionId, file.id, range))
     const count = blockCountRef.current
     if (count === 0) return
     const next = blockAfterAction(operated, count)
@@ -5879,7 +6286,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     // pane that remounts under them (a poll that lost the entry for a moment, a presentation
     // switch) resumes it, so the code changing under the reader cannot move them (see the landing
     // effect). This is the offset the panel would have remembered on closing — just kept current.
-    rememberPanelView(file.sessionId, { fileId: file.id, scrollTop: body.scrollTop })
+    rememberPanelView(sessionId, { fileId: file.id, scrollTop: body.scrollTop })
     setScrollTop(body.scrollTop)
     setViewportHeight(body.clientHeight)
     // Re-anchor the "current diff" (`focus`) to the block under the viewport
@@ -6054,18 +6461,25 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
   const renderDiscussion = useCallback((discussion: Discussion, width: number, split: boolean): ReactNode => (
     <DiscussionBlock
       discussion={discussion}
-      label={discussionLineRange(discussion.anchor)}
+      label={discussionLineRange(discussion)}
       bodyWidth={width}
       lang={lang}
       menuOpen={discussionMenuFor === discussion.id}
-      asking={askingId !== undefined}
+      asking={discussion.asking === true}
       split={split}
       t={t}
       onToggle={toggleDiscussion}
       onMenuOpen={setDiscussionMenuFor}
       onRemove={removeDiscussion}
       onDraft={(id, value) => {
-        setDiscussions(current => current.map(entry => (entry.id === id ? { ...entry, draft: value } : entry)))
+        // A placed-but-unsent block keeps its words on the placement itself — there is no comment id
+        // yet to hang them under — and a stored comment keeps them in the per-comment state. One
+        // home either way, so a poll and a remount both see the same text.
+        if (draftThreads.some(thread => thread.id === id)) {
+          setDraftThreads(current => current.map(thread => (thread.id === id ? { ...thread, draft: value } : thread)))
+          return
+        }
+        patchThreads({ [id]: { draft: value } })
       }}
       onSend={sendDiscussion}
       registerInput={(id, element) => {
@@ -6074,8 +6488,8 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
       }}
     />
   // The card is given its width as an ARGUMENT (`renderDiscussion(discussion, bodyWidth)`), so this
-  // callback reads nothing but the menu and the question in flight; the width is not its to keep.
-  ), [discussionMenuFor, askingId, t, lang, toggleDiscussion, removeDiscussion, sendDiscussion, discussionLineRange])
+  // callback reads nothing but the menu, the question in flight and where the reader's words go.
+  ), [discussionMenuFor, t, lang, toggleDiscussion, removeDiscussion, sendDiscussion, discussionLineRange, patchThreads, draftThreads])
 
   /**
    * The lines a selection names, whichever view made it, or undefined when it names none this panel
@@ -6438,6 +6852,126 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
     return () => { animation.cancel() }
   }, [frameFollowsScroll, frameAnchorEnd, frameAnchorTop, maxScroll, viewportHeight])
 
+  // The diff toolbar's left group gives way before its decisions do: whichever buttons the row
+  // cannot hold are moved into one overflow menu rather than wrapped or clipped. Their widths are
+  // measured, not assumed — each is a chip whose width follows its glyph — and remembered by key,
+  // because a button that has moved into the menu is no longer in the DOM when the panel grows
+  // again and still has to be able to come back.
+  const actionGroupRef = useRef<HTMLDivElement | null>(null)
+  const actionStatsRef = useRef<HTMLSpanElement | null>(null)
+  const actionRefs = useRef(new Map<string, HTMLElement>())
+  const actionWidths = useRef(new Map<string, number>())
+  const [inlineActions, setInlineActions] = useState(Number.MAX_SAFE_INTEGER)
+  const [moreOpen, setMoreOpen] = useState(false)
+  const rememberActionWidth = (key: string, element: HTMLElement | null): void => {
+    if (element === null) actionRefs.current.delete(key)
+    else actionRefs.current.set(key, element)
+  }
+
+  // The group in the order it draws them: the jump pair (only for a file with changes to jump
+  // between), search, go-to, then the view toggles and the version-control reset. Each button's
+  // tooltip is also its row's title in the overflow menu, so a control that has moved into the
+  // menu is named exactly as its own button names it — its chord included.
+  const toolbarItems: DiffToolbarItem[] = []
+  if (model.blocks.length > 0) {
+    toolbarItems.push(
+      {
+        kind: 'button', key: 'prev', data: { 'data-diff-prev': '' }, disabled: busy,
+        label: t('action.prevDiff'), hint: withChord(t('action.prevDiff'), 'jumpUp'), icon: <IconChevronUpOutline14 size={14} />,
+        onSelect: () => { jumpBlock(-1, true) },
+      },
+      {
+        kind: 'button', key: 'next', data: { 'data-diff-next': '' }, disabled: busy,
+        label: t('action.nextDiff'), hint: withChord(t('action.nextDiff'), 'jumpDown'), icon: <IconChevronDownOutline14 size={14} />,
+        onSelect: () => { jumpBlock(1, true) },
+      },
+    )
+  }
+  toolbarItems.push({
+    kind: 'button', key: 'search', data: { 'data-diff-search-toggle': '' },
+    label: t('action.search'), hint: withChord(t('action.search'), 'openSearch'), icon: <IconSearchOutline16 size={14} />,
+    onSelect: toggleSearch,
+  })
+  if (!previewActive) {
+    // The button only asks; the popup itself is rendered by the code view it belongs to (see
+    // `gotoDialog`), so it can be centred on that view's own box.
+    toolbarItems.push({
+      kind: 'button', key: 'goto', data: { 'data-diff-goto': '' },
+      label: t('action.goto'), hint: withChord(t('action.goto'), 'goto'), icon: <GotoLineIcon />,
+      onSelect: () => { setGotoDraft(''); setGotoOpen(true) },
+    })
+  }
+  toolbarItems.push({ kind: 'divider', key: 'viewDivider' })
+  toolbarItems.push({
+    kind: 'button', key: 'splitView', data: { 'data-diff-toggle-view': '' },
+    label: t(splitView ? 'action.viewUnified' : 'action.viewSplit'), icon: <ViewModeIcon split={splitView} />,
+    onSelect: toggleSplitView,
+  })
+  if (lang === 'markdown') {
+    toolbarItems.push({
+      kind: 'button', key: 'mdPreview', data: { 'data-diff-md-preview': '' },
+      label: t(mdPreview ? 'action.viewSource' : 'action.viewPreview'), icon: <MarkdownModeIcon preview={mdPreview} />,
+      onSelect: () => {
+        const next = !mdPreview
+        setMdPreview(next)
+        setMdPreviewEnabled(next)
+      },
+    })
+  }
+  toolbarItems.push({
+    kind: 'button', key: 'refreshVcs', data: { 'data-diff-refresh-vcs': '' }, disabled: busy,
+    label: t('action.refreshVcs'), icon: <IconRefreshOutline16 size={14} />,
+    onSelect: () => { onRefreshVcs(file) },
+  })
+
+  const inlineToolbarItems = toolbarItems.slice(0, inlineActions)
+  const hiddenToolbarItems = toolbarItems.slice(inlineActions).flatMap(item => item.kind === 'button' ? [item] : [])
+  const hiddenToolbarMenu: MenuEntry[] = hiddenToolbarItems.map(item => (
+    {
+      id: item.key,
+      label: item.hint ?? item.label,
+      icon: item.icon,
+      ...(item.disabled === undefined ? {} : { disabled: item.disabled }),
+    }
+  ))
+  const showStats = model.diff.added !== 0 || model.diff.removed !== 0
+
+  // Only the item KEYS and the stats' presence are dependencies: a label or a glyph can change
+  // (a toggle names its other state) without moving a single width, and the observer below covers
+  // the panel being dragged wider or narrower — which is also what makes the decisions' own width
+  // count, since a one-button decision row leaves this group more of the row than a two-button one.
+  // A layout effect, so the first painted frame is already the settled one.
+  const toolbarMeasureKey = `${toolbarItems.map(item => item.key).join(' ')}|${showStats ? 'stats' : ''}`
+  useLayoutEffect(() => {
+    const group = actionGroupRef.current
+    if (group === null) return
+    const measure = (): void => {
+      // A box with no width is a document with no layout (the test environment): every button is
+      // drawn and no measurement is claimed.
+      if (group.clientWidth === 0) {
+        setInlineActions(toolbarItems.length)
+        return
+      }
+      for (const item of toolbarItems) {
+        const element = actionRefs.current.get(item.key)
+        if (element !== undefined) actionWidths.current.set(item.key, element.offsetWidth)
+      }
+      // The stats are the group's fixed prefix, so the room the buttons have is what is left of it.
+      const stats = actionStatsRef.current?.offsetWidth ?? 0
+      const budget = Math.max(0, group.clientWidth - (stats === 0 ? 0 : stats + TOOLBAR_ITEM_GAP_PX))
+      const overflow = actionRefs.current.get('more')?.offsetWidth || TOOLBAR_OVERFLOW_PX
+      let count = inlineItemCount(toolbarItems.map(item => actionWidths.current.get(item.key) ?? 0), budget, TOOLBAR_ITEM_GAP_PX, overflow)
+      // A hairline is not a control: the row never ends with one.
+      if (count > 0 && toolbarItems[count - 1]?.kind === 'divider') count -= 1
+      setInlineActions(count)
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(group)
+    return () => { observer.disconnect() }
+  }, [toolbarMeasureKey, inlineActions])
+
   // A quote can also arrive under code that is already scrolled sideways — a thread that has just
   // gone outdated, one revealed further down the file — so it catches up after every commit that
   // could have drawn one, before the reader could see it at the wrong column.
@@ -6513,107 +7047,65 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
         </Tooltip>
       </div>
       <div className={css.diffActions}>
-        {(model.diff.added !== 0 || model.diff.removed !== 0) && (
-          <span className={css.diffStats}>{t('panel.stats', { added: model.diff.added, removed: model.diff.removed })}</span>
-        )}
-        {model.blocks.length > 0 && (
-          <>
-            <Tooltip label={withChord(t('action.prevDiff'), 'jumpUp')} side="bottom" delayMs={500}>
-              <button
-                type="button"
-                className={`${css.action} ${css.iconAction}`}
-                data-diff-prev
-                aria-label={t('action.prevDiff')}
-                disabled={busy}
-                onClick={() => { jumpBlock(-1, true) }}
-              >
-                <IconChevronUpOutline14 size={14} />
-              </button>
-            </Tooltip>
-            <Tooltip label={withChord(t('action.nextDiff'), 'jumpDown')} side="bottom" delayMs={500}>
-              <button
-                type="button"
-                className={`${css.action} ${css.iconAction}`}
-                data-diff-next
-                aria-label={t('action.nextDiff')}
-                disabled={busy}
-                onClick={() => { jumpBlock(1, true) }}
-              >
-                <IconChevronDownOutline14 size={14} />
-              </button>
-            </Tooltip>
-          </>
-        )}
-        <Tooltip label={withChord(t('action.search'), 'openSearch')} side="bottom" delayMs={500}>
-          <button
-            type="button"
-            className={`${css.action} ${css.iconAction}`}
-            data-diff-search-toggle
-            aria-label={t('action.search')}
-            onClick={toggleSearch}
-          >
-            <IconSearchOutline16 size={14} />
-          </button>
-        </Tooltip>
-        {previewActive ? null : (
-          // The button only asks; the popup itself is rendered by the code view it belongs to (see
-          // `gotoDialog`), so it can be centred on that view's own box.
-          <span className={css.gotoHost}>
-            <Tooltip label={withChord(t('action.goto'), 'goto')} side="bottom" delayMs={500}>
-              <button
-                type="button"
-                className={`${css.action} ${css.iconAction}`}
-                data-diff-goto
-                aria-label={t('action.goto')}
-                onClick={() => { setGotoDraft(''); setGotoOpen(true) }}
-              >
-              <GotoLineIcon />
-              </button>
-            </Tooltip>
-          </span>
-        )}
-        <span className={css.divider} />
-        <Tooltip label={t(splitView ? 'action.viewUnified' : 'action.viewSplit')} side="bottom" delayMs={500}>
-          <button
-            type="button"
-            className={`${css.action} ${css.iconAction}`}
-            data-diff-toggle-view
-            aria-label={t(splitView ? 'action.viewUnified' : 'action.viewSplit')}
-            onClick={toggleSplitView}
-          >
-            <ViewModeIcon split={splitView} />
-          </button>
-        </Tooltip>
-        {lang === 'markdown' && (
-          <Tooltip label={t(mdPreview ? 'action.viewSource' : 'action.viewPreview')} side="bottom" delayMs={500}>
-            <button
-              type="button"
-              className={`${css.action} ${css.iconAction}`}
-              data-diff-md-preview
-              aria-label={t(mdPreview ? 'action.viewSource' : 'action.viewPreview')}
-              onClick={() => {
-                const next = !mdPreview
-                setMdPreview(next)
-                setMdPreviewEnabled(next)
+        <div className={css.diffActionInfo} data-diff-actions ref={actionGroupRef}>
+          {showStats && (
+            <span className={css.diffStats} ref={actionStatsRef}>{t('panel.stats', { added: model.diff.added, removed: model.diff.removed })}</span>
+          )}
+          {/* Drawn while they fit; the rest are the overflow menu below. The stats above are the
+              group's fixed prefix — the summary of the diff is not something to hide behind `⋯`. */}
+          {inlineToolbarItems.map(item => (
+            <Fragment key={item.key}>
+              {item.kind === 'divider' ? (
+                <span className={css.divider} ref={(element) => { rememberActionWidth(item.key, element) }} />
+              ) : (
+                <Tooltip label={item.hint ?? item.label} side="bottom" delayMs={500}>
+                  <button
+                    type="button"
+                    ref={(element) => { rememberActionWidth(item.key, element) }}
+                    className={`${css.action} ${css.iconAction}`}
+                    {...item.data}
+                    aria-label={item.label}
+                    disabled={item.disabled}
+                    onClick={item.onSelect}
+                  >
+                    {item.icon}
+                  </button>
+                </Tooltip>
+              )}
+            </Fragment>
+          ))}
+          {/* What did not fit, in the order it would have been drawn. Portaled like the language
+              picker, so the list is not cropped by the group it hangs off. */}
+          {hiddenToolbarItems.length > 0 && (
+            <Menu
+              open={moreOpen}
+              portal
+              compact
+              align="end"
+              items={hiddenToolbarMenu}
+              onSelect={(id) => {
+                setMoreOpen(false)
+                hiddenToolbarItems.find(item => item.key === id)?.onSelect()
               }}
-            >
-              <MarkdownModeIcon preview={mdPreview} />
-            </button>
-          </Tooltip>
-        )}
-        <Tooltip label={t('action.refreshVcs')} side="bottom" delayMs={500}>
-          <button
-            type="button"
-            className={`${css.action} ${css.iconAction}`}
-            data-diff-refresh-vcs
-            disabled={busy}
-            aria-label={t('action.refreshVcs')}
-            onClick={() => { onRefreshVcs(file) }}
-          >
-            <IconRefreshOutline16 size={14} />
-          </button>
-        </Tooltip>
-        <span className={css.flexSpacer} />
+              onClose={() => { setMoreOpen(false) }}
+              anchor={(
+                <Tooltip label={t('action.more')} side="bottom" delayMs={500}>
+                  <button
+                    type="button"
+                    ref={(element) => { rememberActionWidth('more', element) }}
+                    className={`${css.action} ${css.iconAction}`}
+                    data-diff-actions-more
+                    aria-label={t('action.more')}
+                    onClick={() => { setMoreOpen(value => !value) }}
+                  >
+                    <IconEllipsisOutline16 size={14} />
+                  </button>
+                </Tooltip>
+              )}
+            />
+          )}
+        </div>
+        <div className={css.diffActionDecisions}>
         {/* A file that no longer differs from the baseline has nothing left to accept or put
             back, so the pair collapses into the one decision still open on it: whether it stays
             in the list. 移出 is a keep — the host folds the (identical) content and drops the
@@ -6624,7 +7116,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
             className={`${css.action} ${css.actionPrimary} ${css.actionQuietDisabled}`}
             data-diff-remove
             disabled={busy}
-            onClick={() => { void onKeep(file.sessionId, file.id, false) }}
+            onClick={() => { void onKeep(sessionId, file.id, false) }}
           >
             {t('row.dismiss')}
           </button>
@@ -6635,7 +7127,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
               className={`${css.action} ${css.actionPrimary} ${css.actionQuietDisabled}`}
               data-diff-keep
               disabled={busy}
-              onClick={() => { void onKeep(file.sessionId, file.id) }}
+              onClick={() => { void onKeep(sessionId, file.id) }}
             >
               {t('action.keep')}
             </button>
@@ -6644,12 +7136,13 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
               className={`${css.action} ${css.actionQuietDisabled}`}
               data-diff-revert
               disabled={busy}
-              onClick={() => { void onRevert(file.sessionId, file.id) }}
+              onClick={() => { void onRevert(sessionId, file.id) }}
             >
               {file.kind === 'create' ? t('action.delete') : t('action.revert')}
             </button>
           </>
         )}
+        </div>
       </div>
       {failedMessage !== undefined && <p className={css.actionError} data-diff-action-error>{failedMessage}</p>}
       {file.missing && <p className={css.missingHint}>{t('panel.missingHint')}</p>}
@@ -6798,6 +7291,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
         <SplitDiff
           ref={splitDiffRef}
           file={file}
+          sessionId={sessionId}
           model={model}
           runs={runs}
           langWrap={langWrap}
@@ -7148,7 +7642,7 @@ function PendingDiff({ file, busy, workspacePath, jumpSignal, undoFlash, landing
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onAskAgent, watchChat, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onRevertAll, onAckRedoCleared, collapseSidebar, t,
+  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onCommentAdd, onCommentRemove, onCommentAsk, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onRevertAll, onAckRedoCleared, onAckUndoNotice, collapseSidebar, t,
   docked = false, dockHost, onOpenDock, closeDock, useDock,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
@@ -7216,17 +7710,31 @@ export function PendingPanel({
    * reader was left at when the panel resumes a view (see `panel-memory`); it is
    * absent when the request means "show me this diff" — a file picked from the
    * list, the advance a decision leaves behind, or the produced-file chip — and
-   * that lands on the file's first change.
+   * that lands on the file's first change. `row`/`line` are the two ways a jump can
+   * name a place: a model row (this panel's own jumps) and a new-file line (the list's
+   * comments tab, which draws no rows — the detail resolves the line against its model). `comment` is
+   * that tab's other half and the better one: the id of the thread the reader clicked, because the
+   * detail is the pane drawing its box and knows the row it hangs at (see the resolution effect). The
+   * line is what that resolve falls back to, and it is all a request that names no comment has.
    */
-  const [landing, setLanding] = useState<{ fileId: string; top?: number | undefined; row?: number | undefined; card?: boolean | undefined; n: number } | undefined>(undefined)
-  /** Ask the diff to land on one file: its first change unless `top` says where, or the row a jump
-   *  to a comment names (which lands the way a change-block jump does, see `landingRow`). `card` lands
-   *  the thread's own box instead of the rows it named, which is what an outdated comment needs: the
-   *  code it was written about is gone, so the position its numbers point at says nothing.
+  const [landing, setLanding] = useState<{ fileId: string; top?: number | undefined; row?: number | undefined; line?: number | undefined; card?: boolean | undefined; comment?: string | undefined; n: number } | undefined>(undefined)
+  /** Ask the diff to land on one file: its first change unless `top` says where, or the row/line a
+   *  jump to a comment names (which lands the way a change-block jump does, see `landingRow`). `card`
+   *  lands the thread's own box instead of the rows it named, which is what the list's comments tab
+   *  asks for: the box hangs below the range it names, and an outdated comment's lines may point at
+   *  code that is gone. `comment` names that thread, which is how the detail finds the box's own row
+   *  without trusting a number the record may have outlived (see the resolution effect).
    *  The nonce makes the request an event rather than a value, so re-clicking the
    *  chip for the file already open lands on its first change again. */
-  const landOn = (fileId: string, top?: number | undefined, row?: number | undefined, card?: boolean): void => {
-    setLanding(prev => ({ fileId, top, row, card, n: (prev?.n ?? 0) + 1 }))
+  const landOn = (
+    fileId: string,
+    top?: number | undefined,
+    row?: number | undefined,
+    card?: boolean,
+    line?: number | undefined,
+    comment?: string | undefined,
+  ): void => {
+    setLanding(prev => ({ fileId, top, row, line, card, comment, n: (prev?.n ?? 0) + 1 }))
   }
   /** The selection as the latest render has it, for the closers that run from a
    *  cleanup (the docked tab unmounting) rather than from a handler. */
@@ -7254,13 +7762,6 @@ export function PendingPanel({
     const onCommentMode = (): void => { setCommentMode(commentModeEnabled()) }
     window.addEventListener(COMMENT_MODE_CHANGED_EVENT, onCommentMode)
     return () => { window.removeEventListener(COMMENT_MODE_CHANGED_EVENT, onCommentMode) }
-  }, [])
-  /** Bumped when the threads change, so the comments tab re-reads them (see `rememberDiscussions`). */
-  const [commentsTick, setCommentsTick] = useState(0)
-  useEffect(() => {
-    const changed = (): void => { setCommentsTick(tick => tick + 1) }
-    window.addEventListener(COMMENTS_CHANGED_EVENT, changed)
-    return () => { window.removeEventListener(COMMENTS_CHANGED_EVENT, changed) }
   }, [])
   /** Bumped when the already-open file is clicked again, to jump to the next
    * diff block in the open file's detail pane. */
@@ -7307,6 +7808,49 @@ export function PendingPanel({
     persistToastRef.current = message
     showCopyToast(t('panel.persistFailed'))
   }, [snapshot.persistError, showCopyToast, t])
+  /**
+   * A comment thread that could not be written to disk, said once per distinct message and for
+   * the same reason the pending file's failure is: the thread was drawn from the host's memory,
+   * so the reader has no way to tell that a restart will erase it. Its own copy, because the
+   * comment files are their own files — one may refuse while the other works.
+   */
+  const commentPersistToastRef = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    const message = snapshot.commentPersistError
+    if (message === undefined) {
+      commentPersistToastRef.current = undefined
+      return
+    }
+    if (message === commentPersistToastRef.current) return
+    commentPersistToastRef.current = message
+    showCopyToast(t('panel.commentPersistFailed'))
+  }, [snapshot.commentPersistError, showCopyToast, t])
+  /**
+   * A refused undo/redo, with the host's own reason. The press produced an answer that
+   * never reached the reader before: the divergence guard's "the file changed outside the
+   * review after the action" is something only the host knows, so it is shown as it
+   * arrived. Acknowledged straight after, so the field does not sit there for the rest of
+   * the session and the SAME refusal on a later press is said again.
+   *
+   * Said once per distinct message, and held by a marker rather than by the ack alone, because
+   * the ack is a round trip: until a later read drops the field the panel is still handed it,
+   * and `showCopyToast` is rebuilt on every render. An effect that toasted on every pass would
+   * toast on its own re-render, and on the render that caused, for as long as the field stood —
+   * which is what this effect did before the marker: a refused undo spun the panel (and hung
+   * every test that staged one) until the host's next read came back.
+   */
+  const undoNoticeToastRef = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    const message = snapshot.undoNotice
+    if (message === undefined) {
+      undoNoticeToastRef.current = undefined
+      return
+    }
+    if (message === undoNoticeToastRef.current) return
+    undoNoticeToastRef.current = message
+    showCopyToast(t('panel.undoFailed', { message }))
+    onAckUndoNotice()
+  }, [snapshot.undoNotice, showCopyToast, onAckUndoNotice, t])
   // "查看差异" bridge from a produced-file chip (see produced-diff.ts): the
   // injected button dispatches OPEN_FILE_EVENT with a path. Open the panel and
   // select the file when it is still pending; otherwise toast. The ref defers to
@@ -7419,6 +7963,20 @@ export function PendingPanel({
     return () => { clearInterval(timer) }
   }, [current, onRefresh])
 
+  /**
+   * A file the list no longer holds takes its placed-but-unsent blocks with it, on every poll.
+   *
+   * A placement is a block of rows in one file's diff, so a file the reader kept or reverted out
+   * of the list leaves nothing for it to hang on. The entry ids ARE paths, so without this the
+   * placement survived the file leaving and was drawn again — on a file the reader had already
+   * dealt with — the moment that path was re-added, and it went on refusing a fresh comment on
+   * those rows meanwhile (see `discussionOverlapping`). The host drops the file's COMMENTS at the
+   * same moment; this is the page's own half of that rule.
+   */
+  useEffect(() => {
+    forgetPlacedThreadsNotIn(current, snapshot.files.map(file => file.id))
+  }, [current, snapshot.files])
+
   // Track the panel's width as a resize trigger so the floating file-list card
   // re-measures its bounds when the panel resizes. The panel only mounts open.
   useEffect(() => {
@@ -7439,8 +7997,7 @@ export function PendingPanel({
     ? panelWidth > 0 && panelWidth < DOCK_TWO_COLUMN_MIN_PX
     : viewportWidth < SIDEBAR_AUTO_COLLAPSE_PX)
   /**
-   * Set when a fresh showing of the panel should start with the folded list open —
-   * the panel opens to show the list, and the knob that reveals it is for folding
+   * Set when a fresh showing of the panel should start with the folded list open —    * the panel opens to show the list, and the knob that reveals it is for folding
    * it away again — and spent by the first frame it can be spent on. The folded
    * mode is not always known on that frame: a docked panel measures its own width a
    * frame after it mounts. A hand on the list's own switches clears it, so the
@@ -7695,7 +8252,7 @@ export function PendingPanel({
   // Nothing outside the panel dismisses it — not a press on the editor, the chat,
   // the composer, or the sidebar's own blank space. The panel is a working
   // surface, not a popover: closing it is a decision, and the ways to make it are
-  // the ✕, Escape, and the quick-summon chord. (The folded file-list card inside
+  // the ✕ Escape, and the quick-summon chord. (The folded file-list card inside
   // it is still dismissed by a press away from the card — see below.)
   // The panel reviews only the current session's files; other sessions of the
   // same workspace stay out of the list, badge, and auto-advance. Sort by the
@@ -7995,8 +8552,7 @@ export function PendingPanel({
 
   /**
    * Remember what this panel is showing, so the next open resumes it: the file
-   * that is open and how far down it the code view is. Called on every way out —
-   * the overlay's close, the hand-off to the dock, and the docked tab unmounting.
+   * that is open and how far down it the code view is. Called on every way out —    * the overlay's close, the hand-off to the dock, and the docked tab unmounting.
    * With no code view (the Markdown preview is showing) the file's offset is kept
    * as it was: the file is what the reader comes back to.
    */
@@ -8207,51 +8763,39 @@ export function PendingPanel({
     const revertLabel = rowMenu.file.kind === 'create' ? t('action.delete') : t('action.revert')
     return [
       // Keeping is two decisions, not one, and the row menu names both: plain 保留 accepts the change
-      // and leaves the file in the list, 保留并移出 does the same and takes the row out. The pair is
+      // and leaves the file in the list, 保留并移出  does the same and takes the row out. The pair is
       // one character apart by design — the tail says what happens to the list.
       { id: 'keep-listed', label: t('row.keepListed') },
       { id: 'keep-remove', label: t('row.keepRemove') },
       { id: 'revert', label: revertLabel },
-      // 回退并移出 is the same pair on the other decision: put the file back and take the row out.
+      // 回退并移出  is the same pair on the other decision: put the file back and take the row out.
       { id: 'revert-remove', label: t('row.revertRemove') },
     ]
   }, [rowMenu, t])
 
   /** Run a row-menu choice through the same handlers the open file uses. 移出 is a keep: the
    *  host folds the content and drops the entry, so the file itself is left alone. The `并移出`
-   *  rows say so explicitly rather than taking the toolbar's confirm-first default. */
+   *  rows say so explicitly rather than taking the toolbar's confirm-first default. The session
+   *  is the one being VIEWED (`current`), not `target.file.sessionId`: a row can list a file
+   *  another session touched, and the decision — and the undo that follows it — is the reader's. */
   const runRowMenu = (id: string): void => {
     const target = rowMenu
     setRowMenu(null)
-    if (target === null) return
-    if (id === 'keep-listed') void onKeep(target.file.sessionId, target.file.id, true)
-    else if (id === 'keep-remove' || id === 'remove') void onKeep(target.file.sessionId, target.file.id)
-    else if (id === 'revert') void onRevert(target.file.sessionId, target.file.id)
-    else if (id === 'revert-remove') void onRevert(target.file.sessionId, target.file.id, true)
+    if (target === null || current === undefined) return
+    if (id === 'keep-listed') void onKeep(current, target.file.id, true)
+    else if (id === 'keep-remove' || id === 'remove') void onKeep(current, target.file.id)
+    else if (id === 'revert') void onRevert(current, target.file.id)
+    else if (id === 'revert-remove') void onRevert(current, target.file.id, true)
   }
 
   const selectedFile = files.find(file => file.id === selected)
-  /**
-   * A file that leaves the list takes its comments with it: the reader who kept or reverted that file
-   * out of the list is done with it, and a thread is a block of rows in a diff the list no longer
-   * holds — so the rows it was written about are gone with the entry (see `forgetDiscussionsNotIn`).
-   *
-   * Only a list that has actually been READ may say a file is gone. An unread panel, a connection
-   * reset (`read` goes back to false, with the files) and a sessionless page all publish an empty
-   * list, and none of those means the reader finished with the files it names.
-   */
-  const listedIds = useMemo(() => files.map(file => file.id), [files])
-  useEffect(() => {
-    if (current === undefined || !snapshot.read) return
-    forgetDiscussionsNotIn(current, listedIds)
-  }, [current, snapshot.read, listedIds])
   /**
    * Every comment the session's files carry, grouped by the file it hangs in: what the comments tab
    * shows. The session is the scope — every file of it that is still in the list, whether or not the
    * reader has opened it, and however many files that is — and the file is what the comments are
    * grouped by, under the file's own name.
    *
-   * A comment IS a block of rows in one file, so its label is the lines it names — the `path:lines`
+   * A comment IS a block of rows in one file, so its label is the lines it is on — the `path:lines`
    * reference the thread's own header wears, with the path left off (the group above IS that file) and
    * nothing in front of the numbers, which are the whole label at that point. Its title is the first
    * sentence of what the reader asked (the first turn is the annotation; later ones are follow-ups), and
@@ -8259,12 +8803,21 @@ export function PendingPanel({
    * group the comments keep the order their rows run, and the groups keep the list's own order (the file
    * name).
    *
-   * The threads are held by the file detail, which is one mount at a time, so they are read back
-   * out of the memory the two share, and re-read whenever they change (`commentsTick`). A file with
-   * no threads is left out rather than shown with nothing under it.
+   * The records come from the snapshot, which is also where they go: a comment is the host's, shared
+   * with every client of the session, and this pane is a second view of it rather than a second copy
+   * (see `PendingDiffSnapshot.comments`). The lines come from the host too (`snapshot.commentLines`):
+   * it resolved each quote against the entry's current content, so an item names the same line the
+   * open card does — and names it for a file this panel has never opened, which the detail's own
+   * re-anchoring could only do once the reader had opened it. A comment the host could not place
+   * keeps `record.anchor`, the line it was written on (see `jumpToComment` for the landing).
    */
   const commentGroups = useMemo(() => {
-    const threads = rememberedDiscussions(current)
+    const byFile = new Map<string, CommentRecord[]>()
+    for (const record of snapshot.comments) {
+      const list = byFile.get(record.entryId)
+      if (list === undefined) byFile.set(record.entryId, [record])
+      else list.push(record)
+    }
     return files
       .map(file => ({
         fileId: file.id,
@@ -8275,36 +8828,47 @@ export function PendingPanel({
         // …and the full path, which is what an item names on hover: a name can be shared, and this is how
         // the reader tells which file a comment is in without opening it.
         path: file.path,
-        entries: (threads[file.id] ?? []).map(discussion => {
-          const written = commentTitle(discussion)
+        entries: (byFile.get(file.id) ?? []).map(record => {
+          const written = commentTitle(record.text)
           const empty = written === ''
+          // Where the comment is NOW, as the host resolved it, and where the record says it was
+          // WRITTEN when the host could not place it (its quote is gone): a comment is listed either
+          // way, and its item wears the numbers the card's own header wears.
+          const resolved = snapshot.commentLines[record.id]
+          const start = resolved?.start ?? record.anchor.startLine
+          const end = resolved?.end ?? record.anchor.endLine
           return {
-            id: discussion.id,
+            id: record.id,
             fileId: file.id,
-            row: discussion.anchor.start,
-            // The row the thread's box hangs below, which is what an outdated thread is landed on.
-            end: discussion.anchor.end,
+            // The lines the comment's box hangs below: the LAST one, because the box sits under the
+            // row its range ends in, and that row is what a jump to the box has to name.
+            line: end,
             // The file itself is the group above, so the reference is cut to what is left of it: the lines
             // it names — `[8]`, or `[10-17]` for a range — bracketed so the row opens with a marker rather
             // than with a bare digit that could be anything.
-            label: `[${lineRangeLabel(discussion.anchor.startLine, discussion.anchor.endLine)}]`,
+            label: `[${lineRangeLabel(start, end)}]`,
             // Nothing written yet: the item says what the comment box is asking for, in the box's own
-            // words (the reader may be looking at a box placed and left empty on some other file).
+            // words (a comment the host holds with no text is one the reader never finished; the panel
+            // does not write those, but a record from elsewhere can be one).
             title: empty ? t('discussion.placeholder') : written,
             empty,
-            lost: discussion.lost === true,
           }
         }),
       }))
       .filter(group => group.entries.length > 0)
-  }, [files, current, commentsTick, t])
+  }, [files, snapshot.comments, snapshot.commentLines, t])
   /** The same comments, flat: what the tab counts and what says whether there are any. */
   const commentEntries = useMemo(() => commentGroups.flatMap(group => group.entries), [commentGroups])
-  /** Open the file a comment hangs in and land on the comment: the rows it names, or — for an outdated
-   *  thread, whose code is gone — its own box, which is the only place that says anything. */
-  const jumpToComment = (fileId: string, row: number, card = false): void => {
+  /** Open the file a comment hangs in and land on the thread's own box, not on the rows it names:
+   *  the box hangs below the range it ends in, and the code an outdated comment named may be gone
+   *  altogether, so "show me this comment" means the comment rather than the code under it. The line
+   *  handed over is the one the panel believes the comment is on — the detail's own resolved line when
+   *  that file has been opened, the record's stored one otherwise (see `commentGroups`) — and the
+   *  thread's own id goes with it: the detail holds the block, so it can put the row the box actually
+   *  hangs at under the reader without depending on a number this list can only guess at. */
+  const jumpToComment = (fileId: string, line: number, id: string): void => {
     if (fileId !== selected) setSelected(fileId)
-    landOn(fileId, undefined, row, card)
+    landOn(fileId, undefined, undefined, true, line, id)
   }
   /**
    * The comment menu's rows: the one action a thread has, named exactly as the block's own
@@ -8313,15 +8877,18 @@ export function PendingPanel({
    */
   const commentMenuItems = useMemo<MenuEntry[]>(() => [{ id: 'close', label: t('action.discussionEnd') }], [t])
   /**
-   * End one comment from the list. The threads belong to the file detail, so the list does not
-   * reach into its state: it forgets the thread in the page's memory, and the detail picks that
-   * up (see `forgetDiscussion`), which is also what takes the block out of the open file.
+   * End one comment from the list. A comment belongs to the host, so ending it is a host action like
+   * the block's own menu offers: the record goes, and the next read is what takes the block out of
+   * the open file (and the item out of this list). A refusal is said out loud rather than leaving an
+   * item the reader believes they removed.
    */
   const runCommentMenu = (id: string): void => {
     const target = commentMenu
     setCommentMenu(null)
-    if (target === null || id !== 'close') return
-    forgetDiscussion(current, target.fileId, target.id)
+    if (target === null || id !== 'close' || current === undefined) return
+    void onCommentRemove(current, target.id).catch((error: unknown) => {
+      showCopyToast(error instanceof Error ? error.message : String(error))
+    })
   }
   /**
    * The folded card's own box, derived from the measured one, or undefined while
@@ -8436,9 +9003,10 @@ export function PendingPanel({
                             className={css.commentRow}
                             data-diff-comment-link={entry.id}
                             data-mobile-nav-copy="1"
-                            // An outdated thread is landed on its own box: the code it named is gone, so the row
-                            // its numbers point at is not where the reader wants to be.
-                            onClick={() => { jumpToComment(entry.fileId, entry.lost ? entry.end : entry.row, entry.lost) }}
+                            // The jump names the lines the comment was written on. Whether they still
+                            // hold that code is the block's own state, which the detail re-anchors
+                            // against its row model — this pane does not guess at it.
+                            onClick={() => { jumpToComment(entry.fileId, entry.line, entry.id) }}
                             onContextMenu={(event) => {
                               // The browser's own menu has nothing to say about a comment, and the one
                               // action a thread has is the whole of what it could offer — the same press
@@ -8449,7 +9017,7 @@ export function PendingPanel({
                             onKeyDown={(event) => {
                               if (event.key !== 'Enter' && event.key !== ' ') return
                               event.preventDefault()
-                              jumpToComment(entry.fileId, entry.lost ? entry.end : entry.row, entry.lost)
+                              jumpToComment(entry.fileId, entry.line, entry.id)
                             }}
                           >
                             {/* One line: what was asked, then where in the file it sits — the title takes
@@ -8461,9 +9029,6 @@ export function PendingPanel({
                                 data-diff-comment-title
                                 data-diff-comment-empty={entry.empty ? '' : undefined}
                               >{entry.title}</span>
-                              {entry.lost && (
-                                <span className={css.commentLost} data-diff-comment-lost>{t('panel.commentOutdated')}</span>
-                              )}
                               <span className={css.commentLabel} data-diff-comment-label>{entry.label}</span>
                             </span>
                           </div>
@@ -8522,7 +9087,7 @@ export function PendingPanel({
 
   // Undo/redo resolves to the affected entry id while it is still pending.
   // The panel then selects that file, or — when it is already the open one —
-  const handleUndo = async (sessionId: SessionId): Promise<void> => {
+   const handleUndo = async (sessionId: SessionId): Promise<void> => {
     const id = await onUndo(sessionId)
     if (id === undefined) return
     if (id === selected) setUndoFlash(signal => signal + 1)
@@ -8684,8 +9249,7 @@ export function PendingPanel({
       if (event.key !== 'Escape') return
       // The add-path modal closes itself: this press is not the panel's.
       if (pathPickerOpen()) return
-      // The detail header's path field keeps its own Escape — it puts the shown path back —
-      // so this press belongs to the field and never to the panel behind it.
+      // The detail header's path field keeps its own Escape — it puts the shown path back —       // so this press belongs to the field and never to the panel behind it.
       if (event.target instanceof Element && event.target.closest('[data-diff-path-input]') !== null) return
       // The coverage popover is the innermost dismissible while it is up, and it
       // closes on this same press.
@@ -8735,8 +9299,8 @@ export function PendingPanel({
     }
     document.body.style.userSelect = 'none'
     document.body.style.cursor = 'col-resize'
-    // One width per animation frame, not one per pointer event. A mouse reports at 125–1000Hz
-    // while the screen draws at 60–120, so most of those events would re-render the list — and,
+    // One width per animation frame, not one per pointer event. A mouse reports at 125— 000Hz
+    // while the screen draws at 60— 20, so most of those events would re-render the list — and,
     // with wrap on, re-wrap the whole code view — for positions nobody ever sees; the frame's own
     // render is the one that shows. The frame takes the LAST position of the events it absorbed.
     let latest = startWidth
@@ -8799,8 +9363,7 @@ export function PendingPanel({
 
   // Docked, the panel is a sidebar tab: it fills the tab body the dock body
   // handed it, so it draws no layer of its own. That layer is the footer seat's
-  // box (42px plus margins) and would push the tab content past its own height —
-  // the sidebar body then scrolls and shows a blank strip under the panel.
+  // box (42px plus margins) and would push the tab content past its own height —   // the sidebar body then scrolls and shows a blank strip under the panel.
   const content = (
     <>
       {/* A transient banner for an import that found no changes; the Toast
@@ -8958,11 +9521,14 @@ export function PendingPanel({
               )}
               {!floatMode && <div className={css.resizeHandle} data-diff-resize onPointerDown={startResize} />}
               <div className={css.detail} data-diff-detail>
-                {selectedFile === undefined ? (
+                {/* The detail belongs to a session: without one there is no list to have
+                    picked a file from, and nothing that could answer a comment. */}
+                {selectedFile === undefined || current === undefined ? (
                   <p className={css.detailEmpty}>{t('panel.selectHint')}</p>
                 ) : (
                   <PendingDiff
                     file={selectedFile}
+                    sessionId={current}
                     busy={snapshot.busy.has(selectedFile.id)}
                     workspacePath={snapshot.workspacePath}
                     jumpSignal={jumpSignal}
@@ -8973,6 +9539,8 @@ export function PendingPanel({
                     landingTop={landing !== undefined && landing.fileId === selectedFile.id ? landing.top : undefined}
                     landingTick={landing !== undefined && landing.fileId === selectedFile.id ? landing.n : 0}
                     landingRow={landing !== undefined && landing.fileId === selectedFile.id ? landing.row : undefined}
+                    landingLine={landing !== undefined && landing.fileId === selectedFile.id ? landing.line : undefined}
+                    landingComment={landing !== undefined && landing.fileId === selectedFile.id ? landing.comment : undefined}
                     landingCard={landing !== undefined && landing.fileId === selectedFile.id ? landing.card : undefined}
                     // The landing is an ask, not a state: once the pane showing the file has taken
                     // it, the panel forgets it, so a pane that mounts later for the same open file
@@ -8980,9 +9548,14 @@ export function PendingPanel({
                     onLanded={() => { setLanding(current => (current === undefined ? current : undefined)) }}
                     failedMessage={failed.get(selectedFile.id)}
                     commentSkill={snapshot.commentSkill}
+                    comments={snapshot.comments}
+                    commentAnswers={snapshot.commentAnswers}
+                    commentsRevision={snapshot.commentsRevision}
+                    commentLines={snapshot.commentLines}
                     onPasteReference={onPasteReference}
-                    onAskAgent={onAskAgent}
-                    watchChat={watchChat}
+                    onCommentAdd={onCommentAdd}
+                    onCommentRemove={onCommentRemove}
+                    onCommentAsk={onCommentAsk}
                     onToast={showCopyToast}
                     t={t}
                     onAddTypedPath={addTypedPath}

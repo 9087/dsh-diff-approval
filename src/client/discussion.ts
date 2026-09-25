@@ -8,6 +8,11 @@
  * @module dsh-diff-approval/client/discussion
  */
 
+// The distance a re-anchor may travel, shared with the host half's own resolution of the same
+// comment: one bound for both, so the figure the list shows and the place this half draws the card
+// cannot come from two different rules (see `comment-lines.ts`).
+import { reanchorWithinLimit } from '../comment-lines.ts'
+
 /** One row range in the current diff model (inclusive, 0-based row indices). */
 export interface DiscussionAnchor {
   /** First row of the range, in the model this block is currently drawn against. */
@@ -101,23 +106,8 @@ export interface Discussion {
   lost?: boolean
   /** The answer being streamed for the question in flight. */
   reply?: string
-  /**
-   * Where the session's transcript stood when the last question was sent — its node count.
-   *
-   * Kept with the block rather than only in the panel's refs, so a question still waiting
-   * for its answer can be picked up again after the panel is closed and reopened: the search
-   * for our own prompt starts here, which is what keeps an older, identical-looking prompt
-   * from being mistaken for it.
-   */
-  baseline?: number
   /** The turn for the last question is running. */
   asking?: boolean
-  /**
-   * The question is sent but still behind another turn of the session, so nothing
-   * streamed yet belongs to this discussion. The block says it is waiting instead
-   * of showing the other turn's answer.
-   */
-  queued?: boolean
   /** The answer failed (the session recorded a prompt error). */
   failed?: boolean
   /**
@@ -321,6 +311,39 @@ export function discussionRowExtras(
 }
 
 /**
+ * Where each block's own box starts, in rows, measured from the BASE of the stack it hangs in.
+ *
+ * Several blocks can end on one row, and then they are drawn one below the other under it, in the
+ * order they are held: `discussionRowExtras` charges the row the sum of them all, and the row stream
+ * (and the split view's card layer) draws one reserving box per block, in that same order. So the
+ * first block of a stack starts at the base, the second one box down, and so on — and a jump that
+ * names a block has to add that many boxes to the base, or it lands the top of the stack whatever
+ * block the reader asked for.
+ *
+ * Nothing is reordered here and no height changes: this is a reading of the drawing order the views
+ * already use, keyed by block id so a jump can ask for the box it was sent for.
+ *
+ * @param discussions - the blocks currently attached to this file, in the order they are drawn.
+ * @param anchorOf - the row the block hangs under, clamped exactly as the caller's row stream clamps
+ *   it (its own height table and its own idea of the last row are what the base below is measured in).
+ * @returns a map from block id to the block's own start, in whole rows below its stack's base.
+ */
+export function discussionStackOffsets(
+  discussions: readonly Discussion[],
+  anchorOf: (discussion: Discussion) => number,
+): Map<string, number> {
+  const offsets = new Map<string, number>()
+  const stacked = new Map<number, number>()
+  for (const discussion of discussions) {
+    const at = anchorOf(discussion)
+    const below = stacked.get(at) ?? 0
+    offsets.set(discussion.id, below)
+    stacked.set(at, below + discussionRows(discussion))
+  }
+  return offsets
+}
+
+/**
  * The discussion attached to exactly this range, if there is one.
  *
  * @param discussions - the blocks currently attached to this file.
@@ -392,7 +415,12 @@ function clearOutdated(discussion: Discussion): Discussion {
  * is what says whether they still hold the code the comment was written about. When they do
  * not — the lines were edited under it, or the hunk moved — the quote is looked for elsewhere
  * in the model and the thread follows it, nearest occurrence first when the same code shows up
- * more than once. When nothing matches, the block keeps the rows it last matched and is marked
+ * more than once. A match farther from the stored rows than `REANCHOR_MAX_LINES` is not that code
+ * having moved but another place in the file that happens to read the same — a look-alike
+ * declaration, which the recorded ±1 context cannot tell apart — so it is refused and the block is
+ * marked outdated instead. That is the one bound the host half applies in lines as well, so the
+ * figure the list ships and the place this half draws the card cannot come from two rules. When
+ * nothing matches, the block keeps the rows it last matched and is marked
  * outdated: it says so and keeps its quote for the reader, rather than being silently moved
  * onto whatever took those lines. Only when the whole range is gone from the model does the
  * block move, and then by line number, back to where the range used to be (see `gone`). The mark
@@ -576,6 +604,12 @@ function remapOne(
       }
       if (!current) continue
       if (fingerprint !== undefined && contextAt(row) !== fingerprint) continue
+      // …and it has to be NEAR the rows the comment names (see `REANCHOR_MAX_LINES` in the shared
+      // rule). Another declaration that reads the same, tens or hundreds of rows away, is another
+      // place in the file: following it is what drew a card far below the line its own item named.
+      // The distance is counted in ROWS — this half's own unit — and a row distance is never smaller
+      // than the new-file distance it stands for, so nothing the host refused can be taken here.
+      if (!reanchorWithinLimit(start, row)) continue
       if (found === -1 || Math.abs(row - start) < Math.abs(found - start)) found = row
     }
     if (found !== -1) {

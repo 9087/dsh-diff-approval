@@ -11,6 +11,10 @@ import type { PendingDiffSnapshot } from '../src/client/slots.ts'
 
 afterEach(cleanup)
 afterEach(() => { localStorage.clear() })
+// Real timers come back for EVERY case, not only at the end of the ones that fake them: an
+// assertion that throws before the case's own `vi.useRealTimers()` would otherwise leave the rest
+// of this file running on a clock that never advances.
+afterEach(() => { vi.useRealTimers() })
 
 /** A stand-in for the sidebar's navigation face: the tabs it was asked to open.
  *

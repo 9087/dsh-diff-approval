@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { REANCHOR_MAX_LINES } from '../src/comment-lines.ts'
 import {
   DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, discussionOnRange,
   discussionOverlapping, discussionPlainText, discussionRowExtras, discussionRows, discussionRounds,
@@ -6,6 +7,11 @@ import {
   selectionFrame, stripBlankLines,
 } from '../src/client/discussion.ts'
 import type { Discussion } from '../src/client/discussion.ts'
+
+/** One row per line, numbered as a whole-file entry is: row N is new-file line N. */
+function numbered(count: number): string[] {
+  return Array.from({ length: count }, (_, index) => `line-${index + 1}`)
+}
 
 /** One discussion, folded or open, with its lines derived from the rows. */
 function discussion(id: string, start: number, end: number, collapsed = false): Discussion {
@@ -174,6 +180,68 @@ describe('discussions in the diff row stream', () => {
     // A thread with no recorded context (from before it was kept) still follows the quote alone.
     const bare = { ...moved, quoteContext: undefined }
     expect(remap(bare, rows([1, 2, 3, 10], ['b', 'x', 'b', 'z'])).lost).toBeUndefined()
+  })
+
+  it('refuses a match too far from the stored rows to be that code having moved', () => {
+    // The report, seen through the rows. Comment A's declaration moved four lines (the lines above it
+    // were deleted) and must still be followed. Comment B's declaration was deleted, and an
+    // identically-shaped one 74 rows down — same `UPROPERTY` line, same field, same blank line —
+    // matches the recorded ±1 context exactly, which is what used to draw its card 74 rows below the
+    // line its own list item named. Only the distance separates the two cases.
+    const field = '\tFString WidgetPath;'
+    const property = '\tUPROPERTY(EditAnywhere, Category = "S")'
+    const quoteContext = `${property}\n${field}\n`
+    /** The row model of a whole-file entry: `texts[line - 1]` reads on new-file line `line`. */
+    const modelOf = (texts: readonly string[]): ReturnType<typeof rows> =>
+      rows(texts.map((_, index) => index + 1), texts)
+    /** A comment of that shape, written on `storedLine` and quoting the field. */
+    const on = (id: string, storedLine: number): Discussion => ({
+      ...discussion(id, storedLine - 1, storedLine - 1),
+      anchor: { start: storedLine - 1, end: storedLine - 1, startLine: storedLine, endLine: storedLine },
+      quote: field,
+      quoteContext,
+    })
+
+    // A: written on 382, the same declaration reads on 378 now (four lines above it were deleted).
+    const movedRows = numbered(400)
+    movedRows[376] = property
+    movedRows[377] = field
+    movedRows[378] = ''
+    const followed = remap(on('a', 382), modelOf(movedRows))
+    expect(followed.lost).toBeUndefined()
+    expect(followed.anchor).toMatchObject({ start: 377, end: 377, startLine: 378, endLine: 378 })
+
+    // B: the declaration the comment was written on is gone — the `UPROPERTY` line above it is still
+    // there, the field under it now reads another one — and the look-alike sits on 452.
+    const twinRows = numbered(458)
+    twinRows[375] = '/** Object path of the property. */'
+    twinRows[376] = property
+    twinRows[377] = '\tFString PropertyName;'
+    twinRows[378] = ''
+    twinRows[449] = '/** Object path of the widget. */'
+    twinRows[450] = property
+    twinRows[451] = field
+    twinRows[452] = ''
+    const refused = remap(on('b', 378), modelOf(twinRows))
+    // The card is NOT carried off to the look-alike: it stays on the lines its header names (the rows
+    // the stored line reads in this model) and says it is outdated, so the jump lands on it there.
+    expect(refused.lost).toBe(true)
+    expect(refused.anchor).toEqual({ start: 377, end: 377, startLine: 378, endLine: 378 })
+
+    // The same bound the host applies in lines, applied to the rows this half counts in: a match
+    // exactly at the limit is followed, one row past it is another place in the file.
+    const at = 377 + REANCHOR_MAX_LINES
+    const within = numbered(at + 40)
+    within[at - 1] = property
+    within[at] = field
+    within[at + 1] = ''
+    expect(remap(on('c', 378), modelOf(within)).lost).toBeUndefined()
+    expect(remap(on('c', 378), modelOf(within)).anchor.start).toBe(at)
+    const past = numbered(at + 41)
+    past[at] = property
+    past[at + 1] = field
+    past[at + 2] = ''
+    expect(remap(on('c', 378), modelOf(past)).lost).toBe(true)
   })
 
   it('condemns a comment on a blank line once that line holds code', () => {

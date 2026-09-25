@@ -1788,15 +1788,6 @@
   font-weight: 700;
 }
 
-/* Outdated: the same grey word the block's own quote label carries, and it never shrinks — the
-   title gives way instead. */
-.commentLost {
-  flex: none;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 11px;
-  line-height: 16px;
-}
-
 /* The first sentence of what was asked: the one item on the row that takes the room that is left, and
    the only one that is ever cut short. It reads from the left, so every title starts on one column. */
 .commentTitle {
@@ -2057,11 +2048,33 @@
   border-bottom: 1px solid var(--dsw-alias-border-l2);
 }
 
+/* The toolbar's two ends. The informational group on the left is what gives way when the row is
+   narrow — its buttons move into one overflow menu, see `inlineItemCount` — so it is the one that
+   absorbs the row's leftover width, and it clips rather than wraps. The decisions on the right keep
+   their own width whatever happens: they are what the row is for. */
+.diffActionInfo {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.diffActionDecisions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* `+N −M`: one figure, never a wrapped pair — a two-line summary would be read as two rows. */
 .diffStats {
   color: var(--dsw-alias-label-tertiary);
   font-size: 12px;
   line-height: 16px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .flexSpacer {
@@ -2161,6 +2174,9 @@
   font-size: 12px;
   line-height: 18px;
   cursor: pointer;
+  /* Keep / Revert / 移出 and the rest are single words in a fixed-height chip: a wrap would make
+     one button two lines tall and drag the whole row's height with it. */
+  white-space: nowrap;
 }
 
 .action:hover:not(:disabled) {

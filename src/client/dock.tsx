@@ -160,12 +160,6 @@ export interface DiffDockBodyProps extends PropsLocale<'diff-approval'> {
   [key: string]: unknown
 }
 
-/** One live dock adapter: the face, and the teardown that unsubscribes. */
-export interface DiffDock {
-  readonly face: DockFace
-  dispose(): void
-}
-
 /** The cordis pieces this adapter uses, structurally: optional service lookup and
  *  a scoped effect. Both are what the plugin sandbox always forwards — its
  *  whitelist covers `effect`/`on`/timers but NOT cordis's dynamic `inject`, and it

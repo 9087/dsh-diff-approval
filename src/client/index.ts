@@ -17,7 +17,6 @@ import { createDiffApprovalPort } from './port.ts'
 import { createPendingDiffStore } from './store.ts'
 import { attachReferenceRemap } from './remap-sync.ts'
 import { conversationAccess } from './conversation-access.ts'
-import { createChatBridge } from './chat-bridge.ts'
 import { OPEN_FILE_EVENT, startProducedDiffInjection } from './produced-diff.ts'
 import type { PendingPanelFace } from './slots.ts'
 import { attachDiffDock, createDockState, DIFF_DOCK_ID, DiffDockBody, DiffDockTitle } from './dock.tsx'
@@ -155,12 +154,6 @@ export function apply(ctx: ClientContext): void {
   // remap can address the visible composer.
   let currentSessionId: SessionId | undefined
 
-  // The session chat bridge: the panel sends a discussion's prompt through it and
-  // watches the transcript for the answer. Both verbs report unavailability
-  // instead of throwing, so a build without those surfaces keeps the composer
-  // fallback the panel had before.
-  const chat = createChatBridge(ctx)
-
   // Rewrite stale references in the current composer when a pending file's
   // content changes (agent edit, block revert, or an external adoption).
   // `remapFile` is also called directly after a whole-file revert (whose entry
@@ -243,7 +236,11 @@ export function apply(ctx: ClientContext): void {
       onAddPath: (sessionId, path, includeUnchanged, exact) => store.addPath(sessionId, path, includeUnchanged, exact),
       onKeepAll: (sessionId) => store.keepAll(sessionId),
       onRevertAll: (sessionId) => store.revertAll(sessionId),
+      onCommentAdd: (sessionId, comment) => store.commentAdd(sessionId, comment),
+      onCommentRemove: (sessionId, id) => store.commentRemove(sessionId, id),
+      onCommentAsk: (sessionId, id, prompt, text) => store.commentAsk(sessionId, id, prompt, text),
       onAckRedoCleared: () => store.clearRedoCleared(),
+      onAckUndoNotice: () => store.clearUndoNotice(),
       onPasteReference: (sessionId, reference) => {
         // Append the reference to the session's composer draft (replace only
         // when empty), addressed explicitly to the copied reference's session
@@ -255,14 +252,6 @@ export function apply(ctx: ClientContext): void {
           reference,
         )
       },
-      onAskAgent: (sessionId, text) => {
-        // The send path P0 verified: write the draft, then submit it, so the
-        // prompt becomes a real turn. `false` means this build has no verb for
-        // that, and the panel keeps its composer fallback.
-        currentSessionId = sessionId
-        return chat.ask(sessionId, text)
-      },
-      watchChat: (sessionId, listener) => chat.watch(sessionId, listener),
       collapseSidebar,
   })
 

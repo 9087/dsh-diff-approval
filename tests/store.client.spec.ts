@@ -2,8 +2,8 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
-import type { DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalListValue, DiffApprovalRefreshValue, PendingFileDiff } from '../src/types.ts'
-import type { DiffApprovalPort } from '../src/client/port.ts'
+import type { DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveValue, DiffApprovalListValue, DiffApprovalRefreshValue, PendingFileDiff } from '../src/types.ts'
+import type { CommentDraft, DiffApprovalPort } from '../src/client/port.ts'
 import { createPendingDiffStore } from '../src/client/store.ts'
 
 const S1 = 'session-1' as SessionId
@@ -16,6 +16,17 @@ type ListMock = ReturnType<typeof vi.fn<(sessionId: SessionId) => Promise<DiffAp
 type ActionMock = ReturnType<typeof vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalActionValue>>>
 type BlockActionMock = ReturnType<typeof vi.fn<(sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<DiffApprovalActionValue>>>
 
+/**
+ * One list answer, with the comment state every read carries. This suite is about
+ * entries, so the comment fields are empty unless a test says otherwise.
+ */
+function listValue(fields: Partial<DiffApprovalListValue> = {}): DiffApprovalListValue {
+  return { files: [], comments: [], commentLines: {}, commentsRevision: 0, commentAnswers: {}, ...fields }
+}
+
+/** The empty comment state, as it appears in a published snapshot. */
+const NO_COMMENTS = { comments: [], commentLines: {}, commentsRevision: 0, commentAnswers: {} }
+
 /** A port plus its mocks, so tests control the answers through local bindings. */
 interface PortSeam {
   port: DiffApprovalPort
@@ -24,20 +35,30 @@ interface PortSeam {
   revert: ActionMock
   blockKeep: BlockActionMock
   blockRevert: BlockActionMock
+  undo: ReturnType<typeof vi.fn<(sessionId: SessionId) => Promise<DiffApprovalActionValue>>>
+  redo: ReturnType<typeof vi.fn<(sessionId: SessionId) => Promise<DiffApprovalActionValue>>>
   refreshVcs: ReturnType<typeof vi.fn<(sessionId: SessionId, id: string, includeUntracked: boolean) => Promise<DiffApprovalRefreshValue>>>
+  commentAdd: ReturnType<typeof vi.fn<(sessionId: SessionId, comment: CommentDraft) => Promise<DiffApprovalCommentAddValue>>>
+  commentRemove: ReturnType<typeof vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalCommentRemoveValue>>>
+  commentAsk: ReturnType<typeof vi.fn<(sessionId: SessionId, id: string, prompt: string, text: string) => Promise<DiffApprovalCommentAskValue>>>
 }
 
 /** Build one seam whose answers the test controls through typed mocks. */
-function port(overrides: Partial<Pick<PortSeam, 'list' | 'keep' | 'revert' | 'blockKeep' | 'blockRevert' | 'refreshVcs'>> = {}): PortSeam {
-  const list = vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>(async () => ({ files: [FILE] }))
+function port(overrides: Partial<Pick<PortSeam, 'list' | 'keep' | 'revert' | 'blockKeep' | 'blockRevert' | 'undo' | 'redo' | 'refreshVcs'>> = {}): PortSeam {
+  const list = vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>(async () => listValue({ files: [FILE] }))
   const keep = vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'kept' }))
   const revert = vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'reverted' }))
   const blockKeep = vi.fn<(sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'kept' }))
   const blockRevert = vi.fn<(sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'reverted' }))
+  const undo = vi.fn<(sessionId: SessionId) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'undone', id: FILE.id }))
+  const redo = vi.fn<(sessionId: SessionId) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'redone', id: FILE.id }))
   const refreshVcs = vi.fn<(sessionId: SessionId, id: string, includeUntracked: boolean) => Promise<DiffApprovalRefreshValue>>(async () => ({ outcome: 'refreshed' }))
+  const commentAdd = vi.fn<(sessionId: SessionId, comment: CommentDraft) => Promise<DiffApprovalCommentAddValue>>(async () => ({ outcome: 'added' }))
+  const commentRemove = vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalCommentRemoveValue>>(async () => ({ outcome: 'removed' }))
+  const commentAsk = vi.fn<(sessionId: SessionId, id: string, prompt: string, text: string) => Promise<DiffApprovalCommentAskValue>>(async () => ({ outcome: 'asked', requestId: 'req-1' }))
   return {
-    port: { list, keep, revert, blockKeep, blockRevert, refreshVcs, ...overrides },
-    list, keep, revert, blockKeep, blockRevert, refreshVcs,
+    port: { list, keep, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentAsk, ...overrides },
+    list, keep, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentAsk,
   }
 }
 
@@ -45,12 +66,12 @@ describe('refresh', () => {
   it('starts unread and publishes the files after a read', async () => {
     const seam = port()
     const store = createPendingDiffStore(seam.port)
-    expect(store.getSnapshot()).toEqual({ read: false, files: [], busy: new Set() })
+    expect(store.getSnapshot()).toEqual({ read: false, files: [], ...NO_COMMENTS, busy: new Set() })
 
     const seen = vi.fn()
     const off = store.subscribe(seen)
     await store.refresh(S1)
-    expect(store.getSnapshot()).toEqual({ read: true, files: [FILE], busy: new Set(), failed: new Map() })
+    expect(store.getSnapshot()).toEqual({ read: true, files: [FILE], ...NO_COMMENTS, busy: new Set(), failed: new Map() })
     expect(seen).toHaveBeenCalled()
     off()
   })
@@ -59,13 +80,13 @@ describe('refresh', () => {
     const seam = port()
     const store = createPendingDiffStore(seam.port)
     await store.refresh(undefined)
-    expect(store.getSnapshot()).toEqual({ read: true, files: [], busy: new Set(), failed: new Map() })
+    expect(store.getSnapshot()).toEqual({ read: true, files: [], ...NO_COMMENTS, busy: new Set(), failed: new Map() })
     expect(seam.list).not.toHaveBeenCalled()
   })
 
   it('carries the host\'s persist failure into the snapshot, and keeps it through a failed poll', async () => {
     const seam = port()
-    seam.list.mockResolvedValue({ files: [FILE], persistError: 'ENOSPC: no space left on device' })
+    seam.list.mockResolvedValue(listValue({ files: [FILE], persistError: 'ENOSPC: no space left on device' }))
     const store = createPendingDiffStore(seam.port)
     await store.refresh(S1)
     expect(store.getSnapshot().persistError).toBe('ENOSPC: no space left on device')
@@ -77,7 +98,7 @@ describe('refresh', () => {
     await store.refresh(S1)
     expect(store.getSnapshot().persistError).toBe('ENOSPC: no space left on device')
 
-    seam.list.mockResolvedValue({ files: [FILE] })
+    seam.list.mockResolvedValue(listValue({ files: [FILE] }))
     await store.refresh(S1)
     expect(store.getSnapshot().persistError).toBeUndefined()
   })
@@ -89,7 +110,67 @@ describe('refresh', () => {
 
     seam.list.mockRejectedValue(new Error('socket closed'))
     await store.refresh(S1)
-    expect(store.getSnapshot()).toEqual({ read: true, files: [FILE], error: 'socket closed', busy: new Set(), failed: new Map() })
+    expect(store.getSnapshot()).toEqual({ read: true, files: [FILE], ...NO_COMMENTS, error: 'socket closed', busy: new Set(), failed: new Map() })
+  })
+})
+
+describe('refresh epochs', () => {
+  it('keeps the newer snapshot when an older read resolves after it', async () => {
+    // Two polls of one session can overlap — a slow host and a poll interval that does not
+    // wait for the last one. The first request is older by construction, so when its answer
+    // lands last it must not put the files it read back over the newer view.
+    const releases: ((value: DiffApprovalListValue) => void)[] = []
+    const seam = port({
+      list: vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>(
+        () => new Promise((resolve) => { releases.push(resolve) }),
+      ),
+    })
+    const store = createPendingDiffStore(seam.port)
+    const older = store.refresh(S1)
+    const newer = store.refresh(S1)
+    expect(releases).toHaveLength(2)
+
+    const NEWER: PendingFileDiff = { ...FILE, newText: 'newer' }
+    releases[1]!(listValue({ files: [NEWER] }))
+    await newer
+    expect(store.getSnapshot().files).toEqual([NEWER])
+
+    releases[0]!(listValue({ files: [FILE] }))
+    await older
+    expect(store.getSnapshot().files).toEqual([NEWER])
+  })
+
+  it('drops a read of the session the reader left instead of publishing it under the new one', async () => {
+    // The reader switched sessions: A's read was still in flight when B's answered. A's
+    // answer names A's files and A's comments, and publishing it would draw them as B's.
+    const S2 = 'session-2' as SessionId
+    const FILE_B: PendingFileDiff = { ...FILE, id: 'entry-2', sessionId: S2, path: '/repo/b.txt' }
+    const A_COMMENT = {
+      id: 'c1', sessionId: S1, entryId: FILE.id, path: FILE.path,
+      anchor: { startLine: 1, endLine: 1 }, quote: 'a', text: 'why?', createdAt: 1, updatedAt: 2,
+    }
+    let releaseA: ((value: DiffApprovalListValue) => void) | undefined
+    const seam = port({
+      list: vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>((sessionId) => (
+        sessionId === S1
+          ? new Promise((resolve) => { releaseA = resolve })
+          : Promise.resolve(listValue({ files: [FILE_B] }))
+      )),
+    })
+    const store = createPendingDiffStore(seam.port)
+    const readingA = store.refresh(S1)
+    await store.refresh(S2)
+    expect(store.getSnapshot().files).toEqual([FILE_B])
+
+    releaseA?.(listValue({ files: [FILE], comments: [A_COMMENT] }))
+    await readingA
+    expect(store.getSnapshot().files).toEqual([FILE_B])
+    expect(store.getSnapshot().comments).toEqual([])
+    // The dropped read changes nothing at all: B's answer is what resolved `read` (a stale
+    // drop cannot leave the panel loading), and the live busy/failed bookkeeping stays the
+    // newest response's to carry.
+    expect(store.getSnapshot().read).toBe(true)
+    expect(store.getSnapshot().busy).toEqual(new Set())
   })
 })
 
@@ -108,7 +189,7 @@ describe('actions', () => {
     expect(store.getSnapshot().busy).toEqual(new Set([FILE.id]))
     release?.({ outcome: 'kept' })
     await settled
-    expect(store.getSnapshot()).toEqual({ read: true, files: [], busy: new Set(), failed: new Map() })
+    expect(store.getSnapshot()).toEqual({ read: true, files: [], ...NO_COMMENTS, busy: new Set(), failed: new Map() })
   })
 
   it('reverts through the port and removes the entry', async () => {
@@ -118,6 +199,37 @@ describe('actions', () => {
     await store.revert(S1, FILE.id)
     expect(seam.revert).toHaveBeenCalledWith(S1, FILE.id)
     expect(store.getSnapshot().files).toEqual([])
+  })
+
+  it('keeps a slow action\'s entry busy across a poll that resolves in between', async () => {
+    // The panel polls every second, and a keep or a revert holds its id busy across its own await
+    // (see `withBusy`). Publishing an empty busy set on the poll re-enabled the row mid-flight, so a
+    // second click on it fired a second keep for the entry already being kept — which is the whole
+    // read of `onKeep` the panel guards on.
+    let release: ((value: DiffApprovalActionValue) => void) | undefined
+    const kept = vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalActionValue>>(
+      () => new Promise((resolve) => { release = resolve }),
+    )
+    const seam = port({ keep: kept })
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+
+    const settled = store.keep(S1, FILE.id)
+    expect(store.getSnapshot().busy).toEqual(new Set([FILE.id]))
+    expect(kept).toHaveBeenCalledTimes(1)
+
+    // A poll lands while the keep is still in flight. The host still lists the entry — the keep has
+    // not reached it — and the row must stay disabled, so the second press the reader makes cannot
+    // become a second keep of the same entry.
+    await store.refresh(S1)
+    expect(store.getSnapshot().files).toEqual([FILE])
+    expect(store.getSnapshot().busy).toEqual(new Set([FILE.id]))
+
+    // The action finishing is the only thing that clears it.
+    release?.({ outcome: 'kept' })
+    await settled
+    expect(store.getSnapshot().busy).toEqual(new Set())
+    expect(kept).toHaveBeenCalledTimes(1)
   })
 
   it('never drops a kept entry locally, and re-reads it so its diff updates at once', async () => {
@@ -261,6 +373,95 @@ describe('reset', () => {
     const store = createPendingDiffStore(seam.port)
     await store.refresh(S1)
     store.reset()
-    expect(store.getSnapshot()).toEqual({ read: false, files: [], busy: new Set() })
+    expect(store.getSnapshot()).toEqual({ read: false, files: [], ...NO_COMMENTS, busy: new Set() })
+  })
+})
+
+describe('undo/redo', () => {
+  it('surfaces a refused undo instead of swallowing it', async () => {
+    const seam = port()
+    seam.undo.mockRejectedValue(new Error('undo failed: the file changed outside the review after the action; undo is unavailable'))
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+
+    await expect(store.undo(S1)).resolves.toBeUndefined()
+    // The reader pressed Ctrl+Z and the host refused. Before this the refusal was thrown
+    // away here, so nothing at all happened on screen.
+    expect(store.getSnapshot().undoNotice).toContain('the file changed outside the review')
+  })
+
+  it('says a session has nothing to undo, and keeps the panel on its list', async () => {
+    const seam = port()
+    seam.undo.mockResolvedValue({ outcome: 'nothing' })
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+    await expect(store.undo(S1)).resolves.toBeUndefined()
+    // Nothing was refused — there was simply nothing on this session's stack — so the
+    // list stays as it is and no failure line is published on its account.
+    expect(store.getSnapshot().error).toBeUndefined()
+    expect(store.getSnapshot().files).toEqual([FILE])
+  })
+
+  it('selects the affected entry after a successful undo', async () => {
+    const seam = port()
+    seam.undo.mockResolvedValue({ outcome: 'undone', id: FILE.id })
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+    await expect(store.undo(S1)).resolves.toBe(FILE.id)
+    expect(seam.list).toHaveBeenCalledWith(S1)
+  })
+})
+
+describe('comments', () => {
+  it('writes one annotation through the port and re-reads', async () => {
+    const seam = port()
+    const store = createPendingDiffStore(seam.port)
+    const draft: CommentDraft = {
+      id: 'c1', entryId: FILE.id, anchor: { startLine: 1, endLine: 1 }, quote: 'a', text: 'why?',
+    }
+    await expect(store.commentAdd(S1, draft)).resolves.toEqual({ outcome: 'added' })
+    expect(seam.commentAdd).toHaveBeenCalledWith(S1, draft)
+    // The thread lives on the host from the moment it is written, so the panel re-reads
+    // rather than keeping a local copy — that is what makes a second client of the same
+    // session show the same thread.
+    expect(seam.list).toHaveBeenCalledWith(S1)
+  })
+
+  it('asks one comment and re-reads, so the derived answer is what shows', async () => {
+    const seam = port()
+    const store = createPendingDiffStore(seam.port)
+    await expect(store.commentAsk(S1, 'c1', 'the prompt', 'why?')).resolves.toEqual({ outcome: 'asked', requestId: 'req-1' })
+    // Both strings go through: the prompt is what the agent is asked, the words are what the
+    // thread shows.
+    expect(seam.commentAsk).toHaveBeenCalledWith(S1, 'c1', 'the prompt', 'why?')
+    expect(seam.list).toHaveBeenCalledWith(S1)
+  })
+
+  it('removes one comment and re-reads', async () => {
+    const seam = port()
+    const store = createPendingDiffStore(seam.port)
+    await expect(store.commentRemove(S1, 'c1')).resolves.toEqual({ outcome: 'removed' })
+    expect(seam.commentRemove).toHaveBeenCalledWith(S1, 'c1')
+    expect(seam.list).toHaveBeenCalledWith(S1)
+  })
+
+  it('carries the host\'s comments, their answers and their resolved lines into the snapshot', async () => {
+    const seam = port()
+    const comment = {
+      id: 'c1', sessionId: S1, entryId: FILE.id, path: FILE.path,
+      anchor: { startLine: 1, endLine: 1 }, quote: 'a', text: 'why?',
+      createdAt: 1, updatedAt: 2, asks: [{ requestId: 'req-1' }],
+    }
+    seam.list.mockResolvedValue(listValue({
+      files: [FILE], comments: [comment], commentsRevision: 3, commentAnswers: { 'req-1': 'because' },
+      // The lines the HOST resolved the quote to: the panel draws these, not the record's anchor.
+      commentLines: { c1: { start: 4, end: 5 } },
+    }))
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+    expect(store.getSnapshot()).toMatchObject({
+      comments: [comment], commentsRevision: 3, commentAnswers: { 'req-1': 'because' },
+      commentLines: { c1: { start: 4, end: 5 } },
+    })
   })
 })

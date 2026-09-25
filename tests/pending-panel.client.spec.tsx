@@ -6,15 +6,15 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { Component } from 'react'
+import { Component, useSyncExternalStore } from 'react'
 import type { ComponentProps, ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
-import type { PendingFileDiff } from '../src/types.ts'
-import { PendingPanel, frameInsets, makeMeasurer, wrapChipRows, MIN_LIST_WIDTH_PX } from '../src/client/PendingPanel.tsx'
+import type { CommentRecord, PendingFileDiff } from '../src/types.ts'
+import { OPEN_PANEL_FILE_EVENT, PendingPanel, fittingItems, frameInsets, inlineItemCount, makeMeasurer, wrapChipRows, MIN_LIST_WIDTH_PX } from '../src/client/PendingPanel.tsx'
 import panelCss from '../src/client/PendingPanel.module.css'
 import { codeFontCss } from '../src/client/code-font.ts'
 import { zh } from '../src/client/locales.ts'
-import { lastPanelFile, panelFileOffset, rememberDiscussions, rememberedDiscussions, removalAskQuiet, resetPanelMemory } from '../src/client/panel-memory.ts'
+import { lastPanelFile, panelFileOffset, rememberedPlacedThreads, rememberedThreads, removalAskQuiet, resetPanelMemory } from '../src/client/panel-memory.ts'
 import { diffLineHeight, navLeadRows, setCommentModeEnabled } from '../src/client/settings.ts'
 import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
 import { DiffApprovalHeaderEntry } from '../src/client/header-entry.tsx'
@@ -32,6 +32,10 @@ vi.mock('../src/client/highlight.ts', { spy: true })
 
 afterEach(cleanup)
 afterEach(() => { vi.restoreAllMocks() })
+// Real timers come back for EVERY case, not only at the end of the ones that fake them: an
+// assertion that throws before the case's own `vi.useRealTimers()` would otherwise leave the rest
+// of this file running on a clock that never advances.
+afterEach(() => { vi.useRealTimers() })
 afterEach(() => { localStorage.clear() })
 // The panel's view memory is module state that outlives a test (and is meant to
 // outlive a close): each case starts from a page that has never opened it.
@@ -73,9 +77,16 @@ function clickFileRow(name: string): void {
  * that cannot be set. Give every code view a 2000px scroll range in an 800px
  * viewport, with a real, writable scrollTop — what the panel's own programmatic
  * scrolls and the tests' simulated user scrolls both need.
+ *
+ * A test whose landing sits deeper than that range passes its own two numbers: the
+ * stub has to reach past the row, or the panel's clamp to `scrollHeight - clientHeight`
+ * decides where the view ends up instead of the arithmetic under test.
+ *
+ * @param scrollHeight - the scroll range to report, in px (defaults to the usual 2000).
+ * @param clientHeight - the viewport to report, in px (defaults to the usual 800).
  * @returns a restore function, for the test's `finally`.
  */
-function stubCodeScroll(): () => void {
+function stubCodeScroll(scrollHeight = 2000, clientHeight = 800): () => void {
   const descriptors = {
     scrollTop: Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollTop'),
     scrollHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight'),
@@ -89,11 +100,11 @@ function stubCodeScroll(): () => void {
   })
   Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
     configurable: true,
-    get(this: Element) { return this.hasAttribute('data-diff-body') ? 2000 : 0 },
+    get(this: Element) { return this.hasAttribute('data-diff-body') ? scrollHeight : 0 },
   })
   Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
     configurable: true,
-    get(this: Element) { return this.hasAttribute('data-diff-body') ? 800 : 0 },
+    get(this: Element) { return this.hasAttribute('data-diff-body') ? clientHeight : 0 },
   })
   return () => {
     for (const [name, descriptor] of Object.entries(descriptors)) {
@@ -120,12 +131,328 @@ function entry(overrides: Partial<PendingFileDiff>): PendingFileDiff {
 
 type PanelProps = ComponentProps<typeof PendingPanel>
 
-function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
+/**
+ * The host half of the panel, played by the test.
+ *
+ * A comment is the HOST's record now (see `PendingDiffSnapshot.comments`), so a test that wants a
+ * thread on screen has to put one in the snapshot, and one that asks a question gets its answer
+ * there too: the panel reads `commentAnswers` rather than watching a transcript. This holds that
+ * state, runs the three comment verbs against it, and re-renders the panel whenever it changes —
+ * which is exactly what the store's own refresh does in the app, one step smaller.
+ */
+interface CommentHost {
+  /** The comments the host holds, oldest first; the array is live, so a test may read it back. */
+  comments: CommentRecord[]
+  /** The answer text the host derives per question id. */
+  answers: Record<string, string>
+  /** Hand out an answer for one question, as the host would read it from the transcript. */
+  answer: (requestId: string, text: string) => void
+  /** The session discarded a question before a turn claimed it. */
+  drop: (requestId: string) => void
+  /** The host dropped one comment outright — what keeping or reverting its entry does. */
+  forget: (id: string) => void
+  /** The pending list a later poll read: the files it now holds, in its own order. */
+  setFiles: (files: PendingFileDiff[]) => void
+  /** The observable face the panel's `usePending` reads: a write re-renders the panel. */
+  subscribe: (listener: () => void) => () => void
+  /** The snapshot as the latest write left it; identity-stable until the next write. */
+  getSnapshot: () => PendingDiffSnapshot
+}
+
+const HOSTS = new WeakMap<PanelProps, CommentHost>()
+
+/**
+ * The host behind one test's panel props.
+ * @param props - what `panelProps` returned.
+ * @returns the live host state, for seeding and for the two mutation verbs.
+ */
+function hostOf(props: PanelProps): CommentHost {
+  const host = HOSTS.get(props)
+  if (host === undefined) throw new Error('these props were not built by panelProps')
+  return host
+}
+
+/** The prompts the panel has asked, in order: the third argument of every `onCommentAsk`. */
+function askedPrompts(props: PanelProps): string[] {
+  return (props.onCommentAsk as unknown as { mock: { calls: [SessionId, string, string][] } }).mock.calls
+    .map(call => call[2])
+}
+
+/** The drafts the panel has written down, in order: the second argument of every `onCommentAdd`. */
+function addedCommentTexts(props: PanelProps): string[] {
+  return (props.onCommentAsk as unknown as { mock: { calls: unknown[][] } }).mock.calls.length === 0
+    ? []
+    : (props.onCommentAdd as unknown as { mock: { calls: [SessionId, { text: string }][] } }).mock.calls
+      .map(call => call[1].text)
+}
+
+/** The newest question of one comment, which is the one an answer lands on. */
+function newestAsk(props: PanelProps, id?: string): { record: CommentRecord; requestId: string } {
+  const host = hostOf(props)
+  const record = id === undefined ? host.comments.at(-1) : host.comments.find(entry => entry.id === id)
+  const ask = record?.asks?.at(-1)
+  if (record === undefined || ask === undefined) throw new Error('no question is waiting for an answer')
+  return { record, requestId: ask.requestId }
+}
+
+/**
+ * Answer the newest question, the way the host derives an answer from the transcript.
+ * @param props - the panel under test.
+ * @param text - what the agent answered.
+ * @param id - the comment whose question is answered (defaults to the newest comment).
+ */
+function answerComment(props: PanelProps, text: string, id?: string): void {
+  const { requestId } = newestAsk(props, id)
+  act(() => { hostOf(props).answer(requestId, text) })
+}
+
+/** The session dropped the newest question before any turn claimed it. */
+function dropComment(props: PanelProps, id?: string): void {
+  const { requestId } = newestAsk(props, id)
+  act(() => { hostOf(props).drop(requestId) })
+}
+
+/**
+ * One stored comment, with the fields a test does not care about filled in.
+ * @param overrides - what this comment says and where it sits.
+ * @returns the record the host would hold.
+ */
+function comment(overrides: Partial<CommentRecord> & { id: string; text: string }): CommentRecord {
   return {
+    sessionId: S1,
+    entryId: FILE.id,
+    path: FILE.path,
+    anchor: { startLine: 1, endLine: 1 },
+    quote: '',
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  }
+}
+
+/**
+ * The report's own shape, staged: one comment written at line 382 on a file that has since lost four
+ * lines directly above the code it quotes. The quoted line reads 378 now — the same line the card's
+ * header names — while the record keeps saying 382.
+ *
+ * Those four lost lines are what make the two numbers disagree at all, and they are also what puts a
+ * row the file no longer has between the file's top and the quoted line: the diff draws them as their
+ * own rows (`removed-1`…`removed-4`), and each of them reads line 378, 379, 380 and 381 through
+ * `newLine ?? oldLine`. A whole-file create has neither of those, which is why the neighbouring jump
+ * tests cannot see either half of this.
+ */
+const STALE_ANCHOR = {
+  /** Unchanged lines above the comment: old and new agree on every one of them. */
+  contextAbove: 377,
+  /** Lines the old text still carries, directly above the quoted one — what moved it up by four. */
+  removedAbove: 4,
+  /** What the stored anchor says. */
+  storedLine: 382,
+  /** What the quoted line reads now (and what the card's own header names). */
+  quotedLine: 378,
+  /** How many lines the new file has. */
+  totalLines: 420,
+  quote: 'line-378',
+} as const
+
+/**
+ * The file the report's comment hangs in.
+ * @param id - the entry id to give it.
+ * @returns the pending file, as the host hands it over.
+ */
+function staleAnchorFile(id: string): PendingFileDiff {
+  const lines = Array.from({ length: STALE_ANCHOR.totalLines }, (_, index) => `line-${index + 1}`)
+  const removed = Array.from({ length: STALE_ANCHOR.removedAbove }, (_, index) => `removed-${index + 1}`)
+  return entry({
+    id,
+    path: '/repo/stale.txt',
+    kind: 'edit',
+    oldText: `${[...lines.slice(0, STALE_ANCHOR.contextAbove), ...removed, ...lines.slice(STALE_ANCHOR.contextAbove)].join('\n')}\n`,
+    newText: `${lines.join('\n')}\n`,
+  })
+}
+
+/** The report's comment: stored on 382, quoting the line that reads 378 now. */
+function staleAnchorComment(fileId: string): CommentRecord {
+  return comment({
+    id: 'd-stale',
+    entryId: fileId,
+    text: '这一行为什么要改？',
+    anchor: { startLine: STALE_ANCHOR.storedLine, endLine: STALE_ANCHOR.storedLine },
+    quote: STALE_ANCHOR.quote,
+  })
+}
+
+/**
+ * Where the comment's own box sits in the code view's content, read off the rendered charge.
+ *
+ * The box hangs below the row the quoted line is in, so its top edge is that row's end: the rows
+ * above it — the unchanged ones, then the four the old text carries — plus its own row, one line
+ * tall each in an edit that never wraps in jsdom, and then the rows the block reserves for itself on
+ * that row. `data-diff-discussion-space` draws exactly that charge (`rows * THREAD_ROW_PX`), which is
+ * the only way to read the height table from here — the table itself is not in the DOM. Taking the
+ * charge back off that end leaves the box's top edge, the same arithmetic the landing itself does.
+ *
+ * @returns the box's top edge and its height, in px of the code view's content.
+ */
+function staleAnchorBox(): { boxTop: number; boxHeight: number } {
+  const space = document.querySelector('[data-diff-discussion-space]') as HTMLElement | null
+  if (space === null) throw new Error("the comment's own row is not rendered, so its box cannot be read")
+  const charge = Number.parseFloat(space.style.height) || 0
+  const cardRow = STALE_ANCHOR.contextAbove + STALE_ANCHOR.removedAbove
+  const rowEnd = (cardRow + 1) * diffLineHeight() + charge
+  return { boxTop: rowEnd - charge, boxHeight: charge }
+}
+
+const LOOKALIKE_PROPERTY = '\tUPROPERTY(EditAnywhere, Category = "S")'
+
+/**
+ * The report's SECOND case, staged: the declaration the comment was written on is GONE, and an
+ * identically-shaped one — the same `UPROPERTY` line, the same field, the same blank line — sits 74
+ * lines below it.
+ *
+ * Those three lines are all a record's ±1 context keeps, so the stored context matches the far
+ * declaration exactly; what differs is the doc comment one line above it (line 376 against line 450),
+ * which the record never kept. The distance from the stored line is therefore the only thing that can
+ * tell the two places apart (see `REANCHOR_MAX_LINES` in the shared rule).
+ */
+const LOOKALIKE = {
+  /** Unchanged lines above the place the comment was written on. */
+  contextAbove: 375,
+  /** What the stored anchor says. */
+  storedLine: 378,
+  /** Where the identically-shaped declaration reads now. */
+  twinLine: 452,
+  /** What the comment quoted, and what only the far declaration still reads. */
+  quote: '\tFString WidgetPath;',
+} as const
+
+/**
+ * The file the second case hangs in.
+ *
+ * A whole-file entry, so the row model IS the current content: an EDIT entry draws the removed
+ * declaration as a row of its own carrying the same new-file number, and the panel's anchor check
+ * reads that removed copy as "the quote is still on its line" — the guard that refuses a copy the file
+ * no longer has applies to a SEARCH, not to the anchor's own line. The geometry under test is the
+ * current content's, and this is that content with nothing else in the rows.
+ *
+ * @param id - the entry id to give it.
+ * @returns the pending file, as the host hands it over.
+ */
+function lookalikeFile(id: string): PendingFileDiff {
+  const lines: string[] = Array.from({ length: LOOKALIKE.twinLine + 6 }, (_, index) => `line-${index + 1}`)
+  // Where the comment was written: the `UPROPERTY` line above the declaration survived, the
+  // declaration under it did not.
+  lines[LOOKALIKE.storedLine - 3] = '/** Object path of the property. */'
+  lines[LOOKALIKE.storedLine - 2] = LOOKALIKE_PROPERTY
+  lines[LOOKALIKE.storedLine - 1] = '\tFString PropertyName;'
+  lines[LOOKALIKE.storedLine] = ''
+  // …and the look-alike, whose own ±1 window reads exactly like the record's.
+  lines[LOOKALIKE.twinLine - 3] = '/** Object path of the widget. */'
+  lines[LOOKALIKE.twinLine - 2] = LOOKALIKE_PROPERTY
+  lines[LOOKALIKE.twinLine - 1] = LOOKALIKE.quote
+  lines[LOOKALIKE.twinLine] = ''
+  return entry({
+    id,
+    path: '/repo/lookalike.txt',
+    kind: 'create',
+    oldText: '',
+    newText: `${lines.join('\n')}\n`,
+  })
+}
+
+/** The second case's comment: written on 378, quoting the declaration that is gone. */
+function lookalikeComment(fileId: string): CommentRecord {
+  return comment({
+    id: 'd-lookalike',
+    entryId: fileId,
+    text: '这里也可以用UWidget？',
+    anchor: { startLine: LOOKALIKE.storedLine, endLine: LOOKALIKE.storedLine },
+    quote: LOOKALIKE.quote,
+    quoteContext: `${LOOKALIKE_PROPERTY}\n${LOOKALIKE.quote}\n`,
+  })
+}
+
+/**
+ * Where the second case's box sits in the code view's content, read off the rendered charge.
+ *
+ * The block hangs below the row its stored line reads in — a whole-file entry is one row per line,
+ * and never wraps in jsdom — so that row ends `storedLine` rows down; the charge it reserved for
+ * itself comes back off that, exactly as the jump's landing does (see `staleAnchorBox`).
+ *
+ * @returns the box's top edge and its height, in px of the code view's content.
+ */
+function lookalikeBox(): { boxTop: number; boxHeight: number } {
+  const space = document.querySelector('[data-diff-discussion-space]') as HTMLElement | null
+  if (space === null) throw new Error("the comment's own row is not rendered, so its box cannot be read")
+  const charge = Number.parseFloat(space.style.height) || 0
+  const rowEnd = LOOKALIKE.storedLine * diffLineHeight() + charge
+  return { boxTop: rowEnd - charge, boxHeight: charge }
+}
+
+function panelProps(snapshot: Partial<PendingDiffSnapshot> & { files: PendingFileDiff[] }): PanelProps {
+  const comments = [...(snapshot.comments ?? [])]
+  const answers: Record<string, string> = { ...(snapshot.commentAnswers ?? {}) }
+  let revision = snapshot.commentsRevision ?? 0
+  let requests = 0
+  const listeners = new Set<() => void>()
+  const build = (): PendingDiffSnapshot => ({
+    read: true,
+    busy: new Set(),
+    ...snapshot,
+    comments: [...comments],
+    commentsRevision: revision,
+    commentAnswers: { ...answers },
+    // The host's resolved lines ride the same read as the records; a test that stages none is the
+    // host having resolved nothing (every caller then falls back to the record's own anchor).
+    commentLines: snapshot.commentLines ?? {},
+  })
+  let current = build()
+  const publish = (): void => {
+    current = build()
+    for (const listener of [...listeners]) listener()
+  }
+  const host: CommentHost = {
+    comments,
+    answers,
+    answer: (requestId, text) => {
+      if (answers[requestId] === text) return
+      answers[requestId] = text
+      revision += 1
+      publish()
+    },
+    drop: (requestId) => {
+      const record = comments.find(entry => entry.asks?.some(ask => ask.requestId === requestId) === true)
+      if (record?.asks === undefined) return
+      record.asks = record.asks.map(ask => (ask.requestId === requestId ? { ...ask, dropped: true } : ask))
+      revision += 1
+      publish()
+    },
+    forget: (id) => {
+      const index = comments.findIndex(entry => entry.id === id)
+      if (index < 0) return
+      comments.splice(index, 1)
+      revision += 1
+      publish()
+    },
+    setFiles: (next) => {
+      snapshot.files = next
+      publish()
+    },
+    subscribe: (listener) => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    getSnapshot: () => current,
+  }
+  const props = {
     wide: true,
     useSessions: (select: (state: { current: SessionId; byId: Record<string, { blank?: boolean }> }) => SessionId) =>
       select({ current: S1, byId: {} }),
-    usePending: (select: (state: PendingDiffSnapshot) => PendingDiffSnapshot) => select(snapshot),
+    // The panel's snapshot, as an observable: the host's writes re-render it, the same way the
+    // store's poll does in the app.
+    usePending: (select: (state: PendingDiffSnapshot) => PendingDiffSnapshot) =>
+      select(useSyncExternalStore(host.subscribe, host.getSnapshot)),
     onRefresh: vi.fn(),
     onKeep: vi.fn(async () => {}),
     onRevert: vi.fn(async () => {}),
@@ -134,10 +461,38 @@ function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
     onOpen: vi.fn(async () => {}),
     onPreviewImage: vi.fn(async (_sessionId: SessionId, _path: string) => undefined),
     onPasteReference: vi.fn(),
-    // The chat bridge, as the panel sees it: a send verb that works, and a
-    // watcher the test drives to deliver an answer.
-    onAskAgent: vi.fn(() => true),
-    watchChat: vi.fn(() => () => {}),
+    // The three comment verbs, against the host state above. A write the entry cannot take is
+    // `missing`, which is the one outcome the panel has to report rather than draw.
+    onCommentAdd: vi.fn(async (_sessionId: SessionId, draft: { id: string; entryId: string; text: string }) => {
+      if (!snapshot.files.some(file => file.id === draft.entryId)) return { outcome: 'missing' as const }
+      const stored = comment({
+        ...draft,
+        path: snapshot.files.find(file => file.id === draft.entryId)?.path ?? '',
+      } as Partial<CommentRecord> & { id: string; text: string })
+      comments.push(stored)
+      revision += 1
+      publish()
+      return { outcome: 'added' as const, comment: stored }
+    }),
+    onCommentRemove: vi.fn(async (_sessionId: SessionId, id: string) => {
+      const index = comments.findIndex(entry => entry.id === id)
+      if (index < 0) return { outcome: 'missing' as const }
+      comments.splice(index, 1)
+      revision += 1
+      publish()
+      return { outcome: 'removed' as const }
+    }),
+    onCommentAsk: vi.fn(async (sessionId: SessionId, id: string, _prompt: string, text: string) => {
+      const record = comments.find(entry => entry.id === id)
+      if (record === undefined) return { outcome: 'missing' as const }
+      requests += 1
+      const requestId = `${sessionId}:req-${requests}`
+      // The reader's own words ride the question, as they do on the host's record.
+      record.asks = [...(record.asks ?? []), { requestId, text }]
+      revision += 1
+      publish()
+      return { outcome: 'asked' as const, requestId }
+    }),
     onUndo: vi.fn(),
     onRedo: vi.fn(),
     onImportVcs: vi.fn(async () => ({ imported: 0, detected: false })),
@@ -147,9 +502,12 @@ function panelProps(snapshot: PendingDiffSnapshot): PanelProps {
     onKeepAll: vi.fn(async () => {}),
     onRevertAll: vi.fn(async () => {}),
     onAckRedoCleared: vi.fn(),
+    onAckUndoNotice: vi.fn(),
     collapseSidebar: vi.fn(),
     t: (key: string, params?: Record<string, unknown>) => params === undefined ? key : `${key} ${JSON.stringify(params)}`,
   } as unknown as PanelProps
+  HOSTS.set(props, host)
+  return props
 }
 
 describe('PendingPanel', () => {
@@ -521,6 +879,24 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-action-error]')).not.toBeNull()
   })
 
+  it('says why a refused undo was refused', async () => {
+    // The host refuses an undo when the file changed outside the review after the action
+    // (the divergence guard). It answers with that reason, and Ctrl+Z has to put it in
+    // front of the reader: before this the reason was thrown away on the way in, so the
+    // key press did nothing at all.
+    const props = panelProps({
+      read: true, files: [FILE], busy: new Set(),
+      undoNotice: 'undo failed: the file changed outside the review after the action; undo is unavailable',
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    await waitFor(() => {
+      const alert = [...document.querySelectorAll('[role="alert"]')]
+        .find(el => el.textContent?.includes('the file changed outside the review'))
+      expect(alert).toBeDefined()
+    })
+  })
+
   it('pops a toast when a keep/revert failure appears', async () => {
     const view = render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
@@ -576,6 +952,40 @@ describe('PendingPanel', () => {
     await waitFor(() => expect(said()).toBe(1))
 
     // The disk recovers and the host drops the field; failing again afterwards is news.
+    view.rerender(withState({ read: true, files: [FILE], busy: new Set() }))
+    await waitFor(() => expect(said()).toBe(1))
+    view.rerender(withState({ ...failing }))
+    await waitFor(() => expect(said()).toBe(2))
+  })
+
+  it('says once that a comment thread cannot be written to disk', async () => {
+    // A comment that only lives in the host's memory is the same trap as a pending list
+    // that does not survive a restart, and it was entirely silent: the write failed, the
+    // panel drew the thread from the in-memory copy, and the reader found it gone later.
+    // It gets its own copy, because the pending file's is not what failed.
+    const t = vi.fn((key: string) => key)
+    const withState = (snapshot: PendingDiffSnapshot): ReactNode => {
+      const props = panelProps(snapshot)
+      props.t = t as unknown as PanelProps['t']
+      return <PendingPanel {...props} />
+    }
+    const said = (): number => t.mock.calls.filter(([key]) => key === 'panel.commentPersistFailed').length
+    const failing: PendingDiffSnapshot = {
+      read: true, files: [FILE], busy: new Set(), commentPersistError: 'ENOTDIR: not a directory',
+    }
+
+    const view = render(withState(failing))
+    await waitFor(() => {
+      const alert = [...document.querySelectorAll('[role="alert"]')]
+        .find(el => el.textContent?.includes('panel.commentPersistFailed'))
+      expect(alert).toBeDefined()
+    })
+    expect(said()).toBe(1)
+
+    // The same failure on the next poll is the same news; the host retracting it (a
+    // write that worked) re-arms the marker.
+    view.rerender(withState({ ...failing }))
+    await waitFor(() => expect(said()).toBe(1))
     view.rerender(withState({ read: true, files: [FILE], busy: new Set() }))
     await waitFor(() => expect(said()).toBe(1))
     view.rerender(withState({ ...failing }))
@@ -893,6 +1303,44 @@ describe('PendingPanel', () => {
     expect(fold).toContain('height: 26px')
   })
 
+  it('ties a keep, a revert and a block decision to the session the panel is VIEWING', () => {
+    // One entry can carry several sessions: `sessionId` is the session that most recently
+    // TOUCHED the file, while the panel is showing the current session's list. The decision
+    // the reader makes is theirs, so it belongs to the viewer — and it has to, or the undo
+    // that follows would land on a stack the viewer cannot reach.
+    act(() => { setCommentModeEnabled(false) })
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const S2 = 'session-toucher' as SessionId
+    const file = entry({
+      id: 'entry-shared', path: '/repo/shared.txt', sessionId: S2,
+      sessionIds: [S1, S2], oldText: 'a\n', newText: 'b\n',
+    })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('shared.txt'))
+
+    // The detail toolbar. A whole-file keep asks its remove-or-keep question first (the
+    // panel's confirm-first default), and the answer rides the same keep call.
+    fireEvent.click(document.querySelector('[data-diff-keep]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-file-confirm-keep]') as HTMLElement)
+    expect(props.onKeep).toHaveBeenLastCalledWith(S1, file.id, true)
+    fireEvent.click(document.querySelector('[data-diff-revert]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-file-confirm-keep]') as HTMLElement)
+    expect(props.onRevert).toHaveBeenLastCalledWith(S1, file.id, true)
+
+    // A block decision from the split view's own frame (the two-column body).
+    const rows = [...document.querySelectorAll('[data-diff-split-row]')] as HTMLElement[]
+    expect(rows.length).toBeGreaterThan(0)
+    fireEvent.mouseEnter(rows[0]!)
+    const blockKeep = document.querySelector('[data-diff-block-keep]') as HTMLElement
+    expect(blockKeep).not.toBeNull()
+    fireEvent.click(blockKeep)
+    const confirmRemove = document.querySelector('[data-diff-confirm-remove]') as HTMLElement
+    if (confirmRemove !== null) fireEvent.click(confirmRemove)
+    expect(props.onBlockKeep).toHaveBeenLastCalledWith(S1, file.id, expect.anything(), expect.anything())
+  })
+
   it('opens a row\'s actions on right-click, and names both ways to keep and to put back', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
@@ -1022,38 +1470,26 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-selection-divider]')).toBeNull()
   })
 
-  it('takes a file\'s comments with it when the file leaves the list', () => {
-    // A thread hangs on the rows of one file's diff. Keeping or reverting that file out of the list
-    // leaves nothing for it to hang on, so its comments go with it — and the same path coming back
-    // later in this visit starts with none.
+  it('lists only the comments whose file is still in the list', () => {
+    // A comment hangs on the rows of one file, and the HOST drops it with its entry — that is the
+    // rule that keeps a comment from outliving what it annotates (see `comments.ts`). What is left
+    // for this pane is to draw what the read carries: a record naming an entry the list no longer
+    // holds has no group to sit under, and the tab counts what it would show, so nothing to show
+    // means no number beside its name.
     act(() => { setCommentModeEnabled(true) })
     const file = entry({ id: 'entry-kept', path: '/repo/kept.txt' })
-    rememberDiscussions(S1, {
-      [file.id]: [{
-        id: 'd-kept',
-        anchor: { start: 0, end: 0, startLine: 1, endLine: 1 },
-        collapsed: false,
-        draft: '',
-        messages: [{ role: 'user', text: '这条会跟着文件一起消失' }],
-      }],
-    } as unknown as Parameters<typeof rememberDiscussions>[1])
-    const view = render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    const kept = comment({ id: 'd-kept', entryId: file.id, text: '这条会跟着文件一起消失' })
+    const view = render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set(), comments: [kept] })} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     expect(document.querySelector('[data-diff-list-tab="comments"]')?.textContent).toBe('panel.tab.comments1')
 
-    // An empty list that has not been READ says nothing: an unread panel — and a connection reset,
-    // which publishes the same shape — must not be taken for "the reader finished with these files".
-    view.rerender(<PendingPanel {...panelProps({ read: false, files: [], busy: new Set() })} />)
-    expect(rememberedDiscussions(S1)[file.id]?.length).toBe(1)
-
-    // The file leaves the list: its comments go with it, out of the memory and out of the tab (which
-    // counts what it would show, so nothing left to show means no number beside its name).
-    view.rerender(<PendingPanel {...panelProps({ read: true, files: [], busy: new Set() })} />)
-    expect(rememberedDiscussions(S1)[file.id]).toBeUndefined()
+    // The file leaves the list. A record that still names it is not drawn anywhere: the file IS the
+    // group, and a comment with no file has nowhere to hang.
+    view.rerender(<PendingPanel {...panelProps({ read: true, files: [], busy: new Set(), comments: [kept] })} />)
     expect(document.querySelector('[data-diff-list-tab="comments"] [data-diff-list-count]')).toBeNull()
 
-    // The same path becoming pending again in this visit starts clean: the comments went with the
-    // entry, so there is nothing left to re-hang on the new rows.
+    // …and the same path becoming pending again starts clean, because the host's read carries no
+    // comment for it any more.
     view.rerender(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
     expect(document.querySelector('[data-diff-list-tab="comments"] [data-diff-list-count]')).toBeNull()
   })
@@ -1107,21 +1543,31 @@ describe('PendingPanel', () => {
 
   it('lists the comments the open files carry in a second tab, and jumps to one', async () => {
     // The list pane has two tabs: the pending files, and every comment the files in the list carry.
-    // A comment is a block of rows in one file, so its item is the rows it hangs on, the first
-    // sentence of what was asked, and — when the code under it has moved on — that it is outdated.
-    // The item is a plain button rather than a selectable row: what it opens is the file, with the
-    // comment landed on, so the item itself carries no selected state.
+    // A comment is a block of rows in one file, so its item is the lines it hangs on, the first
+    // sentence of what the reader wrote, and — when the code under it has moved on — that it is
+    // outdated. The item is a plain button rather than a selectable row: what it opens is the file,
+    // with the comment landed on, so the item itself carries no selected state.
     act(() => { setCommentModeEnabled(true) })
     const file = entry({ id: 'entry-rows', path: '/repo/rows.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
-    rememberDiscussions(S1, {
-      [file.id]: [
-        { id: 'd-eight', anchor: { start: 7, end: 7, startLine: 8, endLine: 8 }, collapsed: false, draft: '', lost: false, messages: [{ role: 'user', text: '这一行为什么要改？后面这句不该进标题。' }] },
-        { id: 'd-lost', anchor: { start: 7, end: 7, startLine: 8, endLine: 8 }, collapsed: false, draft: '', lost: true, quote: 'const gone = 1', quoteLines: [{ old: 8, new: 8, side: 'add' }], messages: [{ role: 'user', text: '这段代码已经不在了' }] },
-        { id: 'd-draft', anchor: { start: 6, end: 7, startLine: 7, endLine: 8 }, collapsed: false, draft: '还没发送的内容。后面的句子不算。', lost: false, messages: [] },
-        { id: 'd-blank', anchor: { start: 7, end: 7, startLine: 8, endLine: 8 }, collapsed: false, draft: '', lost: false, messages: [] },
+    const props = panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [
+        comment({ id: 'd-eight', entryId: file.id, text: '这一行为什么要改？后面这句不该进标题。', anchor: { startLine: 8, endLine: 8 } }),
+        // The code it quoted is nowhere in the file — but the list draws no rows and cannot re-anchor,
+        // so whether the comment is still about anything is the DETAIL's verdict, not this pane's.
+        // The record is here to say that such a comment is listed exactly like any other.
+        comment({
+          id: 'd-lost', entryId: file.id, text: '这段代码已经不在了', anchor: { startLine: 8, endLine: 8 },
+          quote: 'const gone = 1', quoteLines: [{ old: 8, new: 8, kind: 'add' }],
+        }),
+        comment({ id: 'd-range', entryId: file.id, text: '这两行一起看。后面的句子不算。', anchor: { startLine: 7, endLine: 8 } }),
+        // A record the host holds with no text: the panel never writes one, but a comment from
+        // somewhere else can be one, and the item must not read as a blank line.
+        comment({ id: 'd-blank', entryId: file.id, text: '', anchor: { startLine: 8, endLine: 8 } }),
       ],
-    } as unknown as Parameters<typeof rememberDiscussions>[1])
-    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
@@ -1142,8 +1588,12 @@ describe('PendingPanel', () => {
     // A range is the two numbers and the dash between them, in the same brackets.
     expect(items[2]!.querySelector('[data-diff-comment-label]')?.textContent).toBe('[7-8]')
     expect(items[0]!.textContent).not.toContain('rows.txt')
-    expect(items[0]!.querySelector('[data-diff-comment-lost]')).toBeNull()
-    expect(items[1]!.querySelector('[data-diff-comment-lost]')).not.toBeNull()
+    // No item is marked as outdated, and none could be: the list has no row model to re-anchor
+    // against, so it never claims a comment's code is gone. What it shows about a comment is its
+    // words and the lines it names — including for one whose quote has left the file.
+    expect(document.querySelector('[data-diff-comment-lost]')).toBeNull()
+    expect(items[1]!.textContent).toContain('这段代码已经不在了')
+    expect(items[1]!.querySelector('[data-diff-comment-label]')?.textContent).toBe('[8]')
     // Where it sits and what was asked are the row's one line: both live in the same flex row, so nothing
     // stacks a title under a reference any more — and the title comes first, with the line numbers last,
     // which is what puts them against the row's right edge.
@@ -1154,9 +1604,8 @@ describe('PendingPanel', () => {
     expect(row.querySelector('[data-diff-comment-title]')?.parentElement).toBe(row)
     expect(items[0]!.textContent).toContain('这一行为什么要改？')
     expect(items[0]!.textContent).not.toContain('后面这句')
-    // A thread that has not been sent yet has no turn to quote: its draft is what the item shows, cut
-    // at its own first full stop like any other title.
-    expect(items[2]!.textContent).toContain('还没发送的内容。')
+    // The title is the annotation's first sentence, cut at its own full stop like any other.
+    expect(items[2]!.textContent).toContain('这两行一起看。')
     expect(items[2]!.textContent).not.toContain('后面的句子')
     // …and a comment box placed and left empty has nothing of the reader's to quote, so the item says
     // what that box is asking for — its own placeholder — and wears the tone a placeholder wears, so it
@@ -1180,9 +1629,9 @@ describe('PendingPanel', () => {
     expect(items[0]!.getAttribute('role')).toBe('button')
     // The items wear the file rows' own box, so the two lists' text shares a column.
     const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
-    const comment = /^\.commentRow \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
-    expect(comment).toContain('padding: 6px 8px')
-    expect(comment).toContain('border-radius: 10px')
+    const rowRule = /^\.commentRow \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
+    expect(rowRule).toContain('padding: 6px 8px')
+    expect(rowRule).toContain('border-radius: 10px')
     // The line numbers never shrink and the first sentence is the only thing that gives way: the row is
     // one line even when the column is narrow. Titles read from the left, the numbers sit on the right.
     const labelRule2 = /^\.commentLabel \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
@@ -1216,15 +1665,388 @@ describe('PendingPanel', () => {
     act(() => { items[0]!.focus() })
     expect(screen.queryByRole('tooltip')).toBeNull()
 
-    // Clicking one lands on the comment the way a jump to a change block lands: the row is left the
-    // configured lead rows below the code view's top edge. (The code view needs its scroll range:
-    // jsdom has none, so the landing would clamp to zero.)
+    // Clicking one lands on the comment's own BOX, not on the row it names: the box hangs below the
+    // last row of the comment's range, so its top edge is the end of that row. The panel's height
+    // table carries the rows the block reserves for itself in that row's entry
+    // (`discussionRowExtras`), which is why the landing effect takes them back out again
+    // (`offsetOf(row + 1) - reservedRows * THREAD_ROW_PX`): what is left is the code above the box.
+    // The configured lead rows then come off that. (The code view needs its scroll range: jsdom has
+    // none, so the landing would clamp to zero.)
     const restore = stubCodeScroll()
     try {
       fireEvent.click(items[0]!)
       const body = document.querySelector('[data-diff-body]') as HTMLElement
-      // A file created whole is one row a line, so the row the comment names is its line less one.
-      expect(body.scrollTop).toBe((8 - 1 - navLeadRows()) * diffLineHeight())
+      // The charge the table took for the blocks, as the panel drew it: the space elements ARE that
+      // charge, which is the only way to read it here — the height table itself is not in the DOM.
+      // All four comments end on line 8, so all four hang under that one row.
+      const spaces = [...document.querySelectorAll('[data-diff-discussion-space]')] as HTMLElement[]
+      expect(spaces).toHaveLength(4)
+      const reservedPx = spaces.reduce((px, node) => px + (Number.parseFloat(node.style.height) || 0), 0)
+      expect(reservedPx).toBeGreaterThan(0)
+      // A file created whole is one row a line and never wraps, so the row the range ends in (line 8,
+      // row 7) ends eight rows of code down — `offsetOf(row + 1)` — plus that charge; taking the
+      // charge back out leaves the box's top edge, and the lead rows come off it.
+      const offsetOfRowEnd = 8 * diffLineHeight() + reservedPx
+      const boxTop = offsetOfRowEnd - reservedPx
+      expect(body.scrollTop).toBe(boxTop - navLeadRows() * diffLineHeight())
+    } finally {
+      restore()
+    }
+  })
+
+  it('names the line a comment is on now, and the stored one for a file it has not opened', () => {
+    // The report: one comment read `[382]` in this list while its own card in the code view read 378.
+    // The stored anchor names where the comment was WRITTEN; the HOST resolves each comment's quote
+    // against the entry's current content and ships the figure on the same read as the records, so
+    // both panes draw one number — and the item of a file this panel never opened has it too. A
+    // comment the host could not resolve (its quote is gone) is absent from the map, and its item
+    // keeps the record's own numbers, which is the fallback the whole pane is built on.
+    act(() => { setCommentModeEnabled(true) })
+    // The open file sorts first, because the panel opens on its first file: the other one is then
+    // never shown, which is the whole point of the second half of this test.
+    const open = entry({ id: 'entry-resolved', path: '/repo/opened.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    const closed = entry({ id: 'entry-closed', path: '/repo/zzz-unopened.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    const props = panelProps({
+      read: true,
+      files: [open, closed],
+      busy: new Set(),
+      comments: [
+        // The row on line 8 reads 'h' now, and the line this comment quoted ('c') is on line 3: the
+        // host resolved it to line 3, so both panes name line 3.
+        comment({ id: 'd-moved', entryId: open.id, text: '这行为什么要改？', anchor: { startLine: 8, endLine: 8 }, quote: 'c' }),
+        // The same shape against a file nobody opened: the host's read carries the figure anyway.
+        comment({ id: 'd-unresolved', entryId: closed.id, text: '这一处也一样。', anchor: { startLine: 8, endLine: 8 }, quote: 'c' }),
+        // …and a comment whose quote is nowhere any more: the host said nothing about it, so its item
+        // falls back to the line the record was written on.
+        comment({ id: 'd-gone', entryId: closed.id, text: '这段代码已经不在了。', anchor: { startLine: 8, endLine: 8 }, quote: 'nowhere' }),
+      ],
+      commentLines: {
+        'd-moved': { start: 3, end: 3 },
+        'd-unresolved': { start: 3, end: 3 },
+      },
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // The card prints the host's figure, and the list prints the same one.
+    const card = document.querySelector('[data-diff-discussion]') as HTMLElement
+    expect(card.textContent).toContain('/repo/opened.txt:3')
+
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    const labelOf = (id: string): string | undefined =>
+      document.querySelector(`[data-diff-comment-link="${id}"] [data-diff-comment-label]`)?.textContent ?? undefined
+    expect(labelOf('d-moved')).toBe('[3]')
+    // …and a file this panel has never opened carries the host's figure just the same.
+    expect(labelOf('d-unresolved')).toBe('[3]')
+    // …while a comment the host could not resolve (its quote is gone) keeps what its record holds.
+    expect(labelOf('d-gone')).toBe('[8]')
+
+    // The jump follows that number: the box hangs below the row the range ends in, so a click lands
+    // with line 3's row (row 2) ended above it and the lead rows taken off — the same landing the
+    // card's own line gets, which is what makes the list's number the place the reader arrives.
+    const restore = stubCodeScroll()
+    try {
+      fireEvent.click(document.querySelector('[data-diff-comment-link="d-moved"]') as HTMLElement)
+      const body = document.querySelector('[data-diff-body]') as HTMLElement
+      expect(body.scrollTop).toBe(3 * diffLineHeight() - navLeadRows() * diffLineHeight())
+    } finally {
+      restore()
+    }
+  })
+
+  it('draws one figure for a comment in the list and in its own card, from the host', () => {
+    // The point of resolving in the host: the list's label, the card's chip and the item's jump
+    // target are one number, because they are one map. The figure here DISAGREES with what the
+    // pane's own remap would say (the quote 'c' sits on line 3 of the rows it draws): a card that
+    // still printed its own remap would print 3, and the two panes would drift apart again the
+    // moment the two rules differed — which is exactly how one comment came to read `[382]` in the
+    // list and 378 in the code view.
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-chip', path: '/repo/chip.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [comment({ id: 'd-chip', entryId: file.id, text: '这行为什么要改？', anchor: { startLine: 8, endLine: 8 }, quote: 'c' })],
+      commentLines: { 'd-chip': { start: 6, end: 6 } },
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    // The box's own chip wears the host's figure…
+    expect((document.querySelector('[data-diff-discussion]') as HTMLElement).textContent)
+      .toContain('/repo/chip.txt:6')
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    // …and the list draws the very same one, so one comment cannot read two different lines.
+    expect(document.querySelector('[data-diff-comment-link="d-chip"] [data-diff-comment-label]')?.textContent)
+      .toBe('[6]')
+
+    const restore = stubCodeScroll()
+    try {
+      fireEvent.click(document.querySelector('[data-diff-comment-link="d-chip"]') as HTMLElement)
+      // The jump carries that figure (it is the item's own end line, see `commentGroups`), while
+      // WHERE the box is drawn stays the pane's own business: the block hangs under the row the
+      // quote resolved to in the row model — layout, not a number to print.
+      const body = document.querySelector('[data-diff-body]') as HTMLElement
+      expect(body.scrollTop).toBe(3 * diffLineHeight() - navLeadRows() * diffLineHeight())
+    } finally {
+      restore()
+    }
+  })
+
+  it('lands a stale comment jump on the box\'s own top when the jump is what opens the file', () => {
+    // The user's case, and the one no pane could resolve on its own: nothing has opened the file,
+    // and the item still has to name the right line. The host resolved the quote, so the figure is
+    // 378 — and the jump is what opens the file. The box the reader came for hangs under line 378's
+    // row, so a jump that lands 382's row would leave the box four rows ABOVE the viewport top:
+    // that is the "clipped off at the top" half of the report.
+    act(() => { setCommentModeEnabled(true) })
+    const other = entry({ id: 'entry-other', path: '/repo/other.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\n' })
+    const file = staleAnchorFile('entry-stale')
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [other, file],
+      busy: new Set(),
+      comments: [staleAnchorComment(file.id)],
+      commentLines: { 'd-stale': { start: STALE_ANCHOR.quotedLine, end: STALE_ANCHOR.quotedLine } },
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    // The panel opens on its first file, so the comment's file is NOT the open one at click time.
+    expect(shownPath()).toBe('/repo/other.txt')
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    const item = document.querySelector('[data-diff-comment-link="d-stale"]') as HTMLElement
+    // The file has never been opened here, and the item names the line the host resolved anyway.
+    expect(item.querySelector('[data-diff-comment-label]')?.textContent).toBe(`[${STALE_ANCHOR.quotedLine}]`)
+
+    const restore = stubCodeScroll(20000, 800)
+    try {
+      fireEvent.click(item)
+      // The jump is what opened the file…
+      expect(shownPath()).toBe('/repo/stale.txt')
+      const body = codeBody()
+      const { boxTop, boxHeight } = staleAnchorBox()
+      // …and it left the box's own top edge the configured lead rows down the view, the way every
+      // other jump leaves that much above its target.
+      expect(body.scrollTop).toBe(boxTop - navLeadRows() * diffLineHeight())
+      // The whole box is inside the viewport the write landed in. jsdom lays nothing out, so the
+      // viewport is the scroll box's own [scrollTop, scrollTop + clientHeight], and the card's box is
+      // that top edge plus the rows it reserves — the panel reserves exactly what the thread draws.
+      expect(boxTop).toBeGreaterThanOrEqual(body.scrollTop)
+      expect(boxTop + boxHeight).toBeLessThanOrEqual(body.scrollTop + body.clientHeight)
+    } finally {
+      restore()
+    }
+  })
+
+  it('lands a stale comment jump on the box\'s own top when the file is already open', () => {
+    // The other half of the report. The read carries the host's answer — 378, not 382 — so the item
+    // names 378. But 378 is also the number the four rows the old text carries read, through
+    // `newLine ?? oldLine` — 378, 379, 380, 381 — so looking that number up in the row model finds
+    // the first of THOSE rows and leaves the view four rows above the box the reader came for.
+    act(() => { setCommentModeEnabled(true) })
+    const file = staleAnchorFile('entry-stale-open')
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [staleAnchorComment(file.id)],
+      commentLines: { 'd-stale': { start: STALE_ANCHOR.quotedLine, end: STALE_ANCHOR.quotedLine } },
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(shownPath()).toBe('/repo/stale.txt')
+    // The card prints the host's figure for where the comment is now, and its own header says 378.
+    expect((document.querySelector('[data-diff-discussion]') as HTMLElement).textContent)
+      .toContain(`/repo/stale.txt:${STALE_ANCHOR.quotedLine}`)
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    const item = document.querySelector('[data-diff-comment-link="d-stale"]') as HTMLElement
+    // The read carried that figure, so the item draws it too.
+    expect(item.querySelector('[data-diff-comment-label]')?.textContent).toBe(`[${STALE_ANCHOR.quotedLine}]`)
+
+    const restore = stubCodeScroll(20000, 800)
+    try {
+      fireEvent.click(item)
+      const body = codeBody()
+      const { boxTop, boxHeight } = staleAnchorBox()
+      expect(body.scrollTop).toBe(boxTop - navLeadRows() * diffLineHeight())
+      expect(boxTop).toBeGreaterThanOrEqual(body.scrollTop)
+      expect(boxTop + boxHeight).toBeLessThanOrEqual(body.scrollTop + body.clientHeight)
+    } finally {
+      restore()
+    }
+  })
+
+  it('keeps a comment on its stored line when its code is gone and a look-alike sits far below', () => {
+    // The user's second report, and the half only this pane can get wrong: the declaration the comment
+    // was written on is GONE, and an identically-shaped one 74 lines below matches the recorded ±1
+    // context exactly — so the pane's own re-anchor used to follow that one and hang the card 74 rows
+    // down, while the item in the list (and the host's figure) named the stored line. A match that far
+    // is another place in the file, not this code having moved: the card stays on the lines the record
+    // names, says it is outdated, and the jump lands on IT.
+    act(() => { setCommentModeEnabled(true) })
+    const file = lookalikeFile('entry-lookalike')
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [lookalikeComment(file.id)],
+      // The host resolved nothing: the declaration the comment quotes is not in the content any more,
+      // so every caller falls back to the line the record was written on (see the resolved-lines test
+      // in `diff-approval.spec.ts`, which pins the host's half of this same case).
+      commentLines: {},
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const card = document.querySelector('[data-diff-discussion]') as HTMLElement
+    // The card is at the stored line, wearing the outdated mark, and its chip names that line — not
+    // the look-alike's.
+    expect(card.hasAttribute('data-lost')).toBe(true)
+    expect(card.textContent).toContain(`/repo/lookalike.txt:${LOOKALIKE.storedLine}`)
+    expect(card.textContent).not.toContain(`/repo/lookalike.txt:${LOOKALIKE.twinLine}`)
+    // It keeps the code it was written about for the reader, which is what an outdated thread says.
+    expect(card.textContent).toContain(LOOKALIKE.quote)
+
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    const item = document.querySelector('[data-diff-comment-link="d-lookalike"]') as HTMLElement
+    expect(item.querySelector('[data-diff-comment-label]')?.textContent).toBe(`[${LOOKALIKE.storedLine}]`)
+
+    const restore = stubCodeScroll(20000, 800)
+    try {
+      fireEvent.click(item)
+      // The jump lands on that card's own top — the one the stored line's row ends in — rather than
+      // on the box 74 rows down, which is where following the look-alike put it.
+      const body = codeBody()
+      const { boxTop, boxHeight } = lookalikeBox()
+      expect(body.scrollTop).toBe(boxTop - navLeadRows() * diffLineHeight())
+      expect(boxTop).toBeGreaterThanOrEqual(body.scrollTop)
+      expect(boxTop + boxHeight).toBeLessThanOrEqual(body.scrollTop + body.clientHeight)
+    } finally {
+      restore()
+    }
+  })
+
+  it('leaves no flash frame on a jump that lands a comment\'s own box', () => {
+    // The report after the landing was fixed: the jump went to the right place, but a blinking frame
+    // appeared at the TOP EDGE of the code view. That frame is the block flash the landing used to
+    // raise — the whole change block's box, whose top sits above the viewport, so its top edge is all
+    // the reader ever sees of it. A jump that means "here is the comment" draws no frame at all: the
+    // box it lands on is the thing the reader asked for, and it is on screen already.
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-quiet-jump', path: '/repo/quiet.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [comment({ id: 'd-quiet', entryId: file.id, text: '这一行为什么要改？', anchor: { startLine: 8, endLine: 8 } })],
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    // Opening flashes the first change — a change-block jump's own frame, on screen when the reader
+    // goes to the comments tab, so the assertion after the jump is about that frame going away too.
+    expect(document.querySelector('[data-diff-block-flash]')).not.toBeNull()
+
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    const restore = stubCodeScroll()
+    try {
+      fireEvent.click(document.querySelector('[data-diff-comment-link="d-quiet"]') as HTMLElement)
+      // The landing itself is unchanged: the box's own top edge, a lead below the viewport top.
+      expect(codeBody().scrollTop).toBe(8 * diffLineHeight() - navLeadRows() * diffLineHeight())
+      // …and nothing frames the code view: neither a new flash nor the one the open left behind.
+      expect(document.querySelector('[data-diff-block-flash]')).toBeNull()
+      // A change-block jump still flashes — that frame IS the "you are here", and it is untouched.
+      fireEvent.click(screen.getByLabelText('action.nextDiff'))
+      expect(document.querySelector('[data-diff-block-flash]')).not.toBeNull()
+    } finally {
+      restore()
+    }
+  })
+
+  it('lands a stacked comment jump on the card the jump named, not on the first card of the row', () => {
+    // The report: two comment boxes hang off the SAME line, and jumping to the second one landed the
+    // TOP of the stack — the first box — so the reader could not tell the two apart by where the jump
+    // went. The landing took the whole row's charge back off `offsetOf(row + 1)`
+    // (`discussionExtras`, the sum of every block on that row), which is the base of the row's stack
+    // and therefore the first card's top edge whatever card was asked for.
+    //
+    // The boxes are drawn in the order the threads are held in — one `[data-diff-discussion-space]`
+    // per card, in the row stream, each as tall as `discussionRows(discussion) * THREAD_ROW_PX` — so
+    // the card the jump was asked for starts at that base plus the reserved height of the boxes
+    // before it in the same row's stack. Those heights are read off the DOM here (the space elements
+    // ARE the row's charge — the height table is not in the DOM), so the expectation is the panel's
+    // own arithmetic rather than a figure copied from a run.
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-stack', path: '/repo/stack.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [
+        comment({ id: 'd-first', entryId: file.id, text: '这一行是第一个框。', anchor: { startLine: 8, endLine: 8 } }),
+        comment({ id: 'd-second', entryId: file.id, text: '这一行是第二个框。', anchor: { startLine: 8, endLine: 8 } }),
+      ],
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    // Both threads end on line 8 — row 7 — so both boxes hang under that one row, one below the other.
+    const spaces = [...document.querySelectorAll('[data-diff-discussion-space]')] as HTMLElement[]
+    expect(spaces).toHaveLength(2)
+    const cardOf = (id: string): HTMLElement =>
+      document.querySelector(`[data-diff-discussion-id="${id}"]`) as HTMLElement
+    expect(cardOf('d-first')).not.toBeNull()
+    expect(cardOf('d-second')).not.toBeNull()
+    // What each box reserves, as the row stream draws it.
+    const charged = spaces.map(node => Number.parseFloat(node.style.height) || 0)
+    const firstPx = charged[0]!
+    const reservedPx = charged.reduce((px, height) => px + height, 0)
+    // The row's own end, then the two boxes below it: the whole charge back off leaves the stack's
+    // base (the first card's top edge), and the lead rows come off whatever card was asked for.
+    const rowEnd = 8 * diffLineHeight() + reservedPx
+    const stackBase = rowEnd - reservedPx
+    const lead = navLeadRows() * diffLineHeight()
+    expect(firstPx).toBeGreaterThan(0)
+    expect(firstPx).toBeLessThan(reservedPx)
+    // The card each jump claims is the one it lands on, by its own id.
+    const landedCard = (): string => {
+      const top = codeBody().scrollTop + lead
+      if (top === stackBase) return cardOf('d-first').dataset.diffDiscussionId!
+      if (top === stackBase + firstPx) return cardOf('d-second').dataset.diffDiscussionId!
+      return `nothing: ${top}`
+    }
+
+    const restore = stubCodeScroll(20000, 800)
+    try {
+      // The first thread's own jump still lands the first box — the behaviour that must not move.
+      fireEvent.click(document.querySelector('[data-diff-comment-link="d-first"]') as HTMLElement)
+      expect(codeBody().scrollTop).toBe(stackBase - lead)
+      expect(landedCard()).toBe('d-first')
+      // …and the second thread's jump lands the SECOND box, one first-box down the stack.
+      fireEvent.click(document.querySelector('[data-diff-comment-link="d-second"]') as HTMLElement)
+      expect(codeBody().scrollTop).toBe(stackBase + firstPx - lead)
+      expect(landedCard()).toBe('d-second')
+    } finally {
+      restore()
+    }
+  })
+
+  it('leaves no flash frame on a comment jump in the side-by-side view either', () => {
+    // The same jump, the other code view: it owns its own scroller AND its own flash key, so the
+    // quiet landing has to hold there too — the frame it would draw is the pair's whole block, whose
+    // top edge is off-screen for exactly the same reason.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-quiet-split', path: '/repo/quiet-split.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [comment({ id: 'd-quiet-split', entryId: file.id, text: '这一行', anchor: { startLine: 8, endLine: 8 } })],
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(document.querySelector('[data-diff-split-row]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-block-flash]')).not.toBeNull()
+
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    const restore = stubCodeScroll()
+    try {
+      fireEvent.click(document.querySelector('[data-diff-comment-link="d-quiet-split"]') as HTMLElement)
+      expect(codeBody().scrollTop).toBe(8 * diffLineHeight() - navLeadRows() * diffLineHeight())
+      expect(document.querySelector('[data-diff-block-flash]')).toBeNull()
     } finally {
       restore()
     }
@@ -1238,22 +2060,20 @@ describe('PendingPanel', () => {
     const alpha = entry({ id: 'entry-grouped-a', path: '/repo/alpha.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
     const beta = entry({ id: 'entry-grouped-b', path: '/repo/deep/beta.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
     const quiet = entry({ id: 'entry-grouped-c', path: '/repo/gamma.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
-    const thread = (id: string, line: number, text: string): unknown => ({
-      id,
-      anchor: { start: line - 1, end: line - 1, startLine: line, endLine: line },
-      collapsed: false,
-      draft: '',
-      lost: false,
-      messages: [{ role: 'user', text }],
-    })
-    rememberDiscussions(S1, {
-      [alpha.id]: [thread('d-alpha-one', 1, '第一处'), thread('d-alpha-two', 2, '第二处')],
-      [beta.id]: [thread('d-beta-one', 1, '另一份里的一处')],
-      [quiet.id]: [],
-    } as unknown as Parameters<typeof rememberDiscussions>[1])
+    const thread = (entryId: string, id: string, line: number, text: string): CommentRecord =>
+      comment({ id, entryId, text, anchor: { startLine: line, endLine: line } })
     // Handed over in the order beta, quiet, alpha: the groups follow the list's own order (by displayed
     // name), which is the order the file rows are in.
-    render(<PendingPanel {...panelProps({ read: true, files: [beta, quiet, alpha], busy: new Set() })} />)
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [beta, quiet, alpha],
+      busy: new Set(),
+      comments: [
+        thread(alpha.id, 'd-alpha-one', 1, '第一处'),
+        thread(alpha.id, 'd-alpha-two', 2, '第二处'),
+        thread(beta.id, 'd-beta-one', 1, '另一份里的一处'),
+      ],
+    })} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
 
@@ -1289,18 +2109,19 @@ describe('PendingPanel', () => {
   it('ends a comment from the list, and takes its block with it', () => {
     // The list is not a read-only index: the one action a thread has (结束评论, the same row the
     // block's own ⋯ menu offers — see `discussionMenuItems`) is on the item's right-click, where the
-    // file rows keep theirs. The threads belong to the file detail, which is one mount at a time, so
-    // the list writes the page's memory instead of reaching into that state, and the detail reads it
-    // back: the block has to go while the reader is still looking at the file.
+    // file rows keep theirs. A comment belongs to the host, so the list asks the host to drop it — one
+    // record, one action — and the read that follows is what takes the block out of the open file.
     act(() => { setCommentModeEnabled(true) })
     const file = entry({ id: 'entry-end', path: '/repo/end.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\n' })
-    rememberDiscussions(S1, {
-      [file.id]: [
-        { id: 'd-one', anchor: { start: 0, end: 0, startLine: 1, endLine: 1 }, collapsed: false, draft: '', lost: false, messages: [{ role: 'user', text: '第一处' }] },
-        { id: 'd-two', anchor: { start: 1, end: 1, startLine: 2, endLine: 2 }, collapsed: false, draft: '', lost: false, messages: [{ role: 'user', text: '第二处' }] },
+    const props = panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [
+        comment({ id: 'd-one', entryId: file.id, text: '第一处', anchor: { startLine: 1, endLine: 1 } }),
+        comment({ id: 'd-two', entryId: file.id, text: '第二处', anchor: { startLine: 2, endLine: 2 } }),
       ],
-    } as unknown as Parameters<typeof rememberDiscussions>[1])
-    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
@@ -1316,10 +2137,10 @@ describe('PendingPanel', () => {
     expect(menu.map(item => item.textContent)).toEqual(['action.discussionEnd'])
 
     fireEvent.click(menu[0]!)
-    // That one item goes, the thread leaves the page's memory, and the block left the open file with
-    // it — the detail adopted the change instead of waiting for the file to be reopened.
+    // The one action went to the host, and the read that follows carries only the other comment: that
+    // one item goes, and the block leaves the open file with it.
+    expect(props.onCommentRemove).toHaveBeenCalledWith(S1, 'd-two')
     expect([...document.querySelectorAll('[data-diff-comment-link]')].map(item => item.getAttribute('data-diff-comment-link'))).toEqual(['d-one'])
-    expect(rememberedDiscussions(S1)[file.id]?.map(entry => entry.id)).toEqual(['d-one'])
     expect(document.querySelectorAll('[data-diff-discussion]').length).toBe(1)
     expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
   })
@@ -2241,12 +3062,12 @@ describe('PendingPanel', () => {
     expect(slack).toContain('min-height: 0')
   })
 
-  it('points a comment at the skill when the host can deliver it', () => {
+  it('points a comment at the skill when the host can deliver it', async () => {
     // With the capability the prompt is the marker, the question and a pointer: the rules
     // live in the skill (and in the summary its catalogue shows), so a long rule stops
     // riding every comment. Without it the same rules ride the message — which is why the
     // panel asks the host instead of guessing.
-    const askPrompt = (snapshot: PendingDiffSnapshot): string => {
+    const askPrompt = async (snapshot: Partial<PendingDiffSnapshot> & { files: PendingFileDiff[] }): Promise<string> => {
       const props = panelProps(snapshot)
       const view = render(<PendingPanel {...props} />)
       fireEvent.click(screen.getByLabelText('panel.aria'))
@@ -2264,24 +3085,28 @@ describe('PendingPanel', () => {
       act(() => { document.dispatchEvent(new Event('selectionchange')) })
       fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
       fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
-      fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
-      const prompt = (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]?.[1] ?? ''
+      // The ask is a round trip to the host, which is what the panel waits on before it can be said
+      // to have asked anything.
+      await act(async () => {
+        fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+      })
+      const prompt = askedPrompts(props)[0] ?? ''
       view.unmount()
       return prompt
     }
     const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
 
-    const withSkill = askPrompt({ read: true, files: [multi], busy: new Set(), commentSkill: 'dsh-diff-approval-comment' })
+    const withSkill = await askPrompt({ read: true, files: [multi], busy: new Set(), commentSkill: 'dsh-diff-approval-comment' })
     expect(withSkill.startsWith('discussion.marker (/repo/m.txt:4)\nwhy?')).toBe(true)
     // The stub translator returns the key plus its parameters, so the pointer shape is
     // recognisable — and the long rules are NOT in the message.
     expect(withSkill).toContain('discussion.promptRuleSkill {"skill":"dsh-diff-approval-comment"}')
     expect(withSkill.endsWith('discussion.promptRule')).toBe(false)
 
-    // The second case asks on a fresh page: threads now outlive a mount (see the page's
-    // memory), and what is under test here is the prompt's shape rather than persistence.
+    // The second case asks on a fresh page: what is under test here is the prompt's shape, and the
+    // page's own memory (the draft, the fold, a measured body) would only be noise.
     resetPanelMemory()
-    const withoutSkill = askPrompt({ read: true, files: [multi], busy: new Set() })
+    const withoutSkill = await askPrompt({ read: true, files: [multi], busy: new Set() })
     expect(withoutSkill.endsWith('discussion.promptRule')).toBe(true)
     expect(withoutSkill).not.toContain('promptRuleSkill')
   })
@@ -5441,57 +6266,53 @@ describe('PendingPanel', () => {
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
     expect(document.querySelector('[data-diff-selection-actions]')).toBeNull()
 
-    // Enter in the input sends the comment, like the composer's own field.
+    // Enter in the input sends the comment, like the composer's own field. The annotation is written
+    // down FIRST and the question asked inside it: a comment is the host's record, and a question can
+    // only be asked of one the host holds.
     fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
-    fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    await act(async () => {
+      fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    })
     expect(props.onPasteReference).not.toHaveBeenCalled()
-    // The prompt carries the marker and the range, so the answer can be matched
-    // back to this block even while the session is doing other things.
-    const asked = (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]
-    expect(asked?.[0]).toBe('session-1')
-    expect(asked?.[1].startsWith('discussion.marker (/repo/m.txt:4)\nwhy?')).toBe(true)
-    // The block stays open and says it is thinking, with no compose row left.
+    expect(addedCommentTexts(props)).toEqual(['why?'])
+    // The prompt carries the marker and the range, so the answer is the answer to THIS question.
+    expect(askedPrompts(props)[0]?.startsWith('discussion.marker (/repo/m.txt:4)\nwhy?')).toBe(true)
+    // The block says it is waiting, and it KEEPS its writing row: the reader may write on, and this
+    // thread's own button is the one thing that is refused while its answer is on its way.
     expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
-    expect(document.querySelector('[data-diff-discussion-input]')).toBeNull()
-
-    // The answer arrives through the watcher: it lands in the block, on the file
-    // the question was about, and the block grows to hold its wrapped lines. The
-    // prompt is in the transcript by then - that is what marks the turn as ours.
-    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
-    expect(listener).toBeDefined()
-    const prompt = { kind: 'user', text: asked?.[1] ?? '' }
-    act(() => {
-      listener!({ running: true, nodes: [prompt], partial: 'the answer', error: undefined })
-    })
-    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('the answer')
-    // …and while it is still being written the block says so, right under the text that has
-    // arrived: the note that said 思考中 is drawn only until the first token lands, so without this
-    // line the block would look finished while the rest of the answer is still coming.
-    const writing = document.querySelector('[data-diff-discussion-answering]')
-    expect(writing?.textContent).toContain('discussion.answering')
-    expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
-    expect(writing?.previousElementSibling).toBe(document.querySelector('[data-diff-discussion-reply]'))
-    // The line is a thread row of its own, and the block reserves it: the header, the question's
-    // bubble (a line and its chrome), the streamed answer, and the line that says more is coming.
-    const streamingBlock = document.querySelector('[data-diff-discussion]') as HTMLElement
-    expect(streamingBlock.style.height).toBe('110px')
-    act(() => {
-      listener!({ running: false, nodes: [prompt, { kind: 'assistant', text: 'the final answer' }], partial: '', error: undefined })
-    })
-    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('the final answer')
-    expect(document.querySelector('[data-diff-discussion-answering]')).toBeNull()
-    // The line's row comes off with it, and the writing row (two rows) returns for a follow-up —
-    // which is one row more than the line cost.
-    expect(Number.parseFloat(streamingBlock.style.height)).toBe(132)
-    // The answer settled into the thread, so the compose row is back for a
-    // follow-up: the conversation continues instead of ending with one answer.
-    expect(document.querySelector('[data-diff-discussion-user]')?.textContent).toBe('why?')
     expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
+    expect((document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement).disabled).toBe(true)
+
+    // The answer arrives on a later read, keyed by the question it answers, and lands in the block
+    // that asked. Once it is there the thread is live again.
+    answerComment(props, 'the final answer')
+    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('the final answer')
+    expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
+    expect((document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement).disabled).toBe(false)
+    expect(document.querySelector('[data-diff-discussion-user]')?.textContent).toBe('why?')
+
+    // A follow-up is a second question in the SAME comment: the conversation continues instead of
+    // ending with one answer, and no second comment is written. Its own words are part of the thread
+    // — a reply whose question nobody can read is not a conversation — and only the annotation is
+    // drawn once, because the first question IS the annotation.
     fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'and then?' } })
-    fireEvent.click(document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement)
-    expect(document.querySelectorAll('[data-diff-discussion-user]').length).toBe(2)
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement)
+    })
+    expect([...document.querySelectorAll('[data-diff-discussion-user]')].map(node => node.textContent))
+      .toEqual(['why?', 'and then?'])
     expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
-    expect((props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls.length).toBe(2)
+    expect(askedPrompts(props).length).toBe(2)
+    expect(props.onCommentAdd).toHaveBeenCalledTimes(1)
+    // The words that crossed the wire are the reader's own, not the prompt they were wrapped in.
+    const asks = (props.onCommentAsk as unknown as { mock: { calls: [SessionId, string, string, string][] } }).mock.calls
+    expect(asks[0]?.[3]).toBe('why?')
+    expect(asks[1]?.[3]).toBe('and then?')
+    expect(asks[1]?.[2]).toContain('discussion.marker (/repo/m.txt:4)')
+    // …and the second answer lands under the first, in the order the questions were asked.
+    answerComment(props, 'and the next answer')
+    expect([...document.querySelectorAll('[data-diff-discussion-reply]')].map(node => node.textContent))
+      .toEqual(['the final answer', 'and the next answer'])
 
     // The block can be finished from its overflow menu; its rows leave the
     // height table with it, and the same rows become commentable once more.
@@ -5575,15 +6396,16 @@ describe('PendingPanel', () => {
     expect(/\.discussionHead > \.flexSpacer \{\s*flex: 1;/.test(sheet)).toBe(true)
   })
 
-  it('refuses a second question while the session is still answering the first', async () => {
-    // One ask at a time. An answer is read out of the session's transcript by matching the prompt
-    // it answers, and only one of those is tracked at a time (see `pendingAskRef`): a second block
-    // asking while the first waits took that bookkeeping over, and the first answer could settle
-    // into the wrong thread. The second writing row stays usable and says so with its button.
-    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+  it('waits per thread, so one waiting question never blocks another', async () => {
+    // A question in flight belongs to ONE thread: the answer the host derives is keyed by the question
+    // it answers (see `CommentAsk`), so two threads may wait at once and each one's answer lands in
+    // its own block. What is still refused is a second question inside the thread that is already
+    // waiting — that is the one whose answer is not in yet.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
-    fireEvent.click(screen.getByText('a.txt'))
+    fireEvent.click(screen.getByText('m.txt'))
     const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
     const select = (index: number): void => {
       const node = rows[index]!.querySelector('[data-diff-code]')?.firstChild ?? rows[index]!
@@ -5597,28 +6419,54 @@ describe('PendingPanel', () => {
       } as unknown as Selection)
       act(() => { document.dispatchEvent(new Event('selectionchange')) })
     }
-    const asked = (): number => (props.onAskAgent as unknown as { mock: { calls: unknown[][] } }).mock.calls.length
+    /** The thread cards, in the order their rows run. */
+    const blocks = (): HTMLElement[] => [...document.querySelectorAll('[data-diff-discussion]')] as HTMLElement[]
+    /** The one card that is waiting on its answer, and the other one. */
+    const waiting = (): HTMLElement => blocks().find(block => block.querySelector('[data-diff-discussion-asking]') !== null)!
+    const free = (): HTMLElement => blocks().find(block => block.querySelector('[data-diff-discussion-asking]') === null)!
+    const sendIn = (block: HTMLElement): HTMLButtonElement => block.querySelector('[data-diff-discussion-send]') as HTMLButtonElement
+    const inputIn = (block: HTMLElement): HTMLInputElement => block.querySelector('[data-diff-discussion-input]') as HTMLInputElement
 
-    // The first comment goes out: the session is answering it now.
+    // The first comment goes out: the host holds it and its question is unanswered.
+    select(5)
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    fireEvent.change(inputIn(blocks()[0]!), { target: { value: 'why?' } })
+    await act(async () => { fireEvent.keyDown(inputIn(blocks()[0]!), { key: 'Enter' }) })
+    expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
+    expect(askedPrompts(props).length).toBe(1)
+    expect(sendIn(blocks()[0]!).disabled).toBe(true)
+
+    // A second comment on another row: its writing row opens, and IT is free to ask — the waiting
+    // thread's question is none of its business.
     select(0)
     fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
-    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
-    fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
-    expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
-    expect(asked()).toBe(1)
+    expect(sendIn(free()).disabled).toBe(false)
+    fireEvent.change(inputIn(free()), { target: { value: 'and this one?' } })
+    await act(async () => { fireEvent.keyDown(inputIn(free()), { key: 'Enter' }) })
+    expect(askedPrompts(props).length).toBe(2)
+    // Both threads now wait, each with its own note.
+    expect(document.querySelectorAll('[data-diff-discussion-asking]').length).toBe(2)
 
-    // A second comment on another row: its writing row opens, and its button refuses.
-    select(1)
-    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
-    const send = document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement
-    expect(send).not.toBeNull()
-    expect(send.disabled).toBe(true)
-    const input = document.querySelector('[data-diff-discussion-input]') as HTMLInputElement
-    fireEvent.change(input, { target: { value: 'and this one?' } })
-    fireEvent.keyDown(input, { key: 'Enter' })
-    expect(asked()).toBe(1)
-    // …and the draft is still there for when the answer lands.
-    expect((document.querySelector('[data-diff-discussion-input]') as HTMLInputElement).value).toBe('and this one?')
+    // A thread that is already waiting refuses its OWN field's Enter too — the button's rule, seen
+    // from the field — and keeps what was typed for when the answer lands.
+    const first = blocks()[0]!
+    const firstId = first.dataset.diffDiscussionId!
+    fireEvent.change(inputIn(first), { target: { value: 'still waiting?' } })
+    await act(async () => { fireEvent.keyDown(inputIn(first), { key: 'Enter' }) })
+    expect(askedPrompts(props).length).toBe(2)
+    expect(inputIn(first).value).toBe('still waiting?')
+
+    // Answer only the thread that was asked here: its block settles, the OTHER one still waits, and
+    // the answer never leaks across (each is keyed by its own question).
+    const firstRecord = hostOf(props).comments.find(entry => entry.id === firstId)!
+    answerComment(props, 'the first answer', firstRecord.id)
+    expect(first.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('the first answer')
+    expect(document.querySelectorAll('[data-diff-discussion-reply]').length).toBe(1)
+    // The answered thread is free again; the other one is the one still wearing the waiting note.
+    expect(sendIn(first).disabled).toBe(false)
+    expect(document.querySelectorAll('[data-diff-discussion-asking]').length).toBe(1)
+    expect(waiting()).not.toBe(first)
+    expect(sendIn(waiting()).disabled).toBe(true)
   })
 
   it('keeps the selection when a real press lands on the frame that acts on it', () => {
@@ -5688,29 +6536,24 @@ describe('PendingPanel', () => {
   })
 
   it('marks a comment outdated when the code it was about is gone, and takes it back when it returns', async () => {
-    // A comment stores the lines it was written about. When a later rebuild of the diff
-    // no longer holds them, the thread is not silently re-hung on whatever took their
-    // place: it says it is outdated, shows that code, and stops taking input — those rows
-    // are not annotated any more, so there is no current line to write about.
-    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    // A comment stores the lines it was written about, and the code those lines read then. When a
+    // later rebuild of the diff no longer holds either, the thread is not silently re-hung on
+    // whatever took their place: it says it is outdated, shows that code, and stops washing rows —
+    // those rows are not annotated any more. The mark is derived from the current model, so the
+    // lines coming back clears it.
+    const record = comment({
+      id: 'd-outdated',
+      text: 'why?',
+      anchor: { startLine: 1, endLine: 1 },
+      // 'a\n' -> 'b\n': the added row is new-file line 1, and the old side has no number for it.
+      quote: 'b',
+      quoteLines: [{ new: 1, kind: 'add' }],
+    })
+    const props = panelProps({ read: true, files: [FILE], busy: new Set(), comments: [record] })
     const view = render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
 
-    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
-    // 'a\n' -> 'b\n': the comment goes on the added row, so the line it quotes is
-    // new-file line 1, and that is what the block must keep showing it was about.
-    const node = rows[1]!.querySelector('[data-diff-code]')?.firstChild ?? rows[1]!
-    vi.spyOn(window, 'getSelection').mockReturnValue({
-      isCollapsed: false,
-      anchorNode: node,
-      focusNode: node,
-      rangeCount: 1,
-      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
-      removeAllRanges: () => {},
-    } as unknown as Selection)
-    act(() => { document.dispatchEvent(new Event('selectionchange')) })
-    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
     expect(document.querySelector('[data-diff-discussion]')?.hasAttribute('data-lost')).toBe(false)
     expect(document.querySelector('[data-diff-discussion-band]')).not.toBeNull()
 
@@ -5722,11 +6565,16 @@ describe('PendingPanel', () => {
     Object.defineProperty(body, 'scrollLeft', { get: () => bodyOffset, set: (value: number) => { bodyOffset = value } })
     bodyOffset = 37
 
-    // The file is rewritten under the comment: the line numbers are still in the model,
-    // but they hold other code and the quote is nowhere to be found. The props are held in a
-    // variable because the panel renders with THEM from here on: the ask below lands on this
-    // object's mocks, not on the first render's.
-    const rewritten = panelProps({ read: true, files: [entry({ oldText: 'x\n', newText: 'y\n' })], busy: new Set() })
+    // The file is rewritten under the comment: the line numbers are still in the model, but they hold
+    // other code and the quote is nowhere to be found. The host still holds the same record — that is
+    // what a durable comment means — so the read carries it and the block re-anchors against the new
+    // model. Its own mocks are held in a variable because the ask below lands on this object.
+    const rewritten = panelProps({
+      read: true,
+      files: [entry({ oldText: 'x\n', newText: 'y\n' })],
+      busy: new Set(),
+      comments: [record],
+    })
     view.rerender(<PendingPanel {...rewritten} />)
     const block = document.querySelector('[data-diff-discussion]') as HTMLElement
     expect(block.hasAttribute('data-lost')).toBe(true)
@@ -5750,8 +6598,11 @@ describe('PendingPanel', () => {
     // reserves what it draws: the quote label and the quoted code row, then the two compose
     // rows under the header.
     expect(document.querySelector('[data-diff-discussion-range]')?.textContent).toBe('/repo/a.txt:1')
-    expect(block.style.height).toBe('110px')
-    expect((block.closest('[data-diff-discussion-space]') as HTMLElement).style.height).toBe('110px')
+    const threadHeight = (): number =>
+      Number.parseFloat((document.querySelector('[data-diff-discussion]') as HTMLElement).style.height)
+    const atDefault = threadHeight()
+    // What it reserves is what it draws: the rows the block hangs in the code's stream are its own.
+    expect((block.closest('[data-diff-discussion-space]') as HTMLElement).style.height).toBe(`${atDefault}px`)
     // The one spare row the block may have reserved is taken by a spacer of its own, and it sits
     // directly above the writing row rather than anywhere else in the thread (see
     // `.discussionSlack`): it is the only child that may carry air, and it is capped at a row.
@@ -5769,15 +6620,15 @@ describe('PendingPanel', () => {
     fireEvent.scroll(body)
     expect(quoteText().scrollLeft).toBe(64)
 
-    // The quoted line is CODE, so its row is the code's row, not the thread's: with a 30px code
-    // line height the block is 22 (header) + 22 (quote label) + 30 (quoted line) + 44 (the two
-    // writing rows) — the thread's own prose is what stays on 22px.
+    // The quoted line is CODE, so its row is the code's row, not the thread's: a taller code line
+    // moves the block by exactly that difference — 30px against the thread's own 22px — while the
+    // thread's prose keeps the size the default settings show.
     localStorage.setItem('diff-approval:diff-line-height', '30')
     view.rerender(<PendingPanel {...rewritten} />)
-    expect((document.querySelector('[data-diff-discussion]') as HTMLElement).style.height).toBe('118px')
+    expect(threadHeight() - atDefault).toBe(8)
     localStorage.removeItem('diff-approval:diff-line-height')
     view.rerender(<PendingPanel {...rewritten} />)
-    expect((document.querySelector('[data-diff-discussion]') as HTMLElement).style.height).toBe('110px')
+    expect(threadHeight()).toBe(atDefault)
 
     // The writing row stays in place and keeps taking input: a thread is a conversation, and the
     // code it was about is quoted right above this row, so a reply still has something to be about.
@@ -5787,12 +6638,12 @@ describe('PendingPanel', () => {
     expect(input.placeholder).toBe('discussion.placeholder')
     expect((document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement).disabled).toBe(false)
     fireEvent.change(input, { target: { value: 'and now?' } })
-    fireEvent.keyDown(input, { key: 'Enter' })
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
     // What it asks about is the lines the thread was WRITTEN about — the ones the quote shows —
     // and not whatever those numbers hold now.
-    const asked = (rewritten.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]
-    expect(asked?.[1]).toContain('/repo/a.txt:1')
-    expect(asked?.[1]).toContain('and now?')
+    const asked = askedPrompts(rewritten)[0] ?? ''
+    expect(asked).toContain('/repo/a.txt:1')
+    expect(asked).toContain('and now?')
 
     // The code comes back (a keep restores the lines), and the mark is derived rather
     // than sticky: it clears instead of condemning the thread for one rebuild — the rows it
@@ -6065,21 +6916,16 @@ describe('PendingPanel', () => {
     expect(block.style.height).toBe('110px')
   })
 
-  it('matches a comment answer to the prompt that asked, not to the session tail', async () => {
-    // A session is often busy with the user's own turn when a comment is sent. The
-    // comment is queued behind it, and the text streaming there belongs to that
-    // other turn: putting it in the block would attribute someone else's words to
-    // the annotation. The marker the prompt starts with is what keeps them apart.
+  it('draws nothing but the wait until the question it asked is answered', async () => {
+    // A session is often busy with other turns when a comment is asked, and the panel reads nothing
+    // about those turns: the answer it draws is the host's derived text for THIS question's request
+    // id (see `commentAnswers`), so another turn's words can never be attributed to the annotation.
+    // What it shows until then is the wait — never a borrowed answer.
     const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [multi], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('m.txt'))
-
-    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
-    const otherUser = { kind: 'user', text: 'unrelated question' }
-    const otherAnswer = { kind: 'assistant', text: 'other answer' }
-    act(() => { listener!({ running: true, nodes: [otherUser], partial: 'other partial', error: undefined }) })
 
     const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
     const code = rows[5]!.querySelector('[data-diff-code]') ?? rows[5]!
@@ -6095,41 +6941,25 @@ describe('PendingPanel', () => {
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
     fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
     fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
-    fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
-    const prompt = (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]?.[1]
+    await act(async () => {
+      fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    })
 
-    // Nothing in the transcript is ours yet, so the block says it is waiting
-    // instead of borrowing the running turn's partial text.
-    act(() => { listener!({ running: true, nodes: [otherUser], partial: 'other partial', error: undefined }) })
-    expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toContain('discussion.queued')
-    // The ellipsis after it is three dots of its own, so they can fill in one at a time.
+    // Unanswered: the block says it is waiting, with three dots of its own, and draws no answer.
+    const note = document.querySelector('[data-diff-discussion-asking]')
+    expect(note?.textContent).toContain('discussion.thinking')
     expect(document.querySelectorAll('[data-diff-discussion-dots] span').length).toBe(3)
     expect(document.querySelector('[data-diff-discussion-reply]')).toBeNull()
 
-    // With the prompt in the transcript, the answer that follows it is ours — and it is still
-    // being written: the note it replaced is gone, and the line under the streamed text says so
-    // instead, so the block never looks finished while words are still coming.
-    act(() => {
-      listener!({ running: true, nodes: [otherUser, otherAnswer, { kind: 'user', text: prompt }], partial: 'our answer', error: undefined })
-    })
-    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('our answer')
+    // The answer the host derived for that question lands in the block that asked it…
+    answerComment(props, 'the answer')
+    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('the answer')
     expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
-    expect(document.querySelector('[data-diff-discussion-answering]')?.textContent).toContain('discussion.answering')
-
-    act(() => {
-      listener!({
-        running: false,
-        nodes: [otherUser, otherAnswer, { kind: 'user', text: prompt }, { kind: 'assistant', text: 'final answer' }],
-        partial: '',
-        error: undefined,
-      })
-    })
-    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('final answer')
-    expect(document.querySelector('[data-diff-discussion-answering]')).toBeNull()
+    // …and the writing row is back for a follow-up, so the thread is a conversation.
     expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
   })
 
-  it('draws a turn\'s inline code and bold, and never the markers', () => {
+  it('draws a turn\'s inline code and bold, and never the markers', async () => {
     // The thread is prose laid out on the code rows, so it knows exactly two pieces of inline
     // Markdown: \`code\` and **bold**. Both are drawn with their markers gone, and the row
     // measurement reads that same text — reserving room for a marker would leave a hole.
@@ -6156,17 +6986,11 @@ describe('PendingPanel', () => {
     fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, {
       target: { value: 'is \`x\` **right**?' },
     })
-    fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
-    const prompt = (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]?.[1]
-    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
-    act(() => {
-      listener!({
-        running: false,
-        nodes: [{ kind: 'user', text: prompt }, { kind: 'assistant', text: 'use \`x\` **always**' }],
-        partial: '',
-        error: undefined,
-      })
+    await act(async () => {
+      fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
     })
+    // The answer the host derived carries the same inline markup, and is drawn the same way.
+    answerComment(props, 'use \`x\` **always**')
 
     // The question in the thread: a code chip and a bold run, and the text without markers.
     const turn = document.querySelector('[data-diff-discussion-user]') as HTMLElement
@@ -6275,68 +7099,51 @@ describe('PendingPanel', () => {
     expect(block.style.height).toBe('66px')
   })
 
-  it('keeps as many rounds of a thread as the settings ask for', () => {
-    // The round count is a preference: with one round, a thread that has been through two keeps
-    // only the newest, and says how many turns it left out. (Two rounds — the default — is what
-    // the other thread tests exercise.)
-    localStorage.setItem('diff-approval:discussion-rounds', '1')
+  it('draws a thread as its annotation and then, per question, its words and its answer', () => {
+    // A comment's turns are the annotation and then, for each question in the order it was asked,
+    // the question's own words and the answer to it. The words are the host's record of the
+    // question (`CommentAsk.text`), because the transcript only holds the prompt around them: a
+    // follow-up that showed nobody's question would not be a conversation. The FIRST question IS
+    // the annotation, so it is not drawn twice, and a question with no answer yet contributes its
+    // words and then nothing. The round cap is a preference, raised here so the whole thread shows.
+    localStorage.setItem('diff-approval:discussion-rounds', '3')
     const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
-    const props = panelProps({ read: true, files: [multi], busy: new Set() })
-    render(<PendingPanel {...props} />)
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [multi],
+      busy: new Set(),
+      comments: [comment({
+        id: 'd-answers',
+        entryId: multi.id,
+        text: 'why?',
+        anchor: { startLine: 4, endLine: 4 },
+        asks: [
+          // The first question's words are the annotation's own: they must not be drawn twice.
+          { requestId: 'q1', text: 'why?' },
+          { requestId: 'q2', text: 'and then?' },
+          { requestId: 'q3', text: 'and the third?' },
+        ],
+      })],
+      // The NEWEST question has no answer yet: it contributes its words and nothing under them, and
+      // the block says it is waiting on it.
+      commentAnswers: { q1: 'one', q2: 'two' },
+    })} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('m.txt'))
 
-    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
-    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
-    const code = rows[5]!.querySelector('[data-diff-code]') ?? rows[5]!
-    const node = code.firstChild ?? code
-    vi.spyOn(window, 'getSelection').mockReturnValue({
-      isCollapsed: false,
-      anchorNode: node,
-      focusNode: node,
-      rangeCount: 1,
-      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
-      removeAllRanges: () => {},
-    } as unknown as Selection)
-    act(() => { document.dispatchEvent(new Event('selectionchange')) })
-    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
-
-    // Round one, and round two, each question followed by its answer.
-    const ask = (question: string): string => {
-      const input = document.querySelector('[data-diff-discussion-input]') as HTMLInputElement
-      fireEvent.change(input, { target: { value: question } })
-      fireEvent.keyDown(input, { key: 'Enter' })
-      return (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls.at(-1)?.[1] ?? ''
-    }
-    const first = ask('why?')
-    act(() => {
-      listener!({ running: false, nodes: [{ kind: 'user', text: first }, { kind: 'assistant', text: 'one' }], partial: '', error: undefined })
-    })
-    const second = ask('and then?')
-    act(() => {
-      listener!({
-        running: false,
-        nodes: [
-          { kind: 'user', text: first }, { kind: 'assistant', text: 'one' },
-          { kind: 'user', text: second }, { kind: 'assistant', text: 'two' },
-        ],
-        partial: '',
-        error: undefined,
-      })
-    })
-
-    // One round kept: the second question and its answer, and the two older turns are counted out.
-    expect(document.querySelectorAll('[data-diff-discussion-user]').length).toBe(1)
-    expect(document.querySelectorAll('[data-diff-discussion-user]')[0]?.textContent).toBe('and then?')
-    expect(document.querySelectorAll('[data-diff-discussion-reply]').length).toBe(1)
-    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('two')
-    expect(document.querySelector('[data-diff-discussion-hidden]')?.textContent).toBe('discussion.hidden {"count":2}')
+    expect([...document.querySelectorAll('[data-diff-discussion-user]')].map(node => node.textContent))
+      .toEqual(['why?', 'and then?', 'and the third?'])
+    expect([...document.querySelectorAll('[data-diff-discussion-reply]')].map(node => node.textContent))
+      .toEqual(['one', 'two'])
+    // A question with no answer draws its words and then nothing at all — not an empty bubble.
+    expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-discussion-hidden]')).toBeNull()
   })
 
-  it('carries its threads, and a waiting question, across a remount', () => {
-    // The panel unmounts whenever it is closed or its presentation changes, and the page's
-    // memory is what brings the threads back. A question still waiting for its answer has to
-    // come with them, or the answer that arrives afterwards has nowhere to land.
+  it('carries its threads, and a waiting question, across a remount', async () => {
+    // The panel unmounts whenever it is closed or its presentation changes. A thread is the HOST's
+    // record, so a fresh mount draws it again from the next read — including a question still
+    // waiting for its answer, which the host holds as an ask with nothing derived for it yet.
     const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [multi], busy: new Set() })
     const first = render(<PendingPanel {...props} />)
@@ -6356,50 +7163,218 @@ describe('PendingPanel', () => {
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
     fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
     fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
-    fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
-    const prompt = {
-      kind: 'user',
-      text: (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls.at(-1)?.[1] ?? '',
-    }
+    await act(async () => {
+      fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    })
     expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
 
-    // Closed and reopened: a fresh mount, holding what the page remembered.
+    // Closed and reopened: a fresh mount, reading the same host.
     first.unmount()
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('m.txt'))
     expect(document.querySelector('[data-diff-discussion-user]')?.textContent).toBe('why?')
-    // Still waiting, so still no writing row.
+    // Still waiting — and the writing row is still there, refusing only its own send.
     expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
-    expect(document.querySelector('[data-diff-discussion-input]')).toBeNull()
+    expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
+    expect((document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement).disabled).toBe(true)
 
     // The answer arrives after the remount and still finds its block.
-    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } })
-      .mock.calls.at(-1)?.[1]
-    act(() => {
-      listener!({ running: false, nodes: [prompt, { kind: 'assistant', text: 'because' }], partial: '', error: undefined, queued: [] })
-    })
+    answerComment(props, 'because')
     expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('because')
-    expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
   })
 
-  it('waits only while the session still holds the queued question', () => {
-    // "Queued" has to mean something: the session's own queue (or its local submission
-    // echo) must still name our prompt. Once neither holds it and it never became a
-    // turn — a stopped turn that dropped the queue, say — the block hands the writing
-    // row back, after a grace so a round-trip gap cannot take it back early.
-    vi.useFakeTimers()
-    try {
-      const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
-      const props = panelProps({ read: true, files: [multi], busy: new Set() })
-      render(<PendingPanel {...props} />)
-      fireEvent.click(screen.getByLabelText('panel.aria'))
-      fireEvent.click(screen.getByText('m.txt'))
-      const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
-      act(() => { listener!({ running: true, nodes: [], partial: '', error: undefined, queued: [] }) })
+  it('keeps a placed-but-unsent block, and its words, across a remount', () => {
+    // A block the reader has placed is not a comment yet, so no host record holds it and there is no
+    // comment id to hang its draft under: the page remembers the PLACEMENT (the entry, the lines and
+    // the quote it was made against) with the words. Closing the panel must not throw away a comment
+    // the reader had started — that is the whole point of this memory.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    const first = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
 
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'half a thought' } })
+
+    // The page holds the placement, not just the words: where it sits, and what is in it.
+    const placed = rememberedPlacedThreads(S1)
+    expect(placed).toHaveLength(1)
+    expect(placed[0]?.fileId).toBe(multi.id)
+    expect(placed[0]?.anchor.startLine).toBe(4)
+    expect(placed[0]?.draft).toBe('half a thought')
+    expect(document.querySelector('[data-diff-discussion-range]')?.textContent).toBe('/repo/m.txt:4')
+
+    // Closed and reopened: a fresh mount draws the same block on the same lines with the words, and
+    // the host was never told about any of it.
+    first.unmount()
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+    expect(document.querySelectorAll('[data-diff-discussion]').length).toBe(1)
+    expect(document.querySelector('[data-diff-discussion-range]')?.textContent).toBe('/repo/m.txt:4')
+    expect((document.querySelector('[data-diff-discussion-input]') as HTMLInputElement).value).toBe('half a thought')
+    expect(props.onCommentAdd).not.toHaveBeenCalled()
+  })
+
+  it('keeps every file\'s draft when the reader switches files', () => {
+    // The page's thread state is ONE record for the session, because a comment belongs to the
+    // session rather than to whichever file happens to be open. Pruning it against the open file's
+    // blocks therefore deleted every OTHER file's draft: typing on a.txt, clicking b.txt and coming
+    // back left the field empty — including on the mount, where the first prune ran against a file
+    // the record had never seen.
+    act(() => { setCommentModeEnabled(true) })
+    const first = entry({ id: 'entry-a', path: '/repo/a-draft.txt' })
+    const second = entry({ id: 'entry-b', path: '/repo/b-draft.txt' })
+    const record = comment({ id: 'd-a', entryId: first.id, text: '为什么？' })
+    const props = panelProps({ read: true, files: [first, second], busy: new Set(), comments: [record] })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a-draft.txt'))
+
+    const field = (): HTMLInputElement => document.querySelector('[data-diff-discussion-input]') as HTMLInputElement
+    fireEvent.change(field(), { target: { value: '半句话' } })
+    expect(rememberedThreads(S1)['d-a']?.draft).toBe('半句话')
+
+    // Off to the other file, whose own comment is a different thread…
+    fireEvent.click(screen.getByText('b-draft.txt'))
+    expect(rememberedThreads(S1)['d-a']?.draft).toBe('半句话')
+
+    // …and back: the field still holds what was typed, because the record is the session's.
+    fireEvent.click(screen.getByText('a-draft.txt'))
+    expect(field().value).toBe('半句话')
+  })
+
+  it('keeps a stored thread\'s draft across a panel remount', () => {
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-a', path: '/repo/a-draft.txt' })
+    const record = comment({ id: 'd-a', entryId: file.id, text: '为什么？' })
+    const props = panelProps({ read: true, files: [file], busy: new Set(), comments: [record] })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: '半句话' } })
+
+    // A close and reopen is a fresh mount: it adopts the page's memory, so the words are still there.
+    view.unmount()
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect((document.querySelector('[data-diff-discussion-input]') as HTMLInputElement).value).toBe('半句话')
+  })
+
+  it('still forgets the state of a comment the host no longer holds', () => {
+    // The other half of the rule: widening the live set to the session must not turn the prune off.
+    // A comment id is the host's and is never reused, so state under one the session no longer holds
+    // — because its entry left the list, which takes the entry's comments with it — is dead weight
+    // for the rest of the visit. A comment on ANOTHER file is live, and keeps its words.
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-a', path: '/repo/a-draft.txt' })
+    const elsewhere = entry({ id: 'entry-b', path: '/repo/b-draft.txt' })
+    const kept = comment({ id: 'd-kept', entryId: file.id, text: '这条还在' })
+    const other = comment({ id: 'd-other', entryId: elsewhere.id, text: '另一条' })
+    const props = panelProps({ read: true, files: [file, elsewhere], busy: new Set(), comments: [kept, other] })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: '半句话' } })
+    expect(rememberedThreads(S1)['d-kept']?.draft).toBe('半句话')
+
+    // Another file's comment is live whatever file is open, so its state is not the prune's business.
+    act(() => { hostOf(props).forget('d-other') })
+    expect(rememberedThreads(S1)['d-kept']?.draft).toBe('半句话')
+
+    // The host drops the comment itself: the session's read no longer carries it, and its state goes.
+    act(() => { hostOf(props).forget('d-kept') })
+    expect(rememberedThreads(S1)['d-kept']).toBeUndefined()
+  })
+
+  it('files the page\'s drafts under the session being viewed, not the one that wrote the file', () => {
+    // `file.sessionId` names the session that most recently TOUCHED the file, and one entry is shown
+    // in every session that touched it. It is the wrong owner for a page's memory: keying on it
+    // files this panel's drafts under some other session's panel, and both would then draw each
+    // other's words.
+    act(() => { setCommentModeEnabled(true) })
+    const touched = 'session-toucher' as SessionId
+    const file = entry({ id: 'entry-a', path: '/repo/a-draft.txt', sessionId: touched, sessionIds: [S1, touched] })
+    const record = comment({ id: 'd-a', entryId: file.id, text: '为什么？' })
+    const props = panelProps({ read: true, files: [file], busy: new Set(), comments: [record] })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: '半句话' } })
+
+    // The panel is reviewing S1 (the harness's current session): the draft is S1's.
+    expect(rememberedThreads(S1)['d-a']?.draft).toBe('半句话')
+    expect(rememberedThreads(touched)['d-a']).toBeUndefined()
+  })
+
+  it('drops a placed block when its file leaves the list, and lets those rows be commented again', () => {
+    // A placement is a block of rows in ONE file's diff. A file the reader kept or reverted out of
+    // the list leaves nothing for it to hang on, so a block still in the page's memory would be
+    // drawn again the moment the same path came back (entry ids ARE paths) — on a file already dealt
+    // with — and until then it went on refusing a fresh comment on rows that showed nothing.
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-f', path: '/repo/f.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('f.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: '半句话' } })
+    expect(rememberedPlacedThreads(S1)).toHaveLength(1)
+
+    // F leaves the list. The poll says so, and the block goes with it.
+    act(() => { hostOf(props).setFiles([]) })
+    expect(rememberedPlacedThreads(S1)).toEqual([])
+
+    // The same path is pending again: no block is drawn on it, and those rows take a new comment —
+    // which is exactly what a stale placement used to refuse. Opened by name rather than by clicking
+    // the list, so the assertion is about the placement and not about the list's own state.
+    act(() => { hostOf(props).setFiles([file]) })
+    act(() => { window.dispatchEvent(new CustomEvent(SHOW_PANEL_EVENT)) })
+    act(() => { window.dispatchEvent(new CustomEvent(OPEN_PANEL_FILE_EVENT, { detail: { fileId: file.id } })) })
+    expect(document.querySelector('[data-diff-discussion]')).toBeNull()
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    expect(document.querySelector('[data-diff-selection-comment]')).not.toBeNull()
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    expect(rememberedPlacedThreads(S1)).toHaveLength(1)
+  })
+
+  it('forgets the placement once the block is written or discarded', async () => {
+    // The placement is only for a block that has no record: writing it moves the words into the
+    // host's comment, and discarding it drops the block — either way the page must not keep a block
+    // that is no longer on screen (it would come back as a ghost on the next mount).
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    const selectRow = (index: number): void => {
       const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
-      const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
+      const node = rows[index]!.querySelector('[data-diff-code]')?.firstChild ?? rows[index]!
       vi.spyOn(window, 'getSelection').mockReturnValue({
         isCollapsed: false,
         anchorNode: node,
@@ -6409,146 +7384,43 @@ describe('PendingPanel', () => {
         removeAllRanges: () => {},
       } as unknown as Selection)
       act(() => { document.dispatchEvent(new Event('selectionchange')) })
-      fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
-      fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
-      fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
-      const prompt = (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]?.[1] ?? ''
-
-      act(() => { listener!({ running: true, nodes: [], partial: '', error: undefined, queued: [prompt] }) })
-      expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toContain('discussion.queued')
-
-      // The session has taken it (the queue no longer names it) and is writing: the block
-      // must stop saying it is queued. This is the phase where nothing has streamed yet and
-      // the answer is being thought about.
-      act(() => { listener!({ running: true, nodes: [], partial: '', error: undefined, queued: [] }) })
-      expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toContain('discussion.thinking')
-
-      // Same once the prompt is in the transcript with the turn still running, and still
-      // nothing written.
-      act(() => {
-        listener!({ running: true, nodes: [{ kind: 'user', text: prompt }], partial: '', error: undefined, queued: [] })
-      })
-      expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toContain('discussion.thinking')
-
-      // The session has let it go and no turn took it. The row comes back only once
-      // the grace has passed - a submission echo and the host's queue row are a round
-      // trip apart, so the first idle notification is not proof.
-      act(() => { listener!({ running: false, nodes: [], partial: '', error: undefined, queued: [] }) })
-      expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toContain('discussion.queued')
-      act(() => { vi.advanceTimersByTime(5000) })
-      expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
-      expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
-      expect(document.querySelector('[data-diff-discussion-user]')?.textContent).toBe('why?')
-    } finally {
-      vi.useRealTimers()
     }
-  })
 
-  it('never lets an older comment\'s answer into a new question on the same rows', () => {
-    // Follow-ups ARE comments on the same rows, so their marker line is identical —
-    // and the words can be too ("再试一次"). Matching by the tail of the transcript
-    // therefore handed the block the PREVIOUS answer, which the real one then replaced
-    // when it arrived. The search now starts at our own baseline, so nothing that was
-    // already in the transcript when we sent can be taken for the prompt we wait on.
-    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
-    const props = panelProps({ read: true, files: [multi], busy: new Set() })
-    render(<PendingPanel {...props} />)
-    fireEvent.click(screen.getByLabelText('panel.aria'))
-    fireEvent.click(screen.getByText('m.txt'))
-    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
-
-    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
-    const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
-    vi.spyOn(window, 'getSelection').mockReturnValue({
-      isCollapsed: false,
-      anchorNode: node,
-      focusNode: node,
-      rangeCount: 1,
-      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
-      removeAllRanges: () => {},
-    } as unknown as Selection)
-    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    // Written: the words become the comment's annotation, and the placement goes.
+    selectRow(5)
     fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
-    const type = (value: string): void => {
-      fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value } })
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+    expect(rememberedPlacedThreads(S1)).toHaveLength(1)
+    await act(async () => {
       fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
-    }
-    const calls = (): [string, string][] => (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls
-    const lastReply = (): string | undefined =>
-      [...document.querySelectorAll('[data-diff-discussion-reply]')].at(-1)?.textContent ?? undefined
-
-    // First turn settles: its prompt and answer are the transcript's tail from now on.
-    type('why?')
-    const firstPrompt = calls()[0]?.[1] ?? ''
-    act(() => {
-      listener!({
-        running: false,
-        nodes: [{ kind: 'user', text: firstPrompt }, { kind: 'assistant', text: 'previous answer' }],
-        partial: '',
-        error: undefined,
-      })
     })
-    expect(lastReply()).toBe('previous answer')
+    expect(rememberedPlacedThreads(S1)).toEqual([])
+    expect(hostOf(props).comments).toHaveLength(1)
+    expect(hostOf(props).comments[0]?.text).toBe('why?')
 
-    // Second turn asks the SAME words on the SAME rows while the session is busy. Its
-    // prompt is queued, so the transcript still ends with the previous turn: the block
-    // must wait, and the streaming text of the running turn must not touch it.
-    type('why?')
-    act(() => {
-      listener!({
-        running: true,
-        nodes: [{ kind: 'user', text: firstPrompt }, { kind: 'assistant', text: 'previous answer' }],
-        partial: 'previous answer streaming',
-        error: undefined,
-        queued: [calls()[1]?.[1] ?? ''],
-      })
-    })
-    expect(document.querySelector('[data-diff-discussion-asking]')?.textContent).toContain('discussion.queued')
-    expect(lastReply()).toBe('previous answer')
-
-    // Our own prompt is in the transcript: from here the answer is ours.
-    const secondPrompt = { kind: 'user', text: calls()[1]?.[1] ?? '' }
-    act(() => {
-      listener!({
-        running: true,
-        nodes: [{ kind: 'user', text: firstPrompt }, { kind: 'assistant', text: 'previous answer' }, secondPrompt],
-        partial: 'our answer',
-        error: undefined,
-        queued: [],
-      })
-    })
-    expect(lastReply()).toBe('our answer')
-
-    act(() => {
-      listener!({
-        running: false,
-        nodes: [
-          { kind: 'user', text: firstPrompt },
-          { kind: 'assistant', text: 'previous answer' },
-          secondPrompt,
-          { kind: 'assistant', text: 'our answer' },
-        ],
-        partial: '',
-        error: undefined,
-        queued: [],
-      })
-    })
-    expect(document.querySelectorAll('[data-diff-discussion-user]').length).toBe(2)
-    expect(lastReply()).toBe('our answer')
+    // Discarded: the block leaves the page with nothing written down at all.
+    selectRow(0)
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'never mind' } })
+    expect(rememberedPlacedThreads(S1)).toHaveLength(1)
+    const block = [...document.querySelectorAll('[data-diff-discussion]')]
+      .find(node => (node as HTMLElement).dataset.diffDiscussionId?.startsWith('draft-') === true)
+    fireEvent.click(block!.querySelector('[data-diff-discussion-menu]') as HTMLButtonElement)
+    fireEvent.click(screen.getByText('action.discussionEnd'))
+    expect(rememberedPlacedThreads(S1)).toEqual([])
+    expect(hostOf(props).comments).toHaveLength(1)
   })
 
-  it('closes a stopped comment instead of taking the next turn\'s answer', () => {
-    // Pressing Stop while a comment is being answered used to leave the block waiting: the
-    // turn was frozen with nothing written, the pending ask stayed armed, and the NEXT
-    // turn's answer then settled into the comment. Two things fix it — a turn's own
-    // segment (nothing after the next human message belongs to this question) and the
-    // frozen node that ends the wait.
+  it('stops waiting when the session drops the question, and gives the words back', async () => {
+    // A question the session discarded before any turn claimed it is not coming back: the host says
+    // so on the ask itself (`dropped`), and the block says the answer failed instead of waiting on
+    // one that will never arrive. A send this pane could not even get through is the same note, from
+    // the page's own state — and either way the reader keeps the writing row.
     const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [multi], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('m.txt'))
-    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
 
     const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
     const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
@@ -6563,50 +7435,175 @@ describe('PendingPanel', () => {
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
     fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
     fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
-    fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
-    const prompt = { kind: 'user', text: (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]?.[1] ?? '' }
-    const lastReply = (): string | undefined =>
-      [...document.querySelectorAll('[data-diff-discussion-reply]')].at(-1)?.textContent ?? undefined
-
-    // The turn runs, then the user stops it: the runtime freezes it with nothing written.
-    act(() => { listener!({ running: true, nodes: [prompt], partial: '', error: undefined, queued: [] }) })
+    await act(async () => {
+      fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    })
     expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
-    const frozen = { kind: 'assistant', text: '', interrupted: true }
-    act(() => { listener!({ running: false, nodes: [prompt, frozen], partial: '', error: undefined, queued: [] }) })
-    expect(document.querySelector('[data-diff-discussion-stopped]')).not.toBeNull()
+
+    // The session lets it go: the note replaces the wait, and the writing row is ready for another
+    // try.
+    dropComment(props)
     expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
-    // The writing row is back, and the question is still there to ask again.
+    expect(document.querySelector('[data-diff-discussion-failed]')?.textContent).toBe('discussion.failed')
     expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
     expect(document.querySelector('[data-diff-discussion-user]')?.textContent).toBe('why?')
-
-    // A later turn - the user's own next message - must not land in this block.
-    const nextUser = { kind: 'user', text: 'another question' }
-    act(() => {
-      listener!({ running: true, nodes: [prompt, frozen, nextUser], partial: 'the new answer', error: undefined, queued: [] })
-    })
-    expect(lastReply()).toBeUndefined()
-    act(() => {
-      listener!({
-        running: false,
-        nodes: [prompt, frozen, nextUser, { kind: 'assistant', text: 'the new answer' }],
-        partial: '',
-        error: undefined,
-        queued: [],
-      })
-    })
-    expect(lastReply()).toBeUndefined()
-    expect(document.querySelector('[data-diff-discussion-stopped]')).not.toBeNull()
   })
 
-  it('keeps the partial an interrupted turn had written, and says it was stopped', () => {
-    // Stop after some text arrived: that text is what the user was reading, so it stays as
-    // the answer — but it is marked stopped, and the writing row comes back.
+  it('says the answer was stopped when the newest question\'s turn is over', () => {
+    // The host marks an ask `ended` when the turn that claimed it stops. With no answer derived for
+    // that question, nothing is coming: the block says so — the note the stopped-turn surface has
+    // always shown — instead of waiting on a turn that is over, and the writing row is ready for
+    // another try.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [multi],
+      busy: new Set(),
+      comments: [comment({
+        id: 'd-stopped',
+        entryId: multi.id,
+        text: 'why?',
+        anchor: { startLine: 4, endLine: 4 },
+        asks: [{ requestId: 'q1', text: 'why?' }, { requestId: 'q2', text: 'and then?', ended: true }],
+      })],
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    expect(document.querySelector('[data-diff-discussion-stopped]')?.textContent).toBe('discussion.stopped')
+    // Not waiting (the turn is over) and not failed (the session did not drop it).
+    expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
+    expect(document.querySelector('[data-diff-discussion-failed]')).toBeNull()
+    // The question's own words are still there, and with them the writing row for another try.
+    expect([...document.querySelectorAll('[data-diff-discussion-user]')].map(node => node.textContent))
+      .toEqual(['why?', 'and then?'])
+    expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
+    expect((document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('shows the answer a stopped turn did write, and no stop note', () => {
+    // `ended` only says the turn is over — the transcript decides whether an answer exists. One that
+    // landed before the stop IS the answer, and the block shows it exactly as it shows any other.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [multi],
+      busy: new Set(),
+      comments: [comment({
+        id: 'd-stopped-answered',
+        entryId: multi.id,
+        text: 'why?',
+        anchor: { startLine: 4, endLine: 4 },
+        asks: [{ requestId: 'q1', text: 'why?' }, { requestId: 'q2', text: 'and then?', ended: true }],
+      })],
+      commentAnswers: { q1: 'the first answer', q2: 'because it guards the edge' },
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    expect([...document.querySelectorAll('[data-diff-discussion-reply]')].map(node => node.textContent))
+      .toEqual(['the first answer', 'because it guards the edge'])
+    expect(document.querySelector('[data-diff-discussion-stopped]')).toBeNull()
+    expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
+  })
+
+  it('only the newest question decides whether a thread is waiting or failed', () => {
+    // The host answers every question it has a transcript message for, and the LAST one's state is
+    // what the block wears: an older question the session dropped does not condemn a thread whose
+    // newest question is answered and live.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [multi],
+      busy: new Set(),
+      comments: [comment({
+        id: 'd-last',
+        entryId: multi.id,
+        text: 'why?',
+        anchor: { startLine: 4, endLine: 4 },
+        asks: [{ requestId: 'q1', dropped: true }, { requestId: 'q2' }],
+      })],
+      commentAnswers: { q2: 'the answer' },
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('the answer')
+    expect(document.querySelector('[data-diff-discussion-failed]')).toBeNull()
+    expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
+    expect((document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('says the last question failed when the newest one was dropped', () => {
+    // The same rule from the other side: a dropped NEWEST question is the failure the block reports,
+    // even when an older question was answered.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [multi],
+      busy: new Set(),
+      comments: [comment({
+        id: 'd-dropped',
+        entryId: multi.id,
+        text: 'why?',
+        anchor: { startLine: 4, endLine: 4 },
+        asks: [{ requestId: 'q1' }, { requestId: 'q2', dropped: true }],
+      })],
+      commentAnswers: { q1: 'the older answer' },
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('the older answer')
+    expect(document.querySelector('[data-diff-discussion-failed]')?.textContent).toBe('discussion.failed')
+    expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
+    // The writing row is there for another try.
+    expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
+  })
+
+  it('never lets one comment\'s answer into another comment on the same rows', () => {
+    // Two comments on the SAME rows — a follow-up in the old model, a second annotation now — carry
+    // different request ids, and the host derives an answer per request. So one comment's answer can
+    // never fill the other's: the block that has no answer of its own waits, however much text the
+    // other one is wearing.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [multi],
+      busy: new Set(),
+      comments: [
+        comment({ id: 'd-answered', entryId: multi.id, text: 'the first one', anchor: { startLine: 4, endLine: 4 }, asks: [{ requestId: 'q1' }] }),
+        comment({ id: 'd-waiting', entryId: multi.id, text: 'the second one', anchor: { startLine: 4, endLine: 4 }, asks: [{ requestId: 'q2' }] }),
+      ],
+      commentAnswers: { q1: 'the first answer' },
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    const blocks = [...document.querySelectorAll('[data-diff-discussion]')] as HTMLElement[]
+    expect(blocks.length).toBe(2)
+    // Both blocks are on the same rows; the one with an answer shows it, the other waits.
+    expect(blocks[0]!.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('the first answer')
+    expect(blocks[1]!.querySelector('[data-diff-discussion-reply]')).toBeNull()
+    expect(blocks[1]!.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
+    // Each block's own question is what its answer belongs to, so the first one's is not offered to
+    // the second.
+    expect(blocks[1]!.querySelector('[data-diff-discussion-send]')?.hasAttribute('disabled')).toBe(true)
+    expect(blocks[0]!.querySelector('[data-diff-discussion-send]')?.hasAttribute('disabled')).toBe(false)
+  })
+
+  it('says a refused send failed, and gives the reader their words back', async () => {
+    // The host answers `no-agent` when it cannot submit the question at all (the session ended, or
+    // this host drives no agent for it). That is the surface a declined send has always had: the
+    // note under the turns, and the writing row back — with what was typed still in it, because the
+    // reader wrote those words and a session with no agent is no reason to write them again.
     const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [multi], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('m.txt'))
-    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
+    ;(props.onCommentAsk as unknown as { mockResolvedValue: (value: unknown) => void })
+      .mockResolvedValue({ outcome: 'no-agent' })
 
     const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
     const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
@@ -6621,35 +7618,60 @@ describe('PendingPanel', () => {
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
     fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
     fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
-    fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
-    const prompt = { kind: 'user', text: (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]?.[1] ?? '' }
-
-    act(() => {
-      listener!({
-        running: false,
-        nodes: [prompt, { kind: 'assistant', text: 'half an answer', interrupted: true }],
-        partial: '',
-        error: undefined,
-        queued: [],
-      })
+    await act(async () => {
+      fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
     })
-    expect([...document.querySelectorAll('[data-diff-discussion-reply]')].at(-1)?.textContent).toBe('half an answer')
-    expect(document.querySelector('[data-diff-discussion-stopped]')).not.toBeNull()
-    expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
+
+    expect(document.querySelector('[data-diff-discussion-failed]')?.textContent).toBe('discussion.failed')
+    expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
+    expect((document.querySelector('[data-diff-discussion-input]') as HTMLInputElement).value).toBe('why?')
+    expect((document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement).disabled).toBe(false)
+    // The comment itself was written down before the question was asked, so the thread stays.
+    expect(document.querySelector('[data-diff-discussion-user]')?.textContent).toBe('why?')
   })
 
-  it('hands the caret back when the compose row returns, unless the user moved on', async () => {
-    // Sending hides the compose row while the turn runs, so the caret has nowhere
-    // to be. It belongs in the input the moment that row is back — a conversation
-    // is typed turn after turn — but not if the user has clicked or typed
-    // elsewhere in the meantime: then the caret is where they put it.
+  it('says why an ask failed, with the host\'s own message', async () => {
+    // `failed` carries the reason, and the panel shows it once as a toast: a question the session
+    // would not take is not something the reader can work out from the block alone.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+    ;(props.onCommentAsk as unknown as { mockResolvedValue: (value: unknown) => void })
+      .mockResolvedValue({ outcome: 'failed', message: 'the session is gone' })
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+    await act(async () => {
+      fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    })
+
+    expect(document.querySelector('[data-diff-discussion-failed]')).not.toBeNull()
+    expect(screen.getByText('the session is gone')).toBeDefined()
+  })
+
+  it('keeps the caret in the writing row across a send', async () => {
+    // The writing row stays while a question is in flight (see `DiscussionBlock`), so the caret never
+    // has to leave: the send takes the words, leaves the field where it was, and the reader can type
+    // the next question without reaching for the block again.
     const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [multi], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('m.txt'))
 
-    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
     const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
     const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
     vi.spyOn(window, 'getSelection').mockReturnValue({
@@ -6663,39 +7685,22 @@ describe('PendingPanel', () => {
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
     fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
 
-    const type = (value: string): void => {
-      fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value } })
-      fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
-    }
-    type('why?')
-    expect(document.querySelector('[data-diff-discussion-input]')).toBeNull()
-    const prompt = (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]?.[1] ?? ''
-    act(() => {
-      listener!({ running: false, nodes: [{ kind: 'user', text: prompt }, { kind: 'assistant', text: 'first answer' }], partial: '', error: undefined })
-    })
-    expect(document.activeElement).toBe(document.querySelector('[data-diff-discussion-input]'))
+    const input = (): HTMLInputElement => document.querySelector('[data-diff-discussion-input]') as HTMLInputElement
+    act(() => { input().focus() })
+    fireEvent.change(input(), { target: { value: 'why?' } })
+    await act(async () => { fireEvent.keyDown(input(), { key: 'Enter' }) })
 
-    // Second turn: this time the user clicks away while the answer runs. Its prompt
-    // carries the second question, which is what tells the two turns apart.
-    type('and then?')
-    const secondPrompt = (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[1]?.[1] ?? ''
-    act(() => { document.dispatchEvent(new Event('pointerdown', { bubbles: true })) })
-    act(() => {
-      listener!({
-        running: false,
-        nodes: [
-          { kind: 'user', text: prompt },
-          { kind: 'assistant', text: 'first answer' },
-          { kind: 'user', text: secondPrompt },
-          { kind: 'assistant', text: 'second answer' },
-        ],
-        partial: '',
-        error: undefined,
-      })
-    })
-    const input = document.querySelector('[data-diff-discussion-input]')
-    expect(input).not.toBeNull()
-    expect(document.activeElement).not.toBe(input)
+    expect(askedPrompts(props).length).toBe(1)
+    // The row is still there, empty and focused: the send took the text, not the place the reader was
+    // typing in.
+    expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
+    expect(input().value).toBe('')
+    expect(document.activeElement).toBe(input())
+
+    // The answer lands in the same block, and the row is still where it was for the next question.
+    answerComment(props, 'because')
+    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('because')
+    expect(document.activeElement).toBe(input())
   })
 
   it('scrolls with the code from a wheel over a discussion block', () => {
@@ -7001,18 +8006,14 @@ describe('PendingPanel', () => {
   })
 
   it('keeps a thread on the code row grid', () => {
-    // A block is a whole number of code rows: one header, one row per line the
-    // thread shows, two for the compose area. The turns used to carry vertical
-    // chrome of their own (a bubble's padding, a paragraph's bottom margin), which
-    // left a gap between the question and its answer and put every line below the
-    // first a few pixels off the code's 22px grid.
+    // A block is a whole number of code rows: one header, one row per line the thread shows, two for
+    // the compose area. The turns used to carry vertical chrome of their own (a bubble's padding, a
+    // paragraph's bottom margin), which left a gap between the question and its answer and put every
+    // line below the first a few pixels off the code's 22px grid.
     const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
-    const props = panelProps({ read: true, files: [multi], busy: new Set() })
-    render(<PendingPanel {...props} />)
+    const draft = render(<PendingPanel {...panelProps({ read: true, files: [multi], busy: new Set() })} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('m.txt'))
-    const listener = (props.watchChat as unknown as { mock: { calls: [string, (view: unknown) => void][] } }).mock.calls[0]?.[1]
-
     const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
     const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
     vi.spyOn(window, 'getSelection').mockReturnValue({
@@ -7030,18 +8031,27 @@ describe('PendingPanel', () => {
     // An empty block: the header plus the two compose rows.
     expect(block().style.height).toBe('66px')
 
-    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
-    fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
-    const prompt = { kind: 'user', text: (props.onAskAgent as unknown as { mock: { calls: [string, string][] } }).mock.calls[0]?.[1] ?? '' }
-    act(() => {
-      // jsdom measures no glyphs, so a message's rows are its line count — plus the
-      // bubble's own half-row padding twice, which is what the user's turn adds. The
-      // blank line is the other point: it is the agent's paragraph gap, and it must
-      // cost neither a row nor a line in the render, since a blank line in a thread
-      // reads as a gap in the code it annotates. The prompt is in the transcript, which
-      // is what makes the answer ours.
-      listener!({ running: false, nodes: [prompt, { kind: 'assistant', text: 'first answer\n\nsecond line' }], partial: '', error: undefined })
-    })
+    // The same thread with a question and an answer: the annotation's bubble, the answer's own lines,
+    // and the writing row under them. The blank line in the answer is the agent's paragraph gap, and
+    // it costs neither a row nor a line in the render — a blank line in a thread reads as a gap in the
+    // code it annotates.
+    draft.unmount()
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [multi],
+      busy: new Set(),
+      comments: [comment({
+        id: 'd-grid',
+        entryId: multi.id,
+        text: 'why?',
+        anchor: { startLine: 4, endLine: 4 },
+        asks: [{ requestId: 'q1' }],
+      })],
+      commentAnswers: { q1: 'first answer\n\nsecond line' },
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
     // 1 header + (1 line of question + its 1 row of bubble padding) + 2 rows of
     // answer + 2 compose rows, and the reservation the rows after it are pushed by
     // says the same.
@@ -7071,16 +8081,12 @@ describe('PendingPanel', () => {
     const CONTENT_PX = 66
     const ROW_PX = 22
     const file = entry({ id: 'entry-runaway', path: '/repo/runaway.txt', oldText: 'a\n', newText: 'b\n' })
-    rememberDiscussions(S1, {
-      [file.id]: [{
-        id: 'd-runaway',
-        anchor: { start: 1, end: 1, startLine: 2, endLine: 2 },
-        collapsed: false,
-        draft: '',
-        messages: [{ role: 'user', text: 'why?' }],
-      }],
-    } as unknown as Parameters<typeof rememberDiscussions>[1])
-    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [comment({ id: 'd-runaway', entryId: file.id, text: 'why?', anchor: { startLine: 2, endLine: 2 } })],
+    })} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('runaway.txt'))
 
@@ -7116,6 +8122,278 @@ describe('PendingPanel', () => {
       expect(document.querySelector('[data-diff-discussion]')).not.toBeNull()
     } finally {
       quiet.mockRestore()
+    }
+  })
+
+  it('keeps a focused composer still when the same file’s content changes', () => {
+    // The reader is typing in a thread and the file is re-read: a row above the thread now wraps
+    // onto a line it did not have, so everything below it — the box they are typing in included —
+    // is drawn 200px lower down. What must not move is the box's place on the SCREEN.
+    //
+    // jsdom lays nothing out, so the two boxes are pinned by hand. The field's position is a live
+    // function of the scroll offset, the way a browser's is, and its drawing follows the reflow:
+    // the first reading after the swap is the OLD one, because that is the drawing the render that
+    // swapped the content in was measured against — the layout the browser had not recomputed yet
+    // (see the fix's own note). Every reading after it is the new one, which is what the commit's
+    // layout pass sees. Without the correction the field is left drawn 200px below the reader's
+    // eyes and the scroll is never touched.
+    const restore = stubCodeScroll()
+    try {
+      const before = entry({ id: 'entry-drift', path: '/repo/drift.txt', oldText: 'a\nb\nc\nd\n', newText: 'a\nB\nc\nd\n' })
+      const after = entry({ id: 'entry-drift', path: '/repo/drift.txt', oldText: 'a\nb\nc\nd\n', newText: 'a\nB\n' + 'x'.repeat(40) + '\nc\nd\n' })
+      const thread = comment({
+        id: 'd-drift',
+        entryId: before.id,
+        text: 'why?',
+        anchor: { startLine: 2, endLine: 2 },
+        asks: [{ requestId: 'q-drift' }],
+      })
+      const view = render(<PendingPanel {...panelProps({
+        read: true,
+        files: [before],
+        busy: new Set(),
+        comments: [thread],
+        commentAnswers: { 'q-drift': 'because' },
+      })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      fireEvent.click(screen.getByText('drift.txt'))
+
+      const body = codeBody()
+      Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 2000 })
+      Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 800 })
+      const box = (top: number, height: number): DOMRect => ({
+        top, bottom: top + height, left: 0, right: 400, width: 400, height, x: 0, y: top, toJSON: () => ({}),
+      }) as DOMRect
+      // The field's own place in the content: 300px down a page that has not reflowed yet, and 500
+      // after the changed row above it is redrawn. It is read the way a browser would be read at
+      // each moment — the first reading after the swap is still the OLD drawing, since the layout
+      // the render that swapped the content in worked from had not been recomputed yet; every
+      // reading after it is the new one, which is what the commit's layout pass sees.
+      let content = 300
+      let reflowed = false
+      const input = document.querySelector('[data-diff-discussion-input]') as HTMLInputElement
+      vi.spyOn(body, 'getBoundingClientRect').mockImplementation(() => box(0, 800))
+      vi.spyOn(input, 'getBoundingClientRect').mockImplementation(() => {
+        const top = reflowed ? content : 300
+        reflowed = true
+        return box(top - body.scrollTop, 26)
+      })
+      // The caret is in the field, which is what the whole correction is gated on.
+      input.focus()
+      expect(document.activeElement).toBe(input)
+      expect(input.getBoundingClientRect().top).toBe(300)
+      reflowed = false
+      content = 500
+
+      view.rerender(<PendingPanel {...panelProps({
+        read: true,
+        files: [after],
+        busy: new Set(),
+        comments: [thread],
+        commentAnswers: { 'q-drift': 'because' },
+      })} />)
+
+      // The field is the same field: the correction is about a box the reader is still in, so a
+      // remount would be a different problem and this test would be measuring nothing.
+      expect(document.querySelector('[data-diff-discussion-input]')).toBe(input)
+      expect(document.activeElement).toBe(input)
+      // The scroll took the difference between the two drawings — 200 — so the field is still drawn
+      // where the reader left it (300 from the viewport's top) while the rows moved under it. A
+      // correction that read its own output would keep walking (200, 400, …) and never settle.
+      expect(body.scrollTop).toBe(200)
+      expect(input.getBoundingClientRect().top).toBe(300)    } finally {
+      restore()
+    }
+  })
+
+  it('leaves a focused composer alone when a render does not move it', () => {
+    // The other half of the gate: a re-render of the same file — a poll, a keystroke, the list
+    // refreshing — with the field focused must not scroll anything at all. A correction that fired
+    // on "a render with a focused field" rather than on "the drawing moved" would walk the view one
+    // residue at a time and read as drift.
+    const restore = stubCodeScroll()
+    try {
+      const one = entry({ id: 'entry-still', path: '/repo/still.txt', oldText: 'a\n', newText: 'b\n' })
+      const props = panelProps({
+        read: true,
+        files: [one],
+        busy: new Set(),
+        comments: [comment({
+          id: 'd-still',
+          entryId: one.id,
+          text: 'why?',
+          anchor: { startLine: 2, endLine: 2 },
+          asks: [{ requestId: 'q-still' }],
+        })],
+        commentAnswers: { 'q-still': 'because' },
+      })
+      const view = render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      fireEvent.click(screen.getByText('still.txt'))
+
+      const body = codeBody()
+      Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 2000 })
+      Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 800 })
+      const box = (top: number, height: number): DOMRect => ({
+        top, bottom: top + height, left: 0, right: 400, width: 400, height, x: 0, y: top, toJSON: () => ({}),
+      }) as DOMRect
+      vi.spyOn(body, 'getBoundingClientRect').mockImplementation(() => box(0, 800))
+      const input = document.querySelector('[data-diff-discussion-input]') as HTMLInputElement
+      vi.spyOn(input, 'getBoundingClientRect').mockImplementation(() => box(180 - body.scrollTop, 26))
+      input.focus()
+
+      view.rerender(<PendingPanel {...props} />)
+      expect(body.scrollTop).toBe(0)
+    } finally {
+      restore()
+    }
+  })
+
+  /**
+   * The reveal: an answer grows a thread the reader is looking at, and the block's last line must
+   * not end up under the code view's bottom edge.
+   *
+   * jsdom lays nothing out, so the thread's card is given a height a test can grow, in the viewport
+   * the body is pinned to. Before the change the card's bottom is past that edge; an answer that
+   * lengthens the card pushes it further past. The scroll the panel takes is the smallest that puts
+   * the bottom (plus the reading margin) back on screen — content that only SHRANK asks for none of
+   * it, and a card the reader has scrolled away from is not dragged back.
+   */
+  it('reveals a visible thread’s bottom when its answer grows', () => {
+    const restore = stubCodeScroll()
+    try {
+      const file = entry({ id: 'entry-grow', path: '/repo/grow.txt', oldText: 'a\n', newText: 'b\n' })
+      let cardHeight = 160
+      const props = panelProps({
+        read: true,
+        files: [file],
+        busy: new Set(),
+        comments: [comment({
+          id: 'd-grow',
+          entryId: file.id,
+          text: 'why?',
+          anchor: { startLine: 2, endLine: 2 },
+          asks: [{ requestId: 'q-grow' }],
+        })],
+      })
+      render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      fireEvent.click(screen.getByText('grow.txt'))
+
+      const body = codeBody()
+      Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 2000 })
+      Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 800 })
+      const box = (top: number, height: number): DOMRect => ({
+        top, bottom: top + height, left: 0, right: 400, width: 400, height, x: 0, y: top, toJSON: () => ({}),
+      }) as DOMRect
+      // The viewport the panel reads the card against, and the card itself: 300px down the content,
+      // 160px tall, so its bottom (460) is already past the 800px page's… it is not — the card is
+      // half way down the screen and fully visible, which is exactly the reader's situation when an
+      // answer arrives. What is clipped comes with the growth below.
+      vi.spyOn(body, 'getBoundingClientRect').mockImplementation(() => box(0, 800))
+      const card = document.querySelector('[data-diff-discussion]') as HTMLElement
+      vi.spyOn(card, 'getBoundingClientRect').mockImplementation(() => box(760 - body.scrollTop, cardHeight))
+
+      // The question is asked and answered: the card grows by 48px, pushing its bottom from 920 to
+      // 968 — 168px past the viewport's edge, of which the correction reveals exactly enough to put
+      // the bottom (and its 8px margin) at 808.
+      expect(document.querySelector('[data-diff-discussion-reply]')).toBeNull()
+      expect(body.scrollTop).toBe(0)
+      cardHeight = 208
+      answerComment(props, 'because', 'd-grow')
+      expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('because')
+      expect(body.scrollTop).toBe(168)
+    } finally {
+      restore()
+    }
+  })
+
+  it('leaves the scroll alone when the thread it grew is out of view', () => {
+    // The reader scrolled away from the thread — the card is below the viewport entirely — and an
+    // answer arrives on it. Nothing may move: being dragged back to a thread you left is the thing
+    // this whole rule is careful about.
+    const restore = stubCodeScroll()
+    try {
+      const file = entry({ id: 'entry-away', path: '/repo/away.txt', oldText: 'a\n', newText: 'b\n' })
+      let cardHeight = 160
+      const props = panelProps({
+        read: true,
+        files: [file],
+        busy: new Set(),
+        comments: [comment({
+          id: 'd-away',
+          entryId: file.id,
+          text: 'why?',
+          anchor: { startLine: 2, endLine: 2 },
+          asks: [{ requestId: 'q-away' }],
+        })],
+      })
+      render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      fireEvent.click(screen.getByText('away.txt'))
+
+      const body = codeBody()
+      Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 2000 })
+      Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 800 })
+      const box = (top: number, height: number): DOMRect => ({
+        top, bottom: top + height, left: 0, right: 400, width: 400, height, x: 0, y: top, toJSON: () => ({}),
+      }) as DOMRect
+      vi.spyOn(body, 'getBoundingClientRect').mockImplementation(() => box(0, 800))
+      const card = document.querySelector('[data-diff-discussion]') as HTMLElement
+      // 2000px down a 2000px file at scroll 0: the card is nowhere near the viewport.
+      vi.spyOn(card, 'getBoundingClientRect').mockImplementation(() => box(2000 - body.scrollTop, cardHeight))
+
+      cardHeight = 248
+      answerComment(props, 'because', 'd-away')
+      expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('because')
+      expect(body.scrollTop).toBe(0)
+    } finally {
+      restore()
+    }
+  })
+
+  it('does not scroll when the answer only shortens the thread', () => {
+    // An answer that replaces a long one asks for nothing: the card's rows follow it down, and the
+    // bottom the reveal looks at has moved UP. A rule written as "scroll to the bottom edge" rather
+    // than "reveal a bottom that was pushed past it" scrolls here, which is a jump for no reason.
+    const restore = stubCodeScroll()
+    try {
+      const file = entry({ id: 'entry-shrink', path: '/repo/shrink.txt', oldText: 'a\n', newText: 'b\n' })
+      let cardHeight = 208
+      const props = panelProps({
+        read: true,
+        files: [file],
+        busy: new Set(),
+        comments: [comment({
+          id: 'd-shrink',
+          entryId: file.id,
+          text: 'why?',
+          anchor: { startLine: 2, endLine: 2 },
+          asks: [{ requestId: 'q-shrink' }],
+        })],
+        commentAnswers: { 'q-shrink': 'a very long answer' },
+      })
+      render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      fireEvent.click(screen.getByText('shrink.txt'))
+
+      const body = codeBody()
+      Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 2000 })
+      Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 800 })
+      const box = (top: number, height: number): DOMRect => ({
+        top, bottom: top + height, left: 0, right: 400, width: 400, height, x: 0, y: top, toJSON: () => ({}),
+      }) as DOMRect
+      vi.spyOn(body, 'getBoundingClientRect').mockImplementation(() => box(0, 800))
+      const card = document.querySelector('[data-diff-discussion]') as HTMLElement
+      // Its bottom is past the edge to begin with; the shorter answer pulls it back inside it.
+      vi.spyOn(card, 'getBoundingClientRect').mockImplementation(() => box(760 - body.scrollTop, cardHeight))
+
+      // The host reads a shorter answer on its next poll: the same question, a shorter text.
+      cardHeight = 160
+      act(() => { hostOf(props).answer('q-shrink', 'short') })
+      expect(body.scrollTop).toBe(0)
+    } finally {
+      restore()
     }
   })
 
@@ -8130,19 +9408,20 @@ describe('PendingPanel', () => {
     // else would move it along with its own code.
     localStorage.setItem('diff-approval:split-mode', '1')
     const file = entry({ id: 'entry-split-quote', path: '/repo/quote.txt', oldText: 'a\nb\n', newText: 'a\nB\n' })
-    rememberDiscussions(S1, {
-      [file.id]: [{
+    // The record quotes code the file no longer holds anywhere, so the thread comes out outdated.
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [comment({
         id: 'd-split-lost',
-        anchor: { start: 1, end: 1, startLine: 2, endLine: 2 },
-        collapsed: false,
-        draft: '',
-        lost: true,
+        entryId: file.id,
+        text: '这行为什么改了？',
+        anchor: { startLine: 2, endLine: 2 },
         quote: 'const gone = 1',
-        quoteLines: [{ old: undefined, new: 2, kind: 'add' }],
-        messages: [{ role: 'user', text: '这行为什么改了？' }],
-      }],
-    } as unknown as Parameters<typeof rememberDiscussions>[1])
-    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+        quoteLines: [{ new: 2, kind: 'add' }],
+      })],
+    })} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('quote.txt'))
 
@@ -8273,12 +9552,12 @@ describe('PendingPanel', () => {
     localStorage.setItem('diff-approval:split-mode', '1')
     act(() => { setCommentModeEnabled(true) })
     const file = entry({ id: 'entry-split-jump', path: '/repo/jump.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
-    rememberDiscussions(S1, {
-      [file.id]: [
-        { id: 'd-split-jump', anchor: { start: 7, end: 7, startLine: 8, endLine: 8 }, collapsed: false, draft: '', lost: false, messages: [{ role: 'user', text: '这一行' }] },
-      ],
-    } as unknown as Parameters<typeof rememberDiscussions>[1])
-    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [comment({ id: 'd-split-jump', entryId: file.id, text: '这一行', anchor: { startLine: 8, endLine: 8 } })],
+    })} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('jump.txt'))
     expect(document.querySelector('[data-diff-split-row]')).not.toBeNull()
@@ -8291,45 +9570,116 @@ describe('PendingPanel', () => {
     try {
       fireEvent.click(item)
       const body = document.querySelector('[data-diff-body]') as HTMLElement
-      // One row a line here too (nothing wraps in jsdom), so the pair the comment names is its line less
-      // one, and the lead rows above it are the configured ones.
-      expect(body.scrollTop).toBe((8 - 1 - navLeadRows()) * diffLineHeight())
+      // The box the comment's thread draws hangs below the pair its last line is in, so what is
+      // landed is that pair's own END: `off(pair) + pairHeightAt(pair)` — the pair's top plus its
+      // height — with the configured lead rows above it. One row a line here and nothing wraps in
+      // jsdom, so the pair is the line less one and its end is `8 * diffLineHeight()`.
+      expect(body.scrollTop).toBe(8 * diffLineHeight() - navLeadRows() * diffLineHeight())
     } finally {
       restore()
     }
   })
 
-  it('lands an outdated comment on its own box, not on the rows its numbers name', () => {
-    // The code an outdated comment was written about is gone, so the row its numbers point at says
-    // nothing: the jump goes to the thread's box instead, which hangs under the pair its range ends in —
-    // one row lower than the landing a live comment's row gets.
+  it('lands a stacked comment jump on the card the jump named in the split view too', () => {
+    // The same defect, the other code view: its cards are one absolutely-positioned plate per pair,
+    // with the threads drawn one below the other inside it, and the landing put the top of that plate
+    // under the lead rows whatever thread was named. The plate's own pixels are what the height table
+    // charges the pair, so the card the jump was asked for starts that much below the pair's end plus
+    // the plates before it — read off the rendered `data-diff-discussion-space`, as the single-column
+    // case reads its row's.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-split-stack', path: '/repo/split-stack.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [
+        comment({ id: 'd-split-first', entryId: file.id, text: '第一个框。', anchor: { startLine: 8, endLine: 8 } }),
+        comment({ id: 'd-split-second', entryId: file.id, text: '第二个框。', anchor: { startLine: 8, endLine: 8 } }),
+      ],
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('split-stack.txt'))
+    expect(document.querySelector('[data-diff-split-row]')).not.toBeNull()
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    // One charge per half, both the same figure: the plates both columns reserve for the pair's threads.
+    const spaces = [...document.querySelectorAll('[data-diff-discussion-space]')] as HTMLElement[]
+    expect(spaces).toHaveLength(2)
+    const stackedPx = Number.parseFloat(spaces[0]!.style.height) || 0
+    expect(stackedPx).toBeGreaterThan(0)
+    // The pair the two threads end in is line 8's own (row 7), so the plate is drawn at that pair's own
+    // end: `off(7) + pairHeightAt(7)`, the pair's top plus its one row — which for a whole-file create
+    // that never wraps is `8 * diffLineHeight()` as well, but the landing's own arithmetic is the pair
+    // table's and is written as such. The card the second jump must land starts below the first one by
+    // exactly the height the first card draws itself at — read off the card's own style, so the
+    // expectation is the panel's drawing rather than a figure copied from a run.
+    const cardBase = 8 * diffLineHeight()
+    const lead = navLeadRows() * diffLineHeight()
+    const cardOf = (id: string): HTMLElement =>
+      document.querySelector(`[data-diff-discussion-id="${id}"]`) as HTMLElement
+    const firstCardPx = Number.parseFloat(cardOf('d-split-first').style.height) || 0
+    expect(firstCardPx).toBeGreaterThan(0)
+    expect(firstCardPx).toBeLessThan(stackedPx)
+    const landedCard = (): string => {
+      const top = document.querySelector('[data-diff-body]')!.scrollTop + lead
+      if (top === cardBase) return cardOf('d-split-first').dataset.diffDiscussionId!
+      if (top === cardBase + firstCardPx) return cardOf('d-split-second').dataset.diffDiscussionId!
+      return `nothing: ${top}`
+    }
+
+    const restore = stubCodeScroll(20000, 800)
+    try {
+      fireEvent.click(document.querySelector('[data-diff-comment-link="d-split-first"]') as HTMLElement)
+      expect(document.querySelector('[data-diff-body]')!.scrollTop).toBe(cardBase - lead)
+      expect(landedCard()).toBe('d-split-first')
+      fireEvent.click(document.querySelector('[data-diff-comment-link="d-split-second"]') as HTMLElement)
+      expect(document.querySelector('[data-diff-body]')!.scrollTop).toBe(cardBase + firstCardPx - lead)
+      expect(landedCard()).toBe('d-split-second')
+    } finally {
+      restore()
+    }
+  })
+
+  it('lands a comment whose code is gone on the lines it names, and lets the block say the rest', () => {
+    // The list has no row model, so it does not know (and does not claim) that a comment's code has
+    // moved on: it names the lines the comment was written on and the DETAIL lands them. For a
+    // comment whose quote is nowhere in the file the block stays on the rows its lines hold (it says
+    // it is outdated rather than moving), so the landing is still the box hanging under the pair
+    // those lines are in — the state itself is the block's to say, not the list's.
     localStorage.setItem('diff-approval:split-mode', '1')
     act(() => { setCommentModeEnabled(true) })
     const file = entry({ id: 'entry-split-card', path: '/repo/card.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
-    rememberDiscussions(S1, {
-      [file.id]: [{
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [comment({
         id: 'd-split-card',
-        anchor: { start: 7, end: 7, startLine: 8, endLine: 8 },
-        collapsed: false,
-        draft: '',
-        lost: true,
+        entryId: file.id,
+        text: '这一行',
+        anchor: { startLine: 8, endLine: 8 },
         quote: 'const gone = 1',
-        quoteLines: [{ old: undefined, new: 8, kind: 'add' }],
-        messages: [{ role: 'user', text: '这一行' }],
-      }],
-    } as unknown as Parameters<typeof rememberDiscussions>[1])
-    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+        quoteLines: [{ new: 8, kind: 'add' }],
+      })],
+    })} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('card.txt'))
     fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
 
     const item = document.querySelector('[data-diff-comment-link]') as HTMLElement
     expect(item).not.toBeNull()
+    // Nothing on the item says the code is gone: the list shows the words and the lines, and the
+    // block's own quote label is where that state is said.
+    expect(item.querySelector('[data-diff-comment-lost]')).toBeNull()
     const restore = stubCodeScroll()
     try {
       fireEvent.click(item)
       const body = document.querySelector('[data-diff-body]') as HTMLElement
-      expect(body.scrollTop).toBe((8 - navLeadRows()) * diffLineHeight())
+      // The same landing a live comment gets: the box hanging under the pair its lines are in, which
+      // is `off(pair) + pairHeightAt(pair)` — the pair's top plus its own height — less the configured
+      // lead rows. One row a line and nothing wraps in jsdom, so that end is `8 * diffLineHeight()`.
+      expect(body.scrollTop).toBe(8 * diffLineHeight() - navLeadRows() * diffLineHeight())
     } finally {
       restore()
     }
@@ -8461,6 +9811,100 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('action.viewUnified'))
     expect(document.querySelector('[data-diff-hscroll]')).toBeNull()
     expect(localStorage.getItem('diff-approval:split-mode')).toBe('0')
+  })
+
+  it('counts the toolbar buttons that fit, reserving room for the overflow button', () => {
+    // 28px chips 8px apart: three fit in exactly 100, and a fourth needs 136.
+    expect(fittingItems([28, 28, 28, 28], 100, 8)).toBe(3)
+    expect(fittingItems([28, 28, 28, 28], 99, 8)).toBe(2)
+    expect(fittingItems([28, 28], 20, 8)).toBe(0)
+    // Everything fits, so no overflow button is reserved and four chips still fit in 136...
+    expect(inlineItemCount([28, 28, 28, 28], 136, 8, 28)).toBe(4)
+    // ...but one more chip does not, and the button that would hold it costs a chip and a gap of
+    // its own: the row draws three inline rather than four with nowhere to put the fifth.
+    expect(inlineItemCount([28, 28, 28, 28, 28], 136, 8, 28)).toBe(3)
+  })
+
+  it('moves the toolbar buttons that no longer fit into one overflow menu that names them', () => {
+    const observers: Array<() => void> = []
+    class FakeResizeObserver {
+      constructor(private readonly callback: () => void) {}
+      observe(): void { observers.push(this.callback) }
+      disconnect(): void {}
+    }
+    const globals = globalThis as unknown as Record<string, unknown>
+    const originalObserver = globals.ResizeObserver
+    globals.ResizeObserver = FakeResizeObserver
+    try {
+      const file = entry({ id: 'entry-overflow', path: '/repo/ov.txt', oldText: 'a\n', newText: 'b\n' })
+      const props = panelProps({ read: true, files: [file], busy: new Set() })
+      render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      fireEvent.click(screen.getByText('ov.txt'))
+
+      const group = document.querySelector('[data-diff-actions]') as HTMLElement
+      expect(group).not.toBeNull()
+      // jsdom lays nothing out, so the width it reports is zero: nothing has been measured, nothing
+      // is hidden behind `⋯`, and every button still names itself to its own tooltip.
+      expect(document.querySelector('[data-diff-actions-more]')).toBeNull()
+      const tooltipOf = (button: HTMLElement): string => {
+        act(() => { button.focus() })
+        return screen.getByRole('tooltip').textContent ?? ''
+      }
+      const names = new Map<string, string>()
+      const hints = new Map<string, string>()
+      for (const button of group.querySelectorAll('button')) {
+        const marker = [...button.attributes].map(attribute => attribute.name)
+          .find(name => name.startsWith('data-diff-') && name !== 'data-diff-actions-more')
+        if (marker === undefined) continue
+        names.set(marker, button.getAttribute('aria-label') ?? '')
+        hints.set(marker, tooltipOf(button))
+      }
+      expect([...names.keys()]).toEqual([
+        'data-diff-prev', 'data-diff-next', 'data-diff-search-toggle',
+        'data-diff-goto', 'data-diff-toggle-view', 'data-diff-refresh-vcs',
+      ])
+      // The button's accessible name stays the action itself; only its tooltip carries the chord.
+      expect(names.get('data-diff-search-toggle')).toBe('action.search')
+      expect(hints.get('data-diff-search-toggle')).toBe('action.search (Ctrl+F)')
+
+      // The panel is dragged narrow and the observer it listens to says so: a 120px group holding a
+      // 40px `+N -M` leaves 72px — one 28px chip, and the overflow button's own room beside it.
+      Object.defineProperty(group, 'clientWidth', { configurable: true, value: 120 })
+      const measure = (element: Element): void => {
+        const width = element.classList.contains(panelCss.diffStats) ? 40
+          : element.classList.contains(panelCss.divider) ? 1
+            : 28
+        Object.defineProperty(element, 'offsetWidth', { configurable: true, value: width })
+      }
+      measure(group)
+      for (const element of group.querySelectorAll('button, span')) measure(element)
+      act(() => { for (const callback of observers) callback() })
+
+      expect(document.querySelector('[data-diff-prev]')).not.toBeNull()
+      expect(document.querySelector('[data-diff-next]')).toBeNull()
+      expect(document.querySelector('[data-diff-search-toggle]')).toBeNull()
+      const more = document.querySelector('[data-diff-actions-more]') as HTMLElement
+      expect(more).not.toBeNull()
+      expect(more.getAttribute('aria-label')).toBe('action.more')
+
+      // The menu holds what left the row, in the row's own order, each row titled with the tooltip
+      // its button would have shown.
+      fireEvent.click(more)
+      const rows = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+      expect(rows.map(row => row.textContent)).toEqual([
+        'data-diff-next', 'data-diff-search-toggle', 'data-diff-goto',
+        'data-diff-toggle-view', 'data-diff-refresh-vcs',
+      ].map(marker => hints.get(marker)))
+
+      // A row does what its button did: the split view turns on from the menu, and the menu closes.
+      fireEvent.click(rows[rows.length - 2]!)
+      expect(document.querySelector('[data-diff-hscroll="left"]')).not.toBeNull()
+      expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
+    } finally {
+      if (originalObserver === undefined) delete globals.ResizeObserver
+      else globals.ResizeObserver = originalObserver
+    }
   })
 
   it('offers a rendered Markdown preview that toggles for a Markdown file', () => {
