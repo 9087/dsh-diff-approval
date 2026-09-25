@@ -48,6 +48,26 @@ interface TestHarness {
   dispose(): Promise<void>
 }
 
+// How long to give a write that has already been ACCEPTED to reach the disk.
+//
+// The stores persist fire-and-forget: an RPC answers as soon as the in-memory mutation is
+// recorded, and the file follows on that file's own write chain (`CommentStore.save`,
+// `PendingPersistence`). `vi.waitFor` defaults to one second, which is a load-sensitive line for a
+// chain of two `writeFile`+`rename` pairs — the panel spec drives a 9,000-line component in a
+// parallel worker, and this machine's git/junction specs run real subprocesses — and a wait that
+// times out is indistinguishable from a removal that never reached the file. Five seconds keeps a
+// genuinely stuck or mis-ordered write failing, while leaving room for the rename to land.
+//
+// This widens the WAIT, not the assertion: it is not a retry of the behaviour under test. Measured
+// on this machine: `takes the entry's comments with it when the entry is kept, and off the disk`
+// failed once in four runs of `tests/diff-approval.spec.ts` alongside the panel spec with the default
+// wait, and did not fail in eight runs with this one. Eight clean runs would still happen about one
+// time in ten if the rate were unchanged, so the numbers support the reading rather than proving it —
+// what makes it more than a loosened timeout is the ordering: the removal's `save` is the LAST link of
+// that file's chain (each `save` captures its snapshot at call time and appends in mutation order), so
+// a write that landed after it, or one that never landed at all, still fails here at five seconds.
+const FILE_WAIT = { timeout: 5_000 } as const
+
 const contexts: Context[] = []
 const tempDirs: string[] = []
 
@@ -2125,7 +2145,7 @@ describe('comments over the channel', () => {
     // than about a write that never happened.
     await vi.waitFor(async () => {
       await expect(readFile(file, 'utf8')).resolves.toContain(comment.id)
-    })
+    }, FILE_WAIT)
 
     const [entry] = await listEntries(handle, 'session-1')
     await handle('keep', { sessionId: 'session-1', id: entry!.id }, signal())
@@ -2135,7 +2155,7 @@ describe('comments over the channel', () => {
     // first client's keep deleted.
     await vi.waitFor(async () => {
       await expect(readFile(file, 'utf8')).resolves.not.toContain(comment.id)
-    })
+    }, FILE_WAIT)
   })
 
   it('still lists the comments of an entry that is still listed', async () => {
