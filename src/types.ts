@@ -5,6 +5,7 @@
  */
 
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { CommentLineRange } from './comment-lines.ts'
 
 /**
  * One file's pending entry, global and unique per `path`: the complete set of
@@ -77,6 +78,42 @@ export interface DiffApprovalListValue {
    * told about it simply finds the list gone later, with nothing to explain it (issue #6).
    */
   persistError?: string | undefined
+  /**
+   * The last failure to write a COMMENT file, or absent while those writes are working.
+   * Separate from `persistError` because the two live in different files and one may be
+   * writable while the other is not; a comment that only exists in memory is erased by a
+   * restart exactly like an unpersisted list, and the panel says so once.
+   */
+  commentPersistError?: string | undefined
+  /**
+   * The requested session's comment threads, oldest first. They ride the list read
+   * so a poll sees the entries and the comments that hang off them in one
+   * consistent snapshot — a comment list that arrived on its own channel could
+   * name an entry the same read had already dropped.
+   */
+  comments: CommentRecord[]
+  /**
+   * The new-file lines each comment sits on NOW, keyed by comment id — where its quote was found in
+   * the entry's current content (see `resolveCommentLines`, which both halves import).
+   *
+   * DERIVED on every read and never persisted: a resolved line written to the comment file would
+   * outlive the content it was true of, and a stale stored figure is worse than none. A comment the
+   * host cannot place — its quote is gone from the content — is simply ABSENT here, and a caller
+   * then falls back to `record.anchor`: the line the comment was WRITTEN on, which is what an
+   * outdated thread shows anyway. Both panes draw this one map, so the list and the open card
+   * cannot name two lines for one comment (issue: one comment read `[382]` in the list while its
+   * card read 378, because only the open file's pane had resolved it).
+   */
+  commentLines: Record<string, CommentLineRange>
+  /** Bumped on every comment change, so a poller can tell "nothing new" from "re-read". */
+  commentsRevision: number
+  /**
+   * The answer text for the questions the session has answered, keyed by the
+   * question's `requestId` (see `CommentAsk`). DERIVED on every read from the
+   * session's own transcript and never stored: the transcript is the one source of
+   * truth for what the agent said, so a stored copy could only ever disagree with it.
+   */
+  commentAnswers: Record<string, string>
 }
 
 /** What the open endpoint asks the OS to do with a file. */
@@ -242,6 +279,131 @@ export interface DiffApprovalAddValue {
   id?: string | undefined
   /** Whether the no-change walk hit its file cap, so some files were not added. */
   truncated?: boolean | undefined
+  /** Failure detail for `outcome: 'failed'`. */
+  message?: string | undefined
+}
+
+/** The rows a comment was written about, as new-file line numbers. */
+export interface CommentAnchor {
+  /** First new-file line of the annotation. */
+  startLine: number
+  /** Last new-file line of the annotation. */
+  endLine: number
+}
+
+/** The gutter pair of one quoted line, kept so an outdated thread can lay its quote out. */
+export interface CommentQuoteLine {
+  /** Old-file number, absent on a row the old side does not have (an added line). */
+  old?: number | undefined
+  /** New-file number — the second gutter — absent on a removed line. */
+  new?: number | undefined
+  /** Which side of the change the row was on when the thread quoted it. */
+  kind?: 'add' | 'del' | 'context' | undefined
+}
+
+/** One question asked inside a comment thread, and what became of it. */
+export interface CommentAsk {
+  /**
+   * The identity of the prompt request this question was submitted as. The session
+   * persists it on the exact user message it accepted (`source.rpcId`), so it is the
+   * join key between the question and its message in the transcript — and it is the
+   * idempotency key: a request carrying it again is the same submission, not a second
+   * one. Minted by this plugin, so a question knows its own message before the session
+   * has admitted anything.
+   */
+  requestId: string
+  /**
+   * The question's own words, as the reader typed them — without the marker, the
+   * `(path:lines)` reference and the answer rules that wrap them in the submitted
+   * prompt. The prompt is what the agent is asked; this is what the thread shows, so a
+   * follow-up is drawn as the words that were written. Set for every question asked
+   * now; absent only on a record written before this field existed, whose words are
+   * not recoverable from anywhere.
+   */
+  text?: string | undefined
+  /** The turn that claimed the message, when the session reported one. */
+  turn?: number | undefined
+  /**
+   * The session discarded the message before any turn claimed it (a stopped turn, a
+   * cancelled queue). Nothing is coming, and the reader is told so rather than left
+   * waiting — this is what the client used to infer from its own queue snapshot.
+   */
+  dropped?: boolean | undefined
+  /**
+   * The turn that claimed this question has stopped. A question whose turn is over and
+   * that the transcript shows no answer for was cut off: the reader is told that and
+   * offered another try, instead of a block that waits forever on a turn that ended.
+   * Only ever set when true.
+   */
+  ended?: boolean | undefined
+}
+
+/**
+ * One comment thread's durable record: the annotation, where it was written, and the
+ * questions asked inside it.
+ *
+ * The ANSWER's text is deliberately absent: `asks[].requestId` names each question's
+ * message, and the session transcript stays the one source of truth for what the agent
+ * said — a client renders an answer by reading the transcript at that id, and the list
+ * read carries the derived text keyed by the same id. Row indices are absent too: they
+ * are model-relative and meaningless after a reload, so the record keeps new-file LINE
+ * numbers plus the quote the reader was looking at, which is what a re-anchor needs.
+ */
+export interface CommentRecord {
+  /** Stable comment id, minted by the host when the annotation is written. */
+  id: string
+  /** The session the comment belongs to: comments never cross sessions. */
+  sessionId: SessionId
+  /** The pending entry the comment hangs off (its id, which is its path). */
+  entryId: string
+  /** The entry's display path when the comment was written. */
+  path: string
+  /** The lines the annotation was made on. */
+  anchor: CommentAnchor
+  /** The anchored lines as they read then (the re-anchor fingerprint). */
+  quote: string
+  /** `quote` with one row of context on each side, as it read then. */
+  quoteContext?: string | undefined
+  /** The gutter numbers of `quote`'s lines, in the same order. */
+  quoteLines?: CommentQuoteLine[] | undefined
+  /** The annotation itself: what the reader wrote. */
+  text: string
+  /** Epoch milliseconds the comment was written. */
+  createdAt: number
+  /** Epoch milliseconds of the last change to this record. */
+  updatedAt: number
+  /** The questions asked in this thread, oldest first; empty until one is asked. */
+  asks?: CommentAsk[] | undefined
+}
+
+/** Value returned by the channel's comment-add endpoint. */
+export interface DiffApprovalCommentAddValue {
+  /**
+   * What the request did. `missing` means the named entry is not in the session's
+   * list — a comment on a file that has left it is refused rather than stored,
+   * which is the first of the two guards against a comment outliving its entry.
+   */
+  outcome: 'added' | 'missing'
+  /** The stored comment; present only when `outcome` is `added`. */
+  comment?: CommentRecord | undefined
+}
+
+/** Value returned by the channel's comment-remove endpoint. */
+export interface DiffApprovalCommentRemoveValue {
+  /** What the request did; `missing` means no such comment in that session. */
+  outcome: 'removed' | 'missing'
+}
+
+/** Value returned by the channel's comment-ask endpoint. */
+export interface DiffApprovalCommentAskValue {
+  /**
+   * What the request did. `missing` means no such comment in that session;
+   * `no-agent` means the session has no live agent to ask (it ended, or this host
+   * drives no agent for it), and `failed` carries `message`.
+   */
+  outcome: 'asked' | 'missing' | 'no-agent' | 'failed'
+  /** The request identity the comment now carries (present when `outcome` is `asked`). */
+  requestId?: string | undefined
   /** Failure detail for `outcome: 'failed'`. */
   message?: string | undefined
 }

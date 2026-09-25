@@ -11,17 +11,26 @@ import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import type { Workspace, WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import type { ConnectionRpcHandler, ConnectionRpcHandlerOptions, HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
-import type { PendingFileDiff } from '../src/types.ts'
+import type { CommentRecord, PendingFileDiff } from '../src/types.ts'
 import { apply, DIFF_APPROVAL_CHANNEL } from '../src/index.ts'
 import { COMMENT_SKILL, COMMENT_SKILL_NAME } from '../src/comment-skill.ts'
+import { commentsDirFor } from '../src/comments.ts'
+import { resolveCommentLines } from '../src/comment-lines.ts'
 import { en, zh } from '../src/client/locales.ts'
 import { PendingPersistence } from '../src/persist.ts'
 import { removeTempDir } from './cleanup.ts'
+
+// The quote-resolving rule, spied but REAL: the tests below count how often the host searches an
+// entry's content for a comment's quote (see "does not search a file again"), and the rule is the
+// only thing that search can be. Every other test runs the same implementation, unwrapped in effect.
+vi.mock('../src/comment-lines.ts', { spy: true })
 
 interface FsDouble {
   resolve: ReturnType<typeof vi.fn>
   readText: ReturnType<typeof vi.fn>
   writeText: ReturnType<typeof vi.fn>
+  /** The policy-aware deletion seam (`ctx.fs.remove` in a sandboxing build). */
+  remove: ReturnType<typeof vi.fn>
   stat: ReturnType<typeof vi.fn>
   listDir: ReturnType<typeof vi.fn>
   processPath: ReturnType<typeof vi.fn>
@@ -61,9 +70,13 @@ async function harness(options: {
     resolve: vi.fn(async (path: string) => ({ displayPath: path, targetKey: `key:${path}` })),
     readText: vi.fn(async () => undefined),
     writeText: vi.fn(async () => ({ version: 1 })),
+    remove: vi.fn(async () => undefined),
     stat: vi.fn(async () => ({ version: 'v1', type: 'file' })),
     listDir: vi.fn(async () => []),
-    processPath: vi.fn((target: { targetKey: string }) => target.targetKey),
+    // The real backend hands back the OS path a subprocess can open; the double keeps the
+    // resolved display path for it, so a consumer that checks confinement (a Revert's
+    // delete) sees the same path it would in production.
+    processPath: vi.fn((target: { displayPath?: string; targetKey: string }) => target.displayPath ?? String(target.targetKey)),
   }
   ctx.provide('fs', fs as unknown as FileSystem)
   const handle = vi.fn<(channel: string, handler: ConnectionRpcHandler, options: ConnectionRpcHandlerOptions) => () => void>(() => () => {})
@@ -737,7 +750,7 @@ describe('open', () => {
 
     await expect(handle('open', { sessionId: 'session-1', id: entry!.id, action: 'open' }, signal()))
       .resolves.toEqual({ ok: true, value: { outcome: 'opened' } })
-    expect(openPath).toHaveBeenCalledWith('key:/repo/a.txt', 'open')
+    expect(openPath).toHaveBeenCalledWith('/repo/a.txt', 'open')
   })
 
   it('reveals the file location for the reveal action', async () => {
@@ -747,7 +760,7 @@ describe('open', () => {
 
     await expect(handle('open', { sessionId: 'session-1', id: entry!.id, action: 'reveal' }, signal()))
       .resolves.toEqual({ ok: true, value: { outcome: 'opened' } })
-    expect(openPath).toHaveBeenCalledWith('key:/repo/a.txt', 'reveal')
+    expect(openPath).toHaveBeenCalledWith('/repo/a.txt', 'reveal')
   })
 
   it('reports missing without touching the launcher when no entry exists', async () => {
@@ -1074,6 +1087,156 @@ describe('undo/redo', () => {
     const answer = await handle('undo', { sessionId: 'session-1' }, signal())
     expect(answer).toEqual({ ok: false, error: { code: 'internal', message: expect.stringContaining('undo failed') as string, details: {} } })
     expect(diskContent).toBe('c')
+  })
+
+  it('does not undo one session\'s action from another session\'s keyboard', async () => {
+    // Two sessions touched the same file, so both list it; each session's own decisions
+    // are its own. A Ctrl+Z in session B must not reach into session A's history — under
+    // the old single global stack it popped A's pair, restored A's entry and reported
+    // success, which is an action the reader never took.
+    const S2 = SessionId('session-2')
+    const { ctx, handle } = await harness({ sessionIds: [SessionId('session-1'), S2] })
+    emitResult(ctx, { name: 'edit', agent: { id: SessionId('session-1') } }, editSuccess('/repo/a.txt', 'a', 'b'))
+    emitResult(ctx, { name: 'edit', agent: { id: S2 } }, editSuccess('/repo/a.txt', 'b', 'c'))
+    const [entry] = await listEntries(handle, 'session-1')
+    expect(entry!.sessionIds).toEqual(expect.arrayContaining([SessionId('session-1'), S2]))
+
+    await handle('keep', { sessionId: 'session-1', id: entry!.id }, signal())
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+
+    // Session B has no undo of its own, and says so rather than silently succeeding.
+    const refused = await handle('undo', { sessionId: String(S2) }, signal())
+    expect(refused).toMatchObject({ ok: true, value: { outcome: 'nothing' } })
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+
+    // Session A's own Ctrl+Z still restores what its keep removed.
+    await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: entry!.id } })
+    const [restored] = await listEntries(handle, 'session-1')
+    expect(restored).toMatchObject({ id: entry!.id })
+  })
+
+  it('writes the undo under the policy of the session that owns the pair', async () => {
+    // The pair remembers the session its action was taken in, and the write policy has to
+    // come from THAT session: the reader's panel may be showing another session's list by
+    // the time Ctrl+Z arrives, and resolving the policy from the viewer would write A's
+    // file under B's sandbox root.
+    //
+    // This is NOT the red-first evidence for the per-session history, whatever the old title
+    // claimed: the caller here IS the pair's own session, so it passes with the ownership
+    // check in `popOwnPair` removed, and it passes even against the pre-fix single global
+    // stack. The evidence for that fix is 'does not undo one session's action from another
+    // session's keyboard' above, which fails as soon as the stacks are not keyed per session.
+    const S2 = SessionId('session-2')
+    const workspaceA = await mkdtemp(join(tmpdir(), 'dsh-undo-a-'))
+    const workspaceB = await mkdtemp(join(tmpdir(), 'dsh-undo-b-'))
+    tempDirs.push(workspaceA, workspaceB)
+    const policy = {
+      defaultMode: 'workspace-write' as const,
+      // Both sessions are live in this process, so the root comes from the session the
+      // resolver was handed — which is the whole point of asserting on it.
+      resolve: vi.fn((request?: { session?: { id?: unknown } }) => ({
+        mode: 'workspace-write' as const,
+        workspaceRoot: String(request?.session?.id) === String(S2) ? workspaceB : workspaceA,
+      })),
+    }
+    const { ctx, handle, fs } = await harness({
+      sessionIds: [SessionId('session-1'), S2],
+      workspacePath: workspaceA,
+      prepare: (context) => {
+        context.provide('sandboxPolicy', policy as never)
+        // The real `sandboxPolicy.resolve` reads the session to find its root; the docs
+        // double keeps no sessions, so each id stands in for its own.
+        context.provide('sessions', { get: (id: SessionId) => ({ id }) } as never)
+      },
+    })
+    let diskContent = 'b'
+    fs.readText.mockImplementation(async () => diskContent)
+    fs.writeText.mockImplementation(async (_target: unknown, content: string) => { diskContent = content; return { version: 1 } })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    await handle('revert', { sessionId: 'session-1', id: entry!.id }, signal())
+    fs.writeText.mockClear()
+    await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: entry!.id } })
+    expect(diskContent).toBe('b')
+    // The write carried session A's policy: the pair's own session, since no other list
+    // was ever viewed here — the assertion that matters is the root the write ran under.
+    expect(fs.writeText).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.anything(),
+      undefined,
+      expect.anything(),
+      { mode: 'workspace-write', workspaceRoot: workspaceA },
+    )
+  })
+
+  it('carries the pair\'s own session policy into the revert\'s delete of a created file', async () => {
+    // A revert of a created file DELETES it. The delete is a mutation like any other, so
+    // it has to go through the same policy seam the write path uses: under a confining
+    // policy a delete of a file the policy would refuse to write must be refused too,
+    // instead of an unconditional `rm` that ignores the mode entirely.
+    const workspace = await mkdtemp(join(tmpdir(), 'dsh-delete-policy-'))
+    tempDirs.push(workspace)
+    const policy = {
+      defaultMode: 'workspace-write' as const,
+      resolve: vi.fn(() => ({ mode: 'workspace-write' as const, workspaceRoot: workspace })),
+    }
+    const { ctx, handle, fs } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (context) => {
+        context.provide('sandboxPolicy', policy as never)
+        context.provide('sessions', { get: () => undefined } as never)
+      },
+    })
+    const target = join(workspace, 'made.txt')
+    emitResult(ctx, writeExec(), writeSuccess(target, 'create', null, 'fresh'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    await expect(handle('revert', { sessionId: 'session-1', id: entry!.id }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'reverted' } })
+    // The delete reached the fs surface with the session's policy beside it, exactly the
+    // way `writeText` is called — not a raw process-path `rm` outside the seam.
+    expect(fs.remove).toHaveBeenCalledTimes(1)
+    // The target, the policy and the signal: the same call shape `writeText` gets, so a
+    // confining backend can fence the delete exactly as it fences a write.
+    expect(fs.remove).toHaveBeenCalledWith(
+      expect.objectContaining({ displayPath: target }),
+      { mode: 'workspace-write', workspaceRoot: workspace },
+      expect.anything(),
+    )
+  })
+
+  it('refuses to delete a created file the session\'s policy confines the review out of', async () => {
+    // The same policy that would fence a WRITE fences the delete: a path outside the
+    // session's workspace root is not the review's to remove, whatever the mode says.
+    const workspace = await mkdtemp(join(tmpdir(), 'dsh-delete-outside-'))
+    const outside = await mkdtemp(join(tmpdir(), 'dsh-delete-elsewhere-'))
+    tempDirs.push(workspace, outside)
+    const policy = {
+      defaultMode: 'workspace-write' as const,
+      resolve: vi.fn(() => ({ mode: 'workspace-write' as const, workspaceRoot: workspace })),
+    }
+    const { ctx, handle, fs } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: workspace,
+      prepare: (context) => {
+        context.provide('sandboxPolicy', policy as never)
+        context.provide('sessions', { get: () => undefined } as never)
+      },
+    })
+    const target = join(outside, 'made.txt')
+    emitResult(ctx, writeExec(), writeSuccess(target, 'create', null, 'fresh'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    const answer = await handle('revert', { sessionId: 'session-1', id: entry!.id }, signal())
+    expect(answer).toEqual({
+      ok: false,
+      error: { code: 'internal', message: expect.stringContaining('sandbox') as string, details: {} },
+    })
+    expect(fs.remove).not.toHaveBeenCalled()
   })
 })
 
@@ -1879,6 +2042,507 @@ describe('review channel mounting', () => {
     const { viaRegister, viaHandle } = await mount('published')
     expect(viaRegister).toEqual([])
     expect(viaHandle).toEqual([DIFF_APPROVAL_CHANNEL])
+  })
+})
+
+describe('comments over the channel', () => {
+  /** The body of one comment on the entry the harness just captured. */
+  const COMMENT_BODY = { anchor: { startLine: 1, endLine: 1 }, quote: 'a', text: 'why is this here?' }
+
+  /**
+   * Add one comment to the session's listed entry at `index`, through the channel.
+   * @param handle - the channel handler.
+   * @param sessionId - the session to write in.
+   * @param index - which listed entry to comment on (oldest capture first).
+   */
+  async function addComment(handle: ConnectionRpcHandler, sessionId = 'session-1', index = 0): Promise<CommentRecord> {
+    const entry = (await listEntries(handle, sessionId))[index]
+    const answer = await handle('comment-add', { sessionId, entryId: entry!.id, ...COMMENT_BODY }, signal())
+    if (!answer.ok) throw new Error('comment-add failed')
+    const value = answer.value as { outcome: string; comment?: CommentRecord }
+    expect(value.outcome).toBe('added')
+    return value.comment!
+  }
+
+  /** Read one session's comments through the channel's list read. */
+  async function listComments(handle: ConnectionRpcHandler, sessionId: string): Promise<CommentRecord[]> {
+    const answer = await handle('list', { sessionId }, signal())
+    if (!answer.ok) throw new Error('list failed')
+    return (answer.value as { comments?: CommentRecord[] }).comments ?? []
+  }
+
+  it('hands the comments and the entries over in one read', async () => {
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const comment = await addComment(handle)
+
+    const answer = await handle('list', { sessionId: 'session-1' }, signal())
+    const value = (answer as { value: { files: PendingFileDiff[]; comments?: CommentRecord[]; commentsRevision?: number } }).value
+    // One read, one snapshot: a comment list that arrived on its own channel could
+    // name an entry the same read had already dropped.
+    expect(value.files.map(entry => entry.id)).toEqual(['/repo/a.txt'])
+    expect(value.comments).toEqual([comment])
+    expect(value.commentsRevision).toBeGreaterThan(0)
+  })
+
+  it('refuses a comment on an entry that is not in that session\'s list', async () => {
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const [entry] = await listEntries(handle, 'session-1')
+    // Another session naming this file's id gets nothing: a comment may not be born
+    // already outliving the entry it hangs off.
+    await expect(handle('comment-add', { sessionId: 'session-2', entryId: entry!.id, ...COMMENT_BODY }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+    expect(await listComments(handle, 'session-2')).toEqual([])
+    await expect(handle('comment-add', { sessionId: 'session-1', entryId: '/repo/gone.txt', ...COMMENT_BODY }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+  })
+
+  it('rejects a malformed comment with an internal error', async () => {
+    const { handle } = await harness()
+    const answer = await handle('comment-add', { sessionId: 'session-1' }, signal())
+    expect(answer).toEqual({ ok: false, error: { code: 'internal', message: expect.any(String) as string, details: {} } })
+  })
+
+  it('removes one comment, and refuses an id that belongs to another session', async () => {
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const comment = await addComment(handle)
+    await expect(handle('comment-remove', { sessionId: 'session-2', id: comment.id }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+    expect(await listComments(handle, 'session-1')).toEqual([comment])
+    await expect(handle('comment-remove', { sessionId: 'session-1', id: comment.id }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'removed' } })
+    expect(await listComments(handle, 'session-1')).toEqual([])
+  })
+
+  it('takes the entry\'s comments with it when the entry is kept, and off the disk', async () => {
+    const { ctx, handle, storageDir } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const comment = await addComment(handle)
+    const file = join(commentsDirFor(storageDir), 'session-1.json')
+    // On disk before the keep, so what follows is an assertion about a removal rather
+    // than about a write that never happened.
+    await vi.waitFor(async () => {
+      await expect(readFile(file, 'utf8')).resolves.toContain(comment.id)
+    })
+
+    const [entry] = await listEntries(handle, 'session-1')
+    await handle('keep', { sessionId: 'session-1', id: entry!.id }, signal())
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+    expect(await listComments(handle, 'session-1')).toEqual([])
+    // The second client that reads that file back must not be handed the comment the
+    // first client's keep deleted.
+    await vi.waitFor(async () => {
+      await expect(readFile(file, 'utf8')).resolves.not.toContain(comment.id)
+    })
+  })
+
+  it('still lists the comments of an entry that is still listed', async () => {
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    emitResult(ctx, editExec(), editSuccess('/repo/b.txt', 'a', 'b'))
+    // The comment hangs off the first entry; the keep is about the second one.
+    const comment = await addComment(handle)
+    const [, second] = await listEntries(handle, 'session-1')
+    await handle('keep', { sessionId: 'session-1', id: second!.id }, signal())
+    // A keep is about one file: the other file's comment is untouched.
+    expect(await listComments(handle, 'session-1')).toEqual([comment])
+  })
+
+  it('asks a comment and hands its derived answer back on the next read', async () => {
+    const submitted: string[] = []
+    const { ctx, handle } = await harness({
+      prepare: (prepared) => {
+        prepared.provide('sessionController', {
+          prompt: (request: { requestId: string }) => {
+            submitted.push(request.requestId)
+            return Promise.resolve({ accepted: true })
+          },
+        } as never)
+        prepared.provide('agents', { get: () => ({ ctx: { on: () => () => {} } }) } as never)
+        prepared.provide('sessions', {
+          get: () => ({
+            // The event log, not `deriveMessages`: an answer belongs to the turn that
+            // claimed the question, and only the log carries that attribution.
+            snapshotEvents: () => [
+              { type: 'turn/start', seq: 0, time: 0, data: { turn: 1 } },
+              {
+                type: 'user/message',
+                seq: 1,
+                time: 0,
+                data: { role: 'user', source: { kind: 'user', rpcId: submitted[0] ?? '' }, content: [{ type: 'text', text: 'the prompt' }] },
+              },
+              {
+                type: 'assistant/message',
+                seq: 2,
+                time: 0,
+                data: { turn: 1, step: 0, message: { role: 'assistant', content: [{ type: 'text', text: 'because it guards the edge' }] } },
+              },
+              { type: 'turn/end', seq: 3, time: 0, data: { turn: 1, reason: { kind: 'completed' } } },
+            ],
+          }),
+        } as never)
+      },
+    })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const comment = await addComment(handle)
+
+    await expect(handle('comment-ask', { sessionId: 'session-1', id: comment.id, prompt: 'the prompt', text: 'why?' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'asked', requestId: expect.any(String) as string } })
+    expect(submitted).toHaveLength(1)
+
+    const read = await handle('list', { sessionId: 'session-1' }, signal())
+    const value = (read as { value: { comments?: CommentRecord[]; commentAnswers?: Record<string, string> } }).value
+    // The request identity the submission minted is on the record, and the answer is
+    // derived from the transcript rather than stored on it.
+    expect(value.comments?.[0]?.asks?.[0]?.requestId).toBe(submitted[0])
+    // The reader's own words ride the question, which is the only place a follow-up's words
+    // exist: the transcript holds the prompt, which wraps them in the marker and the rules.
+    expect(value.comments?.[0]?.asks?.[0]?.text).toBe('why?')
+    expect(value.commentAnswers).toEqual({ [submitted[0] as string]: 'because it guards the edge' })
+  })
+
+  it('reports a question whose turn ended with no answer as over, from the log alone', async () => {
+    // No `agent/turn-stopping` ever fires in this test: the session's own log is the only
+    // thing that says the turn is over, which is exactly the case a resumed session (or a
+    // client that connected after the fact) is in.
+    const submitted: string[] = []
+    const { ctx, handle } = await harness({
+      prepare: (prepared) => {
+        prepared.provide('sessionController', {
+          prompt: (request: { requestId: string }) => {
+            submitted.push(request.requestId)
+            return Promise.resolve({ accepted: true })
+          },
+        } as never)
+        prepared.provide('agents', { get: () => ({ ctx: { on: () => () => {} } }) } as never)
+        prepared.provide('sessions', {
+          get: () => ({
+            snapshotEvents: () => [
+              { type: 'turn/start', seq: 0, time: 0, data: { turn: 4 } },
+              {
+                type: 'user/message',
+                seq: 1,
+                time: 0,
+                data: { role: 'user', source: { kind: 'user', rpcId: submitted[0] ?? '' }, content: [{ type: 'text', text: 'the prompt' }] },
+              },
+              // The turn is closed with nothing written: the question was cut off.
+              { type: 'turn/end', seq: 2, time: 0, data: { turn: 4, reason: { kind: 'aborted' } } },
+            ],
+          }),
+        } as never)
+      },
+    })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const comment = await addComment(handle)
+    await handle('comment-ask', { sessionId: 'session-1', id: comment.id, prompt: 'the prompt', text: 'why?' }, signal())
+
+    const value = (await handle('list', { sessionId: 'session-1' }, signal()) as {
+      value: { comments?: CommentRecord[]; commentAnswers?: Record<string, string> }
+    }).value
+    // No answer, and the question says so: the block shows the stopped note rather than
+    // waiting on a turn that is already over.
+    expect(value.commentAnswers).toEqual({})
+    expect(value.comments?.[0]?.asks?.[0]).toMatchObject({ requestId: submitted[0], ended: true })
+  })
+
+  it('does not walk the session log for a session that carries no comments', async () => {
+    // The list read derives answers and turn ends from the session's whole event log, and
+    // each of those reads is a full pass over it — on a long session that is >100k events,
+    // paid again by every client, once a second. With no comments there is nothing to
+    // derive: a question lives inside a comment (`ask` looks the comment up and refuses an
+    // id the store does not hold), so the log read is pure cost. The log here holds a
+    // turn/end, which is exactly what `endedTurns` would otherwise sweep.
+    const snapshotEvents = vi.fn(() => [
+      { type: 'turn/start', seq: 0, time: 0, data: { turn: 7 } },
+      { type: 'turn/end', seq: 1, time: 0, data: { turn: 7, reason: { kind: 'completed' } } },
+    ])
+    const { ctx, handle } = await harness({
+      prepare: (prepared) => {
+        prepared.provide('sessions', { get: () => ({ snapshotEvents }) } as never)
+      },
+    })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+
+    const value = (await handle('list', { sessionId: 'session-1' }, signal()) as {
+      value: { files?: PendingFileDiff[]; comments?: CommentRecord[]; commentAnswers?: Record<string, string> }
+    }).value
+    expect(value.files).toHaveLength(1)
+    expect(value.comments).toEqual([])
+    expect(value.commentAnswers).toEqual({})
+    expect(snapshotEvents).not.toHaveBeenCalled()
+  })
+
+  it('still derives the answers and turn ends of a session that carries a comment', async () => {
+    // The other half of the skip above: a session WITH a comment must still read the log,
+    // and the read must still land on the comment handed to the client in the same
+    // response — the turn and the `ended` flag are written onto that very record.
+    const submitted: string[] = []
+    const snapshotEvents = vi.fn(() => [
+      { type: 'turn/start', seq: 0, time: 0, data: { turn: 3 } },
+      {
+        type: 'user/message',
+        seq: 1,
+        time: 0,
+        data: { role: 'user', source: { kind: 'user', rpcId: submitted[0] ?? '' }, content: [{ type: 'text', text: 'the prompt' }] },
+      },
+      // The turn is closed with nothing written: the question was cut off, and only the
+      // log says so (no `agent/turn-stopping` fires in this test).
+      { type: 'turn/end', seq: 2, time: 0, data: { turn: 3, reason: { kind: 'aborted' } } },
+    ])
+    const { ctx, handle } = await harness({
+      prepare: (prepared) => {
+        prepared.provide('sessionController', {
+          prompt: (request: { requestId: string }) => {
+            submitted.push(request.requestId)
+            return Promise.resolve({ accepted: true })
+          },
+        } as never)
+        prepared.provide('agents', { get: () => ({ ctx: { on: () => () => {} } }) } as never)
+        prepared.provide('sessions', { get: () => ({ snapshotEvents }) } as never)
+      },
+    })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const comment = await addComment(handle)
+    await handle('comment-ask', { sessionId: 'session-1', id: comment.id, prompt: 'the prompt', text: 'why?' }, signal())
+
+    const value = (await handle('list', { sessionId: 'session-1' }, signal()) as {
+      value: { comments?: CommentRecord[]; commentAnswers?: Record<string, string> }
+    }).value
+    expect(snapshotEvents).toHaveBeenCalled()
+    expect(value.commentAnswers).toEqual({})
+    expect(value.comments?.[0]?.asks?.[0]).toMatchObject({ requestId: submitted[0], turn: 3, ended: true })
+  })
+
+  it('refuses to ask a comment of another session, or on a host with no prompt verb', async () => {
+    const { ctx, handle } = await harness({ prepare: (prepared) => { prepared.provide('sessionController', {} as never) } })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const comment = await addComment(handle)
+    await expect(handle('comment-ask', { sessionId: 'session-2', id: comment.id, prompt: 'p', text: 'p' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+    await expect(handle('comment-ask', { sessionId: 'session-1', id: comment.id, prompt: 'p', text: 'p' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'no-agent' } })
+    // Nothing was asked, so nothing changed.
+    expect(await listComments(handle, 'session-1')).toEqual([comment])
+  })
+
+  it('rejects a malformed ask with an internal error', async () => {
+    const { handle } = await harness()
+    const answer = await handle('comment-ask', { sessionId: 'session-1', id: 'c1' }, signal())
+    expect(answer).toEqual({ ok: false, error: { code: 'internal', message: expect.any(String) as string, details: {} } })
+    // The reader's words are required: the thread shows THEM, and a request without them would
+    // store a question nobody could read. A blank one is the same as none.
+    await expect(handle('comment-ask', { sessionId: 'session-1', id: 'c1', prompt: 'p' }, signal()))
+      .resolves.toEqual({ ok: false, error: { code: 'internal', message: expect.any(String) as string, details: {} } })
+    await expect(handle('comment-ask', { sessionId: 'session-1', id: 'c1', prompt: 'p', text: '   ' }, signal()))
+      .resolves.toEqual({ ok: false, error: { code: 'internal', message: expect.any(String) as string, details: {} } })
+  })
+
+  /**
+   * Add one comment with its own anchor and quote, so a test can stage where a thread was written
+   * and what it quoted without going through the shared `COMMENT_BODY`.
+   * @param handle - the channel handler.
+   * @param body - the entry, the stored anchor and the quote.
+   * @returns the stored record.
+   */
+  async function addQuotedComment(
+    handle: ConnectionRpcHandler,
+    body: { entryId: string; anchor: { startLine: number; endLine: number }; quote: string; quoteContext?: string; sessionId?: string },
+  ): Promise<CommentRecord> {
+    const answer = await handle('comment-add', {
+      sessionId: body.sessionId ?? 'session-1',
+      entryId: body.entryId,
+      anchor: body.anchor,
+      quote: body.quote,
+      text: '这一行为什么要改？',
+      ...(body.quoteContext === undefined ? {} : { quoteContext: body.quoteContext }),
+    }, signal())
+    if (!answer.ok) throw new Error('comment-add failed')
+    const value = answer.value as { outcome: string; comment?: CommentRecord }
+    expect(value.outcome).toBe('added')
+    return value.comment!
+  }
+
+  /** The resolved lines one list read carries (empty when it carries none). */
+  async function listCommentLines(
+    handle: ConnectionRpcHandler,
+    sessionId = 'session-1',
+  ): Promise<Record<string, { start: number; end: number }>> {
+    const answer = await handle('list', { sessionId }, signal())
+    if (!answer.ok) throw new Error('list failed')
+    return (answer.value as { commentLines?: Record<string, { start: number; end: number }> }).commentLines ?? {}
+  }
+
+  it('names the line a comment is on now from the host, with nothing opened', async () => {
+    // The report: one comment read `[382]` in the list while its own card read 378, because the
+    // quoted line had moved and only the OPEN file's detail pane resolved the quote. The list is a
+    // second view of the same thread, so the figure has to be the host's — resolved against the
+    // entry's current content on the read that carries it, with no client having opened anything.
+    const { ctx, handle } = await harness()
+    const lines = Array.from({ length: 420 }, (_, index) => `line-${index + 1}`)
+    const removed = ['removed-1', 'removed-2', 'removed-3', 'removed-4']
+    const before = `${[...lines.slice(0, 377), ...removed, ...lines.slice(377)].join('\n')}\n`
+    const after = `${lines.join('\n')}\n`
+    emitResult(ctx, editExec(), editSuccess('/repo/moved.txt', before, after))
+    const comment = await addQuotedComment(handle, {
+      entryId: '/repo/moved.txt',
+      anchor: { startLine: 382, endLine: 382 },
+      quote: 'line-378',
+    })
+
+    // The stored anchor still says 382 — the record is never rewritten — and the read carries where
+    // the quote is now.
+    expect((await listComments(handle, 'session-1'))[0]?.anchor).toEqual({ startLine: 382, endLine: 382 })
+    expect(await listCommentLines(handle)).toEqual({ [comment.id]: { start: 378, end: 378 } })
+  })
+
+  it('leaves a comment whose quote is gone out of the resolved lines', async () => {
+    // A quote that is nowhere in the content is a thread the code has moved past. The host says
+    // nothing about it rather than guessing: an absent figure sends the caller to `record.anchor`,
+    // which is the line the comment was WRITTEN on — the same answer an outdated block keeps.
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/gone.txt', 'a\nb\nc\n', 'x\ny\nz\n'))
+    const comment = await addQuotedComment(handle, {
+      entryId: '/repo/gone.txt',
+      anchor: { startLine: 2, endLine: 2 },
+      quote: 'b',
+    })
+
+    expect(await listCommentLines(handle)).toEqual({})
+    // …and the record is untouched: the stored anchor is all a caller has left, which is the point.
+    expect((await listComments(handle, 'session-1')).find(record => record.id === comment.id)?.anchor)
+      .toEqual({ startLine: 2, endLine: 2 })
+  })
+
+  it('leaves a look-alike far from the stored line out of the resolved lines', async () => {
+    // The report's second case, on the host's own read: the declaration the comment was written on is
+    // gone, and an identically-shaped one — the same `UPROPERTY` line, the same field, the same blank
+    // line — sits 74 lines below it. Those three lines are all the record's ±1 context keeps, so the
+    // look-alike matches it exactly; before this the host answered 452, and the list named a line whose
+    // code was never what the comment was about. A match that far is another place in the file, not
+    // this code having moved, so the host says nothing and the item keeps the record's own line.
+    const { ctx, handle } = await harness()
+    const property = '\tUPROPERTY(EditAnywhere, Category = "S")'
+    const quote = '\tFString WidgetPath;'
+    const lines = Array.from({ length: 458 }, (_, index) => `line-${index + 1}`)
+    lines[375] = '/** Object path of the property. */'
+    lines[376] = property
+    lines[377] = '\tFString PropertyName;'
+    lines[378] = ''
+    lines[449] = '/** Object path of the widget. */'
+    lines[450] = property
+    lines[451] = quote
+    lines[452] = ''
+    const content = `${lines.join('\n')}\n`
+    emitResult(ctx, editExec(), editSuccess('/repo/lookalike.txt', `PRE\n${content}`, content))
+    const comment = await addQuotedComment(handle, {
+      entryId: '/repo/lookalike.txt',
+      anchor: { startLine: 378, endLine: 378 },
+      quote,
+      quoteContext: `${property}\n${quote}\n`,
+    })
+
+    // No figure for it on the read, and the record is untouched: the stored anchor is what the list
+    // label, the card's chip and the jump fall back to — the same answer an outdated thread keeps.
+    expect(await listCommentLines(handle)).toEqual({})
+    expect((await listComments(handle, 'session-1')).find(record => record.id === comment.id)?.anchor)
+      .toEqual({ startLine: 378, endLine: 378 })
+  })
+
+  it('follows a repeated quoted line to the nearest occurrence, and to the earlier one on a tie', async () => {
+    // The client's own rule (see `remapDiscussion`) picks the occurrence closest to where the
+    // comment was written, because that is the one the reader was looking at. This is the host
+    // producing the SAME answer for the same content, so the two panes cannot name two lines.
+    //
+    // The copies sit inside the distance a re-anchor may travel and no farther (see
+    // `REANCHOR_MAX_LINES`): a repeated line 45 lines from the stored one is another declaration
+    // rather than this code having moved, and is refused — which is why these three comments are
+    // written among copies that are 5, 10 and 25 lines away rather than the whole file apart. What
+    // is under test here is which of the reachable copies wins, not how far a match may be.
+    const { ctx, handle } = await harness()
+    const lines = Array.from({ length: 200 }, (_, index) => `line-${index + 1}`)
+    lines[9] = 'dup'
+    lines[44] = 'dup'
+    lines[64] = 'dup'
+    const content = `${lines.join('\n')}\n`
+    emitResult(ctx, editExec(), editSuccess('/repo/dup.txt', `pre\n${content}`, content))
+    // Written 25 lines above the copy it was near, and 45 above the one before that: the nearest wins,
+    // not the first.
+    const near = await addQuotedComment(handle, { entryId: '/repo/dup.txt', anchor: { startLine: 90, endLine: 90 }, quote: 'dup' })
+    // Written between the last two copies, an equal distance from each: the earlier one wins, exactly
+    // as the client's ascending scan keeps the first window it met.
+    const tie = await addQuotedComment(handle, { entryId: '/repo/dup.txt', anchor: { startLine: 55, endLine: 55 }, quote: 'dup' })
+    // …and the stored line still holding the quote is the anchor itself: the thread has not moved.
+    const held = await addQuotedComment(handle, { entryId: '/repo/dup.txt', anchor: { startLine: 10, endLine: 10 }, quote: 'dup' })
+
+    expect(await listCommentLines(handle)).toEqual({
+      [near.id]: { start: 65, end: 65 },
+      [tie.id]: { start: 45, end: 45 },
+      [held.id]: { start: 10, end: 10 },
+    })
+  })
+
+  it('does not search a file again for a list read whose content has not changed', async () => {
+    // The list read is the hot path — every client of the session asks once a second — and resolving
+    // a comment is a search of the entry's whole content. It therefore happens when the content can
+    // have changed, and a poll that changed nothing re-sends the figure it already has (the same
+    // reason the read below skips the session log for a session with no comments). The counter is
+    // the shared rule itself: nothing else in the host searches a file for a quote.
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'PRE\na\nb\n', 'a\nb\nc\nd\n'))
+    const comment = await addQuotedComment(handle, {
+      entryId: '/repo/a.txt',
+      anchor: { startLine: 1, endLine: 1 },
+      quote: 'c',
+    })
+    const searches = (): number => vi.mocked(resolveCommentLines).mock.calls.length
+
+    const before = searches()
+    expect(await listCommentLines(handle)).toEqual({ [comment.id]: { start: 3, end: 3 } })
+    const afterFirst = searches()
+    expect(afterFirst).toBeGreaterThan(before)
+
+    // The very same content, read again: the figure comes from the cache, with no second search.
+    expect(await listCommentLines(handle)).toEqual({ [comment.id]: { start: 3, end: 3 } })
+    expect(searches()).toBe(afterFirst)
+
+    // …and content that DID move is followed on the next read, so the cache is keyed to the content
+    // it was resolved against rather than to the comment.
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a\nb\nc\nd\n', 'x\ny\nz\nq\nc\n'))
+    expect(await listCommentLines(handle)).toEqual({ [comment.id]: { start: 5, end: 5 } })
+    expect(searches()).toBe(afterFirst + 1)
+  })
+
+  it('takes every entry\'s comments with it when the whole list is kept', async () => {
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    emitResult(ctx, editExec(), editSuccess('/repo/b.txt', 'a', 'b'))
+    await addComment(handle, 'session-1', 0)
+    await addComment(handle, 'session-1', 1)
+    expect(await listComments(handle, 'session-1')).toHaveLength(2)
+
+    // A bulk decision is still one decision per entry, and each entry takes its own
+    // comments with it — a file that leaves the list may not leave its thread behind.
+    await handle('keep-all', { sessionId: 'session-1' }, signal())
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+    expect(await listComments(handle, 'session-1')).toEqual([])
+  })
+
+  it('does not bring a comment back when the entry it hung off is undone', async () => {
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const comment = await addComment(handle)
+    const [entry] = await listEntries(handle, 'session-1')
+    await handle('keep', { sessionId: 'session-1', id: entry!.id }, signal())
+    expect(await listComments(handle, 'session-1')).toEqual([])
+
+    // Undo puts the ENTRY back; the comment that died with it stays dead. That is the
+    // rule the reader asked for — rewinding a review does not resurrect an annotation
+    // whose file already left the list, and the sweep at load cannot find it either.
+    await handle('undo', { sessionId: 'session-1' }, signal())
+    expect((await listEntries(handle, 'session-1')).map(listed => listed.id)).toEqual([comment.entryId])
+    expect(await listComments(handle, 'session-1')).toEqual([])
   })
 })
 

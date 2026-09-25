@@ -45,6 +45,35 @@ function sameEntry(left: PendingEntry, right: PendingEntry): boolean {
  */
 export class PendingDiffStore {
   private readonly entries = new Map<string, PendingEntry>()
+  /**
+   * The content version of each entry: bumped whenever its tracked `newText` moves, and never for a
+   * change that leaves the content alone (a block keep advances `oldText` only).
+   *
+   * It is what lets derived, content-dependent state — the lines a comment's quote resolves to, read
+   * off `newText` — be cached and refreshed when the content moved rather than recomputed on every
+   * read. The versions come from one monotonic counter and are never reused, so an entry that leaves
+   * the list and comes back cannot hand back the number a stale cache was keyed to.
+   */
+  private readonly contentVersions = new Map<string, number>()
+  /** The last version handed out; only ever climbs (see `contentVersions`). */
+  private contentVersionCounter = 0
+
+  /** Note that one path's tracked content moved, and give it a fresh version. */
+  private bumpContent(path: string): void {
+    this.contentVersions.set(pathKeyOf(path), ++this.contentVersionCounter)
+  }
+
+  /**
+   * The version of one path's tracked content, or 0 while it has none.
+   *
+   * Two calls that return the same number describe the same `newText`: a caller caching something
+   * derived from that content may serve its copy until the number changes.
+   * @param path - the file path (the global entry key).
+   * @returns the path's content version.
+   */
+  contentVersion(path: string): number {
+    return this.contentVersions.get(pathKeyOf(path)) ?? 0
+  }
 
   /**
    * Merge one captured operation into its file's entry. A no-op (equal before
@@ -63,6 +92,10 @@ export class PendingDiffStore {
     const merged = current === undefined ? { ...entry } : this.mergeEntry(current, entry)
     if (current !== undefined && sameEntry(current, merged)) return false
     this.entries.set(pathKeyOf(merged.path), merged)
+    // A new entry is content that arrived; an existing one moved only when its `newText` did (a
+    // capture whose content happens to be the same leaves the version — and every cache keyed to it
+    // — alone).
+    if (current === undefined || current.newText !== merged.newText) this.bumpContent(merged.path)
     return true
   }
 
@@ -122,7 +155,12 @@ export class PendingDiffStore {
    * @returns whether an entry was removed.
    */
   remove(path: string): boolean {
-    return this.entries.delete(pathKeyOf(path))
+    const key = pathKeyOf(path)
+    const removed = this.entries.delete(key)
+    // The version goes with the entry rather than being reused: an entry re-added under the same
+    // path is different content, and a cache keyed to the old number must not read as current.
+    if (removed) this.contentVersions.delete(key)
+    return removed
   }
 
   /**
@@ -137,6 +175,7 @@ export class PendingDiffStore {
     if (entry === undefined) return false
     const next: PendingEntry = { ...entry, ...patch, updatedAt: Date.now() }
     this.entries.set(pathKeyOf(path), next)
+    if (next.newText !== entry.newText) this.bumpContent(path)
     return true
   }
 
@@ -151,6 +190,9 @@ export class PendingDiffStore {
     const existing = this.entries.get(key)
     if (existing !== undefined && sameEntry(existing, entry)) return false
     this.entries.set(key, { ...entry })
+    // An undo/redo replays a snapshot: when it carries different content (or puts the entry back),
+    // that content is now what the path holds, so anything derived from it is stale.
+    if (existing === undefined || existing.newText !== entry.newText) this.bumpContent(entry.path)
     return true
   }
 

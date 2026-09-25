@@ -36,6 +36,7 @@
 
 import { readFile, rm, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { expandHomePath } from '@deepseek-ai/dsh-home-paths'
@@ -49,6 +50,10 @@ import type { FsTarget } from '@deepseek-ai/dsh-fs'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import { PendingDiffStore } from './pending.ts'
 import { PendingPersistence, defaultStorageDir } from './persist.ts'
+import { CommentStore, commentsDirFor } from './comments.ts'
+import { CommentAsker } from './comment-ask.ts'
+import { resolveCommentLines } from './comment-lines.ts'
+import type { CommentLineRange } from './comment-lines.ts'
 import { defaultOpenPath } from './open.ts'
 import type { OpenAction } from './open.ts'
 import { COMMENT_SKILL, COMMENT_SKILL_NAME } from './comment-skill.ts'
@@ -59,16 +64,20 @@ import type { VcsChange, VcsImportInput, ShellExecutorLike } from './vcs.ts'
 import type {
   DiffApprovalActionValue, DiffApprovalAddOutcome, DiffApprovalAddValue, DiffApprovalBlockTarget, DiffApprovalBrowseEntry, DiffApprovalBrowseValue,
   DiffApprovalBulkValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue,
+  CommentAnchor, CommentQuoteLine, CommentRecord, DiffApprovalCommentAddValue, DiffApprovalCommentRemoveValue,
   PendingEntry, PendingEntryKind, PendingFileDiff, VcsImportValue,
 } from './types.ts'
 
 export type {
   DiffApprovalActionOutcome, DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalBlockTarget,
   DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalRefreshOutcome, DiffApprovalRefreshValue,
+  CommentAnchor, CommentQuoteLine, CommentRecord, DiffApprovalCommentAddValue, DiffApprovalCommentRemoveValue,
   PendingEntry, PendingEntryKind, PendingFileDiff,
 } from './types.ts'
 export { PendingDiffStore } from './pending.ts'
 export { PendingPersistence, defaultStorageDir } from './persist.ts'
+export { CommentStore, commentsDirFor } from './comments.ts'
+export { CommentAsker, answerForRequest } from './comment-ask.ts'
 export { defaultOpenPath } from './open.ts'
 
 /** Stable Cordis plugin name. */
@@ -78,9 +87,12 @@ export const name = 'diff-approval'
  * Services required before the review surface activates. `webServer` rides with
  * `connection` (both come from the web bundle), and is named explicitly because
  * the channel's owner context must be able to resolve it — see
- * `ConnectionServiceSurface`.
+ * `ConnectionServiceSurface`. `sessionController` and `agents` are what a comment is
+ * asked through and what reports the turn that claimed it: both come from the same
+ * base composition this plugin already requires for `sessions`, so a host that could
+ * list pending changes at all has them.
  */
-export const inject = ['fs', 'connection', 'webServer', 'workspaceRegistry', 'sessions']
+export const inject = ['fs', 'connection', 'webServer', 'workspaceRegistry', 'sessions', 'sessionController', 'agents']
 
 /** The connection RPC channel this plugin serves. */
 export const DIFF_APPROVAL_CHANNEL = '/diff-approval'
@@ -461,7 +473,117 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     throw new Error('diff-approval: storageDir must be a non-empty string')
   }
   const store = new PendingDiffStore()
-  const persistence = new PendingPersistence(resolve(expandHomePath(storageDir ?? defaultStorageDir())))
+  const storageRoot = resolve(expandHomePath(storageDir ?? defaultStorageDir()))
+  const persistence = new PendingPersistence(storageRoot)
+  // Comments live in their own directory, never in the pending file: an entry that
+  // left the list and a comment that outlived it are exactly what this pairing has
+  // to keep apart (see `CommentStore`).
+  //
+  // Its two failure seams are wired here because the store owns no logger: a comment
+  // write that fails is the same trap as a pending list that will not survive a restart
+  // (the reader finds the thread gone later with nothing to explain it), and a file the
+  // load had to skip has to be named rather than left as a silently shorter thread.
+  const comments = new CommentStore(commentsDirFor(storageRoot), {
+    onLoadSkipped: (file, error) => {
+      ctx.logger.warn(`diff-approval: skipping unreadable comment file '${file}' (moved to '.corrupt'): ${errorMessage(error)}`)
+    },
+    onPersistError: (message) => {
+      if (message === undefined) return
+      ctx.logger.error(`diff-approval: writing comments failed, so the threads will not survive a restart: ${message}`)
+    },
+  })
+  // Asks a comment's question through the session's own prompt API and reads the
+  // answer back out of the transcript (see `CommentAsker`).
+  const commentAsker = new CommentAsker(ctx, comments)
+
+  /**
+   * The lines each comment sits on now, resolved from the entry content it hangs off and held
+   * against the version of that content it was resolved at (see `resolveCommentLines` for the rule
+   * and `PendingDiffStore.contentVersion` for the versions).
+   *
+   * The list read is the hot path — every client of the session asks once a second — so a figure
+   * that costs a search of the entry's whole content is computed when the content can have changed
+   * and reused until it has. Nothing is written to the comment record: a resolved line is DERIVED,
+   * and a persisted one would outlive the content it was true of.
+   */
+  const commentLines = new Map<string, {
+    /** The entry the comment hangs off, so the figure can be dropped with that entry. */
+    entryId: string
+    /** The entry content version the range was resolved against. */
+    version: number
+    /** The record fields it was resolved from, so an edited comment re-resolves. */
+    quote: string
+    context: string | undefined
+    startLine: number
+    endLine: number
+    /** The resolved range, or `undefined` when the quote is nowhere in that content. */
+    range: CommentLineRange | undefined
+  }>()
+
+  /**
+   * The new-file lines this session's comments sit on now, keyed by comment id.
+   *
+   * This is the whole point of resolving in the host: the list pane, the code view's own card and
+   * the jump that opens it draw ONE figure, and they draw it without anything having been opened —
+   * a comment used to be corrected by the open file's pane and published back to the list, so the
+   * list read `382` while the card read `378` until the reader opened the file.
+   *
+   * A comment whose quote is gone from the content is ABSENT from the map rather than guessed at:
+   * the caller then falls back to `record.anchor`, the line the comment was written on, which is
+   * the same answer an outdated thread shows.
+   * @param sessionId - the session whose comments to resolve.
+   * @returns the resolved lines per comment id; comments that do not resolve are left out.
+   */
+  function resolvedCommentLines(sessionId: SessionId): Record<string, CommentLineRange> {
+    const resolved: Record<string, CommentLineRange> = {}
+    for (const comment of comments.list(sessionId)) {
+      const entry = store.get(comment.entryId)
+      if (entry === undefined) continue
+      const version = store.contentVersion(comment.entryId)
+      const cached = commentLines.get(comment.id)
+      if (cached !== undefined
+        && cached.entryId === comment.entryId
+        && cached.version === version
+        && cached.quote === comment.quote
+        && cached.context === comment.quoteContext
+        && cached.startLine === comment.anchor.startLine
+        && cached.endLine === comment.anchor.endLine) {
+        if (cached.range !== undefined) resolved[comment.id] = cached.range
+        continue
+      }
+      const range = resolveCommentLines(entry.newText, comment)
+      commentLines.set(comment.id, {
+        entryId: comment.entryId,
+        version,
+        quote: comment.quote,
+        context: comment.quoteContext,
+        startLine: comment.anchor.startLine,
+        endLine: comment.anchor.endLine,
+        range,
+      })
+      if (range !== undefined) resolved[comment.id] = range
+    }
+    return resolved
+  }
+
+  /**
+   * Drop the resolved lines of every comment that hangs off one entry. They are what an entry takes
+   * with it when it leaves the list (`dropEntry` removes those comments), so their figures go too.
+   * @param entryId - the entry that left the list.
+   */
+  function forgetCommentLinesForEntry(entryId: string): void {
+    for (const [id, row] of commentLines) {
+      if (row.entryId === entryId) commentLines.delete(id)
+    }
+  }
+
+  /** Drop the resolved lines of the comments the store no longer holds (the orphan sweep's leavings). */
+  function forgetOrphanedCommentLines(): void {
+    for (const id of commentLines.keys()) {
+      if (comments.get(id) === undefined) commentLines.delete(id)
+    }
+  }
+
   const launchPath = config?.openPath ?? defaultOpenPath
   // What a comment prompt may point the agent at. Asked lazily, on the first list
   // request: the tool registry is still filling up while plugins mount (see
@@ -479,8 +601,44 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       } catch (error: unknown) {
         ctx.logger.error(`diff-approval: loading persisted state failed, so the list starts empty: ${errorMessage(error)}`)
       }
+      try {
+        // The orphan sweep at load: an entry absent here was removed while this host
+        // was running, so a comment still pointing at it is a crash's leftover
+        // (see `CommentStore.retain`). Run before anything can read, which is what
+        // makes an entry re-added later unable to resurrect its old comments.
+        // Skipped when any file could not be read: the comments that file held are
+        // absent from the store, and sweeping on that incomplete set would delete the
+        // good files' orphans too — a corrupt file must not be able to destroy data it
+        // never touched (the bad file itself is moved aside, see `CommentStore.loadAll`).
+        const loaded = await comments.loadAll()
+        if (loaded > 0 && comments.skippedFiles().length === 0) {
+          comments.retain(new Set(store.all().map(entry => entry.id)))
+        }
+      } catch (error: unknown) {
+        // Only the readdir-level failures reach here now; a bad file is skipped and named
+        // rather than taking every session's comments with it.
+        ctx.logger.error(`diff-approval: loading comment state failed, so the comments start empty: ${errorMessage(error)}`)
+      }
     })()
     return loadPromise
+  }
+
+  /**
+   * Drop one entry from the list, and its comments with it.
+   *
+   * The comments go in the same tick as the entry — rather than being swept on some
+   * later read — because a second client polling in between must never be handed a
+   * comment naming a file the same read no longer lists. Synchronous: the comment
+   * store applies changes to memory as it goes and persists on its own chain.
+   * @param id - the entry id (= path) leaving the list.
+   * @returns whether the entry was there.
+   */
+  function dropEntry(id: string): boolean {
+    const removed = store.remove(id)
+    comments.removeForEntry(id)
+    // …and the lines those comments resolved to, which are about content this path no longer lists.
+    forgetCommentLinesForEntry(id)
+    return removed
   }
 
   /** Pre-write bases captured at the intent seams, keyed by the tool call id. */
@@ -614,8 +772,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       stack.length = 0
       stack.push(...kept)
     }
-    clean(undoStack)
-    clean(redoStack)
+    for (const stack of undoStacks.values()) clean(stack)
+    for (const stack of redoStacks.values()) clean(stack)
   }
 
   /**
@@ -638,7 +796,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // The file is gone: remove it from the list, keeping an undoable
         // checkpoint that recreates the file (its tracked content) and restores
         // the entry to the list.
-        store.remove(entry.path)
+        dropEntry(entry.path)
         pushUndo(sessionId,
           { id: entry.path, path: entry.path, entry, fileText: entry.newText },
           { id: entry.path, path: entry.path, entry: undefined, fileText: undefined })
@@ -648,7 +806,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       if (live.kind === 'unavailable') {
         // Present but unreadable: no operation is safe, so drop the entry and
         // purge its undo/redo records so the LIFO queue stays traversable.
-        store.remove(entry.path)
+        dropEntry(entry.path)
         purgeForEntry(entry.path)
         persistSession()
         continue
@@ -663,7 +821,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       if (hasContent && content !== entry.newText) {
         adopted = content
         const beforeText = entry.newText
-        const redoWasPresent = redoStack.length > 0
+        const redoWasPresent = redoStackOf(sessionId).length > 0
         store.update(entry.path, { newText: content })
         pushUndo(sessionId,
           { id: entry.path, path: entry.path, entry, fileText: beforeText },
@@ -846,6 +1004,63 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   }
 
   /**
+   * Delete one file as a Revert, under the same session sandbox policy the write
+   * path carries.
+   *
+   * A Revert of a created file removes it, and a removal is a mutation like any
+   * other: going through a raw `processPath` + `rm` bypassed the confinement
+   * entirely, so a `workspace-write` session could delete a file the very same
+   * policy would refuse to write. The mode is therefore checked here, against the
+   * target's own path, and the backend that does confine is handed the policy as
+   * well: the check is what a build with no confining backend still enforces, and
+   * passing the policy through is what lets a confining one enforce its own,
+   * stricter rules. The plain `rm` remains the last resort for a deployment whose
+   * `ctx.fs` has no delete verb of its own.
+   * @param target - the resolved target to delete.
+   * @param sessionId - the session whose policy governs the delete.
+   * @param signal - aborts before the delete is issued.
+   */
+  async function removeRevert(target: FsTarget, sessionId: SessionId, signal: AbortSignal): Promise<void> {
+    const policy = sandboxPolicyOf(sessionId)
+    const osPath = processPathOf(target)
+    if (policy !== undefined && !withinSandboxRoot(osPath, policy)) {
+      throw new Error(
+        `file access denied under ${policy.mode} mode: '${osPath}' is outside the sandbox workspace root '${policy.workspaceRoot}'`,
+      )
+    }
+    const fs = ctx.fs as unknown as { remove?: (target: FsTarget, policy: SandboxExecutionPolicyLike, signal: AbortSignal) => Promise<unknown> }
+    if (policy !== undefined && typeof fs.remove === 'function') {
+      await fs.remove(target, policy, signal)
+      return
+    }
+    await rm(osPath, { force: true })
+  }
+
+  /** The OS path a resolved target names, as the confinement check reads it. */
+  function processPathOf(target: FsTarget): string {
+    return ctx.fs.processPath(target)
+  }
+
+  /**
+   * Whether a path lies inside the policy's workspace root (or IS it). Paths are
+   * compared case-insensitively on Windows for the same reason the backend's own
+   * containment is: `C:\Repo` and `c:\repo` are one directory there.
+   * @param path - the OS path the delete would touch.
+   * @param policy - the session's resolved policy.
+   * @returns true when the mode permits the delete at that path.
+   */
+  function withinSandboxRoot(path: string, policy: SandboxExecutionPolicyLike): boolean {
+    if (policy.mode !== 'read-only' && policy.mode !== 'workspace-write') return true
+    if (policy.mode === 'read-only') return false
+    if (policy.workspaceRoot === '') return true
+    const target = process.platform === 'win32' ? path.toLowerCase() : path
+    const root = process.platform === 'win32' ? policy.workspaceRoot.toLowerCase() : policy.workspaceRoot
+    if (target === root) return true
+    const rel = relative(root, target)
+    return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
+  }
+
+  /**
    * Revert one entry's file back to its baseline (the shared per-entry logic
    * behind both the single `revert` endpoint and the bulk `revert-all`). A
    * created file's revert deletes it (not undoable: the file is gone), an edit
@@ -858,7 +1073,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   async function revertEntryContent(entry: PendingEntry, sessionId: SessionId, signal: AbortSignal): Promise<{ before: DiffApprovalUndoState; after: DiffApprovalUndoState } | undefined> {
     const resolved = await ctx.fs.resolve(entry.path, { signal })
     if (entry.kind === 'create') {
-      await rm(ctx.fs.processPath(resolved), { force: true })
+      await removeRevert(resolved, sessionId, signal)
       return undefined
     }
     const preWrite = await ctx.fs.readText(resolved, undefined) ?? entry.newText
@@ -870,18 +1085,59 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     }
   }
 
-  // Per-session undo/redo stacks, in memory only (lost on restart). Every
-  // undoable keep/revert/block action pushes its before/after pair; undo
-  // restores `before`, redo re-applies `after`. Actions that delete a file
-  // (revert of a created file, block-revert to empty) are not pushed.
-  // Global undo/redo: a single LIFO stack across every file, because entries are
-  // globally unique per path. A fresh action invalidates the whole redo history.
-  const undoStack: DiffApprovalUndoPair[] = []
-  const redoStack: DiffApprovalUndoPair[] = []
+  // Undo/redo stacks, in memory only (lost on restart). Every undoable
+  // keep/revert/block action pushes its before/after pair; undo restores
+  // `before`, redo re-applies `after`. Actions that delete a file (revert of a
+  // created file, block-revert to empty) are not pushed.
+  //
+  // PER SESSION, not global: an entry's id is globally unique (it is the path), and a
+  // single LIFO queue across every session meant session B's Ctrl+Z could pop session
+  // A's keep and report success — an action the reader never took, on a file they may
+  // not even be looking at. The pair also remembers the session it was taken in, and
+  // the restore uses THAT session's sandbox policy: the panel may have moved on to
+  // another list by the time the undo arrives, and resolving from the viewer would
+  // write A's file under B's root.
+  const undoStacks = new Map<SessionId, DiffApprovalUndoPair[]>()
+  const redoStacks = new Map<SessionId, DiffApprovalUndoPair[]>()
 
+  /** The undo stack of one session, created on first use. */
+  function undoStackOf(sessionId: SessionId): DiffApprovalUndoPair[] {
+    let stack = undoStacks.get(sessionId)
+    if (stack === undefined) {
+      stack = []
+      undoStacks.set(sessionId, stack)
+    }
+    return stack
+  }
+
+  /** The redo stack of one session, created on first use. */
+  function redoStackOf(sessionId: SessionId): DiffApprovalUndoPair[] {
+    let stack = redoStacks.get(sessionId)
+    if (stack === undefined) {
+      stack = []
+      redoStacks.set(sessionId, stack)
+    }
+    return stack
+  }
+
+  /** Record one undoable action in its own session's history. A fresh action
+   *  invalidates that session's redo history (and only that session's). */
   function pushUndo(sessionId: SessionId, before: DiffApprovalUndoState, after: DiffApprovalUndoState): void {
-    undoStack.push({ sessionId, before, after })
-    redoStack.length = 0
+    undoStackOf(sessionId).push({ sessionId, before, after })
+    redoStackOf(sessionId).length = 0
+  }
+
+  /** Drop the top pair of one stack when it belongs to `sessionId`; otherwise the
+   *  stack is left exactly as it was, so another session's action is untouched.
+   * @param stack - the session's stack (undo or redo).
+   * @param sessionId - the session the request is for.
+   * @returns the pair to move, or undefined when this session has nothing to move.
+   */
+  function popOwnPair(stack: DiffApprovalUndoPair[], sessionId: SessionId): DiffApprovalUndoPair | undefined {
+    const pair = stack[stack.length - 1]
+    if (pair === undefined || pair.sessionId !== sessionId) return undefined
+    stack.pop()
+    return pair
   }
 
   /**
@@ -918,12 +1174,12 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       // or removes it by path, exactly reversing the import.
       for (const item of state.batch) {
         if (item.entry !== undefined) store.restore(item.entry)
-        else store.remove(item.path)
+        else dropEntry(item.path)
       }
       return
     }
     if (state.entry !== undefined) store.restore(state.entry)
-    else store.remove(state.path)
+    else dropEntry(state.path)
   }
 
   /**
@@ -1018,9 +1274,57 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const sessionId = sessionOf(payload)
         if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
         await ensureLoaded()
+        // The sweep on every read, so a comment a crash left behind its entry is gone
+        // before any client can be handed it; removing the entry already took its
+        // comments with it (`dropEntry`), so this normally removes nothing.
+        if (comments.retain(new Set(store.all().map(entry => entry.id))) > 0) {
+          // What it did remove may have lines cached against content it never hung off.
+          forgetOrphanedCommentLines()
+        }
         const { files, redoCleared } = await listWithState(sessionId)
+        // Nothing to derive when the session carries no comments, and the derivation is the
+        // expensive half of this read: `answers` and `endedTurns` each walk the session's WHOLE
+        // event log (a long session is >100k events), and every client repeats that once a
+        // second. A question exists only inside a comment — `ask` looks the comment up first
+        // and refuses an id the store does not hold, and `recordAsk` writes onto that comment —
+        // so an empty comment list means no answer and no turn is worth reading out of the log.
+        // The skip also skips `answers`'s re-arming of the inbox watcher, which is safe for the
+        // same reason: the ask that would need the watcher arms it itself (`ask` calls `watch`).
+        const commentAnswers: Record<string, string> = {}
+        if (comments.list(sessionId).length > 0) {
+          // Derived here, on every read, from the session's own event log: the log is the
+          // only place an answer is written down, and the turn that claimed a question is
+          // the only thing that bounds it. `answers` writes nothing, so the turn's end is
+          // recorded beside it first — the log is durable where `agent/turn-stopping` is a
+          // live event, so this is what marks a question over for a session whose ending
+          // this process never watched (a resume, a client that connected later).
+          const answers = commentAsker.answers(sessionId)
+          for (const [requestId, read] of Object.entries(answers)) {
+            // The transcript names the turn too, so a question asked while this process was
+            // not watching still learns it — which is what lets `markTurnEnded` below, and
+            // the panel, find it at all. Recording is a no-op once the inbox has written
+            // the same number down.
+            if (read.turn !== undefined) comments.recordTurnForRequest(sessionId, requestId, read.turn)
+          }
+          for (const turn of commentAsker.endedTurns(sessionId)) comments.markTurnEnded(sessionId, turn)
+          for (const [requestId, read] of Object.entries(answers)) {
+            if (read.answer !== undefined) commentAnswers[requestId] = read.answer
+          }
+        }
         const value: DiffApprovalListValue = {
           files,
+          // The comments ride this read rather than a channel of their own, so the
+          // entries and the comments that hang off them arrive as one snapshot.
+          // Read AFTER the derivation above: it writes the question's turn and its end onto
+          // these very records, and the snapshot handed to the client has to carry them.
+          comments: comments.list(sessionId),
+          // The lines each of those comments sits on in the entry's CURRENT content, resolved here
+          // and shipped with the records: the list pane, the code view's own card and the jump all
+          // draw one figure, and none of them needs the file to have been opened first. A comment
+          // the host cannot place is absent from the map, and its callers keep `record.anchor`.
+          commentLines: resolvedCommentLines(sessionId),
+          commentsRevision: comments.commentsRevision(),
+          commentAnswers,
           workspacePath: workspaceOf(sessionId)?.path,
           redoCleared: redoCleared || undefined,
           // The skill a comment prompt may point at, so the client knows which prompt
@@ -1029,7 +1333,61 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           // The last failure to write the pending state, so the panel can say that the list will not
           // survive a restart — the one thing a reader cannot find out from the panel itself.
           persistError: persistFailureReported,
+          // …and the same for the comment files, which are their own files: a thread written
+          // to memory while its file refuses the write is erased by a restart just as silently.
+          commentPersistError: comments.persistError(),
         }
+        return { ok: true, value }
+      }
+      case 'comment-add': {
+        const input = commentAddOf(payload)
+        if (input === undefined) return rpcError('sessionId, entryId, anchor, quote and text must be valid')
+        await ensureLoaded()
+        // The entry has to be listed in THIS session. A comment on a file that has
+        // left the list is refused rather than stored: it is the one way a comment
+        // could be born already outliving its entry.
+        const entry = store.list(input.sessionId).find(candidate => candidate.id === input.entryId)
+        if (entry === undefined) {
+          const value: DiffApprovalCommentAddValue = { outcome: 'missing' }
+          return { ok: true, value }
+        }
+        const now = Date.now()
+        const record: CommentRecord = {
+          // The caller's id when it named one, so a retried request lands on the same
+          // comment instead of writing a second copy of it.
+          id: input.id ?? randomUUID(),
+          sessionId: input.sessionId,
+          entryId: entry.id,
+          path: entry.path,
+          anchor: input.anchor,
+          quote: input.quote,
+          text: input.text,
+          createdAt: now,
+          updatedAt: now,
+          ...(input.quoteContext === undefined ? {} : { quoteContext: input.quoteContext }),
+          ...(input.quoteLines === undefined ? {} : { quoteLines: input.quoteLines }),
+        }
+        comments.add(record)
+        const value: DiffApprovalCommentAddValue = { outcome: 'added', comment: record }
+        return { ok: true, value }
+      }
+      case 'comment-remove': {
+        const target = targetOf(payload)
+        if (target === undefined) return rpcError('sessionId and id must be non-empty strings')
+        await ensureLoaded()
+        const value: DiffApprovalCommentRemoveValue = {
+          outcome: comments.remove(target.sessionId, target.id) ? 'removed' : 'missing',
+        }
+        // The comment is gone, so the lines it resolved to are about nothing: a later comment reusing
+        // the id (the client mints them, and a retry may) must not read as already resolved.
+        commentLines.delete(target.id)
+        return { ok: true, value }
+      }
+      case 'comment-ask': {
+        const input = commentAskOf(payload)
+        if (input === undefined) return rpcError('sessionId, id, prompt and text must be valid')
+        await ensureLoaded()
+        const value = await commentAsker.ask(input.sessionId, input.id, input.prompt, input.text, signal)
         return { ok: true, value }
       }
       case 'keep': {
@@ -1060,7 +1418,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           const value: DiffApprovalActionValue = { outcome: 'kept', resolved: true }
           return { ok: true, value }
         }
-        store.remove(target.id)
+        dropEntry(target.id)
         pushUndo(target.sessionId,
           { id: entry.path, path: entry.path, entry, fileText: undefined },
           { id: entry.path, path: entry.path, entry: undefined, fileText: undefined })
@@ -1105,7 +1463,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           const value: DiffApprovalActionValue = { outcome: 'reverted', resolved: true }
           return { ok: true, value }
         }
-        store.remove(target.id)
+        dropEntry(target.id)
         if (undo !== undefined) pushUndo(target.sessionId, undo.before, undo.after)
         persistSession(true)
         const value: DiffApprovalActionValue = { outcome: 'reverted' }
@@ -1121,7 +1479,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         for (const entry of entries) {
           before.push({ id: entry.id, path: entry.path, entry, fileText: undefined })
           after.push({ id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
-          store.remove(entry.id)
+          dropEntry(entry.id)
         }
         if (before.length > 0) {
           pushUndo(sessionId,
@@ -1149,7 +1507,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             return rpcError(`revert-all failed for ${entry.path}`)
           }
           if (undo !== undefined) { batchBefore.push(undo.before); batchAfter.push(undo.after) }
-          store.remove(entry.id)
+          dropEntry(entry.id)
         }
         if (batchBefore.length > 0) {
           pushUndo(sessionId,
@@ -1185,7 +1543,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         persistSession()
         const fullyResolved = contentEqual(updatedOld, entry.newText)
         if (fullyResolved && blockTarget.removeWhenResolved === true) {
-          store.remove(blockTarget.id)
+          dropEntry(blockTarget.id)
           pushUndo(blockTarget.sessionId,
             { id: entry.id, path: entry.path, entry: afterEntry, fileText: undefined },
             { id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
@@ -1220,7 +1578,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         try {
           const target = await ctx.fs.resolve(entry.path, { signal })
           if (entry.kind === 'create' && content === '') {
-            await rm(ctx.fs.processPath(target), { force: true })
+            await removeRevert(target, blockTarget.sessionId, signal)
           } else {
             const preWrite = await ctx.fs.readText(target, undefined) ?? entry.newText
             await writeRevert(target, content, blockTarget.sessionId, signal)
@@ -1236,7 +1594,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         persistSession()
         const fullyResolved = contentEqual(updatedNew, entry.oldText)
         if (fullyResolved && blockTarget.removeWhenResolved === true) {
-          store.remove(blockTarget.id)
+          dropEntry(blockTarget.id)
           pushUndo(blockTarget.sessionId,
             { id: entry.id, path: entry.path, entry: afterEntry, fileText: undefined },
             { id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
@@ -1248,19 +1606,26 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       case 'undo': {
         const sessionId = sessionOf(payload)
         if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
-        const pair = undoStack.pop()
+        // Only THIS session's history moves. The pair remembers the session it was taken
+        // in, and the pop refuses anything else, so a Ctrl+Z in B can never reach A's
+        // keep — and when B has nothing of its own the answer is `nothing`, which is the
+        // truth rather than a silent success on someone else's file.
+        const pair = popOwnPair(undoStackOf(sessionId), sessionId)
         if (pair === undefined) {
           const value: DiffApprovalActionValue = { outcome: 'nothing' }
           return { ok: true, value }
         }
         try {
-          await restoreState(sessionId, pair.before, pair.after, signal)
+          // The write policy comes from the PAIR's session, not the caller's: the panel
+          // shows the open session's list, and that is not always the one whose entry is
+          // being restored.
+          await restoreState(pair.sessionId, pair.before, pair.after, signal)
         } catch (error: unknown) {
           // Keep the pair on the stack so a later, still-valid undo works.
-          undoStack.push(pair)
+          undoStackOf(sessionId).push(pair)
           return rpcError(`undo failed: ${errorMessage(error)}`)
         }
-        redoStack.push(pair)
+        redoStackOf(sessionId).push(pair)
         persistSession(true)
         const value: DiffApprovalActionValue = { outcome: 'undone', id: pair.after.id }
         return { ok: true, value }
@@ -1268,18 +1633,18 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       case 'redo': {
         const sessionId = sessionOf(payload)
         if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
-        const pair = redoStack.pop()
+        const pair = popOwnPair(redoStackOf(sessionId), sessionId)
         if (pair === undefined) {
           const value: DiffApprovalActionValue = { outcome: 'nothing' }
           return { ok: true, value }
         }
         try {
-          await restoreState(sessionId, pair.after, pair.before, signal)
+          await restoreState(pair.sessionId, pair.after, pair.before, signal)
         } catch (error: unknown) {
-          redoStack.push(pair)
+          redoStackOf(sessionId).push(pair)
           return rpcError(`redo failed: ${errorMessage(error)}`)
         }
-        undoStack.push(pair)
+        undoStackOf(sessionId).push(pair)
         persistSession(true)
         const value: DiffApprovalActionValue = { outcome: 'redone', id: pair.after.id }
         return { ok: true, value }
@@ -1780,6 +2145,93 @@ function targetOf(payload: unknown): { sessionId: SessionId; id: string } | unde
   const id = (payload as Record<string, unknown>).id
   if (typeof id !== 'string' || id.length === 0) return undefined
   return { sessionId, id }
+}
+
+/**
+ * Narrow a wire payload to one comment-ask request: a target, the prompt to send, and the
+ * reader's own words that prompt wraps.
+ *
+ * Both strings are required. The prompt is what the agent is asked; `text` is what the
+ * thread shows as the question, and it cannot be recovered from the prompt (which carries
+ * the marker, the reference and the rules around it) — a request without it would store a
+ * question nobody can read, so it is refused instead.
+ *
+ * @param payload - the wire payload.
+ * @returns the request, or undefined when it is not one.
+ */
+function commentAskOf(payload: unknown): { sessionId: SessionId; id: string; prompt: string; text: string } | undefined {
+  const target = targetOf(payload)
+  if (target === undefined) return undefined
+  const record = payload as Record<string, unknown>
+  const prompt = record.prompt
+  if (typeof prompt !== 'string' || prompt.trim().length === 0) return undefined
+  const text = record.text
+  if (typeof text !== 'string' || text.trim().length === 0) return undefined
+  return { ...target, prompt, text }
+}
+
+/** One comment-add request, narrowed from the wire. */
+interface CommentAddInput {
+  sessionId: SessionId
+  /** An id the caller supplied, so a retry after a dropped response is the same comment. */
+  id: string | undefined
+  entryId: string
+  anchor: CommentAnchor
+  quote: string
+  quoteContext: string | undefined
+  quoteLines: CommentQuoteLine[] | undefined
+  text: string
+}
+
+/**
+ * Narrow a wire payload to one comment-add request.
+ *
+ * The display path is deliberately NOT read from the wire: the entry a comment
+ * hangs off is the authority on what that file is called, so a client cannot pin a
+ * comment to a path the list disagrees with.
+ *
+ * @param payload - the request body.
+ * @returns the narrowed request, or `undefined` when a required field is missing.
+ */
+function commentAddOf(payload: unknown): CommentAddInput | undefined {
+  const sessionId = sessionOf(payload)
+  if (sessionId === undefined) return undefined
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
+  const body = payload as Record<string, unknown>
+  const { entryId, anchor, quote, text } = body
+  if (typeof entryId !== 'string' || entryId.length === 0) return undefined
+  if (typeof anchor !== 'object' || anchor === null || Array.isArray(anchor)) return undefined
+  const { startLine, endLine } = anchor as Record<string, unknown>
+  if (typeof startLine !== 'number' || !Number.isFinite(startLine)) return undefined
+  if (typeof endLine !== 'number' || !Number.isFinite(endLine)) return undefined
+  if (typeof quote !== 'string') return undefined
+  // An annotation with nothing in it is not a comment; the reader's own panel refuses to
+  // send one, so a blank here is a broken caller rather than an empty thread to store.
+  if (typeof text !== 'string' || text.trim().length === 0) return undefined
+  const id = body.id
+  const quoteContext = body.quoteContext
+  const quoteLines: CommentQuoteLine[] = []
+  if (Array.isArray(body.quoteLines)) {
+    for (const line of body.quoteLines) {
+      if (typeof line !== 'object' || line === null || Array.isArray(line)) continue
+      const { old, new: side, kind } = line as Record<string, unknown>
+      quoteLines.push({
+        ...(typeof old === 'number' && Number.isFinite(old) ? { old } : {}),
+        ...(typeof side === 'number' && Number.isFinite(side) ? { new: side } : {}),
+        ...(kind === 'add' || kind === 'del' || kind === 'context' ? { kind } : {}),
+      })
+    }
+  }
+  return {
+    sessionId,
+    id: typeof id === 'string' && id.length > 0 ? id : undefined,
+    entryId,
+    anchor: { startLine, endLine },
+    quote,
+    quoteContext: typeof quoteContext === 'string' && quoteContext !== '' ? quoteContext : undefined,
+    quoteLines: quoteLines.length > 0 ? quoteLines : undefined,
+    text,
+  }
 }
 
 /** Narrow a wire payload to one preview-image target. */
