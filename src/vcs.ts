@@ -23,7 +23,7 @@
  * @module dsh-diff-approval/vcs
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { dirname, resolve, sep } from 'node:path'
 
 /** The version-control systems this integration knows. */
@@ -99,26 +99,81 @@ function shq(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
 
-/** POSIX path-inside check, case-insensitive on Windows. */
-function isPathInside(absolutePath: string, root: string): boolean {
-  const folded = (value: string) => process.platform === 'win32' ? value.toLowerCase() : value
-  const path = folded(resolve(absolutePath))
-  const base = folded(resolve(root))
+/** Resolve one path to its real (link-followed) form. A path that is not on disk yet — a file git
+ * still reports as untracked, or a scope below a directory that does not exist — has no real path
+ * of its own, so the deepest ancestor that does exist is resolved and the rest re-appended:
+ * `resolve()` collapses the `..`/`.` segments of that tail. When nothing on the way resolves, the
+ * lexical path is what is left and the comparison falls back to the purely lexical one. */
+function realpathOrSelf(absolutePath: string): string {  const path = resolve(absolutePath)
+  try {
+    return realpathSync.native(path)
+  } catch {
+    const parent = dirname(path)
+    if (parent === path) return path
+    const resolvedParent = realpathOrSelf(parent)
+    // No ancestor resolved either: climbing on would only replay the same misses.
+    if (resolvedParent === parent) return path
+    return resolve(resolvedParent, path.slice(parent.length + 1))
+  }
+}
+
+/** The `workspaceRoot`/`scope` pair with both sides resolved ONCE per scan, so the per-path side of
+ * the comparison is the only `realpath` a scan pays per changed file. The roots are the same two
+ * paths for every row of a scan; the changed file is not. */
+interface ScanRoots {
+  /** Both sides of the scope check, in real form. */
+  real: { workspace: string; scope: string | undefined }
+}
+
+/** Resolve the workspace root and the scope once, for {@link inScanScope} to reuse per row. */
+function realRoots(workspaceRoot: string, scope: string | undefined): ScanRoots {
+  return {
+    real: {
+      workspace: realpathOrSelf(workspaceRoot),
+      scope: scope === undefined ? undefined : realpathOrSelf(scope),
+    },
+  }
+}
+
+/** The prefix test itself, on two already-absolute and already-resolved paths: case-insensitive on
+ * Windows, separator-aware so a sibling sharing a name prefix (`/w/repo-x` vs `/w/repo`) is not
+ * read as inside. On Windows `/` and `\` name the same separator, so both are folded to `sep`. */
+function isLexicallyInside(absolutePath: string, root: string): boolean {
+  const fold = (value: string): string => {
+    const unified = sep === '\\' ? value.replace(/\//g, sep) : value
+    return process.platform === 'win32' ? unified.toLowerCase() : unified
+  }
+  const path = fold(absolutePath)
+  const base = fold(root)
   if (path === base) return true
   return path.startsWith(base + sep)
+}
+
+/** Path-inside check on real paths, case-insensitive on Windows. Both sides are put in their real
+ * (link-followed) form first: a workspace reached through a symlink, a Windows junction or a mapped
+ * path is the same directory as its target, and comparing the two spellings lexically reads one
+ * file as two unrelated paths — which silently drops every imported change. The lexical check is
+ * still the answer when neither side resolves (nothing exists to follow). */
+function isPathInside(absolutePath: string, root: string): boolean {
+  const path = resolve(absolutePath)
+  const base = resolve(root)
+  const realPath = realpathOrSelf(path)
+  const realRoot = realpathOrSelf(base)
+  // Neither side had a link to follow: the lexical comparison already is the real one.
+  if (realPath === path && realRoot === base) return isLexicallyInside(path, base)
+  return isLexicallyInside(realPath, realRoot)
 }
 
 /**
  * Whether one changed path belongs to the scan: inside the workspace, and inside
  * the narrowed `scope` when the caller set one.
  * @param absolutePath - the changed file's absolute path.
- * @param workspaceRoot - the session's workspace root.
- * @param scope - one path to restrict the scan to, or undefined for all of it.
+ * @param roots - the workspace root and scope, resolved once per scan by {@link realRoots}.
  * @returns whether the change is in scope.
  */
-function inScanScope(absolutePath: string, workspaceRoot: string, scope: string | undefined): boolean {
-  if (!isPathInside(absolutePath, workspaceRoot)) return false
-  return scope === undefined || isPathInside(absolutePath, scope)
+function inScanScope(absolutePath: string, roots: ScanRoots): boolean {
+  if (!isPathInside(absolutePath, roots.real.workspace)) return false
+  return roots.real.scope === undefined || isPathInside(absolutePath, roots.real.scope)
 }
 
 /** The VCS marker of one directory, or undefined when it holds none. */
@@ -165,8 +220,12 @@ async function runShell(
 }
 
 /** Parse `git status --porcelain=v1 -z` output into (XY, repo-relative path)
- * records. Rename/copy records carry a trailing destination field, which is
- * consumed and skipped. */
+ * records. In `-z` a rename/copy record is `XY <to>\0<from>\0`: the record's own
+ * field holds the path that exists in the worktree, and the ORIGIN follows as its
+ * own NUL field, which is consumed and skipped. (`orig -> dest` is the non-`-z`
+ * spelling; verified against git: `git mv a.txt b.txt` gives `R  b.txt\0a.txt\0`.)
+ * The status command below turns rename detection off, so this branch is a fallback
+ * for a caller that enables it. */
 function parseGitPorcelainZ(output: string): { xy: string; rel: string }[] {
   const records: { xy: string; rel: string }[] = []
   let index = 0
@@ -229,11 +288,13 @@ async function readGitBlob(
 /** Enumerate the workspace's local changes in a git checkout. */
 async function gitChanges(input: VcsImportInput): Promise<VcsChange[]> {
   const { root, workspaceRoot, includeUntracked, scope, shell, readText, signal } = input
+  // Resolved once here, not once per row: the roots do not change while one scan runs.
+  const roots = realRoots(workspaceRoot, scope)
   const stdout = await runShell(shell, GIT_STATUS_COMMAND, root, signal)
   const changes: VcsChange[] = []
   for (const { xy, rel } of parseGitPorcelainZ(stdout)) {
     const absolute = resolve(root, rel)
-    if (!inScanScope(absolute, workspaceRoot, scope)) continue
+    if (!inScanScope(absolute, roots)) continue
     if (xy === '??') {
       if (!includeUntracked) continue
       const newText = await readText(absolute) ?? ''
@@ -270,6 +331,7 @@ function xmlUnescape(value: string): string {
 /** Enumerate the workspace's local changes in an svn working copy. */
 async function svnChanges(input: VcsImportInput): Promise<VcsChange[]> {
   const { root, workspaceRoot, includeUntracked, scope, shell, readText, signal } = input
+  const roots = realRoots(workspaceRoot, scope)
   const stdout = await runShell(shell, 'svn status --xml', root, signal)
   const changes: VcsChange[] = []
   const entryPattern = /<entry[^>]*path="([^"]*)"[^>]*>\s*<wc-status[^>]*item="([^"]*)"/g
@@ -278,7 +340,7 @@ async function svnChanges(input: VcsImportInput): Promise<VcsChange[]> {
     const rel = xmlUnescape(match[1]!)
     const item = match[2]!
     const absolute = resolve(root, rel)
-    if (!inScanScope(absolute, workspaceRoot, scope)) continue
+    if (!inScanScope(absolute, roots)) continue
     if (item === 'modified' || item === 'deleted') {
       let oldText = ''
       try {
@@ -319,6 +381,7 @@ function p4ChangeOf(line: string): { depot: string; action: string } | undefined
 async function p4Changes(input: VcsImportInput): Promise<VcsChange[]> {
   const { root, workspaceRoot, includeUntracked, scope, shell, readText, signal } = input
   const command = includeUntracked ? 'p4 status' : 'p4 opened'
+  const roots = realRoots(workspaceRoot, scope)
   const stdout = await runShell(shell, command, root, signal)
   const changes: VcsChange[] = []
   for (const line of stdout.split('\n')) {
@@ -329,7 +392,7 @@ async function p4Changes(input: VcsImportInput): Promise<VcsChange[]> {
     const local = where.trim().split(/\s+/).pop()
     if (local === undefined || local.length === 0) continue
     const absolute = resolve(local)
-    if (!inScanScope(absolute, workspaceRoot, scope)) continue
+    if (!inScanScope(absolute, roots)) continue
     const deleted = opened.action === 'delete' || opened.action === 'move/delete'
     const created = opened.action === 'add' || opened.action === 'move/add'
     const newText = deleted ? '' : (await readText(absolute) ?? '')
