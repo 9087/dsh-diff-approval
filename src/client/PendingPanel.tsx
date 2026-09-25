@@ -5938,6 +5938,22 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     landingCommentRef.current = undefined
     landingPendingRef.current = false
   }
+  /**
+   * Keep a landing true for a moment after it is applied (see the retry effect below).
+   *
+   * A landing is computed from heights that are still settling: a thread's own size is measured a frame
+   * or two after it first draws, wrapped row heights arrive later still, and the pane itself may be its
+   * previous layout's. Any of those moves the place the landing asked for, and the write that was exact
+   * when it was made is then a few rows out — which only a file this pane has just mounted shows, and
+   * only on some frames. Held as the PLACE (a row, a card, a block) rather than re-derived, so the retry
+   * lands the same spot whatever `focus` has become; dropped as soon as the reader scrolls.
+   *
+   * @param goal - the place the landing named, without its deadline.
+   */
+  const armLandingGoal = (goal: { row: number | undefined; blockStart: number | undefined; card: boolean; comment: string | undefined }): void => {
+    landingGoalRef.current = { ...goal, until: Date.now() + LANDING_RETRY_MS }
+    setLandingVerify(n => n + 1)
+  }
   useLayoutEffect(() => {
     if (rowCount === 0) return
     // Nothing is placed before the placement effect has decided where this file opens: this runs in
@@ -5984,18 +6000,13 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
         return
       }
       const rowBody = bodyRef.current
-      if (rowBody !== null && !applyRowLanding(rowBody, row, toCard, wantedCard)) {
-        // The box could not reach the offset: something it needs is not there yet (its own size, this
-        // file's rows, the comment model). The ask is KEPT — a jump the box could not land is not a jump
-        // the reader got — and the retry below keeps trying it for a moment. Spending it here is what left
-        // the reader at whatever offset the box already had: an "it jumped somewhere" that only a file
-        // this pane has only just mounted could show, and only on some frames.
-        landingPendingRef.current = true
-        landingGoalRef.current = { until: Date.now() + LANDING_RETRY_MS, row, blockStart: undefined, card: toCard, comment: wantedCard }
-        setLandingVerify(n => n + 1)
-        return
-      }
-      if (rowBody !== null) landRowDone()
+      if (rowBody !== null) applyRowLanding(rowBody, row, toCard, wantedCard)
+      landRowDone()
+      // Kept true for a moment after it is applied: the heights this place is computed from are still
+      // settling (a thread's own size is measured a frame or two later, and a card that grows moves
+      // everything under it), so a landing that was exact when it was written can be a few rows out by
+      // the time the reader looks. See `armLandingGoal`.
+      armLandingGoal({ row, blockStart: undefined, card: toCard, comment: wantedCard })
       return
     }
     const block = model.blocks[focus]
@@ -6023,14 +6034,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const target = offsetOf(block.start) - leadRows * ROW_HEIGHT_PX
     const written = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
     applyScrollTop(body, written)
-    // A write that fell short of the block is the pane's range, not the reader's target: kept, and retried
-    // for a moment (see `landingGoalRef`). A target past the end of a fully measured file is the bottom of
-    // the file, not a short write.
-    if (target - written < 1) landingGoalRef.current = undefined
-    else {
-      landingGoalRef.current = { until: Date.now() + LANDING_RETRY_MS, row: undefined, blockStart: block.start, card: false, comment: undefined }
-      setLandingVerify(n => n + 1)
-    }
+    armLandingGoal({ row: undefined, blockStart: block.start, card: false, comment: undefined })
     // Re-run once when wrapped offsets go from "not measured yet" to ready, so
     // an open-with-wrap-on file centers on the block's real (wrapped) offset
     // instead of the initial fixed-22px guess. `rowOffsets === null` flips only
@@ -6078,12 +6082,11 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
         const wanted = goal.row === undefined
           ? offsetOf(goal.blockStart ?? 0) - leadRows * ROW_HEIGHT_PX
           : rowLandingTarget(goal.row, goal.card, goal.comment)
-        const written = Math.max(0, Math.min(wanted, body.scrollHeight - body.clientHeight))
-        applyScrollTop(body, written)
-        if (wanted - written < 1) {
-          landingGoalRef.current = undefined
-          landRowDone()
-          return
+        // The place is what is kept true, not the offset that stood for it when it was first written: a
+        // thread that grew, a wrapped row that got taller or a pane that reached its real size all move
+        // it, and each of those turns an exact landing into one a few rows out.
+        if (Math.abs(body.scrollTop - wanted) >= 1) {
+          applyScrollTop(body, Math.max(0, Math.min(wanted, body.scrollHeight - body.clientHeight)))
         }
       }
       if (Date.now() >= goal.until) {

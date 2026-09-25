@@ -3624,6 +3624,66 @@ describe('PendingPanel', () => {
     }
   })
 
+  it('lands a comment jump when the pane grows, not at the range the pane had', async () => {
+    // The comment half of the same report: the jump opens the file and lands the thread's OWN box, and a
+    // pane that is still its previous layout's size clamps that write into a range that is not the
+    // reader's. The place is kept and re-asserted (see `landingGoalRef`), so the box ends up where the
+    // jump asked even though nothing about the pane was ready when it ran.
+    const observers: Array<() => void> = []
+    class FakeResizeObserver {
+      constructor(private readonly callback: () => void) {}
+      observe(): void { observers.push(this.callback) }
+      disconnect(): void {}
+    }
+    const globals = globalThis as unknown as Record<string, unknown>
+    const originalObserver = globals.ResizeObserver
+    globals.ResizeObserver = FakeResizeObserver
+    const restore = stubCodeScroll(500000, 800)
+    try {
+      const lines = Array.from({ length: 400 }, (_, index) => `line-${index + 1}`)
+      const changed = [...lines]
+      changed[0] = 'CHANGED'
+      const deep = entry({
+        id: 'entry-deep', path: '/repo/deep.txt', kind: 'edit',
+        oldText: `${lines.join('\n')}\n`, newText: `${changed.join('\n')}\n`,
+      })
+      const other = entry({ id: 'entry-other', path: '/repo/other.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
+      const note = comment({
+        id: 'd-deep', entryId: 'entry-deep', text: '这一行。',
+        anchor: { startLine: 301, endLine: 301 }, quote: 'line-301',
+      })
+      render(<PendingPanel {...panelProps({
+        read: true, files: [other, deep], busy: new Set(),
+        comments: [note], commentLines: { 'd-deep': { start: 301, end: 301 } },
+      })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      clickFileRow('other.txt')
+
+      const box = codeBody()
+      const metrics = { scrollHeight: 2000, clientHeight: 400 }
+      Object.defineProperty(box, 'scrollHeight', { configurable: true, get: () => metrics.scrollHeight })
+      Object.defineProperty(box, 'clientHeight', { configurable: true, get: () => metrics.clientHeight })
+      act(() => { for (const fire of observers) fire() })
+
+      fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+      fireEvent.click(document.querySelector('[data-diff-comment-link="d-deep"]') as HTMLElement)
+      expect(shownPath()).toBe('/repo/deep.txt')
+
+      metrics.scrollHeight = 500000
+      metrics.clientHeight = 800
+      act(() => { for (const fire of observers) fire() })
+      // The box hangs below line 301's row, and the landing leaves the configured lead rows above its top
+      // edge. Line 1 is the file's one change, so that row is a DELETION followed by the line that replaced
+      // it: new line 301 sits on row index 301, and the box under it starts at the end of row 301.
+      const wanted = (301 + 1) * diffLineHeight() - navLeadRows() * diffLineHeight()
+      await vi.waitFor(() => { expect(codeBody().scrollTop).toBe(wanted) })
+    } finally {
+      restore()
+      if (originalObserver === undefined) delete globals.ResizeObserver
+      else globals.ResizeObserver = originalObserver
+    }
+  })
+
   it('lands a file row jump when the pane grows, not at the range the pane had', async () => {
     // The report: clicking a file's row in the list while that file is NOT open lands "somewhere" — the
     // place the reader was in before — while the same click after the file has been open is exact. A pane
