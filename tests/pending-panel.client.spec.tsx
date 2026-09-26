@@ -15,7 +15,7 @@ import panelCss from '../src/client/PendingPanel.module.css'
 import { codeFontCss } from '../src/client/code-font.ts'
 import { zh } from '../src/client/locales.ts'
 import { lastPanelFile, panelFileOffset, rememberedPlacedThreads, rememberedThreads, removalAskQuiet, resetPanelMemory } from '../src/client/panel-memory.ts'
-import { diffLineHeight, navLeadRows, setCommentModeEnabled } from '../src/client/settings.ts'
+import { diffLineHeight, navLeadRows, setCommentModeEnabled, setConfirmFileRemoveEnabled } from '../src/client/settings.ts'
 import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
 import { DiffApprovalHeaderEntry } from '../src/client/header-entry.tsx'
 import { DiffApprovalSettingsTab } from '../src/client/SettingsTab.tsx'
@@ -1714,6 +1714,28 @@ describe('PendingPanel', () => {
     keepRemove('entry-bare')
     expect(document.querySelector('[data-diff-batch-confirm]')).toBeNull()
     expect(props.onKeep).toHaveBeenLastCalledWith(S1, 'entry-bare')
+  })
+
+  it('asks about a whole-file keep when its comments would go, setting or no setting', () => {
+    // The confirm-first SETTING is about asking whether the row leaves the list; a file whose comments die
+    // with it is asked about either way, because that loss is not what the setting was ever about.
+    act(() => { setConfirmFileRemoveEnabled(false) })
+    const annotated = entry({ id: 'entry-annotated', path: '/repo/annotated.txt' })
+    const props = panelProps({
+      read: true,
+      files: [annotated],
+      busy: new Set(),
+      comments: [comment({ id: 'c-one', entryId: annotated.id, text: '一', anchor: { startLine: 1, endLine: 1 } })],
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    fireEvent.click(document.querySelector('[data-diff-keep]') as HTMLElement)
+    expect(screen.getByText('panel.removeCommentsOne {"file":"annotated.txt","count":1}')).toBeDefined()
+    expect(props.onKeep).not.toHaveBeenCalled()
+    // Answering 移除 is what drops the row (and its comments) — the answer the setting would have asked for.
+    fireEvent.click(document.querySelector('[data-diff-file-confirm-remove]') as HTMLElement)
+    expect(props.onKeep).toHaveBeenLastCalledWith(S1, 'entry-annotated', false)
   })
 
   it('offers 移出 from a row menu once that file has no diff left', () => {
@@ -11710,6 +11732,20 @@ describe('PendingPanel', () => {
     expect(document.querySelectorAll('[role="menuitem"]').length).toBeGreaterThan(0)
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(panel()).not.toBeNull()
+  })
+
+  it('undoes with Ctrl+Z in the docked presentation too', () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} docked dockHost={host} />)
+    // `open` is the OVERLAY's own flag and stays false for the instance living in a sidebar tab, so a
+    // guard that checks it alone makes Ctrl+Z a dead key in the docked presentation. The keyboard is the
+    // same surface either way: the chord must reach the host from a tab as well.
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true })
+    expect(props.onUndo).toHaveBeenCalledWith(S1)
+    fireEvent.keyDown(window, { key: 'Z', ctrlKey: true, shiftKey: true })
+    expect(props.onRedo).toHaveBeenCalledWith(S1)
   })
 
   it('keeps a docked panel standing through an outside press and Escape', () => {

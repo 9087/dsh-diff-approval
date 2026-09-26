@@ -758,6 +758,17 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * @param id - the entry id (= path) leaving the list.
    * @returns whether the entry was there.
    */
+  /**
+   * Drop an entry from its session's list, ALONG WITH THE COMMENTS it carries.
+   *
+   * That second half is deliberate FOR NOW: a comment is a note about a change, not a change, so it is not
+   * part of what undo/redo keeps (`pushUndo` is the one place that would have to grow if comments are ever
+   * to survive a removal). A file that leaves the list and comes back — through the deleted-file checkpoint
+   * below, through a re-import, or through the reader adding it again — comes back without its comments.
+   * The panel therefore asks before any press that drops an entry carrying comments (see the `remove-one` /
+   * `remove-*` prompts); the paths with no press of their own stay silent, because there is no moment to ask
+   * at.
+   */
   function dropEntry(id: string): boolean {
     const removed = store.remove(id)
     comments.removeForEntry(id)
@@ -920,7 +931,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       if (live.kind === 'deleted') {
         // The file is gone: remove it from the list, keeping an undoable
         // checkpoint that recreates the file (its tracked content) and restores
-        // the entry to the list.
+        // the entry to the list. Undo/redo covers the DIFF for now, so the comments this file carried are
+        // not in the checkpoint and do not come back with it (see `dropEntry`) — the current scope, not an
+        // oversight: they would have to join the snapshot in `pushUndo` to survive.
         dropEntry(entry.path)
         pushUndo(sessionId,
           { id: entry.path, path: entry.path, entry, fileText: entry.newText },

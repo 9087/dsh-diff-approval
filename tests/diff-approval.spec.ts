@@ -852,6 +852,28 @@ describe('a pick of files (keep-many)', () => {
       .toEqual(['/repo/a.txt', '/repo/b.txt', '/repo/c.txt'])
   })
 
+  it('brings a KEPT file back with its diff when the keep is undone', async () => {
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a\n', 'A\n'))
+    const [a] = await listEntries(handle, 'session-1')
+
+    // 保留 leaves the row listed with nothing left to show: the accepted content is folded into the
+    // baseline, and NO file is written (the file already holds it).
+    expect(await handle('keep', { sessionId: 'session-1', id: a!.id, keepListed: true }, signal()))
+      .toEqual({ ok: true, value: { outcome: 'kept', resolved: true } })
+    const kept = await listEntries(handle, 'session-1')
+    expect(kept).toHaveLength(1)
+    expect(kept[0]).toMatchObject({ oldText: 'A\n', newText: 'A\n' })
+
+    // Ctrl+Z restores the state the reader was in BEFORE the keep — the row shows its diff again even
+    // though the file's bytes never moved.
+    expect(await handle('undo', { sessionId: 'session-1' }, signal()))
+      .toMatchObject({ ok: true, value: { outcome: 'undone' } })
+    const back = await listEntries(handle, 'session-1')
+    expect(back).toHaveLength(1)
+    expect(back[0]).toMatchObject({ oldText: 'a\n', newText: 'A\n' })
+  })
+
   it('writes the files back when the session-wide revert-all is undone', async () => {
     const { ctx, fs, handle } = await harness()
     threeEditEntries(ctx)

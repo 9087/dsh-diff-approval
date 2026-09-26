@@ -8707,7 +8707,9 @@ export function PendingPanel({
       setBatchPrompt({ sessionId, kind: 'remove-one', ids: [id], doomed: [] })
       return Promise.resolve()
     }
-    if (keepListed === undefined && confirmFileRemoveEnabled()) {
+    // The confirm-first SETTING governs asking about the row; a file whose comments would die with it is
+    // asked about regardless, because that loss is not something the setting was ever about.
+    if (keepListed === undefined && (confirmFileRemoveEnabled() || commentsOn([id]).count > 0)) {
       if (removalAskQuiet(current, id)) return onKeep(sessionId, id, true)
       setFilePrompt({ action: 'keep', sessionId, id })
       return Promise.resolve()
@@ -8715,7 +8717,7 @@ export function PendingPanel({
     return keepListed === undefined ? onKeep(sessionId, id) : onKeep(sessionId, id, keepListed)
   }
   const revertWithPrompt: PendingPanelFace['onRevert'] = (sessionId, id, keepListed) => {
-    if (keepListed === undefined && confirmFileRemoveEnabled()) {
+    if (keepListed === undefined && (confirmFileRemoveEnabled() || commentsOn([id]).count > 0)) {
       if (removalAskQuiet(current, id)) return onRevert(sessionId, id, true)
       setFilePrompt({ action: 'revert', sessionId, id })
       return Promise.resolve()
@@ -9858,7 +9860,12 @@ export function PendingPanel({
   // can hold focus, scope this back to the panel so the composer's own
   // undo/redo is restored everywhere else.
   useEffect(() => {
-    if (!open || current === undefined) return
+    // The chord belongs to whichever instance is on screen: the overlay while it is open, the sidebar tab
+    // while the panel is docked. `open` is the OVERLAY's own flag and stays false in a tab, so a guard that
+    // checked it alone made Ctrl+Z/Ctrl+Y dead keys for anyone reviewing from the sidebar. (The mounts stand
+    // down for each other — an overlay closes as the dock takes over — so any overlap is a frame, and the
+    // host is what pops, not this listener.)
+    if ((!open && !docked) || current === undefined) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.altKey) return
       // The add-path dialog is a modal this panel owns.
@@ -10372,6 +10379,13 @@ export function PendingPanel({
             <div className={css.confirmBackdrop} data-diff-confirm>
               <div className={css.confirmCard} role="dialog" aria-modal="true">
                 <p className={css.confirmText}>{t('panel.resolvedAsk', { file: basenameOf(promptFile.path) })}</p>
+                {/* A block action that resolved the whole file is about to drop it, and dropping it deletes
+                    its comments on the host: the same line the other removal dialogs carry. */}
+                {commentsOn([promptFile.id]).count > 0 && (
+                  <p className={css.confirmText} data-diff-block-comments>
+                    {t('panel.removeCommentsOne', { file: basenameOf(promptFile.path), count: commentsOn([promptFile.id]).count })}
+                  </p>
+                )}
                 {/* The same checkbox the whole-file dialog carries: this question comes back for
                     every block of the file, and the answer is usually the same one. */}
                 <label className={css.pickerCheck} title={t('panel.removalQuietHint')}>
