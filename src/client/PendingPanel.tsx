@@ -8122,20 +8122,33 @@ export function PendingPanel({
   const [batchPrompt, setBatchPrompt] = useState<{
     sessionId: SessionId
     kind: 'keep-picked' | 'keep-remove-picked' | 'revert-picked' | 'revert-remove-picked' | 'keep-all' | 'revert-all' | 'close-picked'
+      | 'remove-one' | 'keep-remove-one' | 'revert-remove-one'
     ids: readonly string[]
     doomed: readonly string[]
   } | null>(null)
   /** What one batch action's dialog asks, in that action's own words. */
-  const batchAskOf = (kind: NonNullable<typeof batchPrompt>['kind'], count: number): string => t(
-    kind === 'keep-picked' ? 'panel.batchKeepAsk'
-      : kind === 'keep-remove-picked' ? 'panel.batchKeepRemoveAsk'
-        : kind === 'revert-picked' ? 'panel.batchRevertAsk'
-          : kind === 'revert-remove-picked' ? 'panel.batchRevertRemoveAsk'
-            : kind === 'keep-all' ? 'panel.batchKeepAllAsk'
-              : kind === 'revert-all' ? 'panel.batchRevertAllAsk'
-                : 'panel.batchCloseAsk',
-    { count },
-  )
+  const batchAskOf = (prompt: NonNullable<typeof batchPrompt>): string => {
+    const { kind } = prompt
+    // A single row is NAMED: "保留并移出「a.txt」？" reads as the press the reader made, where "1 个文件"
+    // reads like a report. The action word is the row's own label, so the dialog and the menu agree.
+    if (kind === 'remove-one' || kind === 'keep-remove-one' || kind === 'revert-remove-one') {
+      const action = kind === 'remove-one'
+        ? t('row.dismiss')
+        : kind === 'keep-remove-one' ? t('row.keepRemove') : t('row.revertRemove')
+      const file = files.find(entry => entry.id === prompt.ids[0])
+      return t('panel.removeOneAsk', { action, file: basenameOf(file?.path ?? '') })
+    }
+    return t(
+      kind === 'keep-picked' ? 'panel.batchKeepAsk'
+        : kind === 'keep-remove-picked' ? 'panel.batchKeepRemoveAsk'
+          : kind === 'revert-picked' ? 'panel.batchRevertAsk'
+            : kind === 'revert-remove-picked' ? 'panel.batchRevertRemoveAsk'
+              : kind === 'keep-all' ? 'panel.batchKeepAllAsk'
+                : kind === 'revert-all' ? 'panel.batchRevertAllAsk'
+                  : 'panel.batchCloseAsk',
+      { count: prompt.ids.length },
+    )
+  }
   /**
    * Run what the dialog was confirming. The dialog is the only caller: nothing bulk happens without it.
    *
@@ -8144,6 +8157,17 @@ export function PendingPanel({
    * was opened over, which is the set the host will walk.
    */
   const runBatchConfirm = (prompt: NonNullable<typeof batchPrompt>): void => {
+    // The three single-row removals are the row menu's own press, confirmed: the same calls it would have
+    // made on the spot, now behind the warning that the file's comments go with it.
+    if (prompt.kind === 'remove-one' || prompt.kind === 'keep-remove-one') {
+      void onKeep(prompt.sessionId, prompt.ids[0] ?? '')
+      return
+    }
+    if (prompt.kind === 'revert-remove-one') {
+      // 回退并移出 DROPS the row, which is what its label says (see `runRowMenu`).
+      void onRevert(prompt.sessionId, prompt.ids[0] ?? '')
+      return
+    }
     if (prompt.kind === 'close-picked') {
       clearPicked()
       if (prompt.ids.length === 0) return
@@ -8161,8 +8185,10 @@ export function PendingPanel({
     if (ids.length === 0) return
     if (prompt.kind === 'keep-picked') void onKeepMany(prompt.sessionId, ids, true)
     else if (prompt.kind === 'keep-remove-picked') void onKeepMany(prompt.sessionId, ids, undefined)
-    else if (prompt.kind === 'revert-picked') void onRevertMany(prompt.sessionId, ids, undefined)
-    else void onRevertMany(prompt.sessionId, ids, true)
+    // Same shape as the keep pair, and as the single row (see `runRowMenu`): 回退 leaves the rows listed,
+    // 回退并移出 drops them.
+    else if (prompt.kind === 'revert-picked') void onRevertMany(prompt.sessionId, ids, true)
+    else void onRevertMany(prompt.sessionId, ids, undefined)
   }
   /** The confirm dialog's own checkbox: stop asking about this file for the rest of the page. */
   const [quietRemoval, setQuietRemoval] = useState(false)
@@ -8673,6 +8699,14 @@ export function PendingPanel({
   // detail view offers once a file has no diff left) runs straight through, so the
   // prompt cannot re-enter itself.
   const keepWithPrompt: PendingPanelFace['onKeep'] = (sessionId, id, keepListed) => {
+    // An explicit `false` is the detail view's own 移出 (the one a file with no diff left offers): it DROPS
+    // the entry, and a dropped entry takes its comments with it — so a file that has any is confirmed
+    // first. The quiet box the other dialog carries is the reader's answer to exactly this question, so a
+    // tick there silences this one too.
+    if (keepListed === false && commentsOn([id]).count > 0 && !removalAskQuiet(current, id)) {
+      setBatchPrompt({ sessionId, kind: 'remove-one', ids: [id], doomed: [] })
+      return Promise.resolve()
+    }
     if (keepListed === undefined && confirmFileRemoveEnabled()) {
       if (removalAskQuiet(current, id)) return onKeep(sessionId, id, true)
       setFilePrompt({ action: 'keep', sessionId, id })
@@ -9319,10 +9353,26 @@ export function PendingPanel({
       setBatchPrompt({ sessionId: current, kind: id, ids, doomed })
       return
     }
+    // 移出, 保留并移出 and 回退并移出 DROP the entry, and a dropped entry takes its comments with it (see
+    // `dropEntry`): when the file has any, the press is confirmed first rather than running on the spot. A
+    // file with no comments keeps the one-press it has always had.
+    if ((id === 'keep-remove' || id === 'remove' || id === 'revert-remove')
+      && commentsOn([target.file.id]).count > 0) {
+      setBatchPrompt({
+        sessionId: current,
+        kind: id === 'remove' ? 'remove-one' : id === 'keep-remove' ? 'keep-remove-one' : 'revert-remove-one',
+        ids: [target.file.id],
+        doomed: [],
+      })
+      return
+    }
     if (id === 'keep-listed') void onKeep(current, target.file.id, true)
     else if (id === 'keep-remove' || id === 'remove') void onKeep(current, target.file.id)
-    else if (id === 'revert') void onRevert(current, target.file.id)
-    else if (id === 'revert-remove') void onRevert(current, target.file.id, true)
+    // The revert pair is the KEEP pair's shape: plain 回退 writes the baseline back and LEAVES the row
+    // listed (nothing left to show, like a kept file), 回退并移出 does the same and drops it. It used to be
+    // wired the other way round — the row that said 移出 stayed and the one that did not say it went.
+    else if (id === 'revert') void onRevert(current, target.file.id, true)
+    else if (id === 'revert-remove') void onRevert(current, target.file.id)
     // Opening is not a decision about the review, so it takes the FILE's own session — the one the header's
     // two icon buttons pass — rather than the session being viewed.
     else if (id === 'open-file') void onOpen(target.file.sessionId, target.file.id, 'open')
@@ -9531,6 +9581,33 @@ export function PendingPanel({
   const promptFile = blockPrompt === null ? undefined : files.find(file => file.id === blockPrompt.id)
   /** The file whose removal is being confirmed (a whole-file action), if any. */
   const promptEntry = filePrompt === null ? undefined : files.find(file => file.id === filePrompt.id)
+  /** The comments a set of files carries: how many files, how many comments, and how they read per file. */
+  const commentsOn = (ids: readonly string[]): { files: number; count: number; list: string } => {
+    const perFile = new Map<string, number>()
+    for (const record of snapshot.comments) {
+      if (!ids.includes(record.entryId)) continue
+      perFile.set(record.entryId, (perFile.get(record.entryId) ?? 0) + 1)
+    }
+    const named = files.filter(file => perFile.has(file.id))
+    const shown = named.slice(0, 3).map(file => `${basenameOf(file.path)} (${perFile.get(file.id) ?? 0})`)
+    if (named.length > 3) shown.push(t('panel.removeCommentsMore', { count: named.length - 3 }))
+    return {
+      files: named.length,
+      count: [...perFile.values()].reduce((sum, one) => sum + one, 0),
+      list: shown.join(', '),
+    }
+  }
+  /** What the dialog says about the comments a removal would take with it (empty when there are none). */
+  const batchCommentsText = (): string => {
+    if (batchPrompt === null) return ''
+    const on = commentsOn(batchPrompt.ids)
+    if (on.count === 0) return ''
+    if (batchPrompt.ids.length === 1) {
+      const file = files.find(entry => entry.id === batchPrompt.ids[0])
+      return t('panel.removeCommentsOne', { file: basenameOf(file?.path ?? ''), count: on.count })
+    }
+    return t('panel.removeCommentsMany', { files: on.files, count: on.count, list: on.list })
+  }
   /** The files a held batch-revert would delete, named for the confirmation. Up to three names, because
    *  the reader needs to recognise WHICH files are about to go — a bare count is what they already knew. */
   const batchDoomed = batchPrompt === null
@@ -10350,6 +10427,12 @@ export function PendingPanel({
                 <p className={css.confirmText}>
                   {t(filePrompt.action === 'keep' ? 'panel.fileKeptAsk' : 'panel.fileRevertedAsk', { file: basenameOf(promptEntry.path) })}
                 </p>
+                {/* Removing it here deletes its comments too, so the question says so. */}
+                {commentsOn([promptEntry.id]).count > 0 && (
+                  <p className={css.confirmText} data-diff-file-comments>
+                    {t('panel.removeCommentsOne', { file: basenameOf(promptEntry.path), count: commentsOn([promptEntry.id]).count })}
+                  </p>
+                )}
                 {/* Tick it and this file stops asking: the action below runs, the row stays in the
                     list, and the reader takes it out by hand when they are done with it. The scope is
                     the page's memory — this session, this visit — so the label says the session and
@@ -10401,8 +10484,15 @@ export function PendingPanel({
             <div className={css.confirmBackdrop} data-diff-batch-confirm>
               <div className={css.confirmCard} role="dialog" aria-modal="true">
                 <p className={css.confirmText}>
-                  {batchAskOf(batchPrompt.kind, batchPrompt.ids.length)}
+                  {batchAskOf(batchPrompt)}
                 </p>
+                {/* The file's comments go with it: the host DELETES them when the entry leaves the list
+                    (see `dropEntry`), and nothing brings them back. */}
+                {batchCommentsText() !== '' && (
+                  <p className={css.confirmText} data-diff-batch-comments>
+                    {batchCommentsText()}
+                  </p>
+                )}
                 {/* The part with no undo behind it. Named, not counted: the reader has to recognise the
                     files this is about to delete, and a number is what they already knew. */}
                 {batchDoomed.length > 0 && (

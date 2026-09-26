@@ -121,6 +121,13 @@ export const zh = {
   'panel.batchDeletes': '回退将删除 {count} 个新建文件，且无法撤销：{files}',
   'panel.batchAndMore': '等 {count} 个',
   'panel.batchGo': '确定',
+  // Taking a file out of the list DELETES its comments on the host (see `dropEntry`), so every press that
+  // drops an entry says so first: in the dialog it already has, or in one raised only for this. Per-file
+  // counts are inline — a table would need headers and dwarf the question it is attached to.
+  'panel.removeOneAsk': '{action}「{file}」？',
+  'panel.removeCommentsOne': '「{file}」上的 {count} 条评论会一起关闭，且无法撤销',
+  'panel.removeCommentsMany': '{files} 个文件上的 {count} 条评论会一起关闭，且无法撤销：{list}',
+  'panel.removeCommentsMore': '等 {count} 个文件',
   'row.added': '+{added}',
   'row.removed': '-{removed}',
   'action.keep': '保留',
@@ -368,6 +375,10 @@ export const en = {
   'panel.batchDeletes': 'Reverting deletes {count} created file(s), with no undo: {files}',
   'panel.batchAndMore': 'and {count} more',
   'panel.batchGo': 'Confirm',
+  'panel.removeOneAsk': '{action} "{file}"?',
+  'panel.removeCommentsOne': 'The {count} comment(s) on "{file}" will be closed too, with no undo',
+  'panel.removeCommentsMany': 'The {count} comment(s) on {files} file(s) will be closed too, with no undo: {list}',
+  'panel.removeCommentsMore': 'and {count} more file(s)',
   'row.added': '+{added}',
   'row.removed': '-{removed}',
   'action.keep': 'Keep',

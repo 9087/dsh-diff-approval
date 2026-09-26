@@ -1411,18 +1411,18 @@ describe('PendingPanel', () => {
     expect(props.onRevert).not.toHaveBeenCalled()
     expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
 
-    // 回退 asks the toolbar's default question, which here means no flag at all.
+    // 回退 keeps the row LISTED — the keep pair's shape: the file is put back and the row stays, resolved.
     fireEvent.contextMenu(row, { clientX: 40, clientY: 60 })
     const plain = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
     fireEvent.click(plain[2]!)
-    expect(props.onRevert).toHaveBeenLastCalledWith(FILE.sessionId, FILE.id)
+    expect(props.onRevert).toHaveBeenLastCalledWith(FILE.sessionId, FILE.id, true)
     expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
 
     // 回退并移出 answers it up front: it puts the file back and takes the row out of the list.
     fireEvent.contextMenu(row, { clientX: 40, clientY: 60 })
     const last = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
     fireEvent.click(last[3]!)
-    expect(props.onRevert).toHaveBeenLastCalledWith(FILE.sessionId, FILE.id, true)
+    expect(props.onRevert).toHaveBeenLastCalledWith(FILE.sessionId, FILE.id)
     expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
 
     // And the two ways out of the panel, in one press each: 打开文件 hands the file to its own app, and
@@ -1618,7 +1618,7 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-batch-deletes]')).toBeNull()
     fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
     expect((props.onRevertMany as unknown as { mock: { calls: unknown[][] } }).mock.calls)
-      .toEqual([[S1, [FILE.id], undefined]])
+      .toEqual([[S1, [FILE.id], true]])
 
     // With a created file in the pick the dialog names it: that file is about to be DELETED, and the host
     // records no undo for that at all — so it is the one line in this panel worth stopping to read.
@@ -1649,7 +1649,7 @@ describe('PendingPanel', () => {
     fireEvent.click(menu()[2]!)
     fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
     expect((props.onRevertMany as unknown as { mock: { calls: unknown[][] } }).mock.calls)
-      .toEqual([[S1, [FILE.id], undefined], [S1, [FILE.id, 'entry-made'], undefined]])
+      .toEqual([[S1, [FILE.id], true], [S1, [FILE.id, 'entry-made'], true]])
     expect(document.querySelector('[data-diff-batch-confirm]')).toBeNull()
     expect(rowOf('entry-made').hasAttribute('data-picked')).toBe(false)
   })
@@ -1675,6 +1675,45 @@ describe('PendingPanel', () => {
     fireEvent.click(items[0]!)
     expect(props.onKeep).toHaveBeenLastCalledWith(S1, 'entry-gone')
     expect(props.onRevert).not.toHaveBeenCalled()
+  })
+
+  it('warns that a file\'s comments go with it before a removal, and only when it has any', () => {
+    // Dropping an entry DELETES its comments on the host (see `dropEntry`), so a removal that would take
+    // comments with it is confirmed first — and a file with none keeps the one-press it always had.
+    const annotated = entry({ id: 'entry-annotated', path: '/repo/annotated.txt' })
+    const bare = entry({ id: 'entry-bare', path: '/repo/bare.txt' })
+    const props = panelProps({
+      read: true,
+      files: [annotated, bare],
+      busy: new Set(),
+      comments: [
+        comment({ id: 'c-one', entryId: annotated.id, text: '一', anchor: { startLine: 1, endLine: 1 } }),
+        comment({ id: 'c-two', entryId: annotated.id, text: '二', anchor: { startLine: 2, endLine: 2 } }),
+      ],
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const rowOf = (id: string): HTMLElement => document.querySelector(`[data-diff-file="${id}"]`) as HTMLElement
+    const keepRemove = (id: string): void => {
+      fireEvent.contextMenu(rowOf(id), { clientX: 10, clientY: 12 })
+      fireEvent.click(([...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[])[1]!)
+    }
+
+    keepRemove('entry-annotated')
+    expect(screen.getByText('panel.removeOneAsk {"action":"row.keepRemove","file":"annotated.txt"}')).toBeDefined()
+    expect(screen.getByText('panel.removeCommentsOne {"file":"annotated.txt","count":2}')).toBeDefined()
+    expect(props.onKeep).not.toHaveBeenCalled()
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-cancel]') as HTMLElement)
+    expect(props.onKeep).not.toHaveBeenCalled()
+    keepRemove('entry-annotated')
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
+    expect(props.onKeep).toHaveBeenLastCalledWith(S1, 'entry-annotated')
+
+    // No comments on it: no dialog, and the press runs on the spot as before.
+    props.onKeep.mockClear()
+    keepRemove('entry-bare')
+    expect(document.querySelector('[data-diff-batch-confirm]')).toBeNull()
+    expect(props.onKeep).toHaveBeenLastCalledWith(S1, 'entry-bare')
   })
 
   it('offers 移出 from a row menu once that file has no diff left', () => {
