@@ -999,10 +999,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       batchBefore.push({ id: final.id, path, entry: pre, fileText: undefined })
     }
     if (batchBefore.length > 0) {
-      pushUndo(sessionId,
-        { id: batchBefore[0]!.id, path: batchBefore[0]!.path, entry: undefined, fileText: undefined, batch: batchBefore },
-        { id: batchAfter[0]!.id, path: batchAfter[0]!.path, entry: undefined, fileText: undefined, batch: batchAfter },
-      )
+      pushBatchUndo(sessionId, batchBefore, batchAfter)
     }
     return folded
   }
@@ -1252,6 +1249,25 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     redoStackOf(sessionId).length = 0
   }
 
+  /**
+   * Record several entries' worth of ONE decision as a single undo step.
+   *
+   * The reader asked once — a VCS import, or a keep/revert over a pick of files — so one Ctrl+Z has to
+   * take the whole thing back. A loop of single actions would push one step per entry instead, and undo
+   * would then peel that one decision apart file by file.
+   *
+   * @param sessionId - the session whose history this belongs to.
+   * @param before - one state per entry, in the order the decision touched them.
+   * @param after - the same entries as the decision left them; the two arrays are index-aligned, which
+   *   is also what the divergence guard on a restore reads (see `restoreState`).
+   */
+  function pushBatchUndo(sessionId: SessionId, before: DiffApprovalUndoState[], after: DiffApprovalUndoState[]): void {
+    if (before.length === 0) return
+    pushUndo(sessionId,
+      { id: before[0]!.id, path: before[0]!.path, entry: undefined, fileText: undefined, batch: before },
+      { id: after[0]!.id, path: after[0]!.path, entry: undefined, fileText: undefined, batch: after })
+  }
+
   /** Drop the top pair of one stack when it belongs to `sessionId`; otherwise the
    *  stack is left exactly as it was, so another session's action is untouched.
    * @param stack - the session's stack (undo or redo).
@@ -1295,11 +1311,15 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       await writeRevert(resolved, state.fileText, sessionId, signal)
     }
     if (state.batch !== undefined) {
-      // A batch (one VCS import) touches no files: each item restores its entry
-      // or removes it by path, exactly reversing the import.
-      for (const item of state.batch) {
-        if (item.entry !== undefined) store.restore(item.entry)
-        else dropEntry(item.path)
+      // A batch is ONE decision over several entries — one VCS import, or one keep/revert asked of a
+      // pick of files — so restoring it is restoring each item in turn. An item that carries `fileText`
+      // writes its file exactly as a lone state does: the session-wide 全部回退 has always put the bytes
+      // each file held into its undo states, and this branch used to ignore them, so undoing it brought
+      // the rows back while the files stayed reverted on disk. The counterpart item is the same index on
+      // the other side, so a single restore's divergence guard applies here too.
+      const counterpart = expectedFile?.batch
+      for (const [index, item] of state.batch.entries()) {
+        await restoreState(sessionId, { ...item, batch: undefined }, counterpart?.[index], signal)
       }
       return
     }
@@ -1618,9 +1638,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           dropEntry(entry.id)
         }
         if (before.length > 0) {
-          pushUndo(sessionId,
-            { id: before[0]!.id, path: before[0]!.path, entry: undefined, fileText: undefined, batch: before },
-            { id: after[0]!.id, path: after[0]!.path, entry: undefined, fileText: undefined, batch: after })
+          pushBatchUndo(sessionId, before, after)
         }
         persistSession(true)
         const value: DiffApprovalBulkValue = { affected: before.length }
@@ -1646,12 +1664,88 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           dropEntry(entry.id)
         }
         if (batchBefore.length > 0) {
-          pushUndo(sessionId,
-            { id: batchBefore[0]!.id, path: batchBefore[0]!.path, entry: undefined, fileText: undefined, batch: batchBefore },
-            { id: batchAfter[0]!.id, path: batchAfter[0]!.path, entry: undefined, fileText: undefined, batch: batchAfter })
+          pushBatchUndo(sessionId, batchBefore, batchAfter)
         }
         persistSession(true)
         const value: DiffApprovalBulkValue = { affected: entries.length }
+        return { ok: true, value }
+      }
+      case 'keep-many': {
+        const request = manyTargetsOf(payload)
+        if (request === undefined) return rpcError('sessionId and a non-empty ids array of strings must be given')
+        await ensureLoaded()
+        const before: DiffApprovalUndoState[] = []
+        const after: DiffApprovalUndoState[] = []
+        for (const id of request.ids) {
+          const entry = store.get(id)
+          // An id that is already gone is not an error: the file left the list between the reader's pick
+          // and this request, which is exactly what keeping it means.
+          if (entry === undefined) continue
+          if (request.keepListed === true) {
+            // The same fold the single keep does: the accepted content is already in the file, so the
+            // entry stays listed with nothing left to show.
+            store.update(id, { oldText: entry.newText })
+            before.push({ id: entry.id, path: entry.path, entry, fileText: undefined })
+            after.push({
+              id: entry.id, path: entry.path,
+              entry: { ...entry, oldText: entry.newText, updatedAt: Date.now() },
+              fileText: undefined,
+            })
+            continue
+          }
+          before.push({ id: entry.id, path: entry.path, entry, fileText: undefined })
+          after.push({ id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
+          dropEntry(id)
+        }
+        pushBatchUndo(request.sessionId, before, after)
+        persistSession(true)
+        const value: DiffApprovalBulkValue = { affected: before.length }
+        return { ok: true, value }
+      }
+      case 'revert-many': {
+        const request = manyTargetsOf(payload)
+        if (request === undefined) return rpcError('sessionId and a non-empty ids array of strings must be given')
+        await ensureLoaded()
+        const before: DiffApprovalUndoState[] = []
+        const after: DiffApprovalUndoState[] = []
+        let affected = 0
+        for (const id of request.ids) {
+          const entry = store.get(id)
+          if (entry === undefined) continue
+          affected += 1
+          let undo: { before: DiffApprovalUndoState; after: DiffApprovalUndoState } | undefined
+          try {
+            undo = await revertEntryContent(entry, request.sessionId, signal)
+          } catch {
+            // An unreadable file is left listed (the caller sees it as a failed entry) rather than
+            // silently dropped; stop the pick here, the way the session-wide revert does — what the
+            // batch has already put back is what the reader sees.
+            return rpcError(`revert-many failed for ${entry.path}`)
+          }
+          if (request.keepListed === true) {
+            // The file holds its old content again and the entry stays listed with the diff gone — the
+            // same pair the single revert+keepListed records, with the file content in the pair.
+            const content = undo?.after.fileText ?? ''
+            store.update(id, { newText: content })
+            if (undo !== undefined) {
+              before.push({ id: entry.path, path: entry.path, entry, fileText: undo.before.fileText })
+              after.push({
+                id: entry.path, path: entry.path,
+                entry: { ...entry, newText: content, updatedAt: Date.now() },
+                fileText: content,
+              })
+            }
+            continue
+          }
+          // A file the agent created has no undo state at all: putting it back DELETED it (see
+          // `revertEntryContent`). The panel asks before sending a pick into this — the delete is the one
+          // thing here that cannot be taken back, so the batch's undo covers only what it can.
+          if (undo !== undefined) { before.push(undo.before); after.push(undo.after) }
+          dropEntry(id)
+        }
+        pushBatchUndo(request.sessionId, before, after)
+        persistSession(true)
+        const value: DiffApprovalBulkValue = { affected }
         return { ok: true, value }
       }
       case 'block-keep': {
@@ -2281,6 +2375,32 @@ function targetOf(payload: unknown): { sessionId: SessionId; id: string } | unde
   const id = (payload as Record<string, unknown>).id
   if (typeof id !== 'string' || id.length === 0) return undefined
   return { sessionId, id }
+}
+
+/**
+ * Narrow a wire payload to one keep/revert over a PICK of files: one session, the files to act on, and
+ * whether the resolved ones stay listed.
+ *
+ * The ids are all-or-nothing, like the pick itself: a payload with one unusable id is not a pick, so the
+ * whole request is refused rather than half-honoured (the ids themselves are still only acted on where
+ * they exist, which is the endpoint's business). A repeated id names one file, so it is kept once.
+ *
+ * @param payload - the wire payload.
+ * @returns the request, or undefined when it is not one.
+ */
+function manyTargetsOf(payload: unknown): { sessionId: SessionId; ids: string[]; keepListed: boolean | undefined } | undefined {
+  const sessionId = sessionOf(payload)
+  if (sessionId === undefined) return undefined
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
+  const record = payload as Record<string, unknown>
+  const ids = record.ids
+  if (!Array.isArray(ids) || ids.length === 0) return undefined
+  const wanted: string[] = []
+  for (const id of ids) {
+    if (typeof id !== 'string' || id.length === 0) return undefined
+    if (!wanted.includes(id)) wanted.push(id)
+  }
+  return { sessionId, ids: wanted, keepListed: record.keepListed === true ? true : undefined }
 }
 
 /**

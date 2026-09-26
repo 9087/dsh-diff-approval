@@ -775,6 +775,133 @@ describe('bulk keep-all / revert-all', () => {
   })
 })
 
+describe('a pick of files (keep-many)', () => {
+  /** Three pending edits, so a pick can be a proper subset of the list. */
+  function threeEditEntries(ctx: Parameters<typeof emitResult>[0]) {
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a\n', 'A\n'))
+    emitResult(ctx, editExec(), editSuccess('/repo/b.txt', 'b\n', 'B\n'))
+    emitResult(ctx, editExec(), editSuccess('/repo/c.txt', 'c\n', 'C\n'))
+  }
+
+  /**
+   * A note on the double's disk: a revert WRITES, and undoing one reads the file back to check it is
+   * still what the action left (the divergence guard) before writing again — so a double whose
+   * `readText` answers `undefined` gets every undo refused, which says nothing about the code under
+   * test. The tests below that undo a revert give it a real disk for that reason.
+   */
+  it('settles only the files it names, and keeps the ones asked to stay listed', async () => {
+    const { ctx, handle } = await harness()
+    threeEditEntries(ctx)
+    const [a, b] = await listEntries(handle, 'session-1')
+
+    // A pick that spans both decisions of the same button: `a` is kept and left listed, `b` is kept and
+    // taken out. `c` was not picked and must not move.
+    const answer = await handle('keep-many',
+      { sessionId: 'session-1', ids: [a!.id], keepListed: true }, signal())
+    expect(answer).toEqual({ ok: true, value: { affected: 1 } })
+    await handle('keep-many', { sessionId: 'session-1', ids: [b!.id] }, signal())
+
+    // The list is ordered by recency, so the file kept listed rejoins at the end — what matters here is
+    // WHICH files are left, not where the kept one sits.
+    const left = (await listEntries(handle, 'session-1')).map(entry => entry.path).sort()
+    expect(left).toEqual(['/repo/a.txt', '/repo/c.txt'])
+  })
+
+  it('takes the whole pick back with ONE undo', async () => {
+    const { ctx, handle } = await harness()
+    threeEditEntries(ctx)
+    const [a, b] = await listEntries(handle, 'session-1')
+
+    expect(await handle('keep-many', { sessionId: 'session-1', ids: [a!.id, b!.id] }, signal()))
+      .toEqual({ ok: true, value: { affected: 2 } })
+    expect((await listEntries(handle, 'session-1')).map(entry => entry.path)).toEqual(['/repo/c.txt'])
+
+    // One decision, one step: a single undo puts BOTH files back, not just the last of them.
+    const answer = await handle('undo', { sessionId: 'session-1' }, signal())
+    expect(answer).toMatchObject({ ok: true, value: { outcome: 'undone' } })
+    const back = (await listEntries(handle, 'session-1')).map(entry => entry.path).sort()
+    expect(back).toEqual(['/repo/a.txt', '/repo/b.txt', '/repo/c.txt'])
+  })
+
+  it('puts a subset of the list back in one call, and takes that one decision back with one undo', async () => {
+    const { ctx, fs, handle } = await harness()
+    threeEditEntries(ctx)
+    const disk = new Map<string, string>([
+      ['/repo/a.txt', 'A\n'], ['/repo/b.txt', 'B\n'], ['/repo/c.txt', 'C\n'],
+    ])
+    fs.readText.mockImplementation(async (target: { displayPath?: string }) => disk.get(target.displayPath ?? ''))
+    fs.writeText.mockImplementation(async (target: { displayPath?: string }, content: string) => {
+      disk.set(target.displayPath ?? '', content)
+      return { version: 1 }
+    })
+    const [a] = await listEntries(handle, 'session-1')
+
+    // One request, one write, and the files the pick did not name do not move.
+    expect(await handle('revert-many', { sessionId: 'session-1', ids: [a!.id] }, signal()))
+      .toEqual({ ok: true, value: { affected: 1 } })
+    expect(fs.writeText).toHaveBeenCalledTimes(1)
+    expect(disk.get('/repo/a.txt')).toBe('a\n')
+    expect(disk.get('/repo/b.txt')).toBe('B\n')
+
+    // …and one undo puts it back on disk, not just back in the list (see `restoreState`).
+    expect(await handle('undo', { sessionId: 'session-1' }, signal()))
+      .toMatchObject({ ok: true, value: { outcome: 'undone' } })
+    expect(fs.writeText).toHaveBeenCalledTimes(2)
+    expect(disk.get('/repo/a.txt')).toBe('A\n')
+    expect((await listEntries(handle, 'session-1')).map(entry => entry.path).sort())
+      .toEqual(['/repo/a.txt', '/repo/b.txt', '/repo/c.txt'])
+  })
+
+  it('writes the files back when the session-wide revert-all is undone', async () => {
+    const { ctx, fs, handle } = await harness()
+    threeEditEntries(ctx)
+    // A real disk: the files hold their changes, and every write lands on it (see the note above).
+    const disk = new Map<string, string>([
+      ['/repo/a.txt', 'A\n'], ['/repo/b.txt', 'B\n'], ['/repo/c.txt', 'C\n'],
+    ])
+    fs.readText.mockImplementation(async (target: { displayPath?: string }) => disk.get(target.displayPath ?? ''))
+    fs.writeText.mockImplementation(async (target: { displayPath?: string }, content: string) => {
+      disk.set(target.displayPath ?? '', content)
+      return { version: 1 }
+    })
+
+    // The session-wide 全部回退 is the reversible one, and its undo has to WRITE the files back: the undo
+    // state carries the bytes each file held, which the old batch restore ignored (it restored entries and
+    // nothing else) — so undoing it put the rows back while the files stayed reverted on disk.
+    expect(await handle('revert-all', { sessionId: 'session-1' }, signal()))
+      .toEqual({ ok: true, value: { affected: 3 } })
+    expect(fs.writeText).toHaveBeenCalledTimes(3)
+    expect(disk.get('/repo/a.txt')).toBe('a\n')
+
+    const answer = await handle('undo', { sessionId: 'session-1' }, signal())
+    expect(answer).toMatchObject({ ok: true, value: { outcome: 'undone' } })
+    expect(fs.writeText).toHaveBeenCalledTimes(6)
+    expect(disk.get('/repo/a.txt')).toBe('A\n')
+    expect([...disk.entries()].sort()).toEqual([['/repo/a.txt', 'A\n'], ['/repo/b.txt', 'B\n'], ['/repo/c.txt', 'C\n']])
+    const back = (await listEntries(handle, 'session-1')).map(entry => entry.path).sort()
+    expect(back).toEqual(['/repo/a.txt', '/repo/b.txt', '/repo/c.txt'])
+  })
+
+  it('ignores an id that is already gone, and refuses a payload with no usable ids', async () => {
+    const { ctx, handle } = await harness()
+    threeEditEntries(ctx)
+    const [a] = await listEntries(handle, 'session-1')
+
+    // A file that left the list between the pick and the request is not an error: keeping it is what
+    // happened to it.
+    expect(await handle('keep-many', { sessionId: 'session-1', ids: [a!.id, '/repo/gone.txt'] }, signal()))
+      .toEqual({ ok: true, value: { affected: 1 } })
+    // A repeated id names one file: two mentions of the same file are one decision about it.
+    expect(await handle('keep-many', { sessionId: 'session-1', ids: [a!.id, a!.id] }, signal()))
+      .toEqual({ ok: true, value: { affected: 0 } })
+
+    const empty = await handle('keep-many', { sessionId: 'session-1', ids: [] }, signal())
+    expect(empty).toEqual({ ok: false, error: { code: 'internal', message: expect.any(String) as string, details: {} } })
+    const bad = await handle('keep-many', { sessionId: 'session-1', ids: [''] }, signal())
+    expect(bad).toEqual({ ok: false, error: { code: 'internal', message: expect.any(String) as string, details: {} } })
+  })
+})
+
 describe('str_replace_editor capture', () => {
   it('captures a str_replace mutation through the edit-intent and result seams', async () => {
     const { ctx, fs, handle } = await harness()
