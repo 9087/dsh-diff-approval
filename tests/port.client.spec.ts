@@ -311,6 +311,29 @@ describe('comments', () => {
       .rejects.toThrow('malformed count')
   })
 
+  it('keeps a pick of files in one request, with the list flag only when it was asked for', async () => {
+    const seam = fakeRpc({ 'keep-many': { ok: true, value: { affected: 2 } } })
+    await expect(createDiffApprovalPort(seam.rpc).keepMany(S1, ['e1', 'e2'], undefined))
+      .resolves.toEqual({ affected: 2 })
+    await createDiffApprovalPort(seam.rpc).keepMany(S1, ['e3'], true)
+    // One call for the pick — the whole point — and `keepListed` is left off the wire when it was not
+    // asked for, so a host cannot read an absent decision as a false one.
+    expect(seam.call).toHaveBeenNthCalledWith(1, '/diff-approval', 'keep-many',
+      { sessionId: 'session-1', ids: ['e1', 'e2'] })
+    expect(seam.call).toHaveBeenNthCalledWith(2, '/diff-approval', 'keep-many',
+      { sessionId: 'session-1', ids: ['e3'], keepListed: true })
+    // A malformed count is a broken host, not a pick that affected nothing.
+    const broken = fakeRpc({ 'keep-many': { ok: true, value: { affected: 'two' } } })
+    await expect(createDiffApprovalPort(broken.rpc).keepMany(S1, ['e1'], undefined))
+      .rejects.toThrow('malformed')
+    // The revert half of the pick rides the same shape, on its own endpoint.
+    const reverting = fakeRpc({ 'revert-many': { ok: true, value: { affected: 1 } } })
+    await expect(createDiffApprovalPort(reverting.rpc).revertMany(S1, ['e9'], true))
+      .resolves.toEqual({ affected: 1 })
+    expect(reverting.call).toHaveBeenCalledWith('/diff-approval', 'revert-many',
+      { sessionId: 'session-1', ids: ['e9'], keepListed: true })
+  })
+
   it('asks one comment and narrows what became of it', async () => {
     const seam = fakeRpc({ 'comment-ask': { ok: true, value: { outcome: 'asked', requestId: 'req-1' } } })
     await expect(createDiffApprovalPort(seam.rpc).commentAsk(S1, 'c1', 'the prompt', 'why?'))

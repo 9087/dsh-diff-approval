@@ -236,6 +236,8 @@ export function apply(ctx: ClientContext): void {
       onAddPath: (sessionId, path, includeUnchanged, exact) => store.addPath(sessionId, path, includeUnchanged, exact),
       onKeepAll: (sessionId) => store.keepAll(sessionId),
       onRevertAll: (sessionId) => store.revertAll(sessionId),
+      onKeepMany: (sessionId, ids, keepListed) => store.keepMany(sessionId, ids, keepListed),
+      onRevertMany: (sessionId, ids, keepListed) => store.revertMany(sessionId, ids, keepListed),
       onCommentAdd: (sessionId, comment) => store.commentAdd(sessionId, comment),
       onCommentRemove: (sessionId, id) => store.commentRemove(sessionId, id),
       onCommentRemoveMany: (sessionId, ids) => store.commentRemoveMany(sessionId, ids),

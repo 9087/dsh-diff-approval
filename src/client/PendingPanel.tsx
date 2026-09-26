@@ -793,10 +793,13 @@ export function openSettingsSection(sectionLabel: string): void {
 interface PendingFileRowProps {
   file: PendingFileDiff
   selected: boolean
+  /** Picked for a decision over several files (Ctrl/Cmd-click). Not the same as `selected`. */
+  picked: boolean
   /** The last keep/revert failure for this file, shown as an inline tag. */
   failedMessage?: string | undefined
   t: Translator
-  onSelect: (id: string) => void
+  /** A press on the row: the caller decides whether it opens the file or picks it. */
+  onSelect: (event: ReactMouseEvent<HTMLElement>, id: string) => void
   /** A right-click on the row: the panel opens the row's action menu at the press. */
   onMenu: (event: ReactMouseEvent<HTMLElement>) => void
 }
@@ -3545,7 +3548,7 @@ function markdownPreviewMarkers(container: HTMLElement): PreviewRulerMarker[] {
 }
 
 /** One row of the file list: the clickable head in the left pane. */
-function PendingFileRow({ file, selected, failedMessage, t, onSelect, onMenu }: PendingFileRowProps) {
+function PendingFileRow({ file, selected, picked, failedMessage, t, onSelect, onMenu }: PendingFileRowProps) {
   const stats = useMemo(
     () => computeWholeFileDiff(file.oldText, file.newText),
     [file.oldText, file.newText],
@@ -3564,8 +3567,12 @@ function PendingFileRow({ file, selected, failedMessage, t, onSelect, onMenu }: 
         <button
           type="button"
           className={css.rowHead}
+          data-diff-file={file.id}
           data-selected={selected || undefined}
-          onClick={() => { onSelect(file.id) }}
+          // A pick is its own state, not the open file: the CSS says so, and the blur rule reads the id.
+          data-picked={picked || undefined}
+          aria-pressed={picked}
+          onClick={(event) => { onSelect(event, file.id) }}
         >
           <span className={css.rowPath}>{basenameOf(file.path)}</span>
           {file.kind === 'create' && <span className={css.kindTag}>{t('row.create')}</span>}
@@ -7820,7 +7827,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onCommentAdd, onCommentRemove, onCommentRemoveMany, onCommentAsk, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onRevertAll, onAckRedoCleared, onAckUndoNotice, collapseSidebar, t,
+  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onCommentAdd, onCommentRemove, onCommentRemoveMany, onCommentAsk, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onRevertAll, onKeepMany, onRevertMany, onAckRedoCleared, onAckUndoNotice, collapseSidebar, t,
   docked = false, dockHost, onOpenDock, closeDock, useDock,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
@@ -8101,6 +8108,57 @@ export function PendingPanel({
    *  choice rides the same block RPC as its `removeWhenResolved` flag. */
   const [blockPrompt, setBlockPrompt] = useState<ResolvedBlockPrompt | null>(null)
   const [filePrompt, setFilePrompt] = useState<FileActionPrompt | null>(null)
+  /**
+   * The batch action waiting for the reader to confirm it: which action, over what, and the files a
+   * revert would DELETE — the one thing in a batch that cannot be taken back. Every bulk action goes
+   * through here (a pick's own menu, the list's bulk footer, the comments list), because each of them is
+   * one press that settles many things at once, and the dialog is where the reader sees how many.
+   */
+  const [batchPrompt, setBatchPrompt] = useState<{
+    sessionId: SessionId
+    kind: 'keep-picked' | 'keep-remove-picked' | 'revert-picked' | 'revert-remove-picked' | 'keep-all' | 'revert-all' | 'close-picked'
+    ids: readonly string[]
+    doomed: readonly string[]
+  } | null>(null)
+  /** What one batch action's dialog asks, in that action's own words. */
+  const batchAskOf = (kind: NonNullable<typeof batchPrompt>['kind'], count: number): string => t(
+    kind === 'keep-picked' ? 'panel.batchKeepAsk'
+      : kind === 'keep-remove-picked' ? 'panel.batchKeepRemoveAsk'
+        : kind === 'revert-picked' ? 'panel.batchRevertAsk'
+          : kind === 'revert-remove-picked' ? 'panel.batchRevertRemoveAsk'
+            : kind === 'keep-all' ? 'panel.batchKeepAllAsk'
+              : kind === 'revert-all' ? 'panel.batchRevertAllAsk'
+                : 'panel.batchCloseAsk',
+    { count },
+  )
+  /**
+   * Run what the dialog was confirming. The dialog is the only caller: nothing bulk happens without it.
+   *
+   * A pick's ids are filtered against the list as it reads NOW — the pick was taken before the dialog
+   * opened, and a refresh may have settled a file in between — while an all-file action names the list it
+   * was opened over, which is the set the host will walk.
+   */
+  const runBatchConfirm = (prompt: NonNullable<typeof batchPrompt>): void => {
+    if (prompt.kind === 'close-picked') {
+      clearPicked()
+      if (prompt.ids.length === 0) return
+      void onCommentRemoveMany(prompt.sessionId, prompt.ids).catch((error: unknown) => {
+        showCopyToast(error instanceof Error ? error.message : String(error))
+      })
+      return
+    }
+    if (prompt.kind === 'keep-all') { void runBulk('keep'); return }
+    if (prompt.kind === 'revert-all') { void runBulk('revert'); return }
+    const ids = prompt.ids.filter(id => files.some(file => file.id === id))
+    // The pick has been spent: the reader asked for those files to be settled, so the state that named
+    // them does not outlive the answer.
+    clearPickedFiles()
+    if (ids.length === 0) return
+    if (prompt.kind === 'keep-picked') void onKeepMany(prompt.sessionId, ids, true)
+    else if (prompt.kind === 'keep-remove-picked') void onKeepMany(prompt.sessionId, ids, undefined)
+    else if (prompt.kind === 'revert-picked') void onRevertMany(prompt.sessionId, ids, undefined)
+    else void onRevertMany(prompt.sessionId, ids, true)
+  }
   /** The confirm dialog's own checkbox: stop asking about this file for the rest of the page. */
   const [quietRemoval, setQuietRemoval] = useState(false)
   /**
@@ -8161,7 +8219,54 @@ export function PendingPanel({
     return () => { document.removeEventListener('pointerdown', onPress, true) }
   }, [pickedComments])
   /** The file list row whose action menu is open, and where the right-click landed. */
-  const [rowMenu, setRowMenu] = useState<{ file: PendingFileDiff; x: number; y: number } | null>(null)
+  const [rowMenu, setRowMenu] = useState<{ file: PendingFileDiff; x: number; y: number; picked: boolean } | null>(null)
+  /**
+   * The FILES the reader has picked in the list (Ctrl/Cmd-click), by id — the same mode the comments tab
+   * has, for the same reason: the four decisions a row offers are decisions about one file, and a reader
+   * looking at ten of them should not have to answer ten times.
+   *
+   * The row head's own `data-selected` means something else (the file open in the detail pane), so the
+   * pick wears `data-picked`: the two states coexist, and a picked file is NOT thereby opened — which is
+   * the whole point of picking with a modifier.
+   */
+  const [pickedFiles, setPickedFiles] = useState<ReadonlySet<string>>(() => new Set())
+  /** End the file picking, keeping the same set object when there is nothing to end. */
+  const clearPickedFiles = (): void => {
+    setPickedFiles(current => (current.size === 0 ? current : new Set()))
+  }
+  /** Pick or unpick one file. The click that reaches this never opens the file (see `pickedFiles`). */
+  const togglePickedFile = (id: string): void => {
+    setPickedFiles(current => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  // The pick is about the list in front of the reader: the comments tab is a different set of rows, so
+  // switching to it ends the pick. A file that left the list needs no effect of its own — the two places
+  // the pick is READ both look it up in the current list, so an id that is gone simply is not acted on.
+  useEffect(() => { clearPickedFiles() }, [activeTab])
+  // The blur rule, the one the comments pick wears: any press that is not on a picked row, not a
+  // Ctrl/Cmd-press (which is itself a pick) and not inside an open menu or dialog ends the pick. A
+  // DIALOG especially: the pick-revert confirmation is about the very files that are picked, so a press
+  // on its buttons must not be read as the reader walking away from them.
+  useEffect(() => {
+    if (pickedFiles.size === 0) return
+    const onPress = (event: PointerEvent): void => {
+      if (event.ctrlKey || event.metaKey) return
+      const target = event.target
+      if (target instanceof Element) {
+        const row = target.closest('[data-diff-file]')
+        if (row !== null && pickedFiles.has(row.getAttribute('data-diff-file') ?? '')) return
+        if (target.closest('[role="menu"]') !== null) return
+        if (target.closest('[role="dialog"]') !== null) return
+      }
+      clearPickedFiles()
+    }
+    document.addEventListener('pointerdown', onPress, true)
+    return () => { document.removeEventListener('pointerdown', onPress, true) }
+  }, [pickedFiles])
   /** The comments-tab item whose menu is open, if any: which thread, where the press landed, and whether
    *  that press acted on a PICK of comments rather than on the one row it landed on. */
   const [commentMenu, setCommentMenu] = useState<{ id: string; fileId: string; x: number; y: number; picked: boolean } | null>(null)
@@ -8872,6 +8977,20 @@ export function PendingPanel({
     setRowMenu(null)
   }, [open])
 
+  /** Ask before running a session-wide bulk decision — the same dialog a pick's rows open. */
+  const askBulk = (kind: 'keep' | 'revert'): void => {
+    if (current === undefined) return
+    // 回退 DELETES every file the agent created; the dialog names those, because that is the part with no
+    // undo behind it.
+    const doomed = kind === 'revert' ? files.filter(file => file.kind === 'create').map(file => file.id) : []
+    setBatchPrompt({
+      sessionId: current,
+      kind: kind === 'keep' ? 'keep-all' : 'revert-all',
+      ids: files.map(file => file.id),
+      doomed,
+    })
+  }
+
   /** Run the same decision over every current-session file, sequentially. */
   const runBulk = async (kind: 'keep' | 'revert') => {
     if (current === undefined) return
@@ -8978,18 +9097,30 @@ export function PendingPanel({
       key={entry.id}
       file={entry}
       selected={selected === entry.id}
+      picked={pickedFiles.has(entry.id)}
       failedMessage={failed.get(entry.id)}
       t={t}
       onMenu={(event) => {
-        setRowMenu({ file: entry, x: event.clientX, y: event.clientY })
+        // A press ON the pick keeps it and offers the decisions over all of it; a press anywhere else is
+        // an ordinary one, and ordinary things end the pick (the same rule the comments tab follows).
+        const onPick = pickedFiles.has(entry.id)
+        if (!onPick) clearPickedFiles()
+        setRowMenu({ file: entry, x: event.clientX, y: event.clientY, picked: onPick })
       }}
-      onSelect={(id) => {
+      onSelect={(event, id) => {
+        // Ctrl/Cmd-click PICKS instead of opening: the reader is gathering files for one decision, and
+        // opening one would take the list they are picking from out from under them.
+        if (event.ctrlKey || event.metaKey) {
+          togglePickedFile(id)
+          return
+        }
         // Re-clicking the already-open file jumps to the next diff block in
         // the open file; any other row switches the selection and lands on that
         // file's first change (not the offset it was left at: the reader asked for
         // the file, not for wherever it happened to be). The floating list stays
         // open so you can browse more files; clicking outside the card (or the
         // toggle button) folds it back.
+        clearPickedFiles()
         if (id === selected) setJumpSignal(signal => signal + 1)
         else {
           setSelected(id)
@@ -9002,6 +9133,22 @@ export function PendingPanel({
   /** The row menu's rows: the pair the file's own toolbar offers, or its single 移出. */
   const rowMenuItems = useMemo<MenuEntry[]>(() => {
     if (rowMenu === null) return []
+    if (rowMenu.picked) {
+      // The pick's own menu: the SAME four decisions the single row offers, in the same short words. The
+      // scope is not in the label — 所有选中 made every row a sentence — it is in the confirmation each
+      // row opens, which names the count and, for a revert, the files about to be deleted. 删除 vs 回退
+      // is the single row's own distinction, decided here by the pick: all of them created files, or not.
+      const picked = files.filter(file => pickedFiles.has(file.id))
+      const revertLabel = picked.length > 0 && picked.every(file => file.kind === 'create')
+        ? t('action.delete')
+        : t('action.revert')
+      return [
+        { id: 'keep-picked', label: t('row.keepListed') },
+        { id: 'keep-remove-picked', label: t('row.keepRemove') },
+        { id: 'revert-picked', label: revertLabel },
+        { id: 'revert-remove-picked', label: t('row.revertRemove') },
+      ]
+    }
     if (fileHasNoDiff(rowMenu.file)) return [{ id: 'remove', label: t('row.dismiss') }]
     // Put back wins a second reading too: 回退 puts the file back and leaves it listed, so a file
     // with more than one operation can be put back one at a time while staying in view.
@@ -9016,7 +9163,7 @@ export function PendingPanel({
       // 回退并移出  is the same pair on the other decision: put the file back and take the row out.
       { id: 'revert-remove', label: t('row.revertRemove') },
     ]
-  }, [rowMenu, t])
+  }, [rowMenu, pickedFiles, files, t])
 
   /** Run a row-menu choice through the same handlers the open file uses. 移出 is a keep: the
    *  host folds the content and drops the entry, so the file itself is left alone. The `并移出`
@@ -9027,6 +9174,25 @@ export function PendingPanel({
     const target = rowMenu
     setRowMenu(null)
     if (target === null || current === undefined) return
+    if (target.picked) {
+      // The pick's four decisions all ask before they run (see `batchPrompt`): each one is a single press
+      // that settles several files, and the dialog is where the reader sees how many — and, for a revert,
+      // which of them are about to be DELETED, the one part of this that cannot be undone.
+      //
+      // Only the files the list still holds: a row that left it cannot be decided on, and naming it in
+      // the request would be asking the host about a file the reader can no longer see.
+      const picked = files.filter(file => pickedFiles.has(file.id))
+      const ids = picked.map(file => file.id)
+      if (ids.length === 0) { clearPickedFiles(); return }
+      if (id !== 'keep-picked' && id !== 'keep-remove-picked'
+        && id !== 'revert-picked' && id !== 'revert-remove-picked') return
+      // The pick stays until the dialog is answered, so cancelling leaves the reader where they were.
+      const doomed = id.startsWith('revert')
+        ? picked.filter(file => file.kind === 'create').map(file => file.id)
+        : []
+      setBatchPrompt({ sessionId: current, kind: id, ids, doomed })
+      return
+    }
     if (id === 'keep-listed') void onKeep(current, target.file.id, true)
     else if (id === 'keep-remove' || id === 'remove') void onKeep(current, target.file.id)
     else if (id === 'revert') void onRevert(current, target.file.id)
@@ -9143,9 +9309,9 @@ export function PendingPanel({
    * the press happened to land on.
    */
   const commentMenuItems = useMemo<MenuEntry[]>(
-    () => [commentMenu?.picked === true
-      ? { id: 'close-picked', label: t('action.discussionEndPicked') }
-      : { id: 'close', label: t('action.discussionEnd') }],
+    // One word for both: what the menu says does not change with the pick — the confirmation that
+    // follows says how many comments it is about to close.
+    () => [{ id: commentMenu?.picked === true ? 'close-picked' : 'close', label: t('action.discussionEnd') }],
     [commentMenu?.picked, t],
   )
   /**
@@ -9187,13 +9353,9 @@ export function PendingPanel({
     if (target === null || current === undefined) return
     if (id === 'close-picked') {
       const ids = [...pickedComments]
-      // The pick has been spent: the reader asked for those comments to go, so the state that named them
-      // does not outlive the request.
-      clearPicked()
-      if (ids.length === 0) return
-      void onCommentRemoveMany(current, ids).catch((error: unknown) => {
-        showCopyToast(error instanceof Error ? error.message : String(error))
-      })
+      if (ids.length === 0) { clearPicked(); return }
+      // The pick stays until the dialog is answered, so cancelling leaves the reader where they were.
+      setBatchPrompt({ sessionId: current, kind: 'close-picked', ids, doomed: [] })
       return
     }
     if (id !== 'close') return
@@ -9219,6 +9381,16 @@ export function PendingPanel({
   const promptFile = blockPrompt === null ? undefined : files.find(file => file.id === blockPrompt.id)
   /** The file whose removal is being confirmed (a whole-file action), if any. */
   const promptEntry = filePrompt === null ? undefined : files.find(file => file.id === filePrompt.id)
+  /** The files a held batch-revert would delete, named for the confirmation. Up to three names, because
+   *  the reader needs to recognise WHICH files are about to go — a bare count is what they already knew. */
+  const batchDoomed = batchPrompt === null
+    ? []
+    : batchPrompt.doomed
+        .map(id => files.find(file => file.id === id))
+        .filter((file): file is PendingFileDiff => file !== undefined)
+  const batchDoomedNames = batchDoomed.length <= 3
+    ? batchDoomed.map(file => basenameOf(file.path)).join(', ')
+    : `${batchDoomed.slice(0, 3).map(file => basenameOf(file.path)).join(', ')} ${t('panel.batchAndMore', { count: batchDoomed.length - 3 })}`
 
   // The list pane's header (its tabs, and the fold-away toggle), its scrollable rows, and the pinned
   // bulk footer, shared by the in-flow left pane and the floating (collapsed) overlay. Only the rows
@@ -9381,7 +9553,7 @@ export function PendingPanel({
                 className={`${css.action} ${css.actionPrimary}`}
                 data-diff-keep-all
                 disabled={bulkBusy !== null}
-                onClick={() => { void runBulk('keep') }}
+                onClick={() => { askBulk('keep') }}
               >
                 {bulkBusy === 'keep' ? t('action.busy') : t('action.keepAll')}
               </button>
@@ -9390,7 +9562,7 @@ export function PendingPanel({
                 className={css.action}
                 data-diff-revert-all
                 disabled={bulkBusy !== null}
-                onClick={() => { void runBulk('revert') }}
+                onClick={() => { askBulk('revert') }}
               >
                 {bulkBusy === 'revert' ? t('action.busy') : t('action.revertAll')}
               </button>
@@ -10045,6 +10217,55 @@ export function PendingPanel({
                     }}
                   >
                     {t('panel.keepInList')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          {batchPrompt !== null && (
+            <div className={css.confirmBackdrop} data-diff-batch-confirm>
+              <div className={css.confirmCard} role="dialog" aria-modal="true">
+                <p className={css.confirmText}>
+                  {batchAskOf(batchPrompt.kind, batchPrompt.ids.length)}
+                </p>
+                {/* The part with no undo behind it. Named, not counted: the reader has to recognise the
+                    files this is about to delete, and a number is what they already knew. */}
+                {batchDoomed.length > 0 && (
+                  <p className={css.confirmText} data-diff-batch-deletes>
+                    {t('panel.batchDeletes', { count: batchDoomed.length, files: batchDoomedNames })}
+                  </p>
+                )}
+                {/* 确定 on the LEFT of 取消: this is a desktop panel, and it is what the two dialogs above
+                    already do (移除 before 保留在列表) — the primary press first, not the iOS order. */}
+                <div className={css.confirmActions}>
+                  <button
+                    type="button"
+                    className={`${css.action} ${css.actionPrimary}`}
+                    data-diff-batch-confirm-go
+                    onClick={() => {
+                      const prompt = batchPrompt
+                      setBatchPrompt(null)
+                      runBatchConfirm(prompt)
+                    }}
+                  >
+                    {t('panel.batchGo')}
+                  </button>
+                  <button
+                    type="button"
+                    className={css.action}
+                    data-diff-batch-confirm-cancel
+                    onClick={() => {
+                      const prompt = batchPrompt
+                      setBatchPrompt(null)
+                      // Either answer ends the selection. The dialog was asked ABOUT that selection, so a
+                      // pick that outlives the question is a pick the reader has to remember cancelling —
+                      // and an all-file action's dialog ends it too, rather than leaving a pick behind a
+                      // decision that was never about it.
+                      if (prompt?.kind === 'close-picked') clearPicked()
+                      else clearPickedFiles()
+                    }}
+                  >
+                    {t('action.cancel')}
                   </button>
                 </div>
               </div>

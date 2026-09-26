@@ -1880,6 +1880,15 @@
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
+/* Picked in the file list (Ctrl/Cmd-click, see `pickedFiles`): the reader is gathering files for ONE
+   decision, and this has to keep saying so while the pointer moves on to the next row. `data-selected`
+   is the file open in the detail pane — a fill — so the pick wears the brand's outline instead, and the
+   inset offset keeps the ring inside the row's own box. */
+.rowHead[data-picked] {
+  outline: 1px solid var(--dsw-alias-state-business-primary);
+  outline-offset: -1px;
+}
+
 .rowPath {
   min-width: 0;
   overflow: hidden;

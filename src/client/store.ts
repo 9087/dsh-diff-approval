@@ -43,6 +43,16 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   keepAll: (sessionId: SessionId) => Promise<void>
   /** Revert every pending entry of one session in a single host call, then refresh. */
   revertAll: (sessionId: SessionId) => Promise<void>
+  /**
+   * Keep a pick of entries, then refresh once. The host makes the whole pick ONE undo step, so this is
+   * one action to the reader in every sense: one request, one read back, one Ctrl+Z.
+   */
+  keepMany: (sessionId: SessionId, ids: readonly string[], keepListed: boolean | undefined) => Promise<void>
+  /**
+   * Revert a pick of entries, then refresh once. Its undo restores what the host could snapshot: a file
+   * the agent created is DELETED with no undo at all, so the panel asks before a pick that would do it.
+   */
+  revertMany: (sessionId: SessionId, ids: readonly string[], keepListed: boolean | undefined) => Promise<void>
   /** Inline one workspace image as a base64 data URI (empty when unreadable). */
   previewImage: (sessionId: SessionId, path: string) => Promise<string | undefined>
   /**
@@ -436,6 +446,14 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
     },
     async revertAll(sessionId) {
       await port.revertAll(sessionId)
+      await this.refresh(sessionId)
+    },
+    async keepMany(sessionId, ids, keepListed) {
+      await port.keepMany(sessionId, ids, keepListed)
+      await this.refresh(sessionId)
+    },
+    async revertMany(sessionId, ids, keepListed) {
+      await port.revertMany(sessionId, ids, keepListed)
       await this.refresh(sessionId)
     },
     // A comment write is the host's from the moment it lands, so the panel re-reads

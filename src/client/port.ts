@@ -72,6 +72,19 @@ export interface DiffApprovalPort {
   keepAll(sessionId: SessionId): Promise<DiffApprovalBulkValue>
   /** Revert every pending entry of one session in a single host call (one batch). */
   revertAll(sessionId: SessionId): Promise<DiffApprovalBulkValue>
+  /**
+   * Keep a PICK of entries in one host call: one request, one durable write and one undo step — the
+   * host records the whole pick as a single batch, so one Ctrl+Z takes that one decision back instead
+   * of peeling it apart file by file. `keepListed` says whether the resolved files stay listed.
+   *
+   * There is a `revertMany` beside it, and the pair is NOT symmetric: a keep writes nothing, while a
+   * revert writes the baseline over each file — and DELETES the ones the agent created, which the host
+   * cannot undo. The panel asks before sending a pick whose revert would delete anything.
+   */
+  keepMany(sessionId: SessionId, ids: readonly string[], keepListed: boolean | undefined): Promise<DiffApprovalBulkValue>
+  /** Revert a PICK of entries in one host call: the same one request, one write, one undo step. The undo
+   *  restores the entries the host could snapshot — see `keepMany` for the deletes it cannot. */
+  revertMany(sessionId: SessionId, ids: readonly string[], keepListed: boolean | undefined): Promise<DiffApprovalBulkValue>
   /** Read one workspace image and inline it as a base64 data URI (for the Markdown preview). */
   previewImage(sessionId: SessionId, path: string): Promise<DiffApprovalPreviewImageValue>
   /**
@@ -151,6 +164,12 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
     },
     async revertAll(sessionId) {
       return bulkOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'revert-all', { sessionId }))
+    },
+    async keepMany(sessionId, ids, keepListed) {
+      return bulkOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'keep-many', manyPayload(sessionId, ids, keepListed)))
+    },
+    async revertMany(sessionId, ids, keepListed) {
+      return bulkOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'revert-many', manyPayload(sessionId, ids, keepListed)))
     },
     async commentAdd(sessionId, comment) {
       return commentAddValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'comment-add', { sessionId, ...comment }))
@@ -476,6 +495,15 @@ function bulkOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffA
     throw new Error('the bulk action returned a malformed value')
   }
   return { affected }
+}
+
+/** The wire payload of a pick: the ids copied on, and `keepListed` only when it was actually asked for. */
+function manyPayload(
+  sessionId: SessionId,
+  ids: readonly string[],
+  keepListed: boolean | undefined,
+): Record<string, unknown> {
+  return keepListed === undefined ? { sessionId, ids: [...ids] } : { sessionId, ids: [...ids], keepListed }
 }
 
 /** Narrow the comment-add endpoint's value; a malformed wire value is a write failure. */

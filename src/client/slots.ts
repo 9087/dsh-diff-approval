@@ -133,6 +133,18 @@ export interface PendingPanelFace {
   /** Revert every pending entry of one session in a single host call (bulk). */
   onRevertAll: (sessionId: SessionId) => Promise<void>
   /**
+   * Keep a PICK of files in one host call. The pick is one decision the reader made, so it goes to the
+   * host as one request — one durable write, one read back, and one undo step — rather than a loop of
+   * per-file calls that undo would then peel apart.
+   */
+  onKeepMany: (sessionId: SessionId, ids: readonly string[], keepListed: boolean | undefined) => Promise<void>
+  /**
+   * Revert a PICK of files in one host call; the same one request, one write, one undo step. Unlike a
+   * keep this writes over the files, and a file the agent created is DELETED with no undo — so the panel
+   * puts a confirmation in front of a pick whose revert would delete (see the pick's menu).
+   */
+  onRevertMany: (sessionId: SessionId, ids: readonly string[], keepListed: boolean | undefined) => Promise<void>
+  /**
    * Write one annotation down in the session's comment store. The host owns the
    * record from here on, so the next read is what shows it (and every other client
    * of this session sees it too).

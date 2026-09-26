@@ -516,6 +516,8 @@ function panelProps(snapshot: Partial<PendingDiffSnapshot> & { files: PendingFil
     onAddPath: vi.fn(async () => ({ outcome: 'added', added: 1, duplicates: 0 })),
     onKeepAll: vi.fn(async () => {}),
     onRevertAll: vi.fn(async () => {}),
+    onKeepMany: vi.fn(async () => {}),
+    onRevertMany: vi.fn(async () => {}),
     onAckRedoCleared: vi.fn(),
     onAckUndoNotice: vi.fn(),
     collapseSidebar: vi.fn(),
@@ -856,19 +858,32 @@ describe('PendingPanel', () => {
   })
 
   it('keeps or reverts every current-session file in a single bulk call from the list footer', async () => {
-    const second = entry({ id: 'entry-2', path: '/repo/b.txt' })
+    const second = entry({ id: 'entry-2', path: '/repo/b.txt', kind: 'create', oldText: '', newText: 'b\n' })
     const props = panelProps({ read: true, files: [FILE, second], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
-    // The bulk footer drives one batched keep-all (not one call per file).
-    fireEvent.click(screen.getByText('action.keepAll'))
+    // The footer ASKS first: one press here settles the whole list, so the dialog says how many files it
+    // covers and nothing is sent until the reader answers.
     const keepAllMock = props.onKeepAll as unknown as { mock: { calls: unknown[][] } }
+    fireEvent.click(screen.getByText('action.keepAll'))
+    expect(screen.getByText('panel.batchKeepAllAsk {"count":2}')).toBeDefined()
+    expect(document.querySelector('[data-diff-batch-deletes]')).toBeNull()
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-cancel]') as HTMLElement)
+    expect(keepAllMock.mock.calls).toHaveLength(0)
+
+    fireEvent.click(screen.getByText('action.keepAll'))
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
     await waitFor(() => { expect(keepAllMock.mock.calls).toHaveLength(1) })
     expect(keepAllMock.mock.calls[0]).toEqual([S1])
     expect(props.onKeep).not.toHaveBeenCalled()
 
+    // 回退 all DELETES the created file, and the dialog is where that is said — by name, since the file
+    // is the thing the reader cannot get back.
     fireEvent.click(screen.getByText('action.revertAll'))
+    expect(screen.getByText('panel.batchRevertAllAsk {"count":2}')).toBeDefined()
+    expect(screen.getByText('panel.batchDeletes {"count":1,"files":"b.txt"}')).toBeDefined()
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
     const revertAllMock = props.onRevertAll as unknown as { mock: { calls: unknown[][] } }
     await waitFor(() => { expect(revertAllMock.mock.calls).toHaveLength(1) })
     expect(revertAllMock.mock.calls[0]).toEqual([S1])
@@ -1402,6 +1417,146 @@ describe('PendingPanel', () => {
     fireEvent.click(last[3]!)
     expect(props.onRevert).toHaveBeenLastCalledWith(FILE.sessionId, FILE.id, true)
     expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
+  })
+
+  it('picks files with Ctrl-click, and the row menu then speaks for the whole pick', () => {
+    const a = entry({ id: 'entry-a', path: '/repo/a.txt', kind: 'edit' })
+    const b = entry({ id: 'entry-b', path: '/repo/b.txt', kind: 'edit' })
+    const props = panelProps({ read: true, files: [a, b], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const rowOf = (id: string): HTMLElement => document.querySelector(`[data-diff-file="${id}"]`) as HTMLElement
+    const picked = (id: string): boolean => rowOf(id).hasAttribute('data-picked')
+
+    // Ctrl-click PICKS without opening: no diff is mounted, and the pick is its own state on the row
+    // (`data-picked`, not the `data-selected` the open file wears).
+    fireEvent.click(rowOf('entry-a'), { ctrlKey: true })
+    fireEvent.click(rowOf('entry-b'), { ctrlKey: true })
+    expect(picked('entry-a')).toBe(true)
+    expect(picked('entry-b')).toBe(true)
+    // Picking is not opening: the file the detail pane shows is still the one it opened with (the list's
+    // first), and the picked rows wear the pick rather than the selection.
+    expect(rowOf('entry-a').hasAttribute('data-selected')).toBe(true)
+    expect(rowOf('entry-b').hasAttribute('data-selected')).toBe(false)
+
+    // A press anywhere else ends the pick — the same blur rule the comments tab follows.
+    fireEvent.pointerDown(document.body)
+    expect(picked('entry-a')).toBe(false)
+    expect(picked('entry-b')).toBe(false)
+    // Pick both again: the blur above is what a press elsewhere does, and the rest of this test is
+    // about what a pick of two then offers.
+    fireEvent.click(rowOf('entry-a'), { ctrlKey: true })
+    fireEvent.click(rowOf('entry-b'), { ctrlKey: true })
+
+    // A press ON a picked row keeps the pick and offers the four decisions the single row offers, in the
+    // same short words: the scope is named by the dialog each of them opens, not by the label.
+    fireEvent.contextMenu(rowOf('entry-a'), { clientX: 10, clientY: 12 })
+    const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+    expect(items.map(item => item.textContent)).toEqual([
+      'row.keepListed', 'row.keepRemove', 'action.revert', 'row.revertRemove',
+    ])
+
+    // Every one of them asks first, and the question carries the scope: how many files this one press is
+    // about to settle. Nothing is sent until the reader answers.
+    fireEvent.click(items[1]!)
+    expect(screen.getByText('panel.batchKeepRemoveAsk {"count":2}')).toBeDefined()
+    // 确定 LEFT of 取消: a desktop panel, and the order its other two dialogs already use.
+    expect([...document.querySelectorAll('[data-diff-batch-confirm-go], [data-diff-batch-confirm-cancel]')]
+      .map(button => button.textContent)).toEqual(['panel.batchGo', 'action.cancel'])
+    expect(props.onKeepMany).not.toHaveBeenCalled()
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
+
+    // ONE call for the whole pick, carrying both ids — not a call per file — and no per-file keep.
+    expect((props.onKeepMany as unknown as { mock: { calls: unknown[][] } }).mock.calls)
+      .toEqual([[S1, ['entry-a', 'entry-b'], undefined]])
+    expect(props.onKeep).not.toHaveBeenCalled()
+    // The pick has been spent, so nothing on the list is picked any more.
+    expect(picked('entry-a')).toBe(false)
+    expect(picked('entry-b')).toBe(false)
+
+    // …which means the next press on a row is an ordinary one: the single-file menu comes back (with the
+    // edit's own 回退 label, `action.revert`, exactly as that row offers it).
+    fireEvent.contextMenu(rowOf('entry-b'), { clientX: 10, clientY: 12 })
+    expect([...document.querySelectorAll('[role="menuitem"]')].map(item => item.textContent))
+      .toEqual(['row.keepListed', 'row.keepRemove', 'action.revert', 'row.revertRemove'])
+  })
+
+  it('takes a picked file with nothing left to review along with the rest', () => {
+    // A file kept but left listed has no diff, and its OWN row menu offers only 移出. The pick's menu is
+    // the same four rows whatever mix the reader holds, and a revert over the pick is not refused for it
+    // either: the file is an edit, so putting it back writes its own content and undoes cleanly.
+    const settled = entry({ id: 'entry-settled', path: '/repo/settled.txt', oldText: 'same\n', newText: 'same\n' })
+    const props = panelProps({ read: true, files: [FILE, settled], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const rowOf = (id: string): HTMLElement => document.querySelector(`[data-diff-file="${id}"]`) as HTMLElement
+
+    fireEvent.click(rowOf(FILE.id), { ctrlKey: true })
+    fireEvent.click(rowOf('entry-settled'), { ctrlKey: true })
+    fireEvent.contextMenu(rowOf(FILE.id), { clientX: 10, clientY: 12 })
+    const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+    expect(items.map(item => item.textContent)).toEqual([
+      'row.keepListed', 'row.keepRemove', 'action.revert', 'row.revertRemove',
+    ])
+
+    fireEvent.click(items[1]!)
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
+    expect((props.onKeepMany as unknown as { mock: { calls: unknown[][] } }).mock.calls)
+      .toEqual([[S1, [FILE.id, 'entry-settled'], undefined]])
+    expect(props.onKeep).not.toHaveBeenCalled()
+  })
+
+  it('names the created files a batch-revert would delete, and only when it would delete any', () => {
+    const made = entry({ id: 'entry-made', path: '/repo/made.txt', kind: 'create', oldText: '', newText: 'made\n' })
+    const props = panelProps({ read: true, files: [FILE, made], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const rowOf = (id: string): HTMLElement => document.querySelector(`[data-diff-file="${id}"]`) as HTMLElement
+    const menu = (): HTMLElement[] => [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+
+    // A pick of EDITS only: the dialog still asks (it is a batch), but it has nothing to warn about —
+    // putting an existing file back is one undo away, so there is no deletion line to read.
+    fireEvent.click(rowOf(FILE.id), { ctrlKey: true })
+    fireEvent.contextMenu(rowOf(FILE.id), { clientX: 10, clientY: 12 })
+    fireEvent.click(menu()[2]!)
+    expect(screen.getByText('panel.batchRevertAsk {"count":1}')).toBeDefined()
+    expect(document.querySelector('[data-diff-batch-deletes]')).toBeNull()
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
+    expect((props.onRevertMany as unknown as { mock: { calls: unknown[][] } }).mock.calls)
+      .toEqual([[S1, [FILE.id], undefined]])
+
+    // With a created file in the pick the dialog names it: that file is about to be DELETED, and the host
+    // records no undo for that at all — so it is the one line in this panel worth stopping to read.
+    fireEvent.click(rowOf(FILE.id), { ctrlKey: true })
+    fireEvent.click(rowOf('entry-made'), { ctrlKey: true })
+    fireEvent.contextMenu(rowOf(FILE.id), { clientX: 10, clientY: 12 })
+    fireEvent.click(menu()[2]!)
+    expect(screen.getByText('panel.batchDeletes {"count":1,"files":"made.txt"}')).toBeDefined()
+    expect(props.onRevertMany).toHaveBeenCalledTimes(1)
+
+    // The press that confirms is inside the dialog, which is not the reader walking away from the pick:
+    // a dialog press must not count as the blur that clears it.
+    fireEvent.pointerDown(document.querySelector('[data-diff-batch-confirm-go]')!)
+    expect(rowOf('entry-made').hasAttribute('data-picked')).toBe(true)
+
+    // Cancelling sends nothing and ends the pick: EITHER answer to the dialog ends the selection, so a
+    // pick never outlives the question it raised.
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-cancel]') as HTMLElement)
+    expect(document.querySelector('[data-diff-batch-confirm]')).toBeNull()
+    expect(props.onRevertMany).toHaveBeenCalledTimes(1)
+    expect(rowOf('entry-made').hasAttribute('data-picked')).toBe(false)
+
+    // Pick both again (the cancel above ended the pick, as it should) and go ahead this time: the whole
+    // pick goes in ONE call, ids in the list's own order.
+    fireEvent.click(rowOf(FILE.id), { ctrlKey: true })
+    fireEvent.click(rowOf('entry-made'), { ctrlKey: true })
+    fireEvent.contextMenu(rowOf('entry-made'), { clientX: 10, clientY: 12 })
+    fireEvent.click(menu()[2]!)
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
+    expect((props.onRevertMany as unknown as { mock: { calls: unknown[][] } }).mock.calls)
+      .toEqual([[S1, [FILE.id], undefined], [S1, [FILE.id, 'entry-made'], undefined]])
+    expect(document.querySelector('[data-diff-batch-confirm]')).toBeNull()
+    expect(rowOf('entry-made').hasAttribute('data-picked')).toBe(false)
   })
 
   it('offers 移出 from a row menu once that file has no diff left', () => {
@@ -2318,8 +2473,24 @@ describe('PendingPanel', () => {
     fireEvent.click(itemOf('d-one'), { ctrlKey: true })
     fireEvent.click(itemOf('d-two'), { ctrlKey: true })
     expect(fireEvent.contextMenu(itemOf('d-two'), { clientX: 20, clientY: 20 })).toBe(false)
-    expect(menuLabels()).toEqual(['action.discussionEndPicked'])
+    // The same words the single row uses, and a dialog that says how many comments this closes.
+    expect(menuLabels()).toEqual(['action.discussionEnd'])
     fireEvent.click([...document.querySelectorAll('[role="menuitem"]')][0] as HTMLElement)
+    expect(screen.getByText('panel.batchCloseAsk {"count":2}')).toBeDefined()
+    expect(props.onCommentRemoveMany).not.toHaveBeenCalled()
+    // Cancelling sends nothing AND ends the pick — the comments are back to unpicked, so the reader is
+    // looking at a list with no selection, not one still armed for an action they declined.
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-cancel]') as HTMLElement)
+    expect(props.onCommentRemoveMany).not.toHaveBeenCalled()
+    expect(itemOf('d-one').hasAttribute('data-selected')).toBe(false)
+    expect(itemOf('d-two').hasAttribute('data-selected')).toBe(false)
+
+    // Pick the two again, ask, and go ahead: the dialog was the only thing that had to be answered.
+    fireEvent.click(itemOf('d-one'), { ctrlKey: true })
+    fireEvent.click(itemOf('d-two'), { ctrlKey: true })
+    fireEvent.contextMenu(itemOf('d-two'), { clientX: 20, clientY: 20 })
+    fireEvent.click([...document.querySelectorAll('[role="menuitem"]')][0] as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
     await waitFor(() => { expect([...document.querySelectorAll('[data-diff-comment-link]')]).toHaveLength(0) })
     // The pick is ONE host call carrying both ids — not one call per comment — so the batch is what the
     // host drops in a single write and the list reads once. The one-comment action is a different prop,
