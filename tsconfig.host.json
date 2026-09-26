@@ -28,6 +28,7 @@
     "src/annotate-skill.ts",
     "src/annotate-tool.ts",
     "src/annotate.ts",
+    "src/atomic-write.ts",
     "src/comment-ask.ts",
     "src/comment-lines.ts",
     "src/comment-skill.ts",

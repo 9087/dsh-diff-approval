@@ -16,7 +16,8 @@
  * @module dsh-diff-approval/src/comments
  */
 
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { readFile, readdir, rename } from 'node:fs/promises'
+import { writeJsonAtomic } from './atomic-write.ts'
 import { basename, dirname, join } from 'node:path'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { CommentAsk, CommentQuoteLine, CommentRecord } from './types.ts'
@@ -156,19 +157,6 @@ function commentFileOf(file: string, value: unknown): CommentFile {
 /** One thrown value's human text, whatever shape it arrived in. */
 function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-/** Stage a JSON envelope as a sibling temp file and atomically rename it into place. */
-async function writeJson(file: string, value: unknown): Promise<void> {
-  await mkdir(dirname(file), { recursive: true })
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
-  await writeFile(tmp, JSON.stringify(value), 'utf8')
-  try {
-    await rename(tmp, file)
-  } catch (error) {
-    await rm(tmp, { force: true }).catch(() => {})
-    throw error
-  }
 }
 
 /**
@@ -610,7 +598,7 @@ export class CommentStore {
     }
     const comments = this.list(sessionId)
     const task = async (): Promise<void> => {
-      await writeJson(file, { version: COMMENT_FILE_VERSION, comments })
+      await writeJsonAtomic(file, { version: COMMENT_FILE_VERSION, comments })
     }
     const tail = this.tails.get(file) ?? Promise.resolve()
     const run = tail.then(task, task)

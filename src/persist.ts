@@ -16,8 +16,9 @@
  * @module dsh-diff-approval/src/persist
  */
 
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { readFile, readdir, rm } from 'node:fs/promises'
+import { join } from 'node:path'
+import { writeJsonAtomic } from './atomic-write.ts'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { PendingEntry } from './types.ts'
@@ -93,35 +94,6 @@ async function readJson(file: string): Promise<unknown | undefined> {
   }
 }
 
-/** Stage a JSON envelope as a sibling temp file and atomically rename it into place. */
-async function writeJson(file: string, value: unknown): Promise<void> {
-  await mkdir(dirName(file), { recursive: true })
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
-  await writeFile(tmp, JSON.stringify(value), 'utf8')
-  try {
-    await rename(tmp, file)
-  } catch (error) {
-    await rm(tmp, { force: true }).catch(() => {})
-    throw error
-  }
-}
-
-/**
- * The directory a path names, in the platform's own spelling.
- *
- * `node:path` rather than a scan for the last `/`: on Windows the storage root is
- * `C:\Users\<user>\.dsh\diff-approval\workspaces`, which contains no forward slash at all — the
- * scan answered `.`, the `mkdir` before every write became a no-op, and the write itself threw
- * ENOENT, so no pending change was ever persisted there (the failure only reached a logger
- * warning). Both separators have to be understood, and only the platform knows which they are.
- *
- * @param file - the file whose directory is wanted.
- * @returns that directory, or `.` for a bare file name.
- */
-function dirName(file: string): string {
-  return dirname(file)
-}
-
 /**
  * File-backed pending entries, one global file keyed by path.
  */
@@ -171,7 +143,7 @@ export class PendingPersistence {
    */
   save(entries: readonly PendingEntry[]): Promise<void> {
     const task = async () => {
-      await writeJson(this.globalFile, { version: FILE_VERSION, entries })
+      await writeJsonAtomic(this.globalFile, { version: FILE_VERSION, entries })
       await removeLegacy(this.root)
     }
     const tail = this.tails.get(this.globalFile) ?? Promise.resolve()
