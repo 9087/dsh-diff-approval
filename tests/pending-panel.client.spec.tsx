@@ -1390,7 +1390,14 @@ describe('PendingPanel', () => {
       'row.keepRemove',
       'action.revert',
       'row.revertRemove',
+      'action.openFile',
+      'action.revealFile',
     ])
+    // The two ways out are a group of their own, behind a hairline: they act on the FILE, not on the
+    // review, and the open file's header carries the same pair through the same `open` endpoint.
+    expect([...document.querySelectorAll('[role="menuitem"], [role="separator"]')]
+      .map(node => node.getAttribute('role')))
+      .toEqual(['menuitem', 'menuitem', 'menuitem', 'menuitem', 'separator', 'menuitem', 'menuitem'])
 
     fireEvent.click(items[0]!)
     expect(props.onKeep).toHaveBeenCalledWith(FILE.sessionId, FILE.id, true)
@@ -1417,6 +1424,20 @@ describe('PendingPanel', () => {
     fireEvent.click(last[3]!)
     expect(props.onRevert).toHaveBeenLastCalledWith(FILE.sessionId, FILE.id, true)
     expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
+
+    // And the two ways out of the panel, in one press each: 打开文件 hands the file to its own app, and
+    // 打开所在目录 selects it in the file manager — both the `open` endpoint the header already calls.
+    fireEvent.contextMenu(row, { clientX: 40, clientY: 60 })
+    const exits = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+    fireEvent.click(exits[4]!)
+    expect(props.onOpen).toHaveBeenLastCalledWith(FILE.sessionId, FILE.id, 'open')
+    expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
+    fireEvent.contextMenu(row, { clientX: 40, clientY: 60 })
+    fireEvent.click(([...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[])[5]!)
+    expect(props.onOpen).toHaveBeenLastCalledWith(FILE.sessionId, FILE.id, 'reveal')
+    // Opening is not one of the review's decisions: nothing was kept, put back or removed by it.
+    expect(props.onKeep).toHaveBeenCalledTimes(2)
+    expect(props.onRevert).toHaveBeenCalledTimes(2)
   })
 
   it('picks files with Ctrl-click, and the row menu then speaks for the whole pick', () => {
@@ -1475,10 +1496,84 @@ describe('PendingPanel', () => {
     expect(picked('entry-b')).toBe(false)
 
     // …which means the next press on a row is an ordinary one: the single-file menu comes back (with the
-    // edit's own 回退 label, `action.revert`, exactly as that row offers it).
+    // edit's own 回退 label, `action.revert`, exactly as that row offers it, and the two ways out below
+    // its hairline).
     fireEvent.contextMenu(rowOf('entry-b'), { clientX: 10, clientY: 12 })
     expect([...document.querySelectorAll('[role="menuitem"]')].map(item => item.textContent))
-      .toEqual(['row.keepListed', 'row.keepRemove', 'action.revert', 'row.revertRemove'])
+      .toEqual([
+        'row.keepListed', 'row.keepRemove', 'action.revert', 'row.revertRemove',
+        'action.openFile', 'action.revealFile',
+      ])
+  })
+
+  it('brings the open file into a Ctrl pick, and makes a Shift press the span from the anchor', () => {
+    const names = ['a', 'b', 'c', 'd', 'e']
+    const props = panelProps({
+      read: true,
+      files: names.map(name => entry({ id: `entry-${name}`, path: `/repo/${name}.txt` })),
+      busy: new Set(),
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const rowOf = (name: string): HTMLElement => document.querySelector(`[data-diff-file="entry-${name}"]`) as HTMLElement
+    const picked = (name: string): boolean => rowOf(name).hasAttribute('data-picked')
+    const pickedNames = (): string[] => names.filter(picked)
+
+    // Nothing has been pressed yet. The panel opened on the first file by itself, and that is what a Shift
+    // press measures from — the row the reader is looking at — so the very first Shift already names a span.
+    expect(rowOf('a').hasAttribute('data-selected')).toBe(true)
+    fireEvent.click(rowOf('c'), { shiftKey: true })
+    expect(pickedNames()).toEqual(['a', 'b', 'c'])
+
+    // The anchor does NOT move on a Shift press, so pressing Shift again measures from the same place: the
+    // span shrinks and `c` goes.
+    fireEvent.click(rowOf('b'), { shiftKey: true })
+    expect(pickedNames()).toEqual(['a', 'b'])
+
+    // A Ctrl press IS the reader acting on a row, so it moves the anchor to that row — the open file joins
+    // an empty pick, and stays picked here because it already was.
+    fireEvent.click(rowOf('d'), { ctrlKey: true })
+    expect(pickedNames()).toEqual(['a', 'b', 'd'])
+
+    // …and the next Shift measures from `d`, not from the open file: the span is d..e, so `a` and `b` (both
+    // outside it, `a` being the file the detail pane still shows) are REPLACED away.
+    fireEvent.click(rowOf('e'), { shiftKey: true })
+    expect(pickedNames()).toEqual(['d', 'e'])
+    expect(rowOf('a').hasAttribute('data-selected')).toBe(true)
+
+    // A Shift press elsewhere is still a pick gesture, so the blur rule must not read it as walking away.
+    fireEvent.pointerDown(document.body, { shiftKey: true })
+    expect(pickedNames()).toEqual(['d', 'e'])
+
+    // Ctrl still takes a single row back OUT — and that press becomes the anchor, so the Shift below
+    // measures from `e`: the span b..e has `e` INSIDE it, so the row just removed comes back with it.
+    fireEvent.click(rowOf('e'), { ctrlKey: true })
+    expect(pickedNames()).toEqual(['d'])
+    fireEvent.click(rowOf('b'), { shiftKey: true })
+    expect(pickedNames()).toEqual(['b', 'c', 'd', 'e'])
+  })
+
+  it('picks on the PRESS, and the click that follows it does not pick twice', () => {
+    const a = entry({ id: 'entry-a', path: '/repo/a.txt' })
+    const b = entry({ id: 'entry-b', path: '/repo/b.txt' })
+    render(<PendingPanel {...panelProps({ read: true, files: [a, b], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const rowOf = (id: string): HTMLElement => document.querySelector(`[data-diff-file="${id}"]`) as HTMLElement
+    const picked = (id: string): boolean => rowOf(id).hasAttribute('data-picked')
+
+    // A real modified click sends mousedown and then click. The pick belongs to the PRESS — the button's
+    // own press state is what it has to line up with (see `consumePickPress`) — and the click that follows
+    // must not take it back out again.
+    fireEvent.mouseDown(rowOf('entry-b'), { ctrlKey: true })
+    expect(picked('entry-b')).toBe(true)
+    fireEvent.click(rowOf('entry-b'), { ctrlKey: true })
+    expect(picked('entry-b')).toBe(true)
+
+    // Shift is the same press: the span is picked at the press, and its click changes nothing.
+    fireEvent.mouseDown(rowOf('entry-a'), { shiftKey: true })
+    expect(picked('entry-a')).toBe(true)
+    fireEvent.click(rowOf('entry-a'), { shiftKey: true })
+    expect(picked('entry-a')).toBe(true)
   })
 
   it('takes a picked file with nothing left to review along with the rest', () => {
@@ -1559,6 +1654,29 @@ describe('PendingPanel', () => {
     expect(rowOf('entry-made').hasAttribute('data-picked')).toBe(false)
   })
 
+  it('drops the keep and revert rows for a file that is gone, keeping 移出', () => {
+    // The file was deleted outside the panel: there is no change to accept, and putting it back would
+    // WRITE THE BASELINE BACK — recreating a file the reader deleted. 移出 is the only decision left, and
+    // the two ways out of the panel still apply to whatever is at that path.
+    const gone = entry({ id: 'entry-gone', path: '/repo/gone.txt', missing: true })
+    const props = panelProps({ read: true, files: [gone], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const rowOf = (id: string): HTMLElement => document.querySelector(`[data-diff-file="${id}"]`) as HTMLElement
+    expect(screen.getByText('panel.missing')).toBeDefined()
+
+    fireEvent.contextMenu(rowOf('entry-gone'), { clientX: 10, clientY: 12 })
+    const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+    expect(items.map(item => item.textContent))
+      .toEqual(['row.dismiss', 'action.openFile', 'action.revealFile'])
+
+    // 移出 is a keep with no decision behind it: the host folds the content and drops the entry, so the
+    // file itself is not touched — which is the only safe thing to do to a file that is not there.
+    fireEvent.click(items[0]!)
+    expect(props.onKeep).toHaveBeenLastCalledWith(S1, 'entry-gone')
+    expect(props.onRevert).not.toHaveBeenCalled()
+  })
+
   it('offers 移出 from a row menu once that file has no diff left', () => {
     // The same condition the open file's toolbar uses: nothing to accept, nothing to put back,
     // so the only decision left is whether the row stays in the list.
@@ -1569,7 +1687,7 @@ describe('PendingPanel', () => {
 
     fireEvent.contextMenu(screen.getByText('a.txt').closest('button') as HTMLElement, { clientX: 10, clientY: 12 })
     const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
-    expect(items.map(item => item.textContent)).toEqual(['row.dismiss'])
+    expect(items.map(item => item.textContent)).toEqual(['row.dismiss', 'action.openFile', 'action.revealFile'])
 
     fireEvent.click(items[0]!)
     expect(props.onKeep).toHaveBeenCalledWith(settled.sessionId, settled.id)
@@ -2422,18 +2540,74 @@ describe('PendingPanel', () => {
     expect(shownPath()).toBe('/repo/pick.txt')
     expect(picked('d-one')).toBe(false)
 
-    // …and moving to another tab replaces every item a pick could have named, so the pick goes with it.
+    // …and moving to another tab replaces every item a pick could have named, so the pick goes with it —
+    // and so does the ANCHOR: a Shift press after the switch measures from the row it lands on, not from a
+    // comment the reader left behind (which would have spanned d-one in as well).
     fireEvent.click(itemOf('d-one'), { ctrlKey: true })
     expect(picked('d-one')).toBe(true)
     fireEvent.click(document.querySelector('[data-diff-list-tab="pending"]') as HTMLElement)
     fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
     expect(picked('d-one')).toBe(false)
+    fireEvent.click(itemOf('d-two'), { shiftKey: true })
+    expect(picked('d-one')).toBe(false)
+    expect(picked('d-two')).toBe(true)
 
-    // The picked row wears a state rather than a hover: the brand's outline, from the stylesheet itself.
-    // jsdom lays nothing out and cascades nothing, so the rule is read from the sheet.
+    // The picked row wears the SAME mark the file list gives a pick — one idea, one style across both
+    // lists — and the FILE list's own pick rule is the same fill the open file wears. jsdom lays nothing
+    // out and cascades nothing, so the rules are read from the sheet.
     const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
-    const rule = /^\.commentRow\[data-selected\] \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
-    expect(rule).toContain('outline: 1px solid var(--dsw-alias-state-business-primary)')
+    const commentPick = /^\.commentRow\[data-selected\] \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
+    const filePick = /^\.rowHead\[data-picked\] \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
+    const fileOpen = /^\.rowHead\[data-selected\] \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
+    expect(commentPick).toContain('background: var(--dsw-alias-interactive-bg-hover)')
+    expect(filePick).toContain('background: var(--dsw-alias-interactive-bg-hover)')
+    expect(filePick.replace(/\s+/g, ' ').trim()).toBe(fileOpen.replace(/\s+/g, ' ').trim())
+  })
+
+  it('makes a Shift press in the comments list the span from the anchor', () => {
+    // The comments list has no "open" item — a press navigates away rather than selecting — so its anchor
+    // is simply the comment the last non-Shift press landed on, which is why the same rule works here.
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-many', path: '/repo/many.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\n' })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [
+        comment({ id: 'd-one', entryId: file.id, text: '一', anchor: { startLine: 1, endLine: 1 } }),
+        comment({ id: 'd-two', entryId: file.id, text: '二', anchor: { startLine: 2, endLine: 2 } }),
+        comment({ id: 'd-three', entryId: file.id, text: '三', anchor: { startLine: 3, endLine: 3 } }),
+      ],
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    const rowOf = (id: string): HTMLElement => document.querySelector(`[data-diff-comment-link="${id}"]`) as HTMLElement
+    const picked = (): boolean[] => ['d-one', 'd-two', 'd-three'].map(id => rowOf(id).hasAttribute('data-selected'))
+
+    // A Ctrl press picks that one comment and makes it the anchor; the Shift press then REPLACES the pick
+    // with the span between the two — so all three are in.
+    fireEvent.click(rowOf('d-one'), { ctrlKey: true })
+    expect(picked()).toEqual([true, false, false])
+    fireEvent.click(rowOf('d-three'), { shiftKey: true })
+    expect(picked()).toEqual([true, true, true])
+
+    // Shift again from the SAME anchor: the span shrinks and the row outside it goes.
+    fireEvent.click(rowOf('d-two'), { shiftKey: true })
+    expect(picked()).toEqual([true, true, false])
+
+    // An ordinary press JUMPS — it is not a pick, and it ends the pick — but it is itself an act on that
+    // comment, so the next Shift measures from it.
+    fireEvent.click(rowOf('d-two'))
+    expect(picked()).toEqual([false, false, false])
+    fireEvent.click(rowOf('d-three'), { shiftKey: true })
+    expect(picked()).toEqual([false, true, true])
+
+    // The comments list takes its pick on the press too: a real Ctrl click sends mousedown and then click,
+    // the first picks, and the second must not take it back out.
+    fireEvent.mouseDown(rowOf('d-one'), { ctrlKey: true })
+    expect(picked()).toEqual([true, true, true])
+    fireEvent.click(rowOf('d-one'), { ctrlKey: true })
+    expect(picked()).toEqual([true, true, true])
   })
 
   it('ends every picked comment from the row menu, and clears the pick with it', async () => {
@@ -4843,6 +5017,22 @@ describe('PendingPanel', () => {
       const row = [...floatList.querySelectorAll('button')].find(button => button.textContent?.includes('a.txt'))
       expect(row).toBeDefined()
       fireEvent.click(row!)
+      expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
+      // The list's OWN dialog is not "outside" it: the confirmation a bulk action raises is answered from
+      // here. The fold is ANIMATED — the card stays mounted while it plays (see `floatClosing`) — so this
+      // waits past the animation before believing the card is still there.
+      fireEvent.click(screen.getByText('action.keepAll'))
+      const dialog = document.querySelector('[data-diff-batch-confirm]') as HTMLElement
+      expect(dialog).not.toBeNull()
+      const cancel = document.querySelector('[data-diff-batch-confirm-cancel]') as HTMLElement
+      // The press is on the dialog's OWN button, which is what the reader hits — and the fold is ANIMATED
+      // (the card stays mounted while it plays, see `floatClosing`), so this waits past the animation before
+      // believing the card is still there.
+      fireEvent.pointerDown(cancel)
+      await new Promise(resolve => setTimeout(resolve, 400))
+      expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
+      fireEvent.click(cancel)
+      await new Promise(resolve => setTimeout(resolve, 400))
       expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
       // Clicking outside the card (the code box) folds it back the same way.
       fireEvent.pointerDown(document.querySelector('[data-diff-approval-panel]') as HTMLElement)
@@ -11465,6 +11655,22 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-approval-panel]:not([data-diff-docked])')).not.toBeNull()
     expect(document.querySelector('[data-diff-cover-backdrop]')).not.toBeNull()
     footer.unmount()
+  })
+
+  it('lets Escape dismiss an open menu without closing the panel behind it', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const panel = (): Element | null => document.querySelector('[data-diff-approval-panel]')
+    expect(panel()).not.toBeNull()
+
+    // The row menu is up, and the panel's own Escape handler runs FIRST (window, capture) while the menu
+    // closes itself on the same press. That press belongs to the menu — the reader is answering the list,
+    // not leaving it — so the panel must still be standing afterwards.
+    fireEvent.contextMenu(screen.getByText('a.txt').closest('button') as HTMLElement, { clientX: 10, clientY: 12 })
+    expect(document.querySelectorAll('[role="menuitem"]').length).toBeGreaterThan(0)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(panel()).not.toBeNull()
   })
 
   it('keeps a docked panel standing through an outside press and Escape', () => {

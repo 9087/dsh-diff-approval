@@ -3572,6 +3572,11 @@ function PendingFileRow({ file, selected, picked, failedMessage, t, onSelect, on
           // A pick is its own state, not the open file: the CSS says so, and the blur rule reads the id.
           data-picked={picked || undefined}
           aria-pressed={picked}
+          onMouseDown={(event) => {
+            // A modified press is the pick (see the panel's `onSelect`): hand it over on the press, so it
+            // lands with this button's own press state instead of a mouseup later.
+            if (event.ctrlKey || event.metaKey || event.shiftKey) onSelect(event, file.id)
+          }}
           onClick={(event) => { onSelect(event, file.id) }}
         >
           <span className={css.rowPath}>{basenameOf(file.path)}</span>
@@ -8179,6 +8184,13 @@ export function PendingPanel({
    * it (`clearPicked`, plus the effect below for the two switches that replace what is on screen).
    */
   const [pickedComments, setPickedComments] = useState<ReadonlySet<string>>(() => new Set())
+  /**
+   * Where a Shift press in the COMMENTS list measures from: the comment the last non-Shift press landed on
+   * (a Ctrl/Cmd pick, or an ordinary press, which jumps to the comment). The comments list has no "open"
+   * item of its own — a press navigates away rather than selecting — so this is what stands in for the file
+   * list's open file, and it is the reason the two lists can share one rule (see `pickCommentRangeTo`).
+   */
+  const [commentAnchor, setCommentAnchor] = useState<string | undefined>(undefined)
   /** End the picking, keeping the same set object when there is nothing to end (so nothing re-renders). */
   const clearPicked = (): void => {
     setPickedComments(current => (current.size === 0 ? current : new Set()))
@@ -8201,12 +8213,13 @@ export function PendingPanel({
   // file row, the toolbar, the diff, the list's empty space, or anything outside this panel at all —
   // which is why the listener is on the document and why it only exists while there is a pick to end.
   // Three presses are NOT that: a press on a row that is picked (the reader acting on the pick, which
-  // that row's own handlers read), a Ctrl/Cmd-press (which is itself a pick — see `togglePicked`), and a
-  // press inside an open menu (this pick's own menu is where the pick is spent, and it is read on select).
+  // that row's own handlers read), a Ctrl/Cmd- or Shift-press (both are themselves picks — see
+  // `togglePicked` and `pickCommentRangeTo`), and a press inside an open menu (this pick's own menu is
+  // where the pick is spent, and it is read on select).
   useEffect(() => {
     if (pickedComments.size === 0) return
     const onPress = (event: PointerEvent): void => {
-      if (event.ctrlKey || event.metaKey) return
+      if (event.ctrlKey || event.metaKey || event.shiftKey) return
       const target = event.target
       if (target instanceof Element) {
         const row = target.closest('[data-diff-comment-link]')
@@ -8230,31 +8243,39 @@ export function PendingPanel({
    * the whole point of picking with a modifier.
    */
   const [pickedFiles, setPickedFiles] = useState<ReadonlySet<string>>(() => new Set())
+  /**
+   * Where a Shift press measures from: the row the last NON-Shift press landed on — a Ctrl/Cmd pick, or an
+   * ordinary press, which opens the file. Shift never moves it, so pressing Shift twice measures from the
+   * same place and the range can shrink as well as grow (see `pickRangeTo`).
+   *
+   * Nothing has been pressed yet on a fresh panel, and `selected` was not the reader's doing (the list
+   * opens on its first file), so the range falls back to the open file when this is unset: the row the
+   * reader is looking at is the only sensible place to measure from before they have touched anything.
+   */
+  const [pickAnchor, setPickAnchor] = useState<string | undefined>(undefined)
   /** End the file picking, keeping the same set object when there is nothing to end. */
   const clearPickedFiles = (): void => {
     setPickedFiles(current => (current.size === 0 ? current : new Set()))
   }
-  /** Pick or unpick one file. The click that reaches this never opens the file (see `pickedFiles`). */
-  const togglePickedFile = (id: string): void => {
-    setPickedFiles(current => {
-      const next = new Set(current)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
   // The pick is about the list in front of the reader: the comments tab is a different set of rows, so
-  // switching to it ends the pick. A file that left the list needs no effect of its own — the two places
-  // the pick is READ both look it up in the current list, so an id that is gone simply is not acted on.
-  useEffect(() => { clearPickedFiles() }, [activeTab])
+  // switching to it ends the pick — and drops the ANCHOR with it. The anchor is "where the reader last
+  // acted", and after a tab switch they are somewhere else: a Shift press there must measure from the row
+  // it lands on, not from one they left behind (which may not even be in this list any more). A file that
+  // left the list needs no effect of its own — the two places the pick is READ both look it up in the
+  // current list, so an id that is gone simply is not acted on.
+  useEffect(() => {
+    clearPickedFiles()
+    setPickAnchor(undefined)
+    setCommentAnchor(undefined)
+  }, [activeTab])
   // The blur rule, the one the comments pick wears: any press that is not on a picked row, not a
-  // Ctrl/Cmd-press (which is itself a pick) and not inside an open menu or dialog ends the pick. A
-  // DIALOG especially: the pick-revert confirmation is about the very files that are picked, so a press
-  // on its buttons must not be read as the reader walking away from them.
+  // Ctrl/Cmd- or Shift-press (both are pick gestures themselves) and not inside an open menu or dialog
+  // ends the pick. A DIALOG especially: the pick-revert confirmation is about the very files that are
+  // picked, so a press on its buttons must not be read as the reader walking away from them.
   useEffect(() => {
     if (pickedFiles.size === 0) return
     const onPress = (event: PointerEvent): void => {
-      if (event.ctrlKey || event.metaKey) return
+      if (event.ctrlKey || event.metaKey || event.shiftKey) return
       const target = event.target
       if (target instanceof Element) {
         const row = target.closest('[data-diff-file]')
@@ -8432,7 +8453,13 @@ export function PendingPanel({
       if (target instanceof Element
         && (target.closest('[data-diff-floating-file-list]') !== null
           || target.closest('[data-diff-file-list-toggle]') !== null
-          || target.closest('[data-diff-float-resize]') !== null)) return
+          || target.closest('[data-diff-float-resize]') !== null
+          // An open MENU or DIALOG is part of this list's own work, not somewhere else the reader walked
+          // off to. Both are drawn INSIDE the panel (the row menu raises the confirmation that answers it),
+          // so a press on one is "inside the panel, outside the CARD" — which is exactly what this rule
+          // folds on. Answering the list's own question must not fold the list away.
+          || target.closest('[role="menu"]') !== null
+          || target.closest('[role="dialog"]') !== null)) return
       // Already on its way in: leave the fold it is playing alone.
       if (floatClosing) return
       foldCardAway()
@@ -9092,6 +9119,86 @@ export function PendingPanel({
     return undefined
   }
 
+  /**
+   * Pick or unpick one file, bringing the OPEN file along the first time.
+   *
+   * A Ctrl/Cmd-click starts a pick in front of the file the reader is reading, so that file is part of it:
+   * they are gathering rows out of the list they are looking at, and the row the detail pane is showing is
+   * one of them. Only when the pick is empty — otherwise the open row could never be clicked OUT of a pick
+   * it is already in, and Ctrl-click is the only way to take anything out.
+   */
+  const pickFile = (id: string): void => {
+    // The press just made is where the next Shift press measures from, whatever it did to the pick — a
+    // Ctrl press that took the row OUT is still the row the reader last acted on.
+    setPickAnchor(id)
+    setPickedFiles(current => {
+      const next = new Set(current)
+      if (next.has(id)) {
+        next.delete(id)
+        return next
+      }
+      if (next.size === 0 && selected !== undefined && selected !== '' && selected !== id) next.add(selected)
+      next.add(id)
+      return next
+    })
+  }
+  /**
+   * Set the pick to exactly the rows between the OPEN file and `id`, both ends included — Shift-click.
+   *
+   * Shift REPLACES the pick instead of adding to it. The reader names one end by looking at it (the open
+   * file) and the other by pressing, and the span between them IS the selection: anything picked earlier
+   * that falls outside that span goes. That is what makes the gesture work in both directions — press
+   * nearer than last time and the range shrinks, press further and it grows — with the anchor staying put.
+   * A stale open file (its row left the list) degrades to the pressed row alone: a Shift press must always
+   * leave something selected, since it has just thrown the old pick away.
+   */
+  const pickRangeTo = (id: string): void => {
+    setPickedFiles(() => {
+      const to = files.findIndex(file => file.id === id)
+      if (to === -1) return new Set()
+      const anchorId = pickAnchor ?? selected
+      const from = anchorId === undefined || anchorId === ''
+        ? -1
+        : files.findIndex(file => file.id === anchorId)
+      if (from === -1) return new Set([id])
+      return new Set(files.slice(Math.min(from, to), Math.max(from, to) + 1).map(file => file.id))
+    })
+  }
+
+  /**
+   * The row a modified press has already picked, so the `click` that follows it does not pick again (a Ctrl
+   * toggle would otherwise pick and immediately unpick). A click with no press of its own — a synthetic
+   * event, or one an automated harness sends — still picks, because nothing was handled for it.
+   */
+  const pressHandledRef = useRef<string | undefined>(undefined)
+  /**
+   * Answer a modified press on a pickable row: Ctrl/Cmd picks that one row, Shift sets the span between the
+   * anchor and it. Returns false for an ordinary press, so the caller's own handling runs.
+   *
+   * The pick happens on the PRESS — `mousedown`, not the `click` that follows at mouseup — because the
+   * button paints its own press state the moment the key goes down, and that state looks like a picked row.
+   * Picking at mouseup therefore read as a delay: the row under the finger looked picked at once while the
+   * rest of a Shift span arrived only on release. One gesture, one pick (see `pressHandledRef`).
+   */
+  const consumePickPress = (
+    event: ReactMouseEvent<HTMLElement>,
+    id: string,
+    onToggle: (id: string) => void,
+    onSpan: (id: string) => void,
+  ): boolean => {
+    if (!event.ctrlKey && !event.metaKey && !event.shiftKey) return false
+    // The press of this same gesture has already picked: swallow the click that follows it. A click with no
+    // press of ours in front of it is an ordinary click event, and still picks.
+    if (event.type === 'click' && pressHandledRef.current === id) {
+      pressHandledRef.current = undefined
+      return true
+    }
+    if (event.type !== 'click') pressHandledRef.current = id
+    if (event.ctrlKey || event.metaKey) onToggle(id)
+    else onSpan(id)
+    return true
+  }
+
   const renderEntry = (entry: PendingFileDiff) => (
     <PendingFileRow
       key={entry.id}
@@ -9108,18 +9215,18 @@ export function PendingPanel({
         setRowMenu({ file: entry, x: event.clientX, y: event.clientY, picked: onPick })
       }}
       onSelect={(event, id) => {
-        // Ctrl/Cmd-click PICKS instead of opening: the reader is gathering files for one decision, and
-        // opening one would take the list they are picking from out from under them.
-        if (event.ctrlKey || event.metaKey) {
-          togglePickedFile(id)
-          return
-        }
+        // A Ctrl/Cmd or Shift press PICKS — on the press itself, so the pick lands with the button's own
+        // press state rather than a mouseup later (see `consumePickPress`).
+        if (consumePickPress(event, id, pickFile, pickRangeTo)) return
         // Re-clicking the already-open file jumps to the next diff block in
         // the open file; any other row switches the selection and lands on that
         // file's first change (not the offset it was left at: the reader asked for
         // the file, not for wherever it happened to be). The floating list stays
         // open so you can browse more files; clicking outside the card (or the
         // toggle button) folds it back.
+        // An ordinary press is also the reader ACTING on this row, so it becomes the anchor a Shift press
+        // measures from — the same rule as a Ctrl press (see `pickAnchor`).
+        setPickAnchor(id)
         clearPickedFiles()
         if (id === selected) setJumpSignal(signal => signal + 1)
         else {
@@ -9149,7 +9256,25 @@ export function PendingPanel({
         { id: 'revert-remove-picked', label: t('row.revertRemove') },
       ]
     }
-    if (fileHasNoDiff(rowMenu.file)) return [{ id: 'remove', label: t('row.dismiss') }]
+    // The two ways out of the panel, behind a hairline: they act on the FILE, not on the review, so they
+    // are a different group from the decisions above — and the open file's own header already has both
+    // (the same `open` endpoint with 'open' / 'reveal'), which this simply reaches from the row.
+    const openRows: MenuEntry[] = [
+      { type: 'separator', id: 'open-separator' },
+      { id: 'open-file', label: t('action.openFile') },
+      { id: 'open-folder', label: t('action.revealFile') },
+    ]
+    // Nothing left to KEEP or to PUT BACK: 移出 is the only decision, and the two ways out still apply to
+    // the file. Two reasons a row gets here, and both mean the same menu:
+    //
+    //   • its content already matches the baseline (`fileHasNoDiff`) — it was kept or put back and left
+    //     listed, so there is nothing to accept and nothing to restore;
+    //   • the file is GONE from disk (the row wears 缺失). Keeping would fold a change that is not there,
+    //     and putting it back would WRITE THE BASELINE BACK — recreating a file the reader deleted outside
+    //     the panel, which is the last thing a "put back" should do behind their back.
+    if (fileHasNoDiff(rowMenu.file) || rowMenu.file.missing) {
+      return [{ id: 'remove', label: t('row.dismiss') }, ...openRows]
+    }
     // Put back wins a second reading too: 回退 puts the file back and leaves it listed, so a file
     // with more than one operation can be put back one at a time while staying in view.
     const revertLabel = rowMenu.file.kind === 'create' ? t('action.delete') : t('action.revert')
@@ -9162,6 +9287,7 @@ export function PendingPanel({
       { id: 'revert', label: revertLabel },
       // 回退并移出  is the same pair on the other decision: put the file back and take the row out.
       { id: 'revert-remove', label: t('row.revertRemove') },
+      ...openRows,
     ]
   }, [rowMenu, pickedFiles, files, t])
 
@@ -9197,6 +9323,10 @@ export function PendingPanel({
     else if (id === 'keep-remove' || id === 'remove') void onKeep(current, target.file.id)
     else if (id === 'revert') void onRevert(current, target.file.id)
     else if (id === 'revert-remove') void onRevert(current, target.file.id, true)
+    // Opening is not a decision about the review, so it takes the FILE's own session — the one the header's
+    // two icon buttons pass — rather than the session being viewed.
+    else if (id === 'open-file') void onOpen(target.file.sessionId, target.file.id, 'open')
+    else if (id === 'open-folder') void onOpen(target.file.sessionId, target.file.id, 'reveal')
   }
 
   const selectedFile = files.find(file => file.id === selected)
@@ -9291,6 +9421,26 @@ export function PendingPanel({
   }, [files, snapshot.comments, snapshot.commentLines, t])
   /** The same comments, flat: what the tab counts and what says whether there are any. */
   const commentEntries = useMemo(() => commentGroups.flatMap(group => group.entries), [commentGroups])
+  /**
+   * Set the comment pick to the span between the anchor and `id`, both ends included — Shift-click.
+   *
+   * The same rule the file list follows (see `pickRangeTo`): Shift REPLACES the pick, the anchor is where
+   * the last non-Shift press landed, and Shift never moves it — so pressing Shift again measures from the
+   * same place and the span can shrink as well as grow. The span follows the RENDERED order, which is the
+   * order the reader sees: comments grouped by file, and inside a group the file's own comments — so a span
+   * may cross a file boundary, exactly as it reads on screen. With no anchor yet (nothing pressed in this
+   * tab), the pressed comment is the whole selection.
+   */
+  const pickCommentRangeTo = (id: string): void => {
+    setPickedComments(() => {
+      const ids = commentEntries.map(entry => entry.id)
+      const to = ids.indexOf(id)
+      if (to === -1) return new Set()
+      const from = commentAnchor === undefined ? -1 : ids.indexOf(commentAnchor)
+      if (from === -1) return new Set([id])
+      return new Set(ids.slice(Math.min(from, to), Math.max(from, to) + 1))
+    })
+  }
   /** Open the file a comment hangs in and land on the thread's own box, not on the rows it names:
    *  the box hangs below the range it ends in, and the code an outdated comment named may be gone
    *  altogether, so "show me this comment" means the comment rather than the code under it. The line
@@ -9492,14 +9642,27 @@ export function PendingPanel({
                             // The jump names the lines the comment was written on. Whether they still
                             // hold that code is the block's own state, which the detail re-anchors
                             // against its row model — this pane does not guess at it.
+                            onMouseDown={(event) => {
+                              // A modified press is the pick, taken on the press itself (see
+                              // `consumePickPress`) so it lands with this row's own press state.
+                              consumePickPress(
+                                event, entry.id,
+                                (id) => { setCommentAnchor(id); togglePicked(id) },
+                                pickCommentRangeTo,
+                              )
+                            }}
                             onClick={(event) => {
                               // Ctrl/Cmd-click PICKS instead of jumping: the reader is gathering a few
                               // comments for one action, and a jump would take them out of the list they
                               // are picking from (see `pickedComments`).
-                              if (event.ctrlKey || event.metaKey) {
-                                togglePicked(entry.id)
-                                return
-                              }
+                              if (consumePickPress(
+                                event, entry.id,
+                                (id) => { setCommentAnchor(id); togglePicked(id) },
+                                pickCommentRangeTo,
+                              )) return
+                              // An ordinary press is a jump, and it is also the reader ACTING on this
+                              // comment, so it becomes the anchor a Shift press measures from.
+                              setCommentAnchor(entry.id)
                               clearPicked()
                               jumpToComment(entry.fileId, entry.line, entry.id)
                             }}
@@ -9755,6 +9918,18 @@ export function PendingPanel({
       // The coverage popover is the innermost dismissible while it is up, and it
       // closes on this same press.
       if (document.querySelector('[data-diff-approval-cover-popover]') !== null) return
+      // An open MENU is the innermost dismissible as well: this press closes the menu, which listens for
+      // the same key — and the panel behind it must stand. This handler is on `window` in the CAPTURE
+      // phase, so it runs before the menu's own and cannot be stopped by it: the exemption has to be here.
+      // Folding the panel on this press would lose the list the reader was answering (its pick, its
+      // scroll, the file it had open) to a key they pressed to shut a menu.
+      if (document.querySelector('[role="menu"]') !== null) return
+      // The batch confirmation this panel raised is answered by this same key: 取消 is what Escape means
+      // there, and the panel stays up behind it.
+      if (batchPrompt !== null) {
+        setBatchPrompt(null)
+        return
+      }
       const target = event.target
       const inPanel = target instanceof Node && panelRef.current?.contains(target) === true
       if (inPanel && document.querySelector('[data-diff-searchbar]') !== null) return
@@ -9766,7 +9941,7 @@ export function PendingPanel({
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
-  }, [open, docked])
+  }, [open, docked, batchPrompt])
 
   /**
    * Drag the list's width, from a mouse *or* a finger. Pointer events rather than
