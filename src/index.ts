@@ -57,6 +57,9 @@ import type { CommentLineRange } from './comment-lines.ts'
 import { defaultOpenPath } from './open.ts'
 import type { OpenAction } from './open.ts'
 import { COMMENT_SKILL, COMMENT_SKILL_NAME } from './comment-skill.ts'
+import { ANNOTATE_SKILL } from './annotate-skill.ts'
+import { annotateRun, annotateToolDefinition } from './annotate-tool.ts'
+import type { AnnotateRunDeps, ListFileOutcome } from './annotate-tool.ts'
 import { FONT_ASSET_DIR, FONT_ROUTE } from './font-slices.ts'
 import type { FontSlice } from './font-slices.ts'
 import { detectVcsRoot, listVcsChanges } from './vcs.ts'
@@ -152,31 +155,87 @@ function lazyCommentSkill(ctx: Context, registered: boolean): () => string | und
 }
 
 /**
- * Register the comment-answering skill with the harness's skill registry, when it has
- * one. The registry's own `skill` tool advertises the catalog and loads the body on
- * demand, so this costs nothing until a comment is answered — and unlike a
- * system-prompt section, a global registration here cannot shape unrelated turns.
+ * One runtime skill this plugin offers, in the shape `ctx.skills.register` takes.
  *
- * Feature-detected and contained: a build without the registry, or a registry that
- * refuses the contribution, simply leaves the short rules the comment prompt already
- * carries as the whole policy.
+ * Two contributions are written in it — the comment-answering rules (`comment-skill.ts`) and the
+ * annotating rules (`annotate-skill.ts`) — and they register the same way, so the shape lives here
+ * rather than being repeated in each of them.
+ */
+interface RuntimeSkill {
+  /** Kebab-case identity the agent loads by. */
+  readonly name: string
+  /** Catalog routing line. */
+  readonly description: string
+  /** Catalog routing guidance. */
+  readonly whenToUse: string
+  /** Instruction body. */
+  readonly content: string
+  /** Origin bucket: this plugin contributes it at runtime, not from disk. */
+  readonly source: 'runtime'
+}
+
+/**
+ * Register one of this plugin's skills with the harness's skill registry, when it has one. The
+ * registry's own `skill` tool advertises the catalog and loads a body on demand, so this costs nothing
+ * until the situation it is about comes up — and unlike a system-prompt section, a global registration
+ * here cannot shape unrelated turns.
+ *
+ * Feature-detected and contained: a build without the registry, or a registry that refuses the
+ * contribution, leaves whatever the prompts already carry as the whole policy (the comment prompt names
+ * its skill inline; the annotating rules lose only their long form, and the tool description still says
+ * what the tool is for).
  *
  * @param ctx - the plugin's host context.
+ * @param skill - the contribution to register.
  * @returns whether the skill is now in the registry.
  */
-function registerCommentSkill(ctx: Context): boolean {
+function registerRuntimeSkill(ctx: Context, skill: RuntimeSkill): boolean {
   if (typeof (ctx.get('skills') as { register?: unknown } | undefined)?.register !== 'function') return false
   let registered = false
   ctx.effect(() => {
     const skills = ctx.get('skills') as { register?: (skill: unknown) => unknown } | undefined
     if (typeof skills?.register !== 'function') return () => {}
     try {
-      const dispose = skills.register(COMMENT_SKILL)
+      const dispose = skills.register(skill)
       registered = true
       return typeof dispose === 'function' ? dispose as () => void : () => {}
     } catch {
       // A registry that rejects the name (a reserved or duplicate one) is not a reason
       // to fail the plugin: the prompt's inline rules still stand on their own.
+      return () => {}
+    }
+  })
+  return registered
+}
+
+/**
+ * Register the annotate tool with the harness's tool registry, when it has one.
+ *
+ * Feature-detected like the skills, and deliberately NOT declared in `inject`: the host half of this
+ * plugin imports nothing from the harness at runtime (its harness packages are services it asks for by
+ * name, and types), so a composition without a tool registry keeps working with the tool simply absent
+ * — where an unsatisfied `inject` would defer the whole plugin, the trap `src/index.ts` documents for
+ * `sessionController`.
+ *
+ * @param ctx - the plugin's host context.
+ * @param deps - what fulfils one call (see `annotate-tool.ts`).
+ * @returns whether the tool is now in the registry.
+ */
+function registerAnnotateTool(ctx: Context, deps: AnnotateRunDeps): boolean {
+  if (typeof (ctx.get('tools') as { register?: unknown } | undefined)?.register !== 'function') return false
+  let registered = false
+  ctx.effect(() => {
+    const tools = ctx.get('tools') as { register?: (definition: unknown) => unknown } | undefined
+    if (typeof tools?.register !== 'function') return () => {}
+    try {
+      const dispose = tools.register(annotateToolDefinition(annotateRun(deps)))
+      registered = true
+      return typeof dispose === 'function' ? dispose as () => void : () => {}
+    } catch (error: unknown) {
+      // A registry that refuses the definition (a name already taken, a shape it does not accept) must
+      // not take the panel down with it: the reader's own comments are this plugin's job, and the tool
+      // is an extra door into them.
+      ctx.logger.warn(`diff-approval: the annotate tool was refused by the tool registry: ${errorMessage(error)}`)
       return () => {}
     }
   })
@@ -588,7 +647,11 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   // What a comment prompt may point the agent at. Asked lazily, on the first list
   // request: the tool registry is still filling up while plugins mount (see
   // `lazyCommentSkill`).
-  const commentSkill = lazyCommentSkill(ctx, registerCommentSkill(ctx))
+  const commentSkill = lazyCommentSkill(ctx, registerRuntimeSkill(ctx, COMMENT_SKILL))
+  // The annotating rules, and the tool they are about: both optional, both feature-detected the way the
+  // comment skill is. Registered here so the catalog and the tool appear together — an agent that can
+  // see the tool should be able to load the long form, and one whose harness has neither is unharmed.
+  registerRuntimeSkill(ctx, ANNOTATE_SKILL)
   /** Hydrate the globally-unique store once from the single persistence file. */
   let loadPromise: Promise<void> | undefined
   const ensureLoaded = (): Promise<void> => {
@@ -621,6 +684,68 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       }
     })()
     return loadPromise
+  }
+
+  // The agent's own door into the same store the panel writes to: `diff_approval_annotate`, registered
+  // after `ensureLoaded` exists because a call has to hydrate the stores before it reads them, exactly
+  // as the panel's own handlers do. Both halves of that store are the ones the panel uses — the pending
+  // list decides which files a card can hang on, and the comment store takes the record — so an
+  // agent's annotation IS a comment: the reader sees it, replies to it, and ends it like any other.
+  registerAnnotateTool(ctx, {
+    ready: ensureLoaded,
+    entriesOf: sessionId => store.list(sessionId),
+    commentsOf: sessionId => comments.list(sessionId),
+    addComment: (record) => { comments.add(record) },
+    listFile: (sessionId, asked, signal) => listFileForAnnotation(sessionId, asked, signal),
+    log: message => ctx.logger.info(`diff-approval: ${message}`),
+  })
+
+  /**
+   * Admit one file into a session's list, so an annotation can hang on it.
+   *
+   * The panel lists what the workspace has pending; an agent that wants to explain a file nobody is
+   * reviewing has nowhere to put the card until the file is listed. This is the same admission the
+   * reader's own "add this path" performs (`add-path`), reached by the agent instead of by hand: both
+   * sides of the entry are the file's own text — the "no pending diff" shape a scanned-clean file
+   * already lands with — so the file opens at its own content and the card sits on the lines it names.
+   *
+   * It is deliberately that ROUTE and not a raw insert: a path already listed is answered from the list
+   * (so annotating twice never re-baselines a review in progress), a path outside the workspace is
+   * refused here rather than confined later, and what lands goes through the same fold + persist + undo
+   * bookkeeping as every other admission.
+   *
+   * @param sessionId - the session whose list gains the file.
+   * @param asked - the path the agent named, workspace-relative or absolute.
+   * @param signal - the caller's lifetime, for the read.
+   * @returns the listed entry (and whether this call is what listed it), or why it could not be listed.
+   */
+  async function listFileForAnnotation(
+    sessionId: SessionId,
+    asked: string,
+    signal: AbortSignal | undefined,
+  ): Promise<ListFileOutcome> {
+    await ensureLoaded()
+    const workspace = workspaceOf(sessionId)
+    if (workspace === undefined) return { kind: 'no-workspace' }
+    const absolute = resolveInsideWorkspace(workspace.path, asked)
+    if (absolute === undefined) return { kind: 'outside' }
+    const listed = store.list(sessionId).find(entry => pathIdentity(entry.path) === pathIdentity(absolute))
+    if (listed !== undefined) return { kind: 'listed', entry: listed, added: false }
+    const content = await readTextOrNone(absolute, signal ?? new AbortController().signal)
+    if (content === undefined) return { kind: 'missing' }
+    const now = Date.now()
+    await foldBatch(sessionId, [{
+      id: absolute,
+      sessionId,
+      path: absolute,
+      kind: 'edit',
+      oldText: content,
+      newText: content,
+      updatedAt: now,
+      sessionIds: [sessionId],
+    }], true)
+    const landed = store.list(sessionId).find(entry => pathIdentity(entry.path) === pathIdentity(absolute))
+    return landed === undefined ? { kind: 'missing' } : { kind: 'listed', entry: landed, added: true }
   }
 
   /**

@@ -14,6 +14,8 @@ import type { ConnectionRpcHandler, ConnectionRpcHandlerOptions, HostConnectionH
 import type { CommentRecord, PendingFileDiff } from '../src/types.ts'
 import { apply, DIFF_APPROVAL_CHANNEL } from '../src/index.ts'
 import { COMMENT_SKILL, COMMENT_SKILL_NAME } from '../src/comment-skill.ts'
+import { ANNOTATE_SKILL, ANNOTATE_SKILL_NAME } from '../src/annotate-skill.ts'
+import { ANNOTATE_TOOL_NAME } from '../src/annotate-tool.ts'
 import { commentsDirFor } from '../src/comments.ts'
 import { resolveCommentLines } from '../src/comment-lines.ts'
 import { en, zh } from '../src/client/locales.ts'
@@ -229,29 +231,32 @@ describe('channel registration', () => {
 })
 
 describe('the comment-answering skill', () => {
-  it('contributes the answer rules to the skill registry, and survives one that refuses', async () => {
-    // The rules live in a skill rather than the system prompt: the harness's own
-    // `skill` tool advertises the catalog and loads the body on demand, so this must
+  it('contributes both skills to the skill registry, and survives one that refuses', async () => {
+    // The rules live in skills rather than the system prompt: the harness's own
+    // `skill` tool advertises the catalog and loads a body on demand, so both must
     // be registered (and cleanly disposed), while a build without a registry — or a
-    // registry that rejects the name — must leave the plugin working.
-    const registered: unknown[] = []
+    // registry that rejects a name — must leave the plugin working.
+    type Contributed = { name?: string; source?: string; content?: string; description?: string }
+    const registered: Contributed[] = []
     const disposers = vi.fn()
     const accepting = await harness({
       prepare: (ctx) => {
         ctx.provide('skills', {
-          register: (skill: unknown) => { registered.push(skill); return disposers },
+          register: (skill: unknown) => { registered.push(skill as Contributed); return disposers },
         } as never)
       },
     })
-    expect(registered).toHaveLength(1)
-    expect(registered[0]).toMatchObject({
-      name: COMMENT_SKILL_NAME,
-      source: 'runtime',
-    })
-    expect((registered[0] as { content: string }).content).toContain('不要空行')
-    expect((registered[0] as { description: string }).description.length).toBeGreaterThan(0)
+    // One contribution per direction of the conversation: answering the reader's comments, and
+    // annotating code the agent is explaining (the tool below is the other half of that one).
+    expect(registered.map(skill => skill.name)).toEqual([COMMENT_SKILL_NAME, ANNOTATE_SKILL_NAME])
+    expect(registered[0]).toMatchObject({ name: COMMENT_SKILL_NAME, source: 'runtime' })
+    expect(registered[0]!.content).toContain('不要空行')
+    expect(registered[0]!.description!.length).toBeGreaterThan(0)
+    expect(registered[1]).toMatchObject({ name: ANNOTATE_SKILL_NAME, source: 'runtime' })
+    expect(registered[1]!.description!.length).toBeGreaterThan(0)
+    expect(registered[1]!.content).toContain(ANNOTATE_TOOL_NAME)
 
-    // Disposal reaches the registry, so a reloaded plugin does not leave the skill behind.
+    // Disposal reaches the registry, so a reloaded plugin does not leave the skills behind.
     await accepting.dispose()
     expect(disposers).toHaveBeenCalled()
 
@@ -266,6 +271,102 @@ describe('the comment-answering skill', () => {
       },
     })
     expect(refusing.channel).toBe(DIFF_APPROVAL_CHANNEL)
+  })
+
+  it('registers the annotate tool with the tool registry, and survives one that refuses', async () => {
+    // The agent's door into the comment store: feature-detected the way the skills are, because the host
+    // half imports nothing from the harness at runtime and a composition without a tool registry has to
+    // keep working with the tool simply absent (an unsatisfied `inject` would defer the whole plugin).
+    type Definition = { name?: string; description?: string; parameters?: unknown; output?: unknown }
+    const definitions: Definition[] = []
+    const disposers = vi.fn()
+    const accepting = await harness({
+      prepare: (ctx) => {
+        ctx.provide('tools', {
+          register: (definition: unknown) => { definitions.push(definition as Definition); return disposers },
+        } as never)
+      },
+    })
+    expect(definitions).toHaveLength(1)
+    expect(definitions[0]).toMatchObject({ name: ANNOTATE_TOOL_NAME })
+    expect(definitions[0]!.description!.length).toBeGreaterThan(0)
+    // The definition is hand-built, so what the registry validates has to be there: an argument schema
+    // and an output with a schema and a render.
+    expect(definitions[0]!.parameters).toMatchObject({ type: 'object', required: ['path', 'startLine', 'note'] })
+    expect(definitions[0]!.output).toMatchObject({ schema: { type: 'string' } })
+    await accepting.dispose()
+    expect(disposers).toHaveBeenCalled()
+
+    // No tool registry: the plugin is otherwise unchanged.
+    expect((await harness()).channel).toBe(DIFF_APPROVAL_CHANNEL)
+
+    // A registry that refuses the definition is survived, and said out loud rather than thrown.
+    const refusing = await harness({
+      prepare: (ctx) => {
+        ctx.provide('tools', { register: () => { throw new Error('name taken') } } as never)
+      },
+    })
+    expect(refusing.channel).toBe(DIFF_APPROVAL_CHANNEL)
+  })
+
+  it('lists a file the annotation names, then stores the card on it', async () => {
+    // The agent's own door into the list: annotating code the user is studying, in a file NOTHING has
+    // changed in, has to put that file in the panel — otherwise the card has nowhere to hang. It goes
+    // through the same admission the reader's own "add this path" uses, so the entry lands with both
+    // sides the file's own text (the "no pending diff" shape) and the reader opens it as it reads.
+    type Definition = { name?: string; execute?: (args: unknown, exec: unknown) => Promise<string> }
+    const definitions: Definition[] = []
+    const { fs, handle } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: 'C:\\repo',
+      prepare: (ctx) => {
+        ctx.provide('tools', {
+          register: (definition: unknown) => { definitions.push(definition as Definition); return () => {} },
+        } as never)
+      },
+    })
+    fs.readText.mockResolvedValue('one\ntwo\nthree\n')
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+
+    const answer = await definitions[0]!.execute!(
+      { path: 'src/a.ts', startLine: 2, endLine: 2, note: '1. 这一行是入口。' },
+      { agent: { id: SessionId('session-1') }, signal: signal() },
+    )
+    expect(answer).toContain('annotated')
+    expect(answer).toContain('added to the list')
+
+    // The file is in the list now, as the "no pending diff" shape a hand-added clean path takes…
+    const entries = await listEntries(handle, 'session-1')
+    expect(entries.map(entry => entry.path)).toEqual([join('C:\\repo', 'src', 'a.ts')])
+    expect(entries[0]).toMatchObject({ kind: 'edit' })
+    expect(entries[0]!.oldText).toBe(entries[0]!.newText)
+    expect(entries[0]!.oldText).toContain('two')
+
+    // …and the card is on the lines it named, attributed to the agent, quoted from the file's own text.
+    const read = await handle('list', { sessionId: 'session-1' }, signal())
+    if (!read.ok) throw new Error('list failed')
+    const comments = (read.value as { comments: CommentRecord[] }).comments
+    expect(comments).toHaveLength(1)
+    expect(comments[0]).toMatchObject({
+      author: 'agent',
+      text: '1. 这一行是入口。',
+      anchor: { startLine: 2, endLine: 2 },
+      quote: 'two',
+      entryId: join('C:\\repo', 'src', 'a.ts'),
+    })
+    // The step number is the agent's own words in the note: there is no field beside it, which is what
+    // makes it travel with the text (a copy of the card, the agent's reply) rather than being drawn.
+    expect(comments[0]).not.toHaveProperty('order')
+
+    // Annotating the same lines again is refused for the reason the feature turns on, and the file is not
+    // re-listed (the listing seam answers from the list, so a review in progress is never re-baselined).
+    const second = await definitions[0]!.execute!(
+      { path: 'src/a.ts', startLine: 2, endLine: 2, note: '又说一遍。' },
+      { agent: { id: SessionId('session-1') }, signal: signal() },
+    )
+    expect(second).toContain('already inside')
+    expect(second).toContain(comments[0]!.id)
+    expect(await listEntries(handle, 'session-1')).toHaveLength(1)
   })
 
   it('is the skill the comment prompt tells the agent to load', () => {

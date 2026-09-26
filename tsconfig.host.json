@@ -25,6 +25,9 @@
     "tsBuildInfoFile": "lib/tsconfig.host.tsbuildinfo"
   },
   "files": [
+    "src/annotate-skill.ts",
+    "src/annotate-tool.ts",
+    "src/annotate.ts",
     "src/comment-ask.ts",
     "src/comment-lines.ts",
     "src/comment-skill.ts",

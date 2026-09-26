@@ -368,6 +368,15 @@ export interface CommentRecord {
   quoteLines?: CommentQuoteLine[] | undefined
   /** The annotation itself: what the reader wrote. */
   text: string
+  /**
+   * Who wrote `text`, when it was not the reader.
+   *
+   * The panel draws a thread's first turn as the reader's own words, which is what it is for every
+   * comment the reader makes. An AGENT-authored annotation is the other direction (see
+   * `annotate-tool.ts`): the panel is showing the agent's explanation on those lines, and drawing it as
+   * something the reader said would put words in their mouth. Absent means the reader.
+   */
+  author?: 'agent' | undefined
   /** Epoch milliseconds the comment was written. */
   createdAt: number
   /** Epoch milliseconds of the last change to this record. */
