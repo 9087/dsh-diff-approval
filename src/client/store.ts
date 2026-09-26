@@ -8,7 +8,7 @@
 
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
-import type { CommentRecord, DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveValue, DiffApprovalOpenAction, DiffApprovalRefreshValue, VcsImportValue } from '../types.ts'
+import type { CommentRecord, DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue, DiffApprovalOpenAction, DiffApprovalRefreshValue, VcsImportValue } from '../types.ts'
 import type { PendingDiffSnapshot } from './slots.ts'
 import type { CommentDraft, DiffApprovalPort } from './port.ts'
 
@@ -52,6 +52,14 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   commentAdd: (sessionId: SessionId, comment: CommentDraft) => Promise<DiffApprovalCommentAddValue>
   /** Drop one annotation, then refresh. */
   commentRemove: (sessionId: SessionId, id: string) => Promise<DiffApprovalCommentRemoveValue>
+  /**
+   * Drop several annotations in ONE host call, then refresh once.
+   *
+   * One refresh is the difference a batch makes here: a loop of `commentRemove` re-reads (and
+   * re-renders) the whole session between every comment, so the list visibly dismantles itself one
+   * item at a time while the reader asked for one action.
+   */
+  commentRemoveMany: (sessionId: SessionId, ids: readonly string[]) => Promise<DiffApprovalCommentRemoveManyValue>
   /** Ask one stored comment as its own turn, then refresh (the answer is derived on read). */
   commentAsk: (sessionId: SessionId, id: string, prompt: string, text: string) => Promise<DiffApprovalCommentAskValue>
   /** Drop every local fact (used on connection reset). */
@@ -440,6 +448,11 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
     },
     async commentRemove(sessionId, id) {
       const value = await port.commentRemove(sessionId, id)
+      await this.refresh(sessionId)
+      return value
+    },
+    async commentRemoveMany(sessionId, ids) {
+      const value = await port.commentRemoveMany(sessionId, ids)
       await this.refresh(sessionId)
       return value
     },

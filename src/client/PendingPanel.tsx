@@ -7819,7 +7819,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onCommentAdd, onCommentRemove, onCommentAsk, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onRevertAll, onAckRedoCleared, onAckUndoNotice, collapseSidebar, t,
+  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onCommentAdd, onCommentRemove, onCommentRemoveMany, onCommentAsk, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onRevertAll, onAckRedoCleared, onAckUndoNotice, collapseSidebar, t,
   docked = false, dockHost, onOpenDock, closeDock, useDock,
 }: PendingPanelProps) {
   const current = useSessions(state => state.current)
@@ -8096,10 +8096,59 @@ export function PendingPanel({
     if (quietRemoval) quietenRemovalAsk(current, id)
     setQuietRemoval(false)
   }
+  /**
+   * The comments the reader has picked in the list (Ctrl/Cmd-click), by id.
+   *
+   * Picking is a mode of its own rather than a navigation: the reader is gathering a few comments for ONE
+   * action — ending them together, from the row's own menu — so a click that picks does NOT jump (a jump
+   * would take them out of the list they are picking from), and anything else they do with the list ends
+   * it (`clearPicked`, plus the effect below for the two switches that replace what is on screen).
+   */
+  const [pickedComments, setPickedComments] = useState<ReadonlySet<string>>(() => new Set())
+  /** End the picking, keeping the same set object when there is nothing to end (so nothing re-renders). */
+  const clearPicked = (): void => {
+    setPickedComments(current => (current.size === 0 ? current : new Set()))
+  }
+  /** Pick or unpick one comment. The click that reaches this never jumps (see `pickedComments`). */
+  const togglePicked = (id: string): void => {
+    setPickedComments(current => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  // Picking is about the comments in front of the reader NOW: switching files or tabs replaces every item
+  // it could have named, so the pick ends with the switch rather than surviving into a list it is not about.
+  useEffect(() => { clearPicked() }, [selected, activeTab])
+  // A press anywhere else ends the pick — the blur rule a multi-selection has.
+  //
+  // Picking is a mode the reader is in, so what ends it is what means they have moved on: a press on a
+  // file row, the toolbar, the diff, the list's empty space, or anything outside this panel at all —
+  // which is why the listener is on the document and why it only exists while there is a pick to end.
+  // Three presses are NOT that: a press on a row that is picked (the reader acting on the pick, which
+  // that row's own handlers read), a Ctrl/Cmd-press (which is itself a pick — see `togglePicked`), and a
+  // press inside an open menu (this pick's own menu is where the pick is spent, and it is read on select).
+  useEffect(() => {
+    if (pickedComments.size === 0) return
+    const onPress = (event: PointerEvent): void => {
+      if (event.ctrlKey || event.metaKey) return
+      const target = event.target
+      if (target instanceof Element) {
+        const row = target.closest('[data-diff-comment-link]')
+        if (row !== null && pickedComments.has(row.getAttribute('data-diff-comment-link') ?? '')) return
+        if (target.closest('[role="menu"]') !== null) return
+      }
+      clearPicked()
+    }
+    document.addEventListener('pointerdown', onPress, true)
+    return () => { document.removeEventListener('pointerdown', onPress, true) }
+  }, [pickedComments])
   /** The file list row whose action menu is open, and where the right-click landed. */
   const [rowMenu, setRowMenu] = useState<{ file: PendingFileDiff; x: number; y: number } | null>(null)
-  /** The comments-tab item whose menu is open, if any: which thread, and where the press landed. */
-  const [commentMenu, setCommentMenu] = useState<{ id: string; fileId: string; x: number; y: number } | null>(null)
+  /** The comments-tab item whose menu is open, if any: which thread, where the press landed, and whether
+   *  that press acted on a PICK of comments rather than on the one row it landed on. */
+  const [commentMenu, setCommentMenu] = useState<{ id: string; fileId: string; x: number; y: number; picked: boolean } | null>(null)
   /** Whether the add-path dialog is open. One dialog covers both shapes: what
    *  the browser settles on decides whether a file or a directory is added. */
   const [addOpen, setAddOpen] = useState(false)
@@ -9069,21 +9118,42 @@ export function PendingPanel({
     landOn(fileId, undefined, undefined, true, line, id)
   }
   /**
-   * The comment menu's rows: the one action a thread has, named exactly as the block's own
-   * overflow menu names it — ending a comment is one thing, and the pane it is asked from must
-   * not look like it does something else.
+   * The comment menu's rows: the action a thread has, named exactly as the block's own overflow menu
+   * names it — ending a comment is one thing, and the pane it is asked from must not look like it does
+   * something else. Opened on a pick, it says what it will actually end: the whole pick, not the one row
+   * the press happened to land on.
    */
-  const commentMenuItems = useMemo<MenuEntry[]>(() => [{ id: 'close', label: t('action.discussionEnd') }], [t])
+  const commentMenuItems = useMemo<MenuEntry[]>(
+    () => [commentMenu?.picked === true
+      ? { id: 'close-picked', label: t('action.discussionEndPicked') }
+      : { id: 'close', label: t('action.discussionEnd') }],
+    [commentMenu?.picked, t],
+  )
   /**
-   * End one comment from the list. A comment belongs to the host, so ending it is a host action like
-   * the block's own menu offers: the record goes, and the next read is what takes the block out of
-   * the open file (and the item out of this list). A refusal is said out loud rather than leaving an
-   * item the reader believes they removed.
+   * End what the comment menu was opened on: that one comment, or every picked one.
+   *
+   * A comment belongs to the host, so ending it is a host action like the block's own menu offers: the
+   * record goes, and the next read is what takes the block out of the open file (and the item out of this
+   * list). The pick goes as ONE request: it is one action the reader asked for, the host drops the whole
+   * batch in one write, and the list reads once when it is done rather than dismantling itself between
+   * comments. A refusal is said out loud rather than leaving an item the reader believes they removed.
    */
   const runCommentMenu = (id: string): void => {
     const target = commentMenu
     setCommentMenu(null)
-    if (target === null || id !== 'close' || current === undefined) return
+    if (target === null || current === undefined) return
+    if (id === 'close-picked') {
+      const ids = [...pickedComments]
+      // The pick has been spent: the reader asked for those comments to go, so the state that named them
+      // does not outlive the request.
+      clearPicked()
+      if (ids.length === 0) return
+      void onCommentRemoveMany(current, ids).catch((error: unknown) => {
+        showCopyToast(error instanceof Error ? error.message : String(error))
+      })
+      return
+    }
+    if (id !== 'close') return
     void onCommentRemove(current, target.id).catch((error: unknown) => {
       showCopyToast(error instanceof Error ? error.message : String(error))
     })
@@ -9201,20 +9271,38 @@ export function PendingPanel({
                             className={css.commentRow}
                             data-diff-comment-link={entry.id}
                             data-mobile-nav-copy="1"
+                            // The row wears the pick the way a picked tree row does: a state, not a hover.
+                            data-selected={pickedComments.has(entry.id) ? '' : undefined}
+                            aria-pressed={pickedComments.has(entry.id)}
                             // The jump names the lines the comment was written on. Whether they still
                             // hold that code is the block's own state, which the detail re-anchors
                             // against its row model — this pane does not guess at it.
-                            onClick={() => { jumpToComment(entry.fileId, entry.line, entry.id) }}
+                            onClick={(event) => {
+                              // Ctrl/Cmd-click PICKS instead of jumping: the reader is gathering a few
+                              // comments for one action, and a jump would take them out of the list they
+                              // are picking from (see `pickedComments`).
+                              if (event.ctrlKey || event.metaKey) {
+                                togglePicked(entry.id)
+                                return
+                              }
+                              clearPicked()
+                              jumpToComment(entry.fileId, entry.line, entry.id)
+                            }}
                             onContextMenu={(event) => {
-                              // The browser's own menu has nothing to say about a comment, and the one
-                              // action a thread has is the whole of what it could offer — the same press
-                              // on a file row opens that row's actions (see `PendingFileRow`).
+                              // The browser's own menu has nothing to say about a comment, and the actions
+                              // a thread has are the whole of what it could offer — the same press on a
+                              // file row opens that row's actions (see `PendingFileRow`). A press ON the
+                              // pick keeps it and acts on all of it; a press anywhere else is an ordinary
+                              // one, and ordinary things end the pick.
                               event.preventDefault()
-                              setCommentMenu({ id: entry.id, fileId: entry.fileId, x: event.clientX, y: event.clientY })
+                              const onPick = pickedComments.has(entry.id)
+                              if (!onPick) clearPicked()
+                              setCommentMenu({ id: entry.id, fileId: entry.fileId, x: event.clientX, y: event.clientY, picked: onPick })
                             }}
                             onKeyDown={(event) => {
                               if (event.key !== 'Enter' && event.key !== ' ') return
                               event.preventDefault()
+                              clearPicked()
                               jumpToComment(entry.fileId, entry.line, entry.id)
                             }}
                           >

@@ -1761,6 +1761,15 @@
   background: var(--dsw-alias-interactive-bg-hover-solid);
 }
 
+/* Picked in the comments list (Ctrl/Cmd-click, see `pickedComments`): the reader is gathering comments for
+   one action, so the row wears the brand's own outline rather than a fill — a fill is what a hover looks
+   like, and this state has to keep saying "picked" while the pointer moves on to the next row. The inset
+   offset keeps the ring inside the row's own box, so a picked row beside a hovered one does not shift. */
+.commentRow[data-selected] {
+  outline: 1px solid var(--dsw-alias-state-business-primary);
+  outline-offset: -1px;
+}
+
 /* One comment: what was asked and where it sits in the file, on the row's single line — the title from
    the left, the line numbers against the right edge. The item is one line the way a file row is. */
 .commentHead {

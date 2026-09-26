@@ -67,14 +67,14 @@ import type { VcsChange, VcsImportInput, ShellExecutorLike } from './vcs.ts'
 import type {
   DiffApprovalActionValue, DiffApprovalAddOutcome, DiffApprovalAddValue, DiffApprovalBlockTarget, DiffApprovalBrowseEntry, DiffApprovalBrowseValue,
   DiffApprovalBulkValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue,
-  CommentAnchor, CommentQuoteLine, CommentRecord, DiffApprovalCommentAddValue, DiffApprovalCommentRemoveValue,
+  CommentAnchor, CommentQuoteLine, CommentRecord, DiffApprovalCommentAddValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue,
   PendingEntry, PendingEntryKind, PendingFileDiff, VcsImportValue,
 } from './types.ts'
 
 export type {
   DiffApprovalActionOutcome, DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalBlockTarget,
   DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalRefreshOutcome, DiffApprovalRefreshValue,
-  CommentAnchor, CommentQuoteLine, CommentRecord, DiffApprovalCommentAddValue, DiffApprovalCommentRemoveValue,
+  CommentAnchor, CommentQuoteLine, CommentRecord, DiffApprovalCommentAddValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue,
   PendingEntry, PendingEntryKind, PendingFileDiff,
 } from './types.ts'
 export { PendingDiffStore } from './pending.ts'
@@ -1508,6 +1508,17 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         commentLines.delete(target.id)
         return { ok: true, value }
       }
+      case 'comment-remove-many': {
+        const request = commentRemoveManyOf(payload)
+        if (request === undefined) return rpcError('sessionId and a non-empty ids array of strings must be given')
+        await ensureLoaded()
+        // One batch is one write of the session's comment file (see `CommentStore.removeMany`), which is
+        // the whole reason this endpoint exists beside `comment-remove`.
+        const removed = comments.removeMany(request.sessionId, request.ids)
+        for (const id of removed) commentLines.delete(id)
+        const value: DiffApprovalCommentRemoveManyValue = { removed: removed.length }
+        return { ok: true, value }
+      }
       case 'comment-ask': {
         const input = commentAskOf(payload)
         if (input === undefined) return rpcError('sessionId, id, prompt and text must be valid')
@@ -2270,6 +2281,30 @@ function targetOf(payload: unknown): { sessionId: SessionId; id: string } | unde
   const id = (payload as Record<string, unknown>).id
   if (typeof id !== 'string' || id.length === 0) return undefined
   return { sessionId, id }
+}
+
+/**
+ * Narrow a wire payload to one batch comment removal: one session, and the comments to drop.
+ *
+ * The ids are all-or-nothing: a payload with one unusable id is not a batch, so the whole request
+ * is refused rather than half-honoured (the ids themselves are still only dropped where they exist,
+ * which is `CommentStore.removeMany`'s business). A repeated id names one comment, so it is kept once.
+ *
+ * @param payload - the wire payload.
+ * @returns the request, or undefined when it is not one.
+ */
+function commentRemoveManyOf(payload: unknown): { sessionId: SessionId; ids: string[] } | undefined {
+  const sessionId = sessionOf(payload)
+  if (sessionId === undefined) return undefined
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
+  const ids = (payload as Record<string, unknown>).ids
+  if (!Array.isArray(ids) || ids.length === 0) return undefined
+  const wanted: string[] = []
+  for (const id of ids) {
+    if (typeof id !== 'string' || id.length === 0) return undefined
+    if (!wanted.includes(id)) wanted.push(id)
+  }
+  return { sessionId, ids: wanted }
 }
 
 /**

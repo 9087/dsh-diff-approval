@@ -9,7 +9,7 @@ import type { ClientConnectionRpc, SessionId } from '@deepseek-ai/dsh-client-con
 import type {
   CommentAnchor, CommentAsk, CommentQuoteLine, CommentRecord,
   DiffApprovalActionValue, DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalBulkValue,
-  DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveValue,
+  DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue,
   DiffApprovalListValue,
   DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue, PendingFileDiff, VcsImportValue,
 } from '../types.ts'
@@ -81,6 +81,12 @@ export interface DiffApprovalPort {
   commentAdd(sessionId: SessionId, comment: CommentDraft): Promise<DiffApprovalCommentAddValue>
   /** Drop one annotation (what "a comment dies with its entry" does by hand). */
   commentRemove(sessionId: SessionId, id: string): Promise<DiffApprovalCommentRemoveValue>
+  /**
+   * Drop several annotations in one host call: one request, one write of the session's comment file,
+   * and one read afterwards (`store.commentRemoveMany`). A batch that is a loop of `commentRemove`
+   * calls is a different thing — N requests, N writes — which is what this endpoint exists to avoid.
+   */
+  commentRemoveMany(sessionId: SessionId, ids: readonly string[]): Promise<DiffApprovalCommentRemoveManyValue>
   /** Ask one stored comment as its own turn of the session. */
   commentAsk(sessionId: SessionId, id: string, prompt: string, text: string): Promise<DiffApprovalCommentAskValue>
 }
@@ -151,6 +157,12 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
     },
     async commentRemove(sessionId, id) {
       return commentRemoveValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'comment-remove', { sessionId, id }))
+    },
+    async commentRemoveMany(sessionId, ids) {
+      // The array is copied onto the wire: a caller's `Set` iteration or a live array must not be able
+      // to move under the request it was read for.
+      return commentRemoveManyValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'comment-remove-many',
+        { sessionId, ids: [...ids] }))
     },
     async commentAsk(sessionId, id, prompt, text) {
       // `prompt` is what the agent is asked; `text` is the reader's own words inside it, which the
@@ -495,6 +507,20 @@ function commentRemoveValueOf(result: Awaited<ReturnType<ClientConnectionRpc['ca
     throw new Error('the comment remove returned a malformed outcome')
   }
   return { outcome }
+}
+
+/** Narrow the comment-remove-many endpoint's value. */
+function commentRemoveManyValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffApprovalCommentRemoveManyValue {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+  const value: unknown = result.value
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('the comment batch remove returned a malformed value')
+  }
+  const removed = (value as Record<string, unknown>).removed
+  if (typeof removed !== 'number' || !Number.isInteger(removed) || removed < 0) {
+    throw new Error('the comment batch remove returned a malformed count')
+  }
+  return { removed }
 }
 
 /** Narrow the comment-ask endpoint's value. */

@@ -403,6 +403,18 @@ export interface DiffApprovalCommentRemoveValue {
   outcome: 'removed' | 'missing'
 }
 
+/** Value returned by the channel's comment-remove-many endpoint. */
+export interface DiffApprovalCommentRemoveManyValue {
+  /**
+   * How many of the named comments the request dropped.
+   *
+   * The ids that were not there are not named back: the reader asked for those comments to be
+   * gone, and one that another client already ended is gone. What is left to say is how many
+   * the request itself did, which is what a test and a log can hold on to.
+   */
+  removed: number
+}
+
 /** Value returned by the channel's comment-ask endpoint. */
 export interface DiffApprovalCommentAskValue {
   /**

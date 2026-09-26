@@ -2237,6 +2237,31 @@ describe('comments over the channel', () => {
     expect(await listComments(handle, 'session-1')).toEqual([])
   })
 
+  it('removes a batch of comments in one request, and drops only the ones it named', async () => {
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    emitResult(ctx, editExec(), editSuccess('/repo/b.txt', 'a', 'b'))
+    emitResult(ctx, editExec(), editSuccess('/repo/c.txt', 'a', 'b'))
+    const first = await addComment(handle, 'session-1', 0)
+    const second = await addComment(handle, 'session-1', 1)
+    const third = await addComment(handle, 'session-1', 2)
+
+    // One request for the pick. An id that is already gone is not an error — it is a comment that is
+    // not there to drop — and a repeated id names one comment, so the count is what actually went.
+    await expect(handle('comment-remove-many',
+      { sessionId: 'session-1', ids: [first.id, third.id, 'gone', first.id] }, signal()))
+      .resolves.toEqual({ ok: true, value: { removed: 2 } })
+    expect((await listComments(handle, 'session-1')).map(row => row.id)).toEqual([second.id])
+
+    // A batch with nothing to name is a malformed request, not a batch that dropped nothing.
+    const answer = await handle('comment-remove-many', { sessionId: 'session-1', ids: [] }, signal())
+    expect(answer).toEqual({ ok: false, error: { code: 'internal', message: expect.any(String) as string, details: {} } })
+    // …and another session's comment is not this session's to drop.
+    await expect(handle('comment-remove-many', { sessionId: 'session-2', ids: [second.id] }, signal()))
+      .resolves.toEqual({ ok: true, value: { removed: 0 } })
+    expect(await listComments(handle, 'session-1')).toHaveLength(1)
+  })
+
   it('takes the entry\'s comments with it when the entry is kept, and off the disk', async () => {
     const { ctx, handle, storageDir } = await harness()
     emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))

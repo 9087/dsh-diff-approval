@@ -293,6 +293,24 @@ describe('comments', () => {
     expect(seam.call).toHaveBeenCalledWith('/diff-approval', 'comment-remove', { sessionId: 'session-1', id: 'c1' })
   })
 
+  it('removes a batch of annotations in one request, and copies the ids onto the wire', async () => {
+    const seam = fakeRpc({ 'comment-remove-many': { ok: true, value: { removed: 2 } } })
+    const picked = new Set(['c1', 'c2'])
+    await expect(createDiffApprovalPort(seam.rpc).commentRemoveMany(S1, picked)).resolves.toEqual({ removed: 2 })
+    // One call, both ids — the whole point of the batch. The set is copied onto the wire, so a mutation
+    // of the caller's set afterwards cannot reach the request that was sent.
+    picked.add('c9')
+    await createDiffApprovalPort(seam.rpc).commentRemoveMany(S1, ['c3'])
+    expect(seam.call).toHaveBeenNthCalledWith(1, '/diff-approval', 'comment-remove-many',
+      { sessionId: 'session-1', ids: ['c1', 'c2'] })
+    expect(seam.call).toHaveBeenNthCalledWith(2, '/diff-approval', 'comment-remove-many',
+      { sessionId: 'session-1', ids: ['c3'] })
+    // A count that is not a count is a broken host, not a batch that dropped nothing.
+    const broken = fakeRpc({ 'comment-remove-many': { ok: true, value: { removed: 'two' } } })
+    await expect(createDiffApprovalPort(broken.rpc).commentRemoveMany(S1, ['c1']))
+      .rejects.toThrow('malformed count')
+  })
+
   it('asks one comment and narrows what became of it', async () => {
     const seam = fakeRpc({ 'comment-ask': { ok: true, value: { outcome: 'asked', requestId: 'req-1' } } })
     await expect(createDiffApprovalPort(seam.rpc).commentAsk(S1, 'c1', 'the prompt', 'why?'))

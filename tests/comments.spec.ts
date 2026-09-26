@@ -309,6 +309,34 @@ describe('mutations', () => {
     expect(comments.list(S1)).toEqual([])
   })
 
+  it('drops a batch in one write, and names only what it dropped', async () => {
+    const comments = await store()
+    comments.add(comment())
+    comments.add(comment({ id: 'c2' }))
+    comments.add(comment({ id: 'c3', sessionId: S2 }))
+    const before = comments.commentsRevision()
+
+    // The ids it can act on are dropped; the ones it cannot are not errors. Another session's comment
+    // and a comment that is already gone are both "not there to drop", and a repeated id names one.
+    expect(comments.removeMany(S1, ['c1', 'gone', 'c3', 'c1'])).toEqual(['c1'])
+    // ONE revision for the whole batch, which is what one write means: a loop of `remove` calls would
+    // have bumped it per comment — and written the session's file per comment.
+    expect(comments.commentsRevision()).toBe(before + 1)
+    expect(comments.list(S1).map(row => row.id)).toEqual(['c2'])
+    expect(comments.list(S2).map(row => row.id)).toEqual(['c3'])
+
+    // A batch that matches nothing does not rewrite the file at all.
+    expect(comments.removeMany(S1, ['gone', 'c3'])).toEqual([])
+    expect(comments.commentsRevision()).toBe(before + 1)
+
+    // The survivors are what the last write left on the disk, not just in memory.
+    await comments.settled()
+    const second = new CommentStore(root)
+    await second.loadAll()
+    expect(second.list(S1).map(row => row.id)).toEqual(['c2'])
+    expect(second.list(S2).map(row => row.id)).toEqual(['c3'])
+  })
+
   it('records the questions asked in a thread, with their own words, and never an answer', async () => {
     const comments = await store()
     comments.add(comment())

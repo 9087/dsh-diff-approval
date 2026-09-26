@@ -2,7 +2,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
-import type { DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveValue, DiffApprovalListValue, DiffApprovalRefreshValue, PendingFileDiff } from '../src/types.ts'
+import type { DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue, DiffApprovalListValue, DiffApprovalRefreshValue, PendingFileDiff } from '../src/types.ts'
 import type { CommentDraft, DiffApprovalPort } from '../src/client/port.ts'
 import { createPendingDiffStore } from '../src/client/store.ts'
 
@@ -40,6 +40,7 @@ interface PortSeam {
   refreshVcs: ReturnType<typeof vi.fn<(sessionId: SessionId, id: string, includeUntracked: boolean) => Promise<DiffApprovalRefreshValue>>>
   commentAdd: ReturnType<typeof vi.fn<(sessionId: SessionId, comment: CommentDraft) => Promise<DiffApprovalCommentAddValue>>>
   commentRemove: ReturnType<typeof vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalCommentRemoveValue>>>
+  commentRemoveMany: ReturnType<typeof vi.fn<(sessionId: SessionId, ids: readonly string[]) => Promise<DiffApprovalCommentRemoveManyValue>>>
   commentAsk: ReturnType<typeof vi.fn<(sessionId: SessionId, id: string, prompt: string, text: string) => Promise<DiffApprovalCommentAskValue>>>
 }
 
@@ -55,10 +56,11 @@ function port(overrides: Partial<Pick<PortSeam, 'list' | 'keep' | 'revert' | 'bl
   const refreshVcs = vi.fn<(sessionId: SessionId, id: string, includeUntracked: boolean) => Promise<DiffApprovalRefreshValue>>(async () => ({ outcome: 'refreshed' }))
   const commentAdd = vi.fn<(sessionId: SessionId, comment: CommentDraft) => Promise<DiffApprovalCommentAddValue>>(async () => ({ outcome: 'added' }))
   const commentRemove = vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalCommentRemoveValue>>(async () => ({ outcome: 'removed' }))
+  const commentRemoveMany = vi.fn<(sessionId: SessionId, ids: readonly string[]) => Promise<DiffApprovalCommentRemoveManyValue>>(async (_sessionId, ids) => ({ removed: ids.length }))
   const commentAsk = vi.fn<(sessionId: SessionId, id: string, prompt: string, text: string) => Promise<DiffApprovalCommentAskValue>>(async () => ({ outcome: 'asked', requestId: 'req-1' }))
   return {
-    port: { list, keep, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentAsk, ...overrides },
-    list, keep, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentAsk,
+    port: { list, keep, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentRemoveMany, commentAsk, ...overrides },
+    list, keep, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentRemoveMany, commentAsk,
   }
 }
 

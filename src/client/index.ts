@@ -238,6 +238,7 @@ export function apply(ctx: ClientContext): void {
       onRevertAll: (sessionId) => store.revertAll(sessionId),
       onCommentAdd: (sessionId, comment) => store.commentAdd(sessionId, comment),
       onCommentRemove: (sessionId, id) => store.commentRemove(sessionId, id),
+      onCommentRemoveMany: (sessionId, ids) => store.commentRemoveMany(sessionId, ids),
       onCommentAsk: (sessionId, id, prompt, text) => store.commentAsk(sessionId, id, prompt, text),
       onAckRedoCleared: () => store.clearRedoCleared(),
       onAckUndoNotice: () => store.clearUndoNotice(),

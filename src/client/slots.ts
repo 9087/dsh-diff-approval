@@ -7,7 +7,7 @@ import type { CommentDraft } from './port.ts'
 import type { CommentLineRange } from '../comment-lines.ts'
 import type {
   CommentRecord, DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalCommentAddValue,
-  DiffApprovalCommentAskValue, DiffApprovalCommentRemoveValue, DiffApprovalOpenAction, DiffApprovalRefreshValue, PendingFileDiff, VcsImportValue,
+  DiffApprovalCommentAskValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue, DiffApprovalOpenAction, DiffApprovalRefreshValue, PendingFileDiff, VcsImportValue,
 } from '../types.ts'
 
 /** What the panel reads and drives: the pending list plus in-flight entries. */
@@ -140,6 +140,12 @@ export interface PendingPanelFace {
   onCommentAdd: (sessionId: SessionId, comment: CommentDraft) => Promise<DiffApprovalCommentAddValue>
   /** Drop one annotation from the session's comment store. */
   onCommentRemove: (sessionId: SessionId, id: string) => Promise<DiffApprovalCommentRemoveValue>
+  /**
+   * Drop several annotations in one host call. Ending a pick of comments is one action the reader
+   * asked for, so it goes to the host as one request and comes back as one read — see
+   * `DiffApprovalStore.commentRemoveMany`.
+   */
+  onCommentRemoveMany: (sessionId: SessionId, ids: readonly string[]) => Promise<DiffApprovalCommentRemoveManyValue>
   /**
    * Ask one stored comment as its own turn of the session; the answer arrives on the
    * next read, derived by the host from the transcript. `prompt` is what the agent is

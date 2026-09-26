@@ -372,12 +372,39 @@ export class CommentStore {
    * @returns whether it was there (and belonged to that session).
    */
   remove(sessionId: SessionId, id: string): boolean {
-    const comment = this.byId.get(id)
-    if (comment === undefined || comment.sessionId !== sessionId) return false
-    this.byId.delete(id)
+    return this.removeMany(sessionId, [id]).length === 1
+  }
+
+  /**
+   * Drop several comments of one session in ONE write.
+   *
+   * This is what a batch action needs and what a loop of `remove` calls cannot give it: each
+   * `remove` saves the session's file, so ending ten comments wrote that file ten times — ten
+   * chances for a transient failure to leave the store and the disk disagreeing about an action
+   * the reader asked for once. The save happens only when something was actually dropped, so a
+   * batch that matches nothing does not rewrite the file.
+   *
+   * An id of another session, or one that is not here at all, is skipped rather than refused:
+   * a batch is one request and the comments it names are the ones it can act on, and a comment
+   * another client already ended is the state the caller was asking for anyway.
+   *
+   * @param sessionId - the session the caller believes the comments belong to.
+   * @param ids - the comments to drop; a repeated id is one comment.
+   * @returns the ids that were dropped, in the order given.
+   */
+  removeMany(sessionId: SessionId, ids: readonly string[]): string[] {
+    const removed: string[] = []
+    for (const id of ids) {
+      if (removed.includes(id)) continue
+      const comment = this.byId.get(id)
+      if (comment === undefined || comment.sessionId !== sessionId) continue
+      this.byId.delete(id)
+      removed.push(id)
+    }
+    if (removed.length === 0) return removed
     this.revision += 1
     this.save(sessionId)
-    return true
+    return removed
   }
 
   /**

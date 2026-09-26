@@ -482,6 +482,21 @@ function panelProps(snapshot: Partial<PendingDiffSnapshot> & { files: PendingFil
       publish()
       return { outcome: 'removed' as const }
     }),
+    onCommentRemoveMany: vi.fn(async (_sessionId: SessionId, ids: readonly string[]) => {
+      let removed = 0
+      for (const id of ids) {
+        const index = comments.findIndex(entry => entry.id === id)
+        if (index < 0) continue
+        comments.splice(index, 1)
+        removed += 1
+      }
+      // One publish for the whole batch, as the host writes the file once.
+      if (removed > 0) {
+        revision += 1
+        publish()
+      }
+      return { removed }
+    }),
     onCommentAsk: vi.fn(async (sessionId: SessionId, id: string, _prompt: string, text: string) => {
       const record = comments.find(entry => entry.id === id)
       if (record === undefined) return { outcome: 'missing' as const }
@@ -2171,7 +2186,7 @@ describe('PendingPanel', () => {
   })
 
   it('ends a comment from the list, and takes its block with it', () => {
-    // The list is not a read-only index: the one action a thread has (结束评论, the same row the
+    // The list is not a read-only index: the one action a thread has (关闭评论, the same row the
     // block's own ⋯ menu offers — see `discussionMenuItems`) is on the item's right-click, where the
     // file rows keep theirs. A comment belongs to the host, so the list asks the host to drop it — one
     // record, one action — and the read that follows is what takes the block out of the open file.
@@ -2207,6 +2222,151 @@ describe('PendingPanel', () => {
     expect([...document.querySelectorAll('[data-diff-comment-link]')].map(item => item.getAttribute('data-diff-comment-link'))).toEqual(['d-one'])
     expect(document.querySelectorAll('[data-diff-discussion]').length).toBe(1)
     expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
+  })
+
+  it('picks comments with Ctrl-click instead of jumping, and any other click ends the pick', () => {
+    // Ctrl/Cmd-click in the comments list GATHERS comments for one action instead of navigating: the
+    // reader is picking from the list, and a jump would take them out of it. Any other click is the
+    // ordinary one — it jumps, and it ends the pick — which is the same rule a file or tab switch follows.
+    act(() => { setCommentModeEnabled(true) })
+    const open = entry({ id: 'entry-open', path: '/repo/open.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
+    const other = entry({ id: 'entry-pick', path: '/repo/pick.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\n' })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [open, other],
+      busy: new Set(),
+      comments: [
+        comment({ id: 'd-one', entryId: other.id, path: other.path, text: '第一处', anchor: { startLine: 1, endLine: 1 }, quote: 'a' }),
+        comment({ id: 'd-two', entryId: other.id, path: other.path, text: '第二处', anchor: { startLine: 3, endLine: 3 }, quote: 'c' }),
+      ],
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    clickFileRow('open.txt')
+    expect(shownPath()).toBe('/repo/open.txt')
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    const itemOf = (id: string): HTMLElement => document.querySelector(`[data-diff-comment-link="${id}"]`) as HTMLElement
+    const picked = (id: string): boolean => itemOf(id).hasAttribute('data-selected')
+
+    // Ctrl-click picks a comment of a file that is NOT open, and nothing navigates: the reader is left in
+    // the list they are picking from, which is the whole point of the gesture.
+    fireEvent.click(itemOf('d-one'), { ctrlKey: true })
+    expect(picked('d-one')).toBe(true)
+    expect(shownPath()).toBe('/repo/open.txt')
+    fireEvent.click(itemOf('d-two'), { ctrlKey: true })
+    expect([picked('d-one'), picked('d-two')]).toEqual([true, true])
+
+    // Ctrl-clicking a picked comment unpicks it; unpicking the last one ends the picking.
+    fireEvent.click(itemOf('d-two'), { ctrlKey: true })
+    expect(picked('d-two')).toBe(false)
+    fireEvent.click(itemOf('d-one'), { ctrlKey: true })
+    expect(picked('d-one')).toBe(false)
+
+    // A plain click is the ordinary one: it jumps to the comment, and it does not leave a pick behind.
+    fireEvent.click(itemOf('d-one'), { ctrlKey: true })
+    fireEvent.click(itemOf('d-two'))
+    expect(shownPath()).toBe('/repo/pick.txt')
+    expect(picked('d-one')).toBe(false)
+
+    // …and moving to another tab replaces every item a pick could have named, so the pick goes with it.
+    fireEvent.click(itemOf('d-one'), { ctrlKey: true })
+    expect(picked('d-one')).toBe(true)
+    fireEvent.click(document.querySelector('[data-diff-list-tab="pending"]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    expect(picked('d-one')).toBe(false)
+
+    // The picked row wears a state rather than a hover: the brand's outline, from the stylesheet itself.
+    // jsdom lays nothing out and cascades nothing, so the rule is read from the sheet.
+    const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const rule = /^\.commentRow\[data-selected\] \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
+    expect(rule).toContain('outline: 1px solid var(--dsw-alias-state-business-primary)')
+  })
+
+  it('ends every picked comment from the row menu, and clears the pick with it', async () => {
+    // A press ON the pick keeps it and its menu says what it will actually end — the whole pick, not the
+    // row the press landed on — and the pick ends with the action, so the state that named those comments
+    // never outlives the request. A press anywhere else is an ordinary one: it ends the pick and offers
+    // the single comment's action, which is what the reader is looking at again.
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-picked', path: '/repo/picked.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\n' })
+    const props = panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [
+        comment({ id: 'd-one', entryId: file.id, path: file.path, text: '第一处', anchor: { startLine: 1, endLine: 1 }, quote: 'a' }),
+        comment({ id: 'd-two', entryId: file.id, path: file.path, text: '第二处', anchor: { startLine: 2, endLine: 2 }, quote: 'b' }),
+        comment({ id: 'd-three', entryId: file.id, path: file.path, text: '第三处', anchor: { startLine: 3, endLine: 3 }, quote: 'c' }),
+      ],
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    const itemOf = (id: string): HTMLElement => document.querySelector(`[data-diff-comment-link="${id}"]`) as HTMLElement
+    const menuLabels = (): (string | null)[] =>
+      [...document.querySelectorAll('[role="menuitem"]')].map(item => item.textContent)
+
+    // First: a press on a row that is NOT picked. It ends the pick, and its menu is the one-comment menu.
+    fireEvent.click(itemOf('d-one'), { ctrlKey: true })
+    expect(itemOf('d-one').hasAttribute('data-selected')).toBe(true)
+    expect(fireEvent.contextMenu(itemOf('d-three'), { clientX: 10, clientY: 10 })).toBe(false)
+    expect(itemOf('d-one').hasAttribute('data-selected')).toBe(false)
+    expect(menuLabels()).toEqual(['action.discussionEnd'])
+    fireEvent.click([...document.querySelectorAll('[role="menuitem"]')][0] as HTMLElement)
+    expect(props.onCommentRemove).toHaveBeenCalledWith(S1, 'd-three')
+
+    // Then a pick of two: the press on either of them names the whole pick, and ending it ends both.
+    fireEvent.click(itemOf('d-one'), { ctrlKey: true })
+    fireEvent.click(itemOf('d-two'), { ctrlKey: true })
+    expect(fireEvent.contextMenu(itemOf('d-two'), { clientX: 20, clientY: 20 })).toBe(false)
+    expect(menuLabels()).toEqual(['action.discussionEndPicked'])
+    fireEvent.click([...document.querySelectorAll('[role="menuitem"]')][0] as HTMLElement)
+    await waitFor(() => { expect([...document.querySelectorAll('[data-diff-comment-link]')]).toHaveLength(0) })
+    // The pick is ONE host call carrying both ids — not one call per comment — so the batch is what the
+    // host drops in a single write and the list reads once. The one-comment action is a different prop,
+    // and it was called exactly once (for `d-three`, above).
+    expect((props.onCommentRemoveMany as unknown as { mock: { calls: unknown[][] } }).mock.calls).toEqual([
+      [S1, ['d-one', 'd-two']],
+    ])
+    expect((props.onCommentRemove as unknown as { mock: { calls: unknown[][] } }).mock.calls).toEqual([
+      [S1, 'd-three'],
+    ])
+  })
+
+  it('ends the pick on a press anywhere else, the way a blur ends a selection', () => {
+    const file = entry({ id: 'entry-blur', path: '/repo/blur.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\n' })
+    const props = panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [
+        comment({ id: 'b-one', entryId: file.id, path: file.path, text: '第一处', anchor: { startLine: 1, endLine: 1 }, quote: 'a' }),
+        comment({ id: 'b-two', entryId: file.id, path: file.path, text: '第二处', anchor: { startLine: 2, endLine: 2 }, quote: 'b' }),
+      ],
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    const itemOf = (id: string): HTMLElement => document.querySelector(`[data-diff-comment-link="${id}"]`) as HTMLElement
+    const picked = (id: string): boolean => itemOf(id).hasAttribute('data-selected')
+
+    // A press on a row that IS picked does not end the pick: that press is the reader acting on the pick.
+    fireEvent.click(itemOf('b-one'), { ctrlKey: true })
+    fireEvent.pointerDown(itemOf('b-one'))
+    expect(picked('b-one')).toBe(true)
+
+    // A Ctrl/Cmd-press is itself a pick, so it does not end the pick either — this is what lets a second
+    // comment be added to it, which the row's own click then does.
+    fireEvent.pointerDown(itemOf('b-two'), { ctrlKey: true })
+    expect(picked('b-one')).toBe(true)
+    fireEvent.click(itemOf('b-two'), { ctrlKey: true })
+    expect(picked('b-one')).toBe(true)
+    expect(picked('b-two')).toBe(true)
+
+    // Anything else means the reader has moved on — the list's empty space, the file list, the toolbar,
+    // the diff, or the conversation outside this panel — so the pick ends there.
+    fireEvent.pointerDown(document.body)
+    expect(picked('b-one')).toBe(false)
+    expect(picked('b-two')).toBe(false)
   })
 
   it('adds the file a browse row names, and closes with a toast', async () => {
