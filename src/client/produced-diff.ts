@@ -1,177 +1,107 @@
 /**
- * Inject a "查看差异" button beside each DSH produced-file chip.
+ * Route a produced-file chip's own click.
  *
- * The harness's `ProducedFiles` component renders each produced file as a
- * `<button>` chip inside `[data-produced-files-row]`; the full path rides the
- * chip's `title`. This plugin wants a quick "view this file's diff" affordance
- * there, but the plugin should not have to touch the harness component. So this
- * module watches the DOM for those chips (via a MutationObserver, the same
- * bridge the dsh-pocket mobile fork uses to inject its 复制 buttons) and injects
- * a small button after each one. Clicking it dispatches a window event that the
- * diff-approval panel listens for (see PendingPanel), which opens the panel and
- * selects the file when it is still pending, or toasts otherwise.
+ * The harness's `ProducedFiles` component renders each produced file as a `<button>` chip inside
+ * `[data-produced-files-row]`, with the full path riding the chip's `title`. The plugin wants a
+ * second way to open a file it is already reviewing — in the review panel — but it must not take
+ * the harness's own open away from anyone else, and it must not touch the harness component. So
+ * this module watches for a click on those chips and answers ONE narrow case:
  *
- * The injected button is intentionally self-contained (inline styles + a fixed
- * label) so it needs no stylesheet and no harness change.
+ *   the chip names a file the panel currently holds → the click is the panel's, and becomes a menu
+ *   (「默认方式打开」 / 「在审批面板中查看」, see `CHIP_MENU_EVENT`);
+ *   anything else → the click is left entirely alone and DSH does whatever it always did.
+ *
+ * The first menu row must open the file exactly the way DSH does — and what that is, is the
+ * harness's business, not this plugin's — so it is not re-implemented here: `replayChipClick`
+ * presses the same chip again, with the interceptor standing down for that one press. A press DSH
+ * keeps keeps its modifiers too: a Ctrl/Cmd/Shift/Alt-click and a middle click never reach the
+ * bridge, so a modifier gesture the harness grows later cannot be swallowed by this plugin.
  */
 
-/** Window event dispatched by the injected button; PendingPanel listens for it. */
+/** Window event dispatched when a pending file's chip is pressed; the panel listens for it. */
+export const CHIP_MENU_EVENT = 'diff-approval:chip-menu'
+
+/** Window event dispatched by the panel to open a file in the panel; PendingPanel listens for it. */
 export const OPEN_FILE_EVENT = 'diff-approval:open-file'
-
-/** Marker set on a produced-file chip once its diff button has been injected. */
-const INJECTED_ATTR = 'data-diff-approval-produced-diff'
-
-/** Marker set on the injected "查看差异" button itself (so cleanup can find it). */
-const BUTTON_ATTR = 'data-diff-approval-produced-diff-btn'
 
 /** The produced-file chip selector (the container row itself is not needed). */
 const CHIP_SELECTOR = '[data-produced-files-row] button'
 
+/** What a chip press tells the panel: which file, and where the chip is (the menu hangs under it). */
+export interface ProducedChipMenuDetail {
+  /** The path the pressed chip names. */
+  path: string
+  /** The chip's own box, in viewport coordinates. */
+  x: number
+  y: number
+}
+
+/** What the bridge needs from the host to decide, and to report. */
+export interface ProducedChipBridge {
+  /**
+   * Whether the panel holds this file right now. Called synchronously on every chip press, because
+   * the decision it answers is whether the press is prevented — there is no second chance at it.
+   */
+  isPending: (path: string) => boolean
+  /** A chip of a pending file was pressed: open the menu the press asked for. */
+  onMenu: (detail: ProducedChipMenuDetail) => void
+}
+
 /** Read the produced-file path from a chip (`title` carries the full path). */
-function producedPathOf(chip: HTMLElement): string | undefined {
+function producedPathOf(chip: Element): string | undefined {
   const path = chip.getAttribute('title')?.trim()
   return path === undefined || path === '' ? undefined : path
 }
 
-/** Inline layout styles matching the file chip's measured values: the chip is
- * 22px tall / 6px radius / 0 8px inline padding on the `--dsw-alias-bg-base`
- * surface. `color` is inlined (the chip's gray text) so the icon is always right;
- * `background` (rest + a deeper hover) stays in the injected <style> rule.
- * `display` is set separately (see inject) to mirror the chip's visibility. */
-function buttonStyle(): Partial<CSSStyleDeclaration> {
-  return {
-    flex: 'none',
-    marginLeft: '-4px',
-    alignItems: 'center',
-    justifyContent: 'center',
-    boxSizing: 'border-box',
-    height: '22px',
-    padding: '0 6px',
-    border: 'none',
-    borderRadius: '6px',
-    cursor: 'pointer',
-    color: 'var(--dsw-alias-label-secondary)',
-  }
-}
-
-/** The DSH "open / jump" icon (IconRightUpOutline16): a diagonal arrow pointing
- *  top-right, i.e. the classic "navigate to / open" affordance — a clean, already
- *  theme-consistent glyph to use instead of hand-drawing +/-. 16×16 matches the
- *  harness's own action glyph; `currentColor` rides the chip's gray text. */
-const DIFF_ICON_SVG =
-  '<svg width="7" height="7" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false" style="color:var(--dsw-alias-label-secondary)">' +
-  '<path d="M13.588429 5.147807C13.588429 4.739638 13.587271 4.403003 13.582013 4.118684L1.703098 15.99968L0.85155 15.148178L0 14.294485L11.878915 2.413442C11.594721 2.408199 11.257569 2.409154 10.849776 2.409154H2.400594V0.000001H10.849776C11.644471 0.000001 12.338899 -0.001059 12.901622 0.059909C13.486363 0.123352 14.071136 0.265493 14.598303 0.648292C14.886598 0.857751 15.141981 1.110984 15.351433 1.399281C15.734578 1.926807 15.876362 2.512925 15.939743 3.098105C16.000775 3.660718 15.99968 4.353347 15.99968 5.147807V13.599133H13.588429V5.147807Z" fill="currentColor"/>' +
-  '</svg>'
+/** The chip whose press `replayChipClick` is replaying, if any: its press is DSH's, not the menu's. */
+let replaying: Element | null = null
 
 /**
- * Start injecting diff buttons into the produced-files row.
- * @param label - localized "查看差异" text, used as the icon button's accessible
- *   name + hover title (the button renders only an icon).
- * @param openPath - called with a produced-file path when its injected button is
- *   clicked; the diff-approval panel decides whether that file is still pending.
- * @returns a cleanup that disconnects the observer and removes injected buttons.
+ * Press a produced-file chip again — DSH's own open, run the only way this plugin can run it
+ * faithfully, with the bridge standing down for that press (see the file's own doc).
+ *
+ * @param path - the file the chip names.
+ * @returns whether a chip naming it was found to press.
  */
-export function startProducedDiffInjection(
-  label: string,
-  openPath: (path: string) => void,
-): () => void {
-  // A :hover tint cannot come from inline styles (inline out-ranks any
-  // stylesheet rule), so install a rule for the injected controls. The icon rides
-  // the file-chip link blue so the button carries a color; hovering adds the
-  // DSH interaction tint as the background.
-  let ownedStyleEl: HTMLStyleElement | null = null
-  if (document.querySelector('style[data-diff-approval-produced-diff]') === null) {
-    ownedStyleEl = document.createElement('style')
-    ownedStyleEl.setAttribute('data-diff-approval-produced-diff', '')
-    ownedStyleEl.textContent =
-      `[${BUTTON_ATTR}]{background:rgba(38, 49, 72, 0.06);}` +
-      `[${BUTTON_ATTR}]:hover{background:rgba(38, 49, 72, 0.14);}`
-    document.head.appendChild(ownedStyleEl)
+export function replayChipClick(path: string): boolean {
+  const chip = [...document.querySelectorAll<HTMLElement>(CHIP_SELECTOR)]
+    .find(candidate => producedPathOf(candidate) === path)
+  if (chip === undefined) return false
+  replaying = chip
+  try {
+    chip.click()
+  } finally {
+    replaying = null
   }
+  return true
+}
 
-  const inject = (): void => {
-    // Snapshot the chips; the loop below mutates the DOM (inserting buttons),
-    // which we must not re-scan in the same pass.
-    const chips = [...document.querySelectorAll<HTMLElement>(CHIP_SELECTOR)]
-    for (const chip of chips) {
-      const path = producedPathOf(chip)
-      if (path === undefined) continue
-      // A span (role=button) is used on purpose: the row's chips are <button>
-      // and its narrow-screen container queries hide `.file:nth-of-type(n)` by
-      // counting buttons, so a real <button> sibling would shift that count and
-      // make the harness hide the wrong file. The span stays out of `:nth-of-type`.
-      if (chip.getAttribute(INJECTED_ATTR) === '1') continue
-      // Give each chip its own button: deduping by path collapsed several chips
-      // that share a `title` (a harness that renders the same tooltip text for
-      // every produced file) to a single button. Checking the chip's own next
-      // sibling keeps distinct chips distinct while still skipping a
-      // re-rendered chip that already owns its button.
-      if (chip.nextElementSibling?.getAttribute(BUTTON_ATTR) === '1') {
-        chip.setAttribute(INJECTED_ATTR, '1')
-        continue
-      }
-      chip.setAttribute(INJECTED_ATTR, '1')
-      const btn = document.createElement('span')
-      btn.setAttribute('role', 'button')
-      btn.setAttribute('tabindex', '0')
-      btn.setAttribute(BUTTON_ATTR, '1')
-      btn.setAttribute('data-path', path)
-      // The tooltip names the exact file the diff is for.
-      btn.setAttribute('aria-label', `${label}: ${path}`)
-      btn.setAttribute('title', `${label}: ${path}`)
-      Object.assign(btn.style, buttonStyle())
-      btn.innerHTML = DIFF_ICON_SVG
-      btn.addEventListener('click', (event) => {
-        // Don't let the injected button bubble into a parent row handler.
-        event.preventDefault()
-        event.stopImmediatePropagation()
-        openPath(path)
-      })
-      btn.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault()
-          openPath(path)
-        }
-      })
-      chip.insertAdjacentElement('afterend', btn)
-    }
-    // Clean up orphaned buttons: a chip React removed/replaced leaves its button
-    // behind as a sibling (its `previousElementSibling` is no longer a chip), so
-    // drop those — a re-render must not leave a stale, duplicated button.
-    for (const btn of document.querySelectorAll<HTMLElement>(`[${BUTTON_ATTR}]`)) {
-      const chip = btn.previousElementSibling
-      if (chip === null || !chip.matches(CHIP_SELECTOR)) btn.remove()
-    }
-    // Mirror each button's visibility to its chip. The harness's container
-    // queries hide `:nth-of-type(n)` file chips on narrow screens, and an
-    // injected span button is not subject to that query — so a hidden chip would
-    // otherwise still show its 查看差异 button. The chip is the button's previous
-    // sibling (we insert `afterend`); read its computed display and mirror it,
-    // but only hide when the chip is explicitly `display:none` (never guess
-    // visible from a missing/odd chip, which is how a previous attempt read as
-    // "the button is gone"). `inject` runs on DOM changes and on window resize,
-    // so a width-driven hide re-syncs.
-    for (const btn of document.querySelectorAll<HTMLElement>(`[${BUTTON_ATTR}]`)) {
-      const chip = btn.previousElementSibling as HTMLElement | null
-      const chipHidden = chip !== null && getComputedStyle(chip).display === 'none'
-      btn.style.display = chipHidden ? 'none' : 'inline-flex'
-    }
+/**
+ * Start routing produced-file chip presses.
+ *
+ * @param bridge - the host's decision (is the file pending) and where to report a press that is.
+ * @returns a cleanup that stops routing.
+ */
+export function startProducedChipMenu(bridge: ProducedChipBridge): () => void {
+  const onClick = (event: MouseEvent): void => {
+    // A modifier press is not this bridge's: it is a gesture the harness may give its own meaning,
+    // and the plugin has no menu to offer it (see the file's own doc).
+    if (event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
+    const target = event.target
+    if (!(target instanceof Element)) return
+    const chip = target.closest(CHIP_SELECTOR)
+    if (chip === null || chip === replaying) return
+    const path = producedPathOf(chip)
+    // Not a file the panel holds: DSH's press, untouched.
+    if (path === undefined || !bridge.isPending(path)) return
+    // The review panel's press: DSH must not also act on it, or the reader would get both the
+    // harness's open and the menu. Captured on the document so no handler between here and the
+    // chip sees it either.
+    event.preventDefault()
+    event.stopImmediatePropagation()
+    const rect = chip.getBoundingClientRect()
+    bridge.onMenu({ path, x: rect.left, y: rect.bottom })
   }
-
-  inject()
-  // React re-renders the produced-files row as turns settle, so keep watching;
-  // each new chip carries no marker and gets its own button.
-  const observer = new MutationObserver(() => inject())
-  observer.observe(document.body, { childList: true, subtree: true })
-  // The container-query hiding is CSS-driven (no DOM mutation fires), so watch
-  // the window size and re-mirror visibility on resize.
-  const onResize = (): void => inject()
-  window.addEventListener('resize', onResize)
-
-  return () => {
-    observer.disconnect()
-    window.removeEventListener('resize', onResize)
-    document.querySelectorAll<HTMLElement>(`[${BUTTON_ATTR}]`).forEach((el) => el.remove())
-    if (ownedStyleEl !== null) ownedStyleEl.remove()
-  }
+  document.addEventListener('click', onClick, true)
+  return () => { document.removeEventListener('click', onClick, true) }
 }

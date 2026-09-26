@@ -1,10 +1,11 @@
-// Produced-files "查看差异" DOM-injection bridge: it watches the harness's
-// produced-files row for file chips and injects a diff button after each one,
-// driving the openPath callback from the chip's title (path).
+// Produced-files chip bridge: a press on a chip whose file the review panel holds is the panel's and
+// becomes a menu (default open / review panel, see CHIP_MENU_EVENT); every other press is DSH's own
+// and this bridge must not touch it — the menu's "default open" is that same press replayed.
 
-import { describe, expect, it, vi } from 'vitest'
-import { act } from '@testing-library/react'
-import { startProducedDiffInjection } from '../src/client/produced-diff.ts'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { replayChipClick, startProducedChipMenu } from '../src/client/produced-diff.ts'
+
+afterEach(() => { document.body.innerHTML = '' })
 
 function mountRow(): HTMLElement {
   const row = document.createElement('div')
@@ -13,162 +14,126 @@ function mountRow(): HTMLElement {
   return row
 }
 
-function chip(parent: HTMLElement, path: string): HTMLButtonElement {
+/** One produced-file chip, with the harness's own press handler on it (what the bridge must respect). */
+function chip(parent: HTMLElement, path: string, opened: () => void = () => {}): HTMLButtonElement {
   const el = document.createElement('button')
   el.type = 'button'
   el.setAttribute('title', path)
   el.textContent = path.split('/').pop() ?? path
+  el.addEventListener('click', opened)
   parent.appendChild(el)
   return el
 }
 
-describe('startProducedDiffInjection', () => {
-  it('injects a diff button after each produced-file chip and drives openPath with its title', () => {
+/** A bridge that holds `held` and nothing else, recording every press it is handed. */
+function bridge(held: string[]) {
+  const onMenu = vi.fn()
+  const stop = startProducedChipMenu({
+    isPending: (path) => held.includes(path),
+    onMenu,
+  })
+  return { onMenu, stop }
+}
+
+describe('startProducedChipMenu', () => {
+  it('turns a press on a held file\'s chip into the menu, and keeps DSH out of that press', () => {
     const row = mountRow()
-    const a = chip(row, '/repo/a.txt')
-    const b = chip(row, '/repo/sub/b.ts')
+    const opened = vi.fn()
+    const a = chip(row, '/repo/a.txt', opened)
+    // The press names the chip's own box, bottom edge: the menu hangs under the chip the reader hit.
+    a.getBoundingClientRect = () => ({ left: 40, bottom: 96, right: 80, top: 80, width: 40, height: 16, x: 40, y: 80, toJSON: () => ({}) }) as DOMRect
+    const { onMenu, stop } = bridge(['/repo/a.txt'])
 
-    const openPath = vi.fn()
-    const stop = startProducedDiffInjection('查看差异', openPath)
+    a.click()
 
-    const buttons = row.querySelectorAll<HTMLButtonElement>('[data-diff-approval-produced-diff-btn]')
-    expect(buttons.length).toBe(2)
-    // The button is an icon-only control; the tooltip names the exact file.
-    expect(buttons[0]!.getAttribute('aria-label')).toBe('查看差异: /repo/a.txt')
-    expect(buttons[0]!.getAttribute('title')).toBe('查看差异: /repo/a.txt')
-    expect(buttons[0]!.querySelector('svg')).not.toBeNull()
-    // The chip→button gap is a -4px left margin against the row's 8px gap.
-    expect(buttons[0]!.style.marginLeft).toBe('-4px')
-    // The icon rides the chip's gray text (inlined so it is not overridden).
-    expect(buttons[0]!.style.color).toBe('var(--dsw-alias-label-secondary)')
-    // Each injected button sits right after its chip.
-    expect(a.nextElementSibling).toBe(buttons[0])
-    expect(b.nextElementSibling).toBe(buttons[1])
-
-    act(() => { buttons[0]!.click() })
-    expect(openPath).toHaveBeenCalledWith('/repo/a.txt')
-
-    act(() => { buttons[1]!.click() })
-    expect(openPath).toHaveBeenCalledWith('/repo/sub/b.ts')
-
+    expect(onMenu).toHaveBeenCalledWith({ path: '/repo/a.txt', x: 40, y: 96 })
+    // The harness's own handler is on the chip and never ran: the reader is getting the menu instead
+    // of DSH's open, not in addition to it.
+    expect(opened).not.toHaveBeenCalled()
     stop()
   })
 
-  it('does not inject twice on the same chip, and re-injects chips added later', async () => {
+  it('leaves a chip of a file the panel does not hold entirely alone', () => {
     const row = mountRow()
-    const openPath = vi.fn()
-    const stop = startProducedDiffInjection('查看差异', openPath)
+    const opened = vi.fn()
+    const a = chip(row, '/repo/a.txt', opened)
+    const other = chip(row, '/repo/b.ts')
+    const { onMenu, stop } = bridge(['/repo/b.ts'])
 
-    const a = chip(row, '/repo/a.txt')
-    await Promise.resolve()
-    // First pass saw `a`; a subsequent call must not add a second button.
-    expect(row.querySelectorAll('[data-diff-approval-produced-diff-btn]').length).toBe(1)
-    // A chip added later (e.g. a new turn settled) gets its own button.
-    const c = chip(row, '/repo/c.txt')
-    await Promise.resolve()
-    expect(row.querySelectorAll('[data-diff-approval-produced-diff-btn]').length).toBe(2)
-    expect(c.nextElementSibling).not.toBeNull()
+    a.click()
 
+    // Not the panel's file: DSH's press, untouched.
+    expect(opened).toHaveBeenCalledTimes(1)
+    expect(onMenu).not.toHaveBeenCalled()
+
+    // …and the one it does hold is the menu's.
+    other.click()
+    expect(onMenu).toHaveBeenCalledWith({ path: '/repo/b.ts', x: 0, y: 0 })
     stop()
   })
 
-  it('skips chips without a title path', () => {
+  it('leaves a modifier press alone: that gesture is the harness\'s to grow', () => {
     const row = mountRow()
-    const openPath = vi.fn()
-    const stop = startProducedDiffInjection('查看差异', openPath)
-    const noPath = document.createElement('button')
-    row.appendChild(noPath)
-    expect(row.querySelectorAll('[data-diff-approval-produced-diff-btn]').length).toBe(0)
+    const opened = vi.fn()
+    const a = chip(row, '/repo/a.txt', opened)
+    const { onMenu, stop } = bridge(['/repo/a.txt'])
+
+    for (const modifier of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { altKey: true }, { button: 1 }]) {
+      a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ...modifier }))
+    }
+
+    expect(opened).toHaveBeenCalledTimes(5)
+    expect(onMenu).not.toHaveBeenCalled()
     stop()
   })
 
-  it('gives each chip its own button even when they share a title', async () => {
-    // Several chips can carry the same tooltip text (a harness that renders the
-    // same label for every produced file). Each distinct chip must still get its
-    // own button — the old per-path dedupe collapsed them to a single button.
+  it('ignores a press that is not on a produced-file chip', () => {
     const row = mountRow()
-    const openPath = vi.fn()
-    const stop = startProducedDiffInjection('查看差异', openPath)
-    const a = chip(row, '/repo/a.txt')
-    const b = chip(row, '/repo/a.txt')
-    await Promise.resolve()
-    expect(row.querySelectorAll('[data-diff-approval-produced-diff-btn]').length).toBe(2)
-    expect(a.nextElementSibling?.getAttribute('data-diff-approval-produced-diff-btn')).toBe('1')
-    expect(b.nextElementSibling?.getAttribute('data-diff-approval-produced-diff-btn')).toBe('1')
+    row.appendChild(document.createElement('span'))
+    const chipLike = document.createElement('button')
+    chipLike.setAttribute('title', '/repo/a.txt')
+    document.body.appendChild(chipLike)
+    const { onMenu, stop } = bridge(['/repo/a.txt'])
+
+    chipLike.click()
+    row.querySelector('span')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+
+    expect(onMenu).not.toHaveBeenCalled()
     stop()
   })
 
-  it('cleans up an orphaned button and re-injects for a chip replaced on re-render', async () => {
-    // A React re-render replaces the chip element (removing the old one); the
-    // stale button it leaves behind is dropped and a fresh one is injected for
-    // the new chip, so a re-render never doubles the button.
+  it('replays the chip\'s own press for the default open, without re-entering the menu', () => {
     const row = mountRow()
-    const openPath = vi.fn()
-    const stop = startProducedDiffInjection('查看差异', openPath)
-    const a = chip(row, '/repo/a.txt')
-    await Promise.resolve()
-    expect(row.querySelectorAll('[data-diff-approval-produced-diff-btn]').length).toBe(1)
+    const opened = vi.fn()
+    const a = chip(row, '/repo/a.txt', opened)
+    const { onMenu, stop } = bridge(['/repo/a.txt'])
 
-    a.remove()
-    const fresh = chip(row, '/repo/a.txt')
-    await Promise.resolve()
-    expect(row.querySelectorAll('[data-diff-approval-produced-diff-btn]').length).toBe(1)
-    expect(fresh.nextElementSibling?.getAttribute('data-diff-approval-produced-diff-btn')).toBe('1')
+    a.click()
+    expect(onMenu).toHaveBeenCalledTimes(1)
+
+    // The menu's first row: the very press the reader made, run again — and the bridge stands down for
+    // it, so DSH's handler runs and the menu is not raised a second time.
+    expect(replayChipClick('/repo/a.txt')).toBe(true)
+    expect(opened).toHaveBeenCalledTimes(1)
+    expect(onMenu).toHaveBeenCalledTimes(1)
+
+    // A file with no chip on the page cannot be pressed: the menu's row reports it instead of guessing.
+    expect(replayChipClick('/repo/gone.txt')).toBe(false)
     stop()
   })
 
-  it('mirrors the chip visibility: hides the button when the chip is hidden', async () => {
-    // The harness's narrow-screen container queries hide some `.file` chips with
-    // `display: none`. The injected span button is not subject to that query, so
-    // it must mirror the chip's computed display — a hidden chip must not leave a
-    // visible 查看差异 button floating beside it.
+  it('stops routing when it is cleaned up', () => {
     const row = mountRow()
-    const a = chip(row, '/repo/a.txt')
-    a.style.display = 'none'
-    const openPath = vi.fn()
-    const stop = startProducedDiffInjection('查看差异', openPath)
-    await Promise.resolve()
-    const btn = row.querySelector('[data-diff-approval-produced-diff-btn]') as HTMLElement
-    expect(btn).not.toBeNull()
-    expect(btn.style.display).toBe('none')
-    stop()
-  })
+    const opened = vi.fn()
+    const a = chip(row, '/repo/a.txt', opened)
+    const { onMenu, stop } = bridge(['/repo/a.txt'])
 
-  it('keeps the button shown when its chip is visible', async () => {
-    const row = mountRow()
-    const a = chip(row, '/repo/a.txt')
-    // A visible chip (emulated computed display) must keep the button visible.
-    a.style.display = 'inline-flex'
-    const openPath = vi.fn()
-    const stop = startProducedDiffInjection('查看差异', openPath)
-    await Promise.resolve()
-    const btn = row.querySelector('[data-diff-approval-produced-diff-btn]') as HTMLElement
-    expect(btn).not.toBeNull()
-    expect(btn.style.display).toBe('inline-flex')
-    stop()
-  })
+    a.click()
+    expect(onMenu).toHaveBeenCalledTimes(1)
 
-  it('installs a stylesheet rule carrying the rest + hover colors (inline can\'t hold :hover)', () => {
-    mountRow()
-    const openPath = vi.fn()
-    const stop = startProducedDiffInjection('查看差异', openPath)
-    const style = document.querySelector('style[data-diff-approval-produced-diff]') as HTMLStyleElement
-    expect(style).not.toBeNull()
-    expect(style!.textContent).toContain(`[${'data-diff-approval-produced-diff-btn'}]`)
-    expect(style!.textContent).toContain(':hover')
-    expect(style!.textContent).toContain('rgba(38, 49, 72, 0.06)')
-    expect(style!.textContent).toContain('rgba(38, 49, 72, 0.14)')
     stop()
-  })
-
-  it('cleanup removes the injected buttons and stops watching', async () => {
-    const row = mountRow()
-    const openPath = vi.fn()
-    const stop = startProducedDiffInjection('查看差异', openPath)
-    chip(row, '/repo/a.txt')
-    await Promise.resolve()
-    expect(row.querySelectorAll('[data-diff-approval-produced-diff-btn]').length).toBe(1)
-    stop()
-    expect(row.querySelectorAll('[data-diff-approval-produced-diff-btn]').length).toBe(0)
+    a.click()
+    expect(opened).toHaveBeenCalledTimes(1)
+    expect(onMenu).toHaveBeenCalledTimes(1)
   })
 })

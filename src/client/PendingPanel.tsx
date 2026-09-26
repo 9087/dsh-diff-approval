@@ -43,7 +43,8 @@ import type { HighlightSpan } from './highlight.ts'
 import { highlightWindow } from './highlight.ts'
 import { langFromPath, suffixOfPath } from './lang.ts'
 import { lineRangeLabel, referenceLabelOf } from './reference.ts'
-import { OPEN_FILE_EVENT } from './produced-diff.ts'
+import { CHIP_MENU_EVENT, OPEN_FILE_EVENT, replayChipClick } from './produced-diff.ts'
+import type { ProducedChipMenuDetail } from './produced-diff.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
 import { OPEN_PANEL_FILE_EVENT, PANEL_STATE_EVENT, SHOW_PANEL_EVENT, TOGGLE_PANEL_EVENT } from './dock.tsx'
 import type { PanelFileDetail, PanelStateDetail } from './dock.tsx'
@@ -8079,6 +8080,21 @@ export function PendingPanel({
     window.addEventListener(OPEN_PANEL_FILE_EVENT, onPanelFile)
     return () => { window.removeEventListener(OPEN_PANEL_FILE_EVENT, onPanelFile) }
   }, [])
+  // A press on a produced-file chip of a file this panel holds (see produced-diff.ts) arrives here as
+  // the menu the press asked for. The docked instance stands down, the same way it does for the
+  // summon chord: the footer entry is mounted whether or not a tab is drawn, so one press is answered
+  // once — by that mount — instead of by both.
+  useEffect(() => {
+    if (docked) return
+    const onChipMenu = (event: Event): void => {
+      const detail = (event as CustomEvent<ProducedChipMenuDetail>).detail
+      if (detail === undefined || typeof detail.path !== 'string') return
+      if (typeof detail.x !== 'number' || typeof detail.y !== 'number') return
+      setChipMenu({ path: detail.path, x: detail.x, y: detail.y })
+    }
+    window.addEventListener(CHIP_MENU_EVENT, onChipMenu)
+    return () => { window.removeEventListener(CHIP_MENU_EVENT, onChipMenu) }
+  }, [docked])
   /** Whether the redo-cleared notice is showing (bottom-right, OK to dismiss). */
   const [redoClearedNotice, setRedoClearedNotice] = useState(false)
   /** A last-block keep/revert awaiting the user's remove-or-keep choice; the
@@ -8149,6 +8165,9 @@ export function PendingPanel({
   /** The comments-tab item whose menu is open, if any: which thread, where the press landed, and whether
    *  that press acted on a PICK of comments rather than on the one row it landed on. */
   const [commentMenu, setCommentMenu] = useState<{ id: string; fileId: string; x: number; y: number; picked: boolean } | null>(null)
+  /** The produced-file chip whose menu is open, and where that chip is: the press on a pending file's
+   *  chip is the panel's (see produced-diff.ts), so the panel answers it with the two ways to open it. */
+  const [chipMenu, setChipMenu] = useState<{ path: string; x: number; y: number } | null>(null)
   /** Whether the add-path dialog is open. One dialog covers both shapes: what
    *  the browser settles on decides whether a file or a directory is added. */
   const [addOpen, setAddOpen] = useState(false)
@@ -9130,6 +9149,30 @@ export function PendingPanel({
     [commentMenu?.picked, t],
   )
   /**
+   * The chip menu's rows: the two ways a produced file can be opened now that this plugin is holding
+   * it. The first is DSH's own open — the press the reader made, replayed by `replayChipClick`, which
+   * is the only way to run it faithfully (what the harness does with that press is its business) — and
+   * the second is this panel, which is the whole reason the press was taken over.
+   */
+  const chipMenuItems = useMemo<MenuEntry[]>(() => [
+    { id: 'default', label: t('chip.openDefault') },
+    { id: 'review', label: t('chip.reviewInPanel') },
+  ], [t])
+  /** Open the produced file the chip menu was raised for, the way the reader chose. */
+  const runChipMenu = (id: string): void => {
+    const target = chipMenu
+    setChipMenu(null)
+    if (target === null) return
+    if (id === 'default') {
+      // The chip is looked up by path rather than kept: the row is React's and may have re-rendered
+      // between the press and this pick, and a stale element would swallow the press in silence.
+      if (!replayChipClick(target.path)) showCopyToast(t('chip.gone'))
+      return
+    }
+    if (id !== 'review') return
+    window.dispatchEvent(new CustomEvent(OPEN_FILE_EVENT, { detail: { path: target.path } }))
+  }
+  /**
    * End what the comment menu was opened on: that one comment, or every picked one.
    *
    * A comment belongs to the host, so ending it is a host action like the block's own menu offers: the
@@ -9667,6 +9710,21 @@ export function PendingPanel({
           restarts it rather than reusing the half-faded one. */}
       {coverNotice !== null && (
         <CoverageNotice key={coverNotice.n} t={t} cover={cover} changed={coverNotice.edge} />
+      )}
+      {/* The produced-file chip's menu. It hangs under a chip in the conversation, so it is drawn
+          here — outside the panel's own frame, which a closed panel does not render at all — and it
+          is a portal like every other menu, so nothing about the panel's layout can clip it. */}
+      {chipMenu !== null && (
+        <Menu
+          open
+          portal
+          compact
+          items={chipMenuItems}
+          onSelect={runChipMenu}
+          onClose={() => { setChipMenu(null) }}
+          getAnchorRect={() => new DOMRect(chipMenu.x, chipMenu.y, 0, 0)}
+          anchor={<span className={css.rowMenuAnchor} />}
+        />
       )}
       {/* Covering everything keeps an 8px inset, so a layer painted with the
           sidebar's fill hides the app behind those seams instead of letting it

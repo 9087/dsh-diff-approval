@@ -3561,6 +3561,59 @@ describe('PendingPanel', () => {
     })
   })
 
+  it('answers a pending file\'s chip press with its own menu, closed panel and all', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    // A produced-file chip in the conversation, carrying the harness's own press handler — the thing
+    // the menu's first row has to replay rather than replace.
+    const row = document.createElement('div')
+    row.setAttribute('data-produced-files-row', '')
+    document.body.appendChild(row)
+    const chip = document.createElement('button')
+    chip.type = 'button'
+    chip.setAttribute('title', FILE.path)
+    const opened = vi.fn()
+    chip.addEventListener('click', opened)
+    row.appendChild(chip)
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
+        detail: { path: FILE.path, x: 10, y: 20 },
+      }))
+    })
+    const items = [...document.querySelectorAll('[role="menuitem"]')]
+    expect(items.map(item => item.textContent)).toEqual(['chip.openDefault', 'chip.reviewInPanel'])
+
+    // The first row is DSH's own press, run on the chip itself: and the panel does NOT open.
+    fireEvent.click(items[0]!)
+    expect(opened).toHaveBeenCalledTimes(1)
+    expect(document.querySelector('[data-diff-approval-diff]')).toBeNull()
+
+    // The second row is this panel, through the same bridge a chip used before it became a menu.
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
+        detail: { path: FILE.path, x: 10, y: 20 },
+      }))
+    })
+    fireEvent.click([...document.querySelectorAll('[role="menuitem"]')][1]!)
+    await waitFor(() => { expect(document.querySelector('[data-diff-approval-diff]')).not.toBeNull() })
+    row.remove()
+  })
+
+  it('says so when the chip menu\'s default open has no chip left to press', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
+        detail: { path: FILE.path, x: 10, y: 20 },
+      }))
+    })
+    fireEvent.click([...document.querySelectorAll('[role="menuitem"]')][0]!)
+
+    await waitFor(() => { expect(screen.getAllByText('chip.gone').length).toBeGreaterThanOrEqual(1) })
+  })
+
   it('records the docked tab\'s place as its tab closes', () => {
     // The docked panel's "close" is its tab closing, which unmounts this instance:
     // that closer has to remember the place like the overlay's ✕ does, even though

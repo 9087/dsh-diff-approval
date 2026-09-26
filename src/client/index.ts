@@ -8,7 +8,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 // Type-only: brings the `settings.section` SlotMap entry into this program.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import { PendingPanel, SIDEBAR_AUTO_COLLAPSE_PX } from './PendingPanel.tsx'
+import { diffPathsMatch, PendingPanel, SIDEBAR_AUTO_COLLAPSE_PX } from './PendingPanel.tsx'
 import { pasteReferenceIntoComposer } from './composer-cover.ts'
 import type { PendingPanelProps } from './PendingPanel.tsx'
 import { PanelBoundary } from './boundary.tsx'
@@ -17,7 +17,7 @@ import { createDiffApprovalPort } from './port.ts'
 import { createPendingDiffStore } from './store.ts'
 import { attachReferenceRemap } from './remap-sync.ts'
 import { conversationAccess } from './conversation-access.ts'
-import { OPEN_FILE_EVENT, startProducedDiffInjection } from './produced-diff.ts'
+import { CHIP_MENU_EVENT, startProducedChipMenu } from './produced-diff.ts'
 import type { PendingPanelFace } from './slots.ts'
 import { attachDiffDock, createDockState, DIFF_DOCK_ID, DiffDockBody, DiffDockTitle } from './dock.tsx'
 import type { DockHostContext } from './dock.tsx'
@@ -323,16 +323,22 @@ export function apply(ctx: ClientContext): void {
     // No docked tab in this host.
   }
 
-  // Inject a "查看差异" button beside every DSH produced-file chip so the panel
-  // can be opened on that file directly from the turn's deliverables. This is a
-  // DOM-injection bridge (the harness's ProducedFiles component is untouched):
-  // clicking dispatches a window event the panel listens for, which opens and
-  // selects the file when it is still pending, or toasts otherwise.
+  // A produced-file chip's own press is a branch: for a file the panel is holding, the press
+  // belongs to the panel and becomes a menu (DSH's own open, or the review panel); for every other
+  // file the press is left exactly as DSH has it. This is a DOM-level bridge (the harness's
+  // ProducedFiles component is untouched) and it injects no control of its own — see produced-diff.ts.
   if (typeof window !== 'undefined') {
-    ctx.effect(() => startProducedDiffInjection(
-      t('panel.viewDiff'),
-      (path) => window.dispatchEvent(new CustomEvent(OPEN_FILE_EVENT, { detail: { path } })),
-    ), 'diff-approval: produced-files diff buttons')
+    ctx.effect(() => startProducedChipMenu({
+      // The panel's list, read at press time: the press is prevented on this answer, so it cannot
+      // wait for a poll to settle.
+      isPending: (path) => {
+        const snapshot = store.getSnapshot()
+        return snapshot.files.some(file => diffPathsMatch(path, file.path, snapshot.workspacePath))
+      },
+      onMenu: (detail) => {
+        window.dispatchEvent(new CustomEvent(CHIP_MENU_EVENT, { detail }))
+      },
+    }), 'diff-approval: produced-file chip menu')
   }
 
   // Now the optional part: discover the right sidebar, register the tab type, and
