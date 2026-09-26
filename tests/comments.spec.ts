@@ -75,6 +75,24 @@ describe('loadAll', () => {
     ])
   })
 
+  it('keeps the mark an agent\'s own annotation carries', async () => {
+    // `commentOf` is the only door a stored row comes back through, so a field it does not copy survives
+    // exactly until the next host restart — and an agent's card came back drawn as the reader's own words
+    // for exactly that reason, which is invisible until a reload.
+    const first = await store()
+    first.add(comment({ id: 'c-agent', author: 'agent' }))
+    first.add(comment({ id: 'c-reader' }))
+    await first.settled()
+    const second = new CommentStore(root)
+    await expect(second.loadAll()).resolves.toBe(2)
+    expect(second.list(S1).find(row => row.id === 'c-agent'))
+      .toEqual(comment({ id: 'c-agent', author: 'agent' }))
+    // The reader's own comments are written without it, and absent stays absent.
+    const reader = second.list(S1).find(row => row.id === 'c-reader')
+    expect(reader).toEqual(comment({ id: 'c-reader' }))
+    expect(reader).not.toHaveProperty('author')
+  })
+
   it('keeps each session in its own file, and lists only that session', async () => {
     const comments = await store()
     comments.add(comment())

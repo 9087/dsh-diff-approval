@@ -1957,6 +1957,45 @@ describe('PendingPanel', () => {
     }
   })
 
+  it('draws an agent-authored annotation as the agent\'s turn, not the reader\'s', () => {
+    // The panel draws a thread's first turn as the reader's own words, which is what every comment the
+    // reader makes is. An annotation the AGENT placed on the code (see `annotate-tool.ts`) is the other
+    // direction: it is the agent's explanation of those lines, and drawing it as something the reader
+    // said would put words in their mouth. `record.author` is the one field that says which.
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-agent', path: '/repo/agent.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\n' })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [
+        {
+          ...comment({ id: 'd-agent', entryId: file.id, text: '1. 这三行是一次调用链。', anchor: { startLine: 2, endLine: 2 }, quote: 'b' }),
+          author: 'agent',
+        },
+        comment({ id: 'd-reader', entryId: file.id, text: '这一行是读者写的。', anchor: { startLine: 3, endLine: 3 }, quote: 'c' }),
+      ],
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const cardOf = (id: string): HTMLElement =>
+      document.querySelector(`[data-diff-discussion-id="${id}"]`) as HTMLElement
+    const agent = cardOf('d-agent')
+    // The role IS the placement: `.discussionUser` is the reader's own turn — a bubble hugging its text
+    // against the thread's RIGHT edge — while `.discussionAnswer` is plain text on the left. An agent's
+    // annotation is the agent speaking, so it takes the left-hand shape and leaves the bubble for what
+    // the reader actually wrote.
+    expect(agent.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('1. 这三行是一次调用链。')
+    expect(agent.querySelector('[data-diff-discussion-user]')).toBeNull()
+    const reader = cardOf('d-reader')
+    expect(reader.querySelector('[data-diff-discussion-user]')?.textContent).toBe('这一行是读者写的。')
+    expect(reader.querySelector('[data-diff-discussion-reply]')).toBeNull()
+    // The step number is the note's own first characters — the panel draws no number of its own — so the
+    // list item opens with it and a walkthrough can be read in order from the list as well.
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    expect(document.querySelector('[data-diff-comment-link="d-agent"] [data-diff-comment-title]')?.textContent)
+      .toBe('1. 这三行是一次调用链。')
+  })
+
   it('lands a stacked comment jump on the card the jump named, not on the first card of the row', () => {
     // The report: two comment boxes hang off the SAME line, and jumping to the second one landed the
     // TOP of the stack — the first box — so the reader could not tell the two apart by where the jump
@@ -2104,6 +2143,31 @@ describe('PendingPanel', () => {
     const size = (name: string): number => Number.parseFloat(/font-size:\s*([\d.]+)px/.exec(rule(name))?.[1] ?? '0')
     expect(size('commentGroupName')).toBeLessThan(size('commentTitle'))
     expect(rule('commentGroupName')).toContain('color: var(--dsw-alias-label-tertiary)')
+  })
+
+  it('lists the comments in the order they were added, not the order their lines run', () => {
+    // The list is for reading a conversation about code, and a walkthrough's cards sit wherever the lines
+    // they are about sit — so the order that means anything is the order they ARRIVED. Both other orders
+    // (file name, row number) say the opposite here, which is what makes this a test rather than a
+    // restatement: zeta's lower line is written first, then zeta's upper line, and alpha.txt last.
+    act(() => { setCommentModeEnabled(true) })
+    const zeta = entry({ id: 'entry-z', path: '/repo/zeta.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\n' })
+    const alpha = entry({ id: 'entry-a', path: '/repo/alpha.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
+    const at = (id: string, entryId: string, line: number, createdAt: number) =>
+      comment({ id, entryId, text: `第 ${line} 行`, anchor: { startLine: line, endLine: line }, createdAt })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [alpha, zeta],
+      busy: new Set(),
+      comments: [at('d-z5', zeta.id, 5, 10), at('d-z2', zeta.id, 2, 20), at('d-a1', alpha.id, 1, 30)],
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    expect([...document.querySelectorAll('[data-diff-comment-link]')].map(item => item.getAttribute('data-diff-comment-link')))
+      .toEqual(['d-z5', 'd-z2', 'd-a1'])
+    // …and the groups follow the first card each file gained, not the file's name.
+    expect([...document.querySelectorAll('[data-diff-comment-group-name]')].map(name => name.textContent))
+      .toEqual(['zeta.txt', 'alpha.txt'])
   })
 
   it('ends a comment from the list, and takes its block with it', () => {

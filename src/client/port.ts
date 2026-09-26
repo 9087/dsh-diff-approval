@@ -207,6 +207,10 @@ function commentOf(value: unknown): CommentRecord | undefined {
     ? row.quoteLines.filter((line): line is CommentQuoteLine => typeof line === 'object' && line !== null)
     : []
   const asks = asksOf(row.asks)
+  // The mark an AGENT-authored annotation carries, validated like every other field: this function is the
+  // only door a comment record comes through on this side, so a field it does not copy is a field the
+  // panel never sees — the card would be drawn as the reader's own words, in the reader's own bubble.
+  const author = row.author === 'agent' ? 'agent' as const : undefined
   return {
     id,
     sessionId: sessionId as SessionId,
@@ -217,6 +221,7 @@ function commentOf(value: unknown): CommentRecord | undefined {
     text,
     createdAt,
     updatedAt,
+    ...(author === undefined ? {} : { author }),
     ...(typeof context === 'string' && context !== '' ? { quoteContext: context } : {}),
     ...(quoteLines.length > 0 ? { quoteLines } : {}),
     ...(asks.length > 0 ? { asks } : {}),

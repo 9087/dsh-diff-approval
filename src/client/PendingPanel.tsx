@@ -1010,7 +1010,12 @@ function discussionOfRecord(
   const asks = record.asks ?? []
   const last = asks.at(-1)
   const answered = last === undefined ? undefined : answers[last.requestId]
-  const messages: DiscussionMessage[] = [{ role: 'user', text: record.text }]
+  const messages: DiscussionMessage[] = [
+    // The first turn is whoever wrote the annotation: the reader's own words for a comment they made,
+    // and the agent's for a card the agent placed on the code (see `CommentRecord.author`). Drawing the
+    // agent's explanation as the reader's would put words in their mouth.
+    { role: record.author === 'agent' ? 'assistant' : 'user', text: record.text },
+  ]
   asks.forEach((ask, index) => {
     // The first question IS the annotation: the reader popped the compose row on those rows and its
     // words became `record.text`, so drawing `ask.text` too would show the same sentence twice.
@@ -8971,9 +8976,15 @@ export function PendingPanel({
    * reference the thread's own header wears, with the path left off (the group above IS that file) and
    * nothing in front of the numbers, which are the whole label at that point. Its title is the first
    * sentence of what the reader asked (the first turn is the annotation; later ones are follow-ups), and
-   * an outdated one says so — the same state the block itself is wearing (see `[data-lost]`). Within a
-   * group the comments keep the order their rows run, and the groups keep the list's own order (the file
-   * name).
+   * an outdated one says so — the same state the block itself is wearing (see `[data-lost]`).
+   *
+   * The list reads in the order things were ADDED, not the order the code runs. A walkthrough's cards sit
+   * wherever the lines they are about sit — often not in reading order, and often in different files — and
+   * what tells the reader which comes next is when it arrived (and, for a flow, the number its own header
+   * carries). So the items of a group keep their arrival order, and the groups themselves are ordered by
+   * the first card each one gained. The host hands them over oldest-first (`CommentStore.list`); this
+   * sorts on the record's own `createdAt` regardless, so a payload that stopped being ordered that way
+   * could not quietly turn the list back into a second view of the file.
    *
    * The records come from the snapshot, which is also where they go: a comment is the host's, shared
    * with every client of the session, and this pane is a second view of it rather than a second copy
@@ -8990,8 +9001,20 @@ export function PendingPanel({
       if (list === undefined) byFile.set(record.entryId, [record])
       else list.push(record)
     }
-    return files
-      .map(file => ({
+    /** When a group's first card arrived: what the groups themselves are ordered by. */
+    const firstAdded = (records: readonly CommentRecord[]): number =>
+      records.reduce((earliest, record) => Math.min(earliest, record.createdAt), Number.POSITIVE_INFINITY)
+    return [...byFile]
+      .flatMap(([fileId, records]) => {
+        // A comment whose file has left the list is not shown at all: this pane lists what the session
+        // still has pending, and the row such a card hangs under left the list with the file.
+        const file = files.find(candidate => candidate.id === fileId)
+        return file === undefined ? [] : [{ file, records }]
+      })
+      // The groups follow the first card each one gained, the way the items inside them follow their own
+      // arrival — so a walkthrough that moves between files reads in the order it was written.
+      .sort((left, right) => firstAdded(left.records) - firstAdded(right.records))
+      .map(({ file, records }) => ({
         fileId: file.id,
         // The file's own name: what the file list shows it as, and what the reader calls it. Two files of
         // the same name in different directories then share a heading, which is what the path in each
@@ -9000,7 +9023,10 @@ export function PendingPanel({
         // …and the full path, which is what an item names on hover: a name can be shared, and this is how
         // the reader tells which file a comment is in without opening it.
         path: file.path,
-        entries: (byFile.get(file.id) ?? []).map(record => {
+        // The items keep their arrival order (oldest first). `sort` is stable, so cards stamped in the
+        // same millisecond — several placed in one turn — keep the order the store handed them over in,
+        // which is the order they were added.
+        entries: [...records].sort((left, right) => left.createdAt - right.createdAt).map(record => {
           const written = commentTitle(record.text)
           const empty = written === ''
           // Where the comment is NOW, as the host resolved it, and where the record says it was

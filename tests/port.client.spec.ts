@@ -86,6 +86,41 @@ describe('list', () => {
     expect(seam.call).toHaveBeenCalledWith('/diff-approval', 'list', { sessionId: 'session-1' })
   })
 
+  it('keeps the mark an agent-authored annotation carries', async () => {
+    // This is the panel's own door for every comment record — the host has another (`commentOf` in
+    // `src/comments.ts`) — so a field this one does not copy is a field the card cannot be drawn from. An
+    // agent's annotation came through here without its mark and was drawn as the reader's own words, in the
+    // reader's bubble; both doors have a test now, because either one dropping it looks the same on screen.
+    const seam = fakeRpc({
+      list: {
+        ok: true,
+        value: {
+          commentsRevision: 1,
+          comments: [
+            {
+              id: 'c-agent', sessionId: 'session-1', entryId: 'e1', path: '/repo/a.txt',
+              anchor: { startLine: 3, endLine: 3 }, quote: 'a', text: '1. 入口在这里。',
+              createdAt: 11, updatedAt: 12, author: 'agent',
+            },
+            {
+              id: 'c-reader', sessionId: 'session-1', entryId: 'e1', path: '/repo/a.txt',
+              anchor: { startLine: 4, endLine: 4 }, quote: 'b', text: '这一行是什么？',
+              createdAt: 13, updatedAt: 14,
+            },
+          ],
+          files: [],
+        },
+      },
+    })
+    const read = await createDiffApprovalPort(seam.rpc).list(S1)
+    expect(read.comments.map(comment => [comment.id, comment.author])).toEqual([
+      ['c-agent', 'agent'],
+      ['c-reader', undefined],
+    ])
+    // Absent stays absent: the reader's own comments carry no mark at all.
+    expect(read.comments[1]).not.toHaveProperty('author')
+  })
+
   it('omits workspacePath when the host sends none', async () => {
     const seam = fakeRpc({ list: { ok: true, value: { files: [] } } })
     // The comments ride the same read, so a host that sends none reads as "no comments

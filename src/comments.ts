@@ -74,6 +74,10 @@ function commentOf(value: unknown): CommentRecord | undefined {
   const quoteLines = Array.isArray(row.quoteLines)
     ? row.quoteLines.filter((entry): entry is CommentQuoteLine => typeof entry === 'object' && entry !== null)
     : []
+  // The field an AGENT-authored annotation carries, validated here like every other one: this function is
+  // the only door a stored row comes back through, so a field it does not copy is a field that survives
+  // exactly until the next host restart — the card would come back drawn as the reader's own words.
+  const author = row.author === 'agent' ? 'agent' as const : undefined
   return {
     id,
     sessionId: sessionId as SessionId,
@@ -84,6 +88,7 @@ function commentOf(value: unknown): CommentRecord | undefined {
     text,
     createdAt,
     updatedAt,
+    ...(author === undefined ? {} : { author }),
     ...(typeof context === 'string' && context !== '' ? { quoteContext: context } : {}),
     ...(quoteLines.length > 0 ? { quoteLines } : {}),
     ...(asksOf(row.asks).length > 0 ? { asks: asksOf(row.asks) } : {}),
