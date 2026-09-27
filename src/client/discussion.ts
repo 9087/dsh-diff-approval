@@ -12,6 +12,9 @@
 // comment: one bound for both, so the figure the list shows and the place this half draws the card
 // cannot come from two different rules (see `comment-lines.ts`).
 import { reanchorWithinLimit } from '../comment-lines.ts'
+// The record's own gutter pair, which is the shape a frame read off a stored comment arrives in: the
+// same fields this module's `DiscussionQuoteLine` carries, from the half that keeps them.
+import type { CommentQuoteLine } from '../types.ts'
 
 /** One row range in the current diff model (inclusive, 0-based row indices). */
 export interface DiscussionAnchor {
@@ -705,6 +708,26 @@ export function quotedFrame(
       return number === undefined ? `${marker} ${text}` : `${marker} ${number}  ${text}`
     })
     .join('\n')
+}
+
+/**
+ * Whether a frame's numbers all come from the OLD file.
+ *
+ * A frame of removed rows alone names no line the file still has, so the numbers its record carries
+ * (`anchor`, and the line a jump is handed) are the old file's. Everything that would otherwise
+ * present them as current lines asks this first: the label a card and a list item wear, and the
+ * landing a jump to that comment makes. A record that kept no sides answers false — what it holds is
+ * read exactly as it always was.
+ *
+ * @param quoteLines - the frame's gutter numbers and sides, when the record kept them.
+ * @returns true when the frame holds at least one row and none of them has a new-file line.
+ */
+export function frameNamesNoCurrentLine(
+  quoteLines: readonly DiscussionQuoteLine[] | readonly CommentQuoteLine[] | undefined,
+): boolean {
+  return quoteLines !== undefined
+    && quoteLines.length > 0
+    && quoteLines.every(line => line.new === undefined)
 }
 
 /**

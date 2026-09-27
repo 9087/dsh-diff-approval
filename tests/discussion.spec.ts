@@ -3,7 +3,7 @@ import { REANCHOR_MAX_LINES } from '../src/comment-lines.ts'
 import {
   DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, discussionOnRange,
   discussionOverlapping, discussionPlainText, discussionRowExtras, discussionRows, discussionRounds,
-  discussionRuns, discussionText, frameCoversRemovedRow, quotedFrame, remapDiscussion, remapDiscussions,
+  discussionRuns, discussionText, frameCoversRemovedRow, frameNamesNoCurrentLine, quotedFrame, remapDiscussion, remapDiscussions,
   selectionFrame, stripBlankLines,
 } from '../src/client/discussion.ts'
 import type { Discussion } from '../src/client/discussion.ts'
@@ -472,6 +472,14 @@ describe('discussions in the diff row stream', () => {
     expect(frameCoversRemovedRow([{ old: 2, kind: 'del' }])).toBe(true)
     expect(frameCoversRemovedRow([{ old: 1, new: 1, kind: 'context' }, { new: 2, kind: 'add' }])).toBe(false)
     expect(frameCoversRemovedRow(undefined)).toBe(false)
+    // A frame whose rows ALL come from the old file is the one whose numbers are the old file's: that
+    // is the case every reader-facing number has to own up to (see `frameNamesNoCurrentLine`).
+    expect(frameNamesNoCurrentLine([{ old: 2, kind: 'del' }, { old: 3, kind: 'del' }])).toBe(true)
+    expect(frameNamesNoCurrentLine([{ old: 1, new: 1, kind: 'context' }, { old: 2, kind: 'del' }])).toBe(false)
+    expect(frameNamesNoCurrentLine([{ new: 2, kind: 'add' }])).toBe(false)
+    // No sides kept, or no frame at all: nothing to claim either way.
+    expect(frameNamesNoCurrentLine(undefined)).toBe(false)
+    expect(frameNamesNoCurrentLine([])).toBe(false)
   })
 
   it('offers keep/revert only over change blocks, and never a second discussion', () => {

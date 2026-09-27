@@ -25,7 +25,7 @@ import { blockRangesOf, changeBlocksOf, computeIntraLineDiff, computeWholeFileDi
 import {
   DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, discussionOverlapping,
   discussionRowExtras, discussionRows, discussionRounds, discussionRuns, discussionStackOffsets,
-  discussionText, frameCoversRemovedRow, quotedFrame, remapDiscussions, selectionFrame,
+  discussionText, frameCoversRemovedRow, frameNamesNoCurrentLine, quotedFrame, remapDiscussions, selectionFrame,
 } from './discussion.ts'
 import type { Discussion, DiscussionMessage, DiscussionQuoteLine } from './discussion.ts'
 import { frameFollowIsAnimated, frameFollowKeyframes } from './scroll-follow.ts'
@@ -936,18 +936,30 @@ function commentTitle(text: string): string {
  * @param line - the new-file line to find.
  * @returns the row index, or undefined when no row reads before that line.
  */
-function rowOfLine(rows: readonly WholeFileDiffRow[], line: number): number | undefined {
+export function rowOfLine(rows: readonly WholeFileDiffRow[], line: number, oldSide = false): number | undefined {
   let before: number | undefined
   let removed: number | undefined
+  let named: number | undefined
   for (let index = 0; index < rows.length; index++) {
     const row = rows[index]!
     const value = row.newLine ?? row.oldLine
     if (value === undefined) continue
-    if (row.newLine === line) return index
-    if (value === line && removed === undefined) removed = index
+    // The row the file as it reads NOW calls that line, and the removal that carried that number in the
+    // old file. Both are collected rather than returned on the spot, because which one the caller means
+    // is the third argument: a comment written on a removed line has no current line at all, and the
+    // number it holds happens to name a DIFFERENT line of the file now (see `frameNamesNoCurrentLine`).
+    if (row.newLine === line) {
+      if (named === undefined) named = index
+    } else if (value === line && removed === undefined) {
+      removed = index
+    }
     if (value < line) before = index
   }
-  return removed ?? before
+  // Old side, and a removal does carry it: that removal is the answer, and the current line that reads
+  // that number is not. Otherwise the lookup is exactly what it always was — the current line first,
+  // then a removal, then the last row before the number.
+  if (oldSide && removed !== undefined) return removed
+  return named ?? removed ?? before
 }
 
 /**
@@ -1150,6 +1162,12 @@ interface PendingDiffProps {  file: PendingFileDiff
    * not own (see `rowOfLine`).
    */
   landingLine?: number | undefined
+  /**
+   * Whether that fallback line came from the OLD file, when the comment's frame held no current line
+   * at all (see `frameNamesNoCurrentLine`). It changes which row the number resolves to: the removal
+   * that carries it, rather than whatever current line happens to read that number now.
+   */
+  landingOld?: boolean | undefined
   /** The comment a jump is for, when it came from the list's comments tab. This pane draws that
    *  thread, so its `anchor.end` IS the row its box hangs at — the one place the row can be read
    *  without going through a line number at all. */
@@ -3698,7 +3716,7 @@ export function inlineItemCount(widths: readonly number[], available: number, ga
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, landingLine, landingComment, landingCard, onLanded, failedMessage, commentSkill, comments, commentAnswers, commentsRevision, commentLines, onCommentAdd, onCommentRemove, onCommentAsk, onPasteReference, onToast, t, onAddTypedPath, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
+function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, landingLine, landingOld, landingComment, landingCard, onLanded, failedMessage, commentSkill, comments, commentAnswers, commentsRevision, commentLines, onCommentAdd, onCommentRemove, onCommentAsk, onPasteReference, onToast, t, onAddTypedPath, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -4317,7 +4335,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
         : Math.max(0, Math.min(cardEnd, Math.max(0, model.diff.rows.length - 1)))
       const row = landingRow
         ?? cardRow
-        ?? (landingLine === undefined ? undefined : rowOfLine(model.diff.rows, landingLine))
+        ?? (landingLine === undefined ? undefined : rowOfLine(model.diff.rows, landingLine, landingOld === true))
       landingTopRef.current = landingTop
       landingRowRef.current = row
       landingCardRef.current = landingCard === true
@@ -5613,9 +5631,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     // OLD file's: the label says which file they came from rather than pointing the reader (and the
     // question) at whatever line now happens to read that number. A comment the host placed, or one
     // whose frame kept no sides, is labelled exactly as before.
-    const oldOnly = resolved === undefined
-      && discussion.quoteLines !== undefined
-      && discussion.quoteLines.every(line => line.new === undefined)
+    const oldOnly = resolved === undefined && frameNamesNoCurrentLine(discussion.quoteLines)
     return oldOnly ? `${label}${t('discussion.deletedLabel')}` : label
   }
   const rowAtY = (y: number): number => {
@@ -7957,7 +7973,7 @@ export function PendingPanel({
    * detail is the pane drawing its box and knows the row it hangs at (see the resolution effect). The
    * line is what that resolve falls back to, and it is all a request that names no comment has.
    */
-  const [landing, setLanding] = useState<{ fileId: string; top?: number | undefined; row?: number | undefined; line?: number | undefined; card?: boolean | undefined; comment?: string | undefined; n: number } | undefined>(undefined)
+  const [landing, setLanding] = useState<{ fileId: string; top?: number | undefined; row?: number | undefined; line?: number | undefined; old?: boolean | undefined; card?: boolean | undefined; comment?: string | undefined; n: number } | undefined>(undefined)
   /** Ask the diff to land on one file: its first change unless `top` says where, or the row/line a
    *  jump to a comment names (which lands the way a change-block jump does, see `landingRow`). `card`
    *  lands the thread's own box instead of the rows it named, which is what the list's comments tab
@@ -7973,8 +7989,9 @@ export function PendingPanel({
     card?: boolean,
     line?: number | undefined,
     comment?: string | undefined,
+    old?: boolean | undefined,
   ): void => {
-    setLanding(prev => ({ fileId, top, row, line, card, comment, n: (prev?.n ?? 0) + 1 }))
+    setLanding(prev => ({ fileId, top, row, line, old, card, comment, n: (prev?.n ?? 0) + 1 }))
   }
   /** The selection as the latest render has it, for the closers that run from a
    *  cleanup (the docked tab unmounting) rather than from a handler. */
@@ -9491,16 +9508,23 @@ export function PendingPanel({
           const resolved = snapshot.commentLines[record.id]
           const start = resolved?.start ?? record.anchor.startLine
           const end = resolved?.end ?? record.anchor.endLine
+          // The numbers a comment the host could not place carries are the OLD file's when its frame
+          // held no current line at all: the item says so, the way the card's own header does.
+          const oldOnly = resolved === undefined && frameNamesNoCurrentLine(record.quoteLines)
           return {
             id: record.id,
             fileId: file.id,
             // The lines the comment's box hangs below: the LAST one, because the box sits under the
             // row its range ends in, and that row is what a jump to the box has to name.
             line: end,
+            // …and the same numbers are what the jump resolves, so it is told which file they came
+            // from: it lands on the REMOVAL that carries that old number rather than on whatever
+            // current line now reads it (see `frameNamesNoCurrentLine`).
+            oldSide: oldOnly,
             // The file itself is the group above, so the reference is cut to what is left of it: the lines
             // it names — `[8]`, or `[10-17]` for a range — bracketed so the row opens with a marker rather
             // than with a bare digit that could be anything.
-            label: `[${lineRangeLabel(start, end)}]`,
+            label: `[${lineRangeLabel(start, end)}]${oldOnly ? t('discussion.deletedLabel') : ''}`,
             // Nothing written yet: the item says what the comment box is asking for, in the box's own
             // words (a comment the host holds with no text is one the reader never finished; the panel
             // does not write those, but a record from elsewhere can be one).
@@ -9539,10 +9563,13 @@ export function PendingPanel({
    *  handed over is the one the panel believes the comment is on — the detail's own resolved line when
    *  that file has been opened, the record's stored one otherwise (see `commentGroups`) — and the
    *  thread's own id goes with it: the detail holds the block, so it can put the row the box actually
-   *  hangs at under the reader without depending on a number this list can only guess at. */
-  const jumpToComment = (fileId: string, line: number, id: string): void => {
+   *  hangs at under the reader without depending on a number this list can only guess at. `oldSide`
+   *  says which file that fallback number came from: a frame of removed rows alone holds an OLD-file
+   *  line, and the detail lands on the removal carrying it rather than on the current line that now
+   *  reads that number (see `frameNamesNoCurrentLine`). */
+  const jumpToComment = (fileId: string, line: number, id: string, oldSide: boolean): void => {
     if (fileId !== selected) setSelected(fileId)
-    landOn(fileId, undefined, undefined, true, line, id)
+    landOn(fileId, undefined, undefined, true, line, id, oldSide)
   }
   /**
    * The comment menu's rows: the action a thread has, named exactly as the block's own overflow menu
@@ -9783,7 +9810,7 @@ export function PendingPanel({
                               // comment, so it becomes the anchor a Shift press measures from.
                               setCommentAnchor(entry.id)
                               clearPicked()
-                              jumpToComment(entry.fileId, entry.line, entry.id)
+                              jumpToComment(entry.fileId, entry.line, entry.id, entry.oldSide)
                             }}
                             onContextMenu={(event) => {
                               // The browser's own menu has nothing to say about a comment, and the actions
@@ -9800,7 +9827,7 @@ export function PendingPanel({
                               if (event.key !== 'Enter' && event.key !== ' ') return
                               event.preventDefault()
                               clearPicked()
-                              jumpToComment(entry.fileId, entry.line, entry.id)
+                              jumpToComment(entry.fileId, entry.line, entry.id, entry.oldSide)
                             }}
                           >
                             {/* One line: what was asked, then where in the file it sits — the title takes
@@ -10355,6 +10382,7 @@ export function PendingPanel({
                     landingTick={landing !== undefined && landing.fileId === selectedFile.id ? landing.n : 0}
                     landingRow={landing !== undefined && landing.fileId === selectedFile.id ? landing.row : undefined}
                     landingLine={landing !== undefined && landing.fileId === selectedFile.id ? landing.line : undefined}
+                    landingOld={landing !== undefined && landing.fileId === selectedFile.id ? landing.old : undefined}
                     landingComment={landing !== undefined && landing.fileId === selectedFile.id ? landing.comment : undefined}
                     landingCard={landing !== undefined && landing.fileId === selectedFile.id ? landing.card : undefined}
                     // The landing is an ask, not a state: once the pane showing the file has taken

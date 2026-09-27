@@ -10,7 +10,8 @@ import { Component, useSyncExternalStore } from 'react'
 import type { ComponentProps, ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { CommentRecord, PendingFileDiff } from '../src/types.ts'
-import { OPEN_PANEL_FILE_EVENT, PendingPanel, fittingItems, frameInsets, inlineItemCount, makeMeasurer, wrapChipRows, MIN_LIST_WIDTH_PX } from '../src/client/PendingPanel.tsx'
+import { OPEN_PANEL_FILE_EVENT, PendingPanel, fittingItems, frameInsets, inlineItemCount, makeMeasurer, rowOfLine, wrapChipRows, MIN_LIST_WIDTH_PX } from '../src/client/PendingPanel.tsx'
+import { computeWholeFileDiff } from '../src/client/whole-file-diff.ts'
 import panelCss from '../src/client/PendingPanel.module.css'
 import { codeFontCss } from '../src/client/code-font.ts'
 import { zh } from '../src/client/locales.ts'
@@ -12137,6 +12138,46 @@ describe('PendingPanel: the rows a comment covers', () => {
     // The line is 2, but the label names it as the OLD file's — the file's own line 2 is `C`.
     expect(prompt).toContain('discussion.marker (/repo/gone.txt:2discussion.deletedLabel)')
     expect(prompt).toContain('- 2  B')
+  })
+
+  it('lists a removal-only comment as the old file\'s', () => {
+    // The item's label is built from the record when the host could not place the comment, and for a
+    // frame of removed rows alone those numbers are the OLD file's: the item says so, exactly as the
+    // card's own header does — while a comment whose frame names a current line is labelled as ever.
+    const gone = entry({ id: 'entry-gone', path: '/repo/gone.txt', oldText: 'A\nB\nC\n', newText: 'A\nC\n' })
+    const kept = entry({ id: 'entry-kept', path: '/repo/kept.txt', oldText: 'p\nq\n', newText: 'p\nQ\n' })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [gone, kept],
+      busy: new Set(),
+      comments: [
+        comment({
+          id: 'd-removal', entryId: gone.id, path: gone.path, text: '这行为什么删了？',
+          anchor: { startLine: 2, endLine: 2 }, quote: 'B', quoteLines: [{ old: 2, kind: 'del' }],
+        }),
+        comment({
+          id: 'd-live', entryId: kept.id, path: kept.path, text: '这行为什么改了？',
+          anchor: { startLine: 2, endLine: 2 }, quote: 'Q', quoteLines: [{ new: 2, kind: 'add' }],
+        }),
+      ],
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    const labelOf = (id: string): string | undefined =>
+      document.querySelector(`[data-diff-comment-link="${id}"] [data-diff-comment-label]`)?.textContent ?? undefined
+    expect(labelOf('d-removal')).toBe('[2]discussion.deletedLabel')
+    expect(labelOf('d-live')).toBe('[2]')
+  })
+
+  it('resolves an old-file number to the removal that carries it, when told which file it is', () => {
+    // Rows for `A\nB\nC` → `A\nC`: A (1/1), the removal B (old 2), C (old 3 / new 2). The number 2 is
+    // `C` in the file as it reads now, and the removal's own line in the old file — one number, two
+    // rows, decided by which file the caller says it came from.
+    const rows = computeWholeFileDiff('A\nB\nC\n', 'A\nC\n').rows
+    expect(rowOfLine(rows, 2)).toBe(2)
+    expect(rowOfLine(rows, 2, true)).toBe(1)
+    // A line the old file never had is untouched by the side: it resolves the way it always did.
+    expect(rowOfLine(rows, 1, true)).toBe(0)
   })
 
   it('pins what a frame of removed lines alone records today', async () => {
