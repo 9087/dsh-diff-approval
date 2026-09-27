@@ -3039,7 +3039,13 @@
   gap: 8px;
   box-sizing: border-box;
   height: 22px;
-  padding: 0 12px;
+  /* The two ends of this row are CONTROLS — the fold arrow and the ⋯ — and the writing row below
+     puts its own pair on the same column: `.discussionCompose` takes back half of the thread's 12px
+     inset on each side (`margin: 0 -6px`), so the field's left edge and the send button's right edge
+     sit 6px in. The header was left on the prose inset, which made its controls look shifted inwards
+     against the row they belong to; 6px puts the arrow over the field's edge and the ⋯ over the
+     button's, and the reader asked for exactly that nudge. */
+  padding: 0 6px;
   /* The header holds controls and a path, so it keeps the UI size even though the
      family follows the code font. */
   font-size: 12px;
