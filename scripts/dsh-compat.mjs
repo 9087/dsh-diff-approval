@@ -46,6 +46,64 @@ const CLIENT_PACKAGE = '@deepseek-ai/dsh-client-ui-primitives'
 const ICON_SIZE_WORDS = ['16', '14', 'Medium', 'Regular', 'Small', 'Large']
 
 /**
+ * The shell packages whose own shipped code this plugin reads a contract out of, installed per release.
+ *
+ * The names come from the mounted seats (`src/client/index.ts`) and from the presses the panel routes
+ * (`src/client/produced-diff.ts`); each package here is the one that declares that name in its entry
+ * bundle, measured rather than assumed.
+ */
+const SHELL_PACKAGES = [
+  CLIENT_PACKAGE,
+  '@deepseek-ai/dsh-client-ui-sidebar',
+  '@deepseek-ai/dsh-client-ui-sidebar-right',
+  '@deepseek-ai/dsh-client-ui-conversation',
+  '@deepseek-ai/dsh-client-ui-deliverables',
+]
+
+/**
+ * What this plugin reads out of a shell, and every name it accepts for each dependency.
+ *
+ * The rule is the icon rule, for the same reason: the plugin already tolerates an older spelling and a
+ * newer one (its file-press selector unions three attributes, its session seat reads several fields),
+ * so the contract is "a way to reach this still exists", not "this exact spelling exists". Each entry
+ * is therefore checked by finding at least one of its names in the release's own code — and a shell
+ * that renames a seat, or moves the marker on a list, fails here instead of silently taking the
+ * plugin's UI apart in the reader's browser.
+ *
+ * NOT covered, and why: `settings.section` is a literal only in the settings-PAGE packages
+ * (`dsh-client-ui-settings-general` and its siblings), which this plugin does not otherwise depend on
+ * and would have to install per release just to grep one string. A rename there costs the settings tab,
+ * which is what the browser smoke test is for.
+ */
+const SHELL_CONTRACTS = [
+  {
+    what: 'the footer seat the pending-changes entry mounts into',
+    any: ['sidebar.footer.action'],
+    in: ['@deepseek-ai/dsh-client-ui-sidebar'],
+  },
+  {
+    what: 'the docked seat the panel mounts into',
+    any: ['sidebar.right.pane.tab', 'sidebar.right.pane.tab.title'],
+    in: ['@deepseek-ai/dsh-client-ui-sidebar-right', '@deepseek-ai/dsh-client-ui-deliverables'],
+  },
+  {
+    what: 'the session-header seat the header entry mounts into',
+    any: ['conversation.session.header.utilities'],
+    in: ['@deepseek-ai/dsh-client-ui-conversation'],
+  },
+  {
+    what: 'a file press that opens a file in the shell\'s own viewer',
+    any: ['data-produced-files-row', 'data-presented-files-row', 'data-changed-files'],
+    in: ['@deepseek-ai/dsh-client-ui-deliverables', '@deepseek-ai/dsh-client-ui-conversation'],
+  },
+  {
+    what: 'the shell\'s own review-pane file picker, which this plugin leaves alone',
+    any: ['data-review-file'],
+    in: ['@deepseek-ai/dsh-client-ui-deliverables'],
+  },
+]
+
+/**
  * Run npm. `npm` is a `.cmd` shim on Windows, which needs a shell, so the command
  * is assembled as a string with each argument quoted.
  * @param args - npm arguments.
@@ -284,20 +342,86 @@ async function exportedNames(packageDir) {
   return names
 }
 
-/** Install the client-side package for one release into that release's isolated directory. */
-async function ensureClientInstalled(version, dir) {
-  if (existsSync(join(dir, 'node_modules', CLIENT_PACKAGE, 'package.json'))) return {}
-  try {
-    await runNpm(['install', '--no-audit', '--no-fund', '--silent', `${CLIENT_PACKAGE}@${version}`], dir)
-    return {}
-  } catch (error) {
-    const detail = (error.stderr || error.message || String(error)).trim().split('\n').slice(-3).join(' ').slice(0, 300)
-    return { clientInstallError: detail }
+/**
+ * Install the shell packages this plugin reads contracts out of, into one release's directory.
+ *
+ * A package that is not published at this version is collected rather than treated as a failure: the
+ * deliverables package only exists from 0.1.6, and a release that predates a seat has nothing to check
+ * there. Installs are cached by directory, so a re-run pays only for what is missing.
+ *
+ * @param version - the release.
+ * @param dir - that release's isolated directory.
+ * @returns the packages that could not be installed.
+ */
+async function ensureShellInstalled(version, dir) {
+  const absent = []
+  for (const name of SHELL_PACKAGES) {
+    if (existsSync(join(dir, 'node_modules', name, 'package.json'))) continue
+    try {
+      await runNpm(['install', '--no-audit', '--no-fund', '--silent', `${name}@${version}`], dir)
+    } catch {
+      absent.push(name)
+    }
   }
+  return { absent }
 }
 
 /**
- * Check one release's client-side package against what the built client asks of it.
+ * The shipped code of one release's shell packages, per package.
+ *
+ * Only the two files a browser loads first (`lib/client.js`, `lib/index.js`): these packages also ship
+ * lazy chunks (`client.pdf.js` and its siblings, megabytes of vendored viewer code), while the seats and
+ * the list markers this check looks for live in the entry bundle.
+ *
+ * @param dir - that release's isolated directory.
+ * @returns a map of package name to entry-bundle text, for the packages that are installed.
+ */
+async function shellSourcesOf(dir) {
+  const sources = new Map()
+  for (const name of SHELL_PACKAGES) {
+    const parts = []
+    for (const file of ['client.js', 'index.js']) {
+      const path = join(dir, 'node_modules', name, 'lib', file)
+      if (existsSync(path)) parts.push(await readFile(path, 'utf8'))
+    }
+    if (parts.length > 0) sources.set(name, parts.join('\n'))
+  }
+  return sources
+}
+
+/**
+ * Check one release's shell against every contract this plugin reads out of it.
+ *
+ * A contract is enforced only where one of the packages it could live in is installed; one of its names
+ * must then appear in one of them. That keeps a release predating a package from failing because the
+ * package is absent (the deliverables package starts at 0.1.6) while a release that HAS the package and
+ * has renamed what this plugin reads out of it still fails. How many contracts were skipped that way is
+ * reported, because a check that quietly skipped is not evidence.
+ *
+ * @param sources - {@link shellSourcesOf}'s map.
+ * @returns `{ ok, detail }`, naming what is missing rather than only that something is.
+ */
+function checkContracts(sources) {
+  const broken = []
+  let checked = 0
+  let skipped = 0
+  for (const contract of SHELL_CONTRACTS) {
+    const usable = contract.in.filter(name => sources.has(name))
+    if (usable.length === 0) {
+      skipped += 1
+      continue
+    }
+    checked += 1
+    if (!contract.any.some(name => usable.some(pkg => sources.get(pkg).includes(name)))) broken.push(contract)
+  }
+  const note = skipped > 0 ? `, ${skipped} skipped` : ''
+  if (broken.length === 0) return { ok: true, detail: `${checked} contract(s)${note}` }
+  return { ok: false, detail: `${broken.map(contract => `no ${contract.what}`).join('; ')}${note}` }
+}
+
+/**
+ * Check one release's client half: the names the plugin's bundle asks for, and the contracts it reads
+ * out of the shell's own code.
  *
  * @param version - the release.
  * @param dir - that release's isolated directory.
@@ -305,21 +429,26 @@ async function ensureClientInstalled(version, dir) {
  * @returns `{ ok, detail, missing }`.
  */
 async function checkClient(version, dir, needs) {
-  const installed = await ensureClientInstalled(version, dir)
-  if (installed.clientInstallError !== undefined) return { ok: false, detail: installed.clientInstallError }
+  const installed = await ensureShellInstalled(version, dir)
   const packageDir = join(dir, 'node_modules', CLIENT_PACKAGE)
+  if (!existsSync(join(packageDir, 'package.json'))) {
+    return { ok: false, detail: `${CLIENT_PACKAGE} could not be installed: ${installed.absent.join(', ')}` }
+  }
   const exports = await exportedNames(packageDir)
   if (exports.size === 0) return { ok: false, detail: 'the release\'s type declarations named no exports' }
   const missing = needs.required.filter(name => !exports.has(name))
   const undrawable = needs.glyphs.filter(glyph => !glyph.names.some(name => exports.has(name)))
-  if (missing.length === 0 && undrawable.length === 0) {
-    return { ok: true, detail: `${needs.glyphs.length} glyph(s), ${needs.required.length} name(s)` }
-  }
-  const detail = [
+  const names = [
     missing.length > 0 ? `no export named ${missing.join(', ')}` : '',
     undrawable.length > 0 ? `no name at all for ${undrawable.map(glyph => glyph.stem).join(', ')}` : '',
   ].filter(Boolean).join('; ')
-  return { ok: false, detail, missing: [...missing, ...undrawable.map(glyph => glyph.stem)] }
+  if (names !== '') return { ok: false, detail: names, missing: [...missing, ...undrawable.map(glyph => glyph.stem)] }
+  const contracts = checkContracts(await shellSourcesOf(dir))
+  if (!contracts.ok) return { ok: false, detail: `contract: ${contracts.detail}` }
+  return {
+    ok: true,
+    detail: `${needs.glyphs.length} glyph(s), ${needs.required.length} name(s), ${contracts.detail}`,
+  }
 }
 
 /** Every published release of the client package, or an empty array when it cannot be read. */
