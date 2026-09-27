@@ -16,6 +16,14 @@ import { describeHome, timing, waitForSessionOnDisk } from './host.ts'
 export const KEEP_REMOVE = ['保留并移出', 'Keep and remove']
 /** Every name the comment menu's close item is known to carry. */
 export const CLOSE_COMMENT = ['关闭评论', 'Close comment']
+/**
+ * Every name the shell's new-session control is known to carry.
+ *
+ * The GUI's locale is the host's, not the test's, and 0.1.7 ignored the `locale: preference: zh` the
+ * fixture seeds — it drew "New session" (its own bundle still carries 新建会话). Matching both is what
+ * this harness does for every shell control, so the shell's language can never decide a run.
+ */
+export const NEW_SESSION = ['新建会话', 'New session']
 
 /**
  * A GUI page with the panel's comment mode on.
@@ -70,12 +78,45 @@ export async function dismissNotices(page: Page): Promise<void> {
  * a substring match happily clicks the heading instead of the row.
  */
 async function openWorkspace(page: Page, title: string): Promise<void> {
+  // Already there is a success, not a wait: a shell may open the last workspace by itself (0.1.7 does),
+  // and then the row this helper used to press is not drawn at all — twenty seconds of waiting for a
+  // control the reader would not see either, and a failed run that was already where it wanted to be.
+  if (await sessionViewUp(page)) return
   const button = page.getByRole('button', { name: title, exact: true })
-  if (await button.count() > 0) {
-    await button.first().click({ timeout: 20_000 })
-    return
+  const text = page.getByText(title, { exact: true })
+  // Polled, not checked once: the sidebar draws its rows a beat after the page is ready, and a
+  // single `count()` on a loaded machine read zero and then pressed a fallback that was not there
+  // either — measured as a 20 s timeout on this suite's first page while the same code passed alone.
+  const deadline = Date.now() + 30_000
+  for (;;) {
+    if (await sessionViewUp(page)) return
+    if (await button.count() > 0) {
+      await button.first().click({ timeout: 20_000 })
+      break
+    }
+    if (await text.count() > 0) {
+      await text.last().click({ timeout: 20_000 })
+      break
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`the sidebar never offered the workspace "${title}"\n${await describeSidebar(page)}`)
+    }
+    await sleep(500)
   }
-  await page.getByText(title, { exact: true }).last().click({ timeout: 20_000 })
+  await sessionViewUp(page, 30_000)
+}
+
+/**
+ * Whether a session view is on screen — the composer is the one thing every session view has.
+ *
+ * @param page - the GUI page.
+ * @param timeout - how long to look, in ms (a short look for "already open", a long one after a press).
+ * @returns true when the composer is visible.
+ */
+async function sessionViewUp(page: Page, timeout = 2_000): Promise<boolean> {
+  return await page.locator('[data-composer-input], [contenteditable="true"]').first()
+    .isVisible({ timeout })
+    .catch(() => false)
 }
 
 /** How long a session id may take to appear on disk. */
@@ -97,6 +138,29 @@ async function apiReply(response: { text(): Promise<string> }): Promise<ApiReply
   } catch {
     return undefined
   }
+}
+
+/**
+ * What the sidebar is offering, for a failure that has to explain itself.
+ *
+ * These controls are the shell's, not this plugin's: a shell that moves one of them turns a helper into a
+ * 20-second timeout whose locator log says only that the locator never matched. Printing the buttons (by
+ * accessible name) and the head of the page's own text is what will name such a change — which is how the
+ * 0.1.7 break was read: the control the helper presses is still labelled the same in that shell's bundle,
+ * but it is no longer on the view the workspace opens onto.
+ *
+ * @param page - the GUI page.
+ * @returns one line of buttons, one line of page text.
+ */
+export async function describeSidebar(page: Page): Promise<string> {
+  const names: string[] = []
+  for (const button of (await page.getByRole('button').all()).slice(0, 40)) {
+    const label = (await button.getAttribute('aria-label')) ?? (await button.innerText().catch(() => ''))
+    const text = (label ?? '').replace(/\s+/g, ' ').trim()
+    if (text !== '') names.push(text.slice(0, 40))
+  }
+  const body = (await page.locator('body').innerText().catch(() => '(no body text)')).replace(/\s+/g, ' ').slice(0, 500)
+  return `buttons on screen: ${JSON.stringify([...new Set(names)])}\npage text: ${body}`
 }
 
 /**
@@ -128,21 +192,63 @@ async function apiReply(response: { text(): Promise<string> }): Promise<ApiReply
  * @returns the new session's id.
  * @throws when the session directory has named nothing within {@link SESSION_ID_TIMEOUT_MS}.
  */
-export async function createSession(page: Page, workspaceTitle: string, home: string): Promise<string> {
+export async function beginSession(page: Page, workspaceTitle: string, home: string, text: string): Promise<string> {
   const startedAt = Date.now()
   await openWorkspace(page, workspaceTitle)
-  await page.getByRole('button', { name: '新建会话' }).first().click({ timeout: 20_000 })
+  // A new session first, where the shell offers the control. The press is best-effort on purpose: what
+  // this helper promises is a session with a message in it, not the press — 0.1.7 keeps the composer
+  // usable without it, and a shell that moves the control again must not fail the run while the composer
+  // is right there. Whatever happens is printed, with what the sidebar was offering (see
+  // `describeSidebar`), because a silent fallback is how a harness stops testing what it says it does.
+  const newSession = page.getByRole('button', { name: new RegExp(NEW_SESSION.join('|'), 'i') })
+  if (await newSession.count() > 0) {
+    await newSession.first().click({ timeout: 10_000 }).catch(async (error: unknown) => {
+      console.log('[beginSession] the new-session press did not land:', String(error).split('\n')[0])
+      console.log(await describeSidebar(page))
+    })
+  }
+  // The message comes BEFORE the id is read. A new session is provisional until its first turn, and only
+  // then does the host write `sessions/<bucket>/<id>/session.v3.jsonl.zstd`: measured on 0.1.7, the press
+  // went through and no directory appeared within ten seconds, while the id was on disk right after the
+  // message. Reading it off that disk is still the only source — the GUI learns its session list from the
+  // host's follow stream, and no reply this side can parse names the id (see `waitForSessionOnDisk`).
+  await sendMessage(page, undefined, text)
 
   const sessionId = await waitForSessionOnDisk(home, Date.now() + SESSION_ID_TIMEOUT_MS)
   if (sessionId === undefined) {
     throw new Error(
-      `no session directory appeared within ${SESSION_ID_TIMEOUT_MS} ms of opening the workspace: the GUI `
-      + `accepted the click but the host never wrote a session log for it.\n${describeHome(home)}`,
+      `no session directory appeared within ${SESSION_ID_TIMEOUT_MS} ms of the session's first message: the GUI `
+      + `accepted the prompt but the host never wrote a session log for it.\n${describeHome(home)}`,
     )
   }
   // How long the id took, and that it came off disk, is what a slow future run needs to see.
   timing('session-id-from-disk', startedAt)
   return sessionId
+}
+
+/**
+ * The composer the reader would type into: the first VISIBLE editable in the tree.
+ *
+ * Not a fixed position, because the shell's own tree holds several: the resident composer host sits
+ * inert whenever no editor is bound (0.1.7 writes `contenteditable="false"` onto it), the hero state
+ * adds another host, and Lexical keeps hidden editables of its own. Both a bare
+ * `[contenteditable="true"]` with `.last()` and a bare `[data-composer-input]` with `.first()` picked a
+ * node that never became visible — a twenty-second click timeout on a composer that was on screen.
+ *
+ * @param page - the GUI page.
+ * @returns the locator to type into.
+ * @throws when nothing visible is editable, naming what the page was offering instead.
+ */
+async function composerOf(page: Page): Promise<Locator> {
+  const selectors = ['[data-composer-input][contenteditable="true"]', '[data-composer-input]', '[contenteditable="true"]']
+  for (const selector of selectors) {
+    const candidates = page.locator(selector)
+    const count = await candidates.count()
+    for (let index = 0; index < count; index++) {
+      if (await candidates.nth(index).isVisible().catch(() => false)) return candidates.nth(index)
+    }
+  }
+  throw new Error(`there was no visible composer to type into.\n${await describeSidebar(page)}`)
 }
 
 /**
@@ -159,13 +265,15 @@ export async function createSession(page: Page, workspaceTitle: string, home: st
  * that never gets an accepted prompt fails the run by name instead of passing on a delay.
  *
  * @param page - the GUI page.
- * @param sessionId - the session whose turn this is; the id is what the error reports.
+ * @param sessionId - the session whose turn this is, when the caller knows it; it is only ever used to
+ *   name the session in the failure text, because a new session's id cannot be known before this turn
+ *   exists (see `beginSession`).
  * @param text - what to type.
  */
-export async function sendMessage(page: Page, sessionId: string, text: string): Promise<void> {
+export async function sendMessage(page: Page, sessionId: string | undefined, text: string): Promise<void> {
   const accepted = new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
-      reject(new Error(`no turn was accepted for session ${sessionId} within ${TURN_ACCEPT_TIMEOUT_MS} ms`))
+      reject(new Error(`no turn was accepted${sessionId === undefined ? '' : ` for session ${sessionId}`} within ${TURN_ACCEPT_TIMEOUT_MS} ms`))
     }, TURN_ACCEPT_TIMEOUT_MS)
     page.on('response', response => {
       if (!response.url().includes('/api/session/prompt')) return
@@ -177,7 +285,9 @@ export async function sendMessage(page: Page, sessionId: string, text: string): 
     })
   })
 
-  const composer = page.locator('[contenteditable="true"]').last()
+  // The composer is the first VISIBLE editable in the tree, not a fixed position in it — see
+  // `composerOf` for what the shell puts there and why both obvious selectors failed.
+  const composer = await composerOf(page)
   await composer.click({ timeout: 20_000 })
   await composer.type(text, { delay: 10 })
   await page.keyboard.press('Enter')

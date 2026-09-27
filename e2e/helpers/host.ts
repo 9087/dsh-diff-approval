@@ -374,6 +374,24 @@ export async function waitForSessionOnDisk(home: string, deadline: number): Prom
  * writes `<home>/sessions/<workspace-slug>/<sessionId>/session.v3.jsonl.zstd`, so the
  * newest log is the session the seed message just landed in.
  */
+/**
+ * The log file inside one session directory, by name, whatever the shell calls it this release.
+ *
+ * It has been `session.v3.jsonl.zstd`, and requiring exactly that name made this harness report "the
+ * host never wrote a session log" for a session directory that was sitting there with a log in it —
+ * 0.1.7 renamed the file. `session.` is the one part that has not changed, and the directory's own
+ * shape is checked by the caller.
+ *
+ * @param dir - one session directory.
+ * @returns the log's file name, or undefined when this directory holds no session log.
+ */
+function sessionLogOf(dir: string): string | undefined {
+  for (const name of readdirSync(dir)) {
+    if (name.startsWith('session.')) return name
+  }
+  return undefined
+}
+
 export function newestSessionId(home: string): string | undefined {
   const root = join(home, 'sessions')
   if (!existsSync(root)) return undefined
@@ -381,21 +399,41 @@ export function newestSessionId(home: string): string | undefined {
   for (const bucket of readdirSync(root)) {
     const bucketDir = join(root, bucket)
     for (const candidate of readdirSync(bucketDir)) {
-      if (!candidate.startsWith('session-')) continue
-      const file = join(bucketDir, candidate, 'session.v3.jsonl.zstd')
-      if (!existsSync(file)) continue
-      const at = statSync(file).mtimeMs
+      // The LOG is what identifies a session directory, not the shape of its name: shells have named
+      // them both `session-<uuid>` and a bare `<uuid>` (0.1.7 writes the bare form, and a real home
+      // carries both shapes), so requiring the prefix skipped every session on the newer shell and
+      // reported "the host never wrote a session log" while the log was sitting right there.
+      const dir = join(bucketDir, candidate)
+      const log = sessionLogOf(dir)
+      if (log === undefined) continue
+      const at = statSync(join(dir, log)).mtimeMs
       if (best === undefined || at > best.at) best = { id: candidate, at }
     }
   }
   return best?.id
 }
 
-/** Everything currently under the seedable directories, for a post-mortem in a failure message. */export function describeHome(home: string): string {
+/** Everything currently under the seedable directories, for a post-mortem in a failure message. */
+export function describeHome(home: string): string {
   const parts: string[] = []
   for (const dir of ['diff-approval/workspaces', 'diff-approval/comments', 'storages']) {
     const full = join(home, ...dir.split('/'))
     parts.push(`${dir}: ${existsSync(full) ? readdirSync(full).join(', ') : '(missing)'}`)
+  }
+  // The session tree itself, because a run that could not name a session has to say what the host did
+  // write: the bucket name and the id shape are the shell's, and both have changed under this harness.
+  const sessions = join(home, 'sessions')
+  if (!existsSync(sessions)) parts.push('sessions: (missing)')
+  else {
+    const listed: string[] = []
+    for (const bucket of readdirSync(sessions)) {
+      const ids = readdirSync(join(sessions, bucket)).slice(0, 6).map(id => {
+        const log = sessionLogOf(join(sessions, bucket, id))
+        return log === undefined ? `${id}(no log)` : `${id}(${log})`
+      })
+      listed.push(`${bucket}: ${ids.length === 0 ? '(empty)' : ids.join(', ')}`)
+    }
+    parts.push(`sessions: ${listed.join(' | ') || '(empty)'}`)
   }
   return parts.join('\n')
 }

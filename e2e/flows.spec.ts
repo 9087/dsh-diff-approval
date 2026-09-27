@@ -23,8 +23,8 @@ import {
   type DshCommand, type Fixture, type Host, type SeededFile,
 } from './helpers/host.ts'
 import {
-  CLOSE_COMMENT, createSession, dismissNotices, ensurePanelList, newGuiPage, openPanel, openSession, panelState,
-  pressUndo, row, sendMessage,
+  beginSession, CLOSE_COMMENT, dismissNotices, ensurePanelList, footerBadge, newGuiPage, openPanel, openSession,
+  panelState, pressUndo, row,
 } from './helpers/gui.ts'
 import { openFloatList, noticesText, writeComment } from './helpers/panel.ts'
 
@@ -82,12 +82,27 @@ async function openFreshPage(tag: string): Promise<void> {
   await page.goto(host.url, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('text=/工作区|Workspaces/', { timeout: 60_000 })
   await dismissNotices(page)
-  const entry = page.getByText(COMMENT_TEXT, { exact: false })
-  if (await entry.count() > 0) {
-    await entry.last().click({ timeout: 20_000 })
-    await new Promise(resolve => setTimeout(resolve, 4000))
-  } else {
-    await openSession(page, SEED_MESSAGE)
+  // Which session the GUI opens is its own decision, and a reload is a fresh one: the press below can
+  // land while the sidebar is still drawing, and then the panel's badge stays disabled and `openPanel`
+  // waits out its whole 30s on a session that never arrives (measured: two consecutive runs failed
+  // exactly there, with `data-diff-approval-badge="0"` and no page error). So the press is made only
+  // while the badge says no session is open, and it is retried rather than slept on once.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (await footerBadge(page).isEnabled().catch(() => false)) break
+    const entry = page.getByText(COMMENT_TEXT, { exact: false })
+    if (await entry.count() > 0) {
+      await entry.last().click({ timeout: 20_000 }).catch(() => {})
+      await new Promise(resolve => setTimeout(resolve, 4000))
+      continue
+    }
+    await openSession(page, SEED_MESSAGE).catch(() => {})
+    await new Promise(resolve => setTimeout(resolve, 2000))
+  }
+  // A session that never opens is worth one line of the page itself: the badge says only that the
+  // panel has nothing to show, and the next failure should say what the GUI was showing instead.
+  if (!await footerBadge(page).isEnabled().catch(() => false)) {
+    const text = await page.locator('body').innerText().catch(() => '(no body text)')
+    console.log(`[nosession:${tag}]`, text.replace(/\s+/g, ' ').slice(0, 400))
   }
   await openPanel(page)
   await ensurePanelList(page)
@@ -110,8 +125,7 @@ test.describe('评论与重启：写一条评论，再看一次宿主重启保�
     await page.goto(host.url, { waitUntil: 'domcontentloaded' })
     await page.waitForSelector('text=/工作区|Workspaces/', { timeout: 60_000 })
     await dismissNotices(page)
-    const sessionId = await createSession(page, fixture.workspace.split(/[\\/]/).pop() ?? 'workspace', fixture.home)
-    await sendMessage(page, sessionId, SEED_MESSAGE)
+    const sessionId = await beginSession(page, fixture.workspace.split(/[\\/]/).pop() ?? 'workspace', fixture.home, SEED_MESSAGE)
     await page.close()
     await stopHost(host.proc)
 

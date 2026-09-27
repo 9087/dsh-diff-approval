@@ -16,9 +16,9 @@ import {
   timed, timing, type Fixture, type Host, type SeededFile,
 } from './helpers/host.ts'
 import {
-  CLOSE_COMMENT, KEEP_REMOVE, askInComment, chooseMenuItem, commentRow, confirmBatch, confirmIfAsked, createSession,
+  CLOSE_COMMENT, KEEP_REMOVE, askInComment, beginSession, chooseMenuItem, commentRow, confirmBatch, confirmIfAsked,
   dismissNotices, ensurePanelList, footerBadge, newGuiPage, openListTab, openPanel, openSession, panelState, pick,
-  pressRedo, pressUndo, row, sendMessage,
+  pressRedo, pressUndo, row,
 } from './helpers/gui.ts'
 
 /** The two files this file keeps and re-keeps; the comments live on the other two. */
@@ -85,8 +85,7 @@ test.describe('待处理面板：保留并移出 / 撤销 / 重做（真 Chromiu
       await dismissNotices(page)
     })
     await timed('session-create', async () => {
-      sessionId = await createSession(page, fixture.workspace.split(/[\\/]/).pop() ?? 'workspace', fixture.home)
-      await sendMessage(page, sessionId, SEED_MESSAGE)
+      sessionId = await beginSession(page, fixture.workspace.split(/[\\/]/).pop() ?? 'workspace', fixture.home, SEED_MESSAGE)
     })
     await timed('phase1-teardown', async () => {
       await page.close()

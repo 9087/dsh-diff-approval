@@ -31,8 +31,8 @@ import {
   type Fixture, type Host, type SeededFile,
 } from './helpers/host.ts'
 import {
-  KEEP_REMOVE, chooseMenuItem, confirmBatch, createSession, dismissNotices, ensurePanelList, newGuiPage,
-  openPanel, openSession, pick, pressUndo, row, sendMessage,
+  KEEP_REMOVE, beginSession, chooseMenuItem, confirmBatch, dismissNotices, ensurePanelList, newGuiPage,
+  openPanel, openSession, pick, pressUndo, row,
 } from './helpers/gui.ts'
 import { dockPanel, dockedPanel, floatCard, openFloatList, panel, setViewport } from './helpers/panel.ts'
 
@@ -71,8 +71,7 @@ test.describe('面板守卫：浮动列表与 Escape，以及停靠面板里的�
     await page.goto(host.url, { waitUntil: 'domcontentloaded' })
     await page.waitForSelector('text=/工作区|Workspaces/', { timeout: 60_000 })
     await dismissNotices(page)
-    const sessionId = await createSession(page, fixture.workspace.split(/[\\/]/).pop() ?? 'workspace', fixture.home)
-    await sendMessage(page, sessionId, SEED_MESSAGE)
+    const sessionId = await beginSession(page, fixture.workspace.split(/[\\/]/).pop() ?? 'workspace', fixture.home, SEED_MESSAGE)
     await page.close()
     await stopHost(host.proc)
 
