@@ -1,37 +1,83 @@
 /**
- * Route a produced-file chip's own click.
+ * Route a file press's own click.
  *
- * The harness's `ProducedFiles` component renders each produced file as a `<button>` chip inside
- * `[data-produced-files-row]`, with the full path riding the chip's `title`. The plugin wants a
- * second way to open a file it is already reviewing — in the review panel — but it must not take
- * the harness's own open away from anyone else, and it must not touch the harness component. So
- * this module watches for a click on those chips and answers ONE narrow case:
+ * The harness draws several presses that answer by opening a file in a viewer of its OWN, and this
+ * module takes over exactly those — and only for a file the review panel is already holding — so the
+ * reader gets both ways of opening it instead of one fixed behaviour:
  *
- *   the chip names a file the panel currently holds → the click is the panel's, and becomes a menu
- *   (「默认方式打开」 / 「在审批面板中查看」, see `CHIP_MENU_EVENT`);
- *   anything else → the click is left entirely alone and DSH does whatever it always did.
+ *   `[data-produced-files-row] button`    0.1.5's produced-file card       `title` = the path
+ *   `[data-presented-files-row] button`   0.1.7's presented-file card      `title` = the path
+ *   `[data-changed-files] button`         0.1.7's changed-files row        `aria-describedby` = the path
+ *   `button[title]`                       a message's file LINK (0.1.7)    `title` = the path
+ *   `button[data-ref-chip]`               a `@file` chip in a message      `title` = the token
+ *   `a[href]`                             any other link naming a file     `href`  = the path
  *
- * The first menu row must open the file exactly the way DSH does — and what that is, is the
- * harness's business, not this plugin's — so it is not re-implemented here: `replayChipClick`
- * presses the same chip again, with the interceptor standing down for that one press. A press DSH
- * keeps keeps its modifiers too: a Ctrl/Cmd/Shift/Alt-click and a middle click never reach the
- * bridge, so a modifier gesture the harness grows later cannot be swallowed by this plugin.
+ * Everything else is left entirely alone: a link to a URL, an in-page anchor, a chip naming something
+ * that is not a file, a file this panel does not hold, a modified press (Ctrl/Cmd/Shift/Alt, or a
+ * middle click — gestures the harness may give its own meaning later), and any press inside this
+ * plugin's own surface, whose buttons carry paths too and belong to the panel that is already showing
+ * the file.
+ *
+ * The name of the module (and of the event it raises) dates from when the produced-file card was the
+ * only press of this kind; `data-presented-files-row` is that same list under 0.1.7's name for it.
  */
 
-/** Window event dispatched when a pending file's chip is pressed; the panel listens for it. */
+/** Window event dispatched when a pending file's press is taken over; the panel listens for it. */
 export const CHIP_MENU_EVENT = 'diff-approval:chip-menu'
 
 /** Window event dispatched by the panel to open a file in the panel; PendingPanel listens for it. */
 export const OPEN_FILE_EVENT = 'diff-approval:open-file'
 
-/** The produced-file chip selector (the container row itself is not needed). */
-const CHIP_SELECTOR = '[data-produced-files-row] button'
+/**
+ * The presses that open a file in the shell's own viewer, one per shape measured in a shell.
+ *
+ * The list is deliberately wider than the produced-file cards, because those are no longer the only
+ * press of this kind: since 0.1.7 a file link written in a message is a `<button>` whose `title` is the
+ * path and whose click calls the shell's `openFile` (see `MarkdownFileLink`), and a `@file` chip is the
+ * same thing with the raw token in `title`. A press this list misses is not a crash — it is one menu the
+ * reader does not get — and a press it matches that names nothing this panel holds is left alone.
+ */
+const PRESS_SELECTOR = [
+  '[data-produced-files-row] button',
+  '[data-presented-files-row] button',
+  '[data-changed-files] button',
+  'button[title]',
+  'button[data-ref-chip]',
+  'a[href]',
+].join(', ')
 
-/** What a chip press tells the panel: which file, and where the chip is (the menu hangs under it). */
+/**
+ * A shell press that looks like one of the above and is NOT one: the review pane's file picker.
+ *
+ * `button[data-review-file]` carries the file's path in `title` exactly like a file link does, but its
+ * press does not open anything — it switches which file the shell's own review pane is showing
+ * (`onClick: () => setMenuOpen(…)`, measured in `dsh-client-ui-deliverables`). Taking that press over
+ * would leave the reader unable to change files inside the shell's review view, which is not a menu
+ * anyone asked for.
+ */
+const SHELL_PICKER_SELECTOR = '[data-review-file]'
+
+/**
+ * This plugin's own surfaces, as the markers they render (`data-diff-approval-*`).
+ *
+ * A press inside one of them is the panel's: the panel's own rows and buttons carry file paths, and
+ * routing those here would take a click away from the surface that is already showing the file — and
+ * away from the panel's own "查看差异" bridge, which is the same idea expressed a different way.
+ */
+const OWN_SURFACE_SELECTOR = [
+  '[data-diff-approval-panel]',
+  '[data-diff-approval-dock]',
+  '[data-diff-approval-chip]',
+  '[data-diff-approval-badge]',
+  '[data-diff-approval-header-entry]',
+  '[data-diff-approval-settings]',
+].join(', ')
+
+/** What a press tells the panel: which file, and where the press was (the menu hangs under it). */
 export interface ProducedChipMenuDetail {
-  /** The path the pressed chip names. */
+  /** The path the pressed element names. */
   path: string
-  /** The chip's own box, in viewport coordinates. */
+  /** The pressed element's own box, in viewport coordinates. */
   x: number
   y: number
 }
@@ -39,37 +85,98 @@ export interface ProducedChipMenuDetail {
 /** What the bridge needs from the host to decide, and to report. */
 export interface ProducedChipBridge {
   /**
-   * Whether the panel holds this file right now. Called synchronously on every chip press, because
+   * Whether the panel holds this file right now. Called synchronously on every press, because
    * the decision it answers is whether the press is prevented — there is no second chance at it.
    */
   isPending: (path: string) => boolean
-  /** A chip of a pending file was pressed: open the menu the press asked for. */
+  /** A pending file's press was taken over: open the menu the press asked for. */
   onMenu: (detail: ProducedChipMenuDetail) => void
 }
 
-/** Read the produced-file path from a chip (`title` carries the full path). */
-function producedPathOf(chip: Element): string | undefined {
-  const path = chip.getAttribute('title')?.trim()
-  return path === undefined || path === '' ? undefined : path
+/** Everything before a `#line` or `?query` suffix: what a path is compared as. */
+function stripSuffix(value: string): string {
+  return value.split('#')[0]?.split('?')[0]?.trim() ?? value
 }
 
-/** The chip whose press `replayChipClick` is replaying, if any: its press is DSH's, not the menu's. */
+/**
+ * The file a reference token names.
+ *
+ * A `@file` chip carries the token as the reader wrote it — `@"path with spaces/x.ts"`, `@a/b.ts#L4` —
+ * so the marker, the quotes and any line suffix come off before it is compared with a stored path.
+ *
+ * @param text - the token text.
+ * @returns the path it names.
+ */
+function pathOfReference(text: string): string {
+  return stripSuffix(text.replace(/^@/, '').replace(/^"|"$/g, '').trim())
+}
+
+/**
+ * Whether this text names a file, rather than a URL, an in-page anchor or a plain label.
+ *
+ * A shell tooltip lives in `title` too, so "the element has a title" is not enough: a URL scheme is not
+ * a file (a Windows drive letter is), and a label with neither a separator nor an extension is a label.
+ * This is a filter, not a decision — `isPending` is what decides — so it errs towards letting a press
+ * through untouched rather than towards taking one over.
+ *
+ * @param value - the candidate text.
+ * @returns whether it could name a file.
+ */
+function looksLikePath(value: string): boolean {
+  if (value === '' || value.startsWith('#') || value.startsWith('?')) return false
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value) && !/^[A-Za-z]:[\\/]/.test(value)) return false
+  return /\.[A-Za-z0-9]{1,8}$/.test(value) || value.includes('/') || value.includes('\\')
+}
+
+/**
+ * The path a press names, or undefined when it names no file.
+ *
+ * @param press - the element the reader pressed.
+ * @returns the path, as the shell spelled it (the panel matches it against its own spelling).
+ */
+function pressPathOf(press: Element): string | undefined {
+  const title = press.getAttribute('title')?.trim()
+  if (title !== undefined) {
+    const path = pathOfReference(title)
+    if (looksLikePath(path)) return path
+  }
+  // A row can carry its path in a description instead of a `title`: 0.1.7's changed-files list points
+  // `aria-describedby` at a visually hidden span whose text is the resolved absolute path — the row
+  // itself says only "view the diff of <name>" in its `aria-label`. Read the shell's own pointer rather
+  // than its copy, so a row in another language works the same.
+  const describedBy = press.getAttribute('aria-describedby')
+  if (describedBy !== null) {
+    const path = press.ownerDocument.getElementById(describedBy)?.textContent?.trim() ?? ''
+    if (looksLikePath(path)) return path
+  }
+  if (press instanceof HTMLAnchorElement) {
+    const path = stripSuffix(press.getAttribute('href')?.trim() ?? '')
+    if (looksLikePath(path)) return path
+  }
+  return undefined
+}
+
+/** The press `replayFilePress` is replaying, if any: that press is the shell's, not the menu's. */
 let replaying: Element | null = null
 
 /**
- * Press a produced-file chip again — DSH's own open, run the only way this plugin can run it
+ * Press a file's own press again — the shell's open, run the only way this plugin can run it
  * faithfully, with the bridge standing down for that press (see the file's own doc).
  *
- * @param path - the file the chip names.
- * @returns whether a chip naming it was found to press.
+ * The menu's first row must open the file exactly the way the shell does, and what that is is the
+ * shell's business, not this plugin's: pressing the same element again keeps every part of it —
+ * the viewer it opens, the line a `#L24` suffix asked for, whatever a future shell adds there.
+ *
+ * @param path - the file the press names.
+ * @returns whether an element naming it was found to press.
  */
-export function replayChipClick(path: string): boolean {
-  const chip = [...document.querySelectorAll<HTMLElement>(CHIP_SELECTOR)]
-    .find(candidate => producedPathOf(candidate) === path)
-  if (chip === undefined) return false
-  replaying = chip
+export function replayFilePress(path: string): boolean {
+  const press = [...document.querySelectorAll<HTMLElement>(PRESS_SELECTOR)]
+    .find(candidate => pressPathOf(candidate) === path)
+  if (press === undefined) return false
+  replaying = press
   try {
-    chip.click()
+    press.click()
   } finally {
     replaying = null
   }
@@ -77,29 +184,31 @@ export function replayChipClick(path: string): boolean {
 }
 
 /**
- * Start routing produced-file chip presses.
+ * Start routing the presses that would open a file in the shell's own viewer.
  *
  * @param bridge - the host's decision (is the file pending) and where to report a press that is.
  * @returns a cleanup that stops routing.
  */
 export function startProducedChipMenu(bridge: ProducedChipBridge): () => void {
   const onClick = (event: MouseEvent): void => {
-    // A modifier press is not this bridge's: it is a gesture the harness may give its own meaning,
+    // A modified press is not this bridge's: it is a gesture the harness may give its own meaning,
     // and the plugin has no menu to offer it (see the file's own doc).
     if (event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
     const target = event.target
     if (!(target instanceof Element)) return
-    const chip = target.closest(CHIP_SELECTOR)
-    if (chip === null || chip === replaying) return
-    const path = producedPathOf(chip)
-    // Not a file the panel holds: DSH's press, untouched.
+    if (target.closest(OWN_SURFACE_SELECTOR) !== null) return
+    if (target.closest(SHELL_PICKER_SELECTOR) !== null) return
+    const press = target.closest(PRESS_SELECTOR)
+    if (press === null || press === replaying) return
+    const path = pressPathOf(press)
+    // Not a file the panel holds: the shell's press, untouched.
     if (path === undefined || !bridge.isPending(path)) return
-    // The review panel's press: DSH must not also act on it, or the reader would get both the
-    // harness's open and the menu. Captured on the document so no handler between here and the
-    // chip sees it either.
+    // The review panel's press: the shell must not also act on it, or the reader would get both the
+    // shell's open and the menu. Captured on the document so no handler between here and the press
+    // sees it either.
     event.preventDefault()
     event.stopImmediatePropagation()
-    const rect = chip.getBoundingClientRect()
+    const rect = press.getBoundingClientRect()
     bridge.onMenu({ path, x: rect.left, y: rect.bottom })
   }
   document.addEventListener('click', onClick, true)

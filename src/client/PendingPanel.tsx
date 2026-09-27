@@ -44,7 +44,7 @@ import type { HighlightSpan } from './highlight.ts'
 import { highlightWindow } from './highlight.ts'
 import { langFromPath, suffixOfPath } from './lang.ts'
 import { lineRangeLabel, referenceLabelOf } from './reference.ts'
-import { CHIP_MENU_EVENT, OPEN_FILE_EVENT, replayChipClick } from './produced-diff.ts'
+import { CHIP_MENU_EVENT, OPEN_FILE_EVENT, replayFilePress } from './produced-diff.ts'
 import type { ProducedChipMenuDetail } from './produced-diff.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
 import { OPEN_PANEL_FILE_EVENT, PANEL_STATE_EVENT, SHOW_PANEL_EVENT, TOGGLE_PANEL_EVENT } from './dock.tsx'
@@ -9612,9 +9612,9 @@ export function PendingPanel({
     setChipMenu(null)
     if (target === null) return
     if (id === 'default') {
-      // The chip is looked up by path rather than kept: the row is React's and may have re-rendered
+      // The press is looked up by path rather than kept: the row is React's and may have re-rendered
       // between the press and this pick, and a stale element would swallow the press in silence.
-      if (!replayChipClick(target.path)) showCopyToast(t('chip.gone'))
+      if (!replayFilePress(target.path)) showCopyToast(t('chip.gone'))
       return
     }
     if (id !== 'review') return
