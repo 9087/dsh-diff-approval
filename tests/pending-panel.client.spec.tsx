@@ -3726,7 +3726,10 @@ describe('PendingPanel', () => {
     const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
 
     const withSkill = await askPrompt({ read: true, files: [multi], busy: new Set(), commentSkill: 'dsh-diff-approval-comment' })
-    expect(withSkill.startsWith('discussion.marker (/repo/m.txt:4)\nwhy?')).toBe(true)
+    // The marker comes first and the question follows the frame it is about (the frame's own rows ride
+    // between them — see `quotedFrame`), so the two ends are what this pins.
+    expect(withSkill.startsWith('discussion.marker (/repo/m.txt:4)\n')).toBe(true)
+    expect(withSkill).toContain('\nwhy?')
     // The stub translator returns the key plus its parameters, so the pointer shape is
     // recognisable — and the long rules are NOT in the message.
     expect(withSkill).toContain('discussion.promptRuleSkill {"skill":"dsh-diff-approval-comment"}')
@@ -7153,7 +7156,8 @@ describe('PendingPanel', () => {
     expect(props.onPasteReference).not.toHaveBeenCalled()
     expect(addedCommentTexts(props)).toEqual(['why?'])
     // The prompt carries the marker and the range, so the answer is the answer to THIS question.
-    expect(askedPrompts(props)[0]?.startsWith('discussion.marker (/repo/m.txt:4)\nwhy?')).toBe(true)
+    expect(askedPrompts(props)[0]?.startsWith('discussion.marker (/repo/m.txt:4)\n')).toBe(true)
+    expect(askedPrompts(props)[0]).toContain('\nwhy?')
     // The block says it is waiting, and it KEEPS its writing row: the reader may write on, and this
     // thread's own button is the one thing that is refused while its answer is on its way.
     expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
@@ -11974,5 +11978,188 @@ describe('PendingPanel', () => {
     }
   })
   // PERF-SWEEP-END
+
+})
+
+/**
+ * What a comment's band covers: the rows of the frame the reader drew, and only those.
+ *
+ * A changed line is TWO rows in this model — the removed copy and the line that replaced it — so a
+ * frame that covers one of them must not be answered with a band over both. The rows are what the
+ * reader sees; the record keeps line numbers, and both sides of a change have their own.
+ */
+describe('PendingPanel: the rows a comment covers', () => {
+  /** The row indices carrying a comment band, in order. */
+  const bandRows = (): number[] => [...document.querySelectorAll('[data-diff-row]')]
+    .map((node, index) => (node.hasAttribute('data-diff-discussion-band') ? index : -1))
+    .filter(index => index >= 0)
+
+  /** The draft the panel last handed the host, or undefined when it handed none. */
+  const lastDraft = (props: PanelProps): Record<string, unknown> | undefined => {
+    const calls = (props.onCommentAdd as unknown as { mock: { calls: [SessionId, Record<string, unknown>][] } }).mock.calls
+    return calls.at(-1)?.[1]
+  }
+
+  /** Put rows `from..to` (0-based) in the browser's selection, over the diff's own code cells. */
+  const selectRows = (from: number, to: number): void => {
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const start = rows[from]!.querySelector('[data-diff-code]')?.firstChild ?? rows[from]!
+    const end = rows[to]!.querySelector('[data-diff-code]')?.firstChild ?? rows[to]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: start,
+      focusNode: end,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: start, startOffset: 0, endContainer: end, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+  }
+
+  /**
+   * A file whose line 2 changed, plus a second file to switch away to.
+   *
+   * The rows read: `A` (context), `B` (removed), `B2` (added), `C` (context) — one changed line as
+   * two rows, with new-file line 2 pointing at the ADDED one.
+   */
+  const changedLinePanel = (): { props: PanelProps } => {
+    const changed = entry({ id: 'entry-band', path: '/repo/band.txt', oldText: 'A\nB\nC\n', newText: 'A\nB2\nC\n' })
+    const other = entry({ id: 'entry-band-other', path: '/repo/other.txt', oldText: 'x\n', newText: 'y\n' })
+    const props = panelProps({ read: true, files: [changed, other], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('band.txt'))
+    return { props }
+  }
+
+  /** Send one comment on the current selection, so the record exists to be drawn. */
+  const writeOnSelection = async (props: PanelProps): Promise<void> => {
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement)
+    })
+    expect(lastDraft(props)).toBeDefined()
+  }
+
+  it('marks the picked line alone, not the removal that sits beside it', async () => {
+    const { props } = changedLinePanel()
+    // The reader picked the ADDED line — new-file line 2 — and nothing else.
+    selectRows(2, 2)
+    await writeOnSelection(props)
+    expect(lastDraft(props)?.anchor).toEqual({ startLine: 2, endLine: 2 })
+    expect(lastDraft(props)?.quote).toBe('B2')
+    // The removed copy above it reads line 2 through its OLD number: it is not what was picked, so
+    // it wears no band — the reader's own frame is the whole answer.
+    expect(bandRows()).toEqual([2])
+
+    // A rebuild (away to another file and back) must not widen it to the removal either.
+    fireEvent.click(screen.getByText('other.txt'))
+    fireEvent.click(screen.getByText('band.txt'))
+    expect(bandRows()).toEqual([2])
+  })
+
+  it('keeps the removals a frame covered, whose old numbers the range does not reach', async () => {
+    // The picked rows are a context line and the two removals under it. Their OLD numbers (2 and 3)
+    // are outside the frame's new-file range (the context line's 1 alone), so a band read as "the
+    // rows the range matches" collapses to that one line and drops both removals the reader picked.
+    const file = entry({ id: 'entry-stretch', path: '/repo/stretch.txt', oldText: 'A\nB\nC\nD\n', newText: 'A\nX\nY\nZ\nD\n' })
+    const other = entry({ id: 'entry-stretch-other', path: '/repo/other.txt', oldText: 'x\n', newText: 'y\n' })
+    const props = panelProps({ read: true, files: [file, other], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('stretch.txt'))
+
+    // Rows: A (context), B, C (removed), X, Y, Z (added), D (context). The frame is the first three.
+    selectRows(0, 2)
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement)
+    })
+    // The label names the line the file HAS (1), not the removal's old number 3 that the range's last
+    // row would have lent it.
+    expect(lastDraft(props)?.anchor).toEqual({ startLine: 1, endLine: 1 })
+    expect(bandRows()).toEqual([0, 1, 2])
+
+    fireEvent.click(screen.getByText('other.txt'))
+    fireEvent.click(screen.getByText('stretch.txt'))
+    expect(bandRows()).toEqual([0, 1, 2])
+  })
+
+  it('marks both rows when the frame covered the removal and its replacement', async () => {
+    const { props } = changedLinePanel()
+    selectRows(1, 2)
+    await writeOnSelection(props)
+    // The replacement is what the label shows — new-file line 2 — because that is the side every
+    // reader-facing number comes from.
+    expect(lastDraft(props)?.anchor).toEqual({ startLine: 2, endLine: 2 })
+    expect(bandRows()).toEqual([1, 2])
+
+    fireEvent.click(screen.getByText('other.txt'))
+    fireEvent.click(screen.getByText('band.txt'))
+    expect(bandRows()).toEqual([1, 2])
+  })
+
+  it('carries the frame\'s own rows in the question, sides and all', async () => {
+    // A reference is one number, and one number cannot say which of the rows it was written on is a
+    // removal: the reader annotating the changed line sent `(/repo/band.txt:2)`, and whoever answered
+    // went to line 2 of the file — another line. The question carries the frame instead: every row,
+    // its side, and that side's number (see `quotedFrame`).
+    const { props } = changedLinePanel()
+    selectRows(1, 2)
+    await writeOnSelection(props)
+    const prompt = askedPrompts(props)[0] ?? ''
+    expect(prompt).toContain('discussion.marker (/repo/band.txt:2)\n- 2  B\n+ 2  B2\n')
+    // …and what the `-` means is in the question too, said once, because a number from the old file
+    // would otherwise read as a line of the file as it reads now.
+    expect(prompt).toContain('discussion.frameLegend')
+    expect(prompt).toContain('\nwhy?')
+  })
+
+  it('says which file the numbers came from when the frame is only removals', async () => {
+    // The frame covers a line the file no longer has, so the only numbers it has are the old file's.
+    // The label says so rather than naming a line that now reads something else, and the question
+    // still carries the removed row itself.
+    const removed = entry({ id: 'entry-gone', path: '/repo/gone.txt', oldText: 'A\nB\nC\n', newText: 'A\nC\n' })
+    const props = panelProps({ read: true, files: [removed], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('gone.txt'))
+
+    selectRows(1, 1)
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement)
+    })
+    const prompt = askedPrompts(props)[0] ?? ''
+    // The line is 2, but the label names it as the OLD file's — the file's own line 2 is `C`.
+    expect(prompt).toContain('discussion.marker (/repo/gone.txt:2discussion.deletedLabel)')
+    expect(prompt).toContain('- 2  B')
+  })
+
+  it('pins what a frame of removed lines alone records today', async () => {
+    // Recorded here as the CURRENT behaviour of a frame that names no line the file still has: the
+    // frame is offered and the anchor falls back to the removed row's OLD number. That number is not
+    // a line of the file as it reads now (the label shows a line the reader never picked), and the
+    // host cannot resolve the quote against it — the open question this test pins rather than fixes.
+    const removed = entry({ id: 'entry-gone', path: '/repo/gone.txt', oldText: 'A\nB\nC\n', newText: 'A\nC\n' })
+    const props = panelProps({ read: true, files: [removed], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('gone.txt'))
+
+    selectRows(1, 1)
+    expect(document.querySelector('[data-diff-selection-comment]')).not.toBeNull()
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement)
+    })
+    // The removed line was old-file line 2, and the file's line 2 is now `C`.
+    expect(lastDraft(props)?.anchor).toEqual({ startLine: 2, endLine: 2 })
+    expect(lastDraft(props)?.quote).toBe('B')
+  })
 
 })

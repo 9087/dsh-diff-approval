@@ -142,6 +142,12 @@ export const zh = {
   'action.discussionCollapse': '收起',
   'discussion.placeholder': '写下你的评论…',
   'discussion.marker': '[评论]',
+  // What the marker's line numbers cannot say, said in the question itself: the frame's own rows, with
+  // their side and that side's numbers (see `quotedFrame`). Only printed when a removed row is in it.
+  'discussion.frameLegend': '（- 开头的行已删除，行号取自旧文件；其余行号都是当前文件的）',
+  // A frame of removed rows alone has no current line to name, so its numbers are the old file's and
+  // the label says so instead of pointing the reader at whatever now reads that line.
+  'discussion.deletedLabel': '（旧文件，已删除）',
   'discussion.promptRule': '（回答只针对这几行；行与行之间不要留空行；只支持 Markdown 的行内代码和加粗，表格、列表、标题这类块级语法画不出来。细则见 dsh-diff-approval-comment skill。）',
   'discussion.promptRuleSkill': '（这是一条代码批注：先加载 {skill} skill，按它的规则回答。）',
   'discussion.thinking': '回复中',
@@ -393,6 +399,10 @@ export const en = {
   'action.discussionCollapse': 'Collapse',
   'discussion.placeholder': 'Write your comment…',
   'discussion.marker': '[Review]',
+  // See the Chinese pair: the frame's own rows ride the question, so a number is never the only thing
+  // that says what the comment is about.
+  'discussion.frameLegend': '(lines starting with - are removed and their numbers come from the old file; every other number is the current file\'s)',
+  'discussion.deletedLabel': ' (old file, deleted)',
   'discussion.promptRule': '(Answer only about these lines, with no blank line between them; only Markdown inline code and bold are supported — tables, lists and headings cannot be drawn here. Full rules: the dsh-diff-approval-comment skill.)',
   'discussion.promptRuleSkill': '(This is a comment on a few diff lines: load the {skill} skill first and answer by its rules.)',
   'discussion.thinking': 'Replying',

@@ -3,7 +3,7 @@ import { REANCHOR_MAX_LINES } from '../src/comment-lines.ts'
 import {
   DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, discussionOnRange,
   discussionOverlapping, discussionPlainText, discussionRowExtras, discussionRows, discussionRounds,
-  discussionRuns, discussionText, remapDiscussion, remapDiscussions,
+  discussionRuns, discussionText, frameCoversRemovedRow, quotedFrame, remapDiscussion, remapDiscussions,
   selectionFrame, stripBlankLines,
 } from '../src/client/discussion.ts'
 import type { Discussion } from '../src/client/discussion.ts'
@@ -146,10 +146,12 @@ describe('discussions in the diff row stream', () => {
     // Nothing moved: the very same object comes back, so a rebuild that changed nothing
     // does not churn the blocks (the panel reads state identity as its change signal).
     expect(remap(original, rows([9, 10, 11, 12], ['a', 'one', 'two', 'b']))).toBe(original)
-    // An edit split the last line in two: a third row joined the range, and the content
-    // under the numbers still starts with the quote, so the numbers are followed.
+    // A third row joined the range: three rows now read line 10, 11 and 11, while the comment quoted
+    // TWO lines. The band is the quoted window — one row per quoted line — because that is what the
+    // reader picked; reading it instead as "every row the range's numbers reach" stretched it over the
+    // extra row (see `remapOne`).
     const grown = remap(original, rows([10, 11, 11], ['one', 'two', 'two']))
-    expect(grown.anchor).toMatchObject({ start: 0, end: 2 })
+    expect(grown.anchor).toMatchObject({ start: 0, end: 1 })
     expect(grown.lost).toBeUndefined()
     // The old numbers now sit over other code, and the quote is elsewhere: the thread
     // follows the code it was written about - nearest occurrence first.
@@ -452,6 +454,24 @@ describe('discussions in the diff row stream', () => {
     // With those numbers gone there is nothing left to anchor on, so the thread is
     // outdated rather than sitting silently on whatever rows now exist.
     expect(remap(original, rows([1, 2], ['a', 'b'])).lost).toBe(true)
+  })
+
+  it('reads a frame back as the rows it covered, each with its own side and number', () => {
+    // What a question carries in place of a bare number: one line per row of the frame, marked with the
+    // side it was on, and numbered by that side's file. A removed row keeps only its old-file number,
+    // which is exactly the fact a reference cannot state.
+    expect(quotedFrame('B\nB2', [{ old: 2, kind: 'del' }, { new: 2, kind: 'add' }])).toBe('- 2  B\n+ 2  B2')
+    expect(quotedFrame('A\nB', [{ old: 1, new: 1, kind: 'context' }, { old: 2, kind: 'del' }])).toBe('  1  A\n- 2  B')
+    // A record from before the sides were kept has the text alone — no invented side, no invented
+    // number — and an empty frame is no block at all.
+    expect(quotedFrame('A\nB', undefined)).toBe('A\nB')
+    expect(quotedFrame('A', [{ new: 1, kind: 'add' }, { new: 2, kind: 'add' }])).toBe('A')
+    expect(quotedFrame(undefined, [])).toBe('')
+    expect(quotedFrame('', [])).toBe('')
+    // The legend is printed for a frame that holds a removed row, and only then.
+    expect(frameCoversRemovedRow([{ old: 2, kind: 'del' }])).toBe(true)
+    expect(frameCoversRemovedRow([{ old: 1, new: 1, kind: 'context' }, { new: 2, kind: 'add' }])).toBe(false)
+    expect(frameCoversRemovedRow(undefined)).toBe(false)
   })
 
   it('offers keep/revert only over change blocks, and never a second discussion', () => {

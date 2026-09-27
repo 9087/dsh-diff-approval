@@ -25,7 +25,7 @@ import { blockRangesOf, changeBlocksOf, computeIntraLineDiff, computeWholeFileDi
 import {
   DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, discussionOverlapping,
   discussionRowExtras, discussionRows, discussionRounds, discussionRuns, discussionStackOffsets,
-  discussionText, remapDiscussions, selectionFrame,
+  discussionText, frameCoversRemovedRow, quotedFrame, remapDiscussions, selectionFrame,
 } from './discussion.ts'
 import type { Discussion, DiscussionMessage, DiscussionQuoteLine } from './discussion.ts'
 import { frameFollowIsAnimated, frameFollowKeyframes } from './scroll-follow.ts'
@@ -948,6 +948,38 @@ function rowOfLine(rows: readonly WholeFileDiffRow[], line: number): number | un
     if (value < line) before = index
   }
   return removed ?? before
+}
+
+/**
+ * The new-file lines a row range covers, or `undefined` when it covers none.
+ *
+ * A changed line is two rows here — the removed copy and the line that replaced it — and each carries
+ * a number of its own file and nothing on the other side. Reading them together (`newLine ?? oldLine`)
+ * is what let a removal's old number stand in for a current line, so the range then named a line the
+ * reader never picked. This reads the NEW side alone: the lines the file has, which is what every
+ * label, jump and reference shows and what a thread is anchored to. A frame that covers none of them
+ * has nothing to anchor to at all (see `selectionFrame`).
+ *
+ * The range is contiguous and the new side numbers its rows in order, so the answer is `undefined` or
+ * one contiguous run: the first and last row of the frame that has a new-file line.
+ *
+ * @param rows - the current model's rows.
+ * @param range - the row range (inclusive).
+ * @returns the line range, or `undefined` when the frame holds no current line.
+ */
+function newLinesInRows(
+  rows: readonly WholeFileDiffRow[],
+  range: RowRange,
+): { startLine: number; endLine: number } | undefined {
+  let startLine: number | undefined
+  let endLine: number | undefined
+  for (let index = range.start; index <= range.end; index++) {
+    const line = rows[index]?.newLine
+    if (line === undefined) continue
+    if (startLine === undefined) startLine = line
+    endLine = line
+  }
+  return startLine === undefined || endLine === undefined ? undefined : { startLine, endLine }
 }
 
 /**
@@ -5318,14 +5350,18 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     if (range === undefined) return
     // A row belongs to one annotation at most, so any overlap refuses a second.
     if (discussionOverlapping(discussions, range) !== undefined) return
+    // What the frame COVERED on the NEW side — the side every label, jump and reference names, and
+    // the side a thread is anchored to. A frame that holds a removal AND a current line therefore
+    // names the current line, not the removal's old-file number; a frame of removed lines alone has
+    // no such line at all, and is still read the way it always was (see the fallback below): that
+    // case is an open question, since a comment there can only be labelled with a line the file no
+    // longer has.
+    const newLines = newLinesInRows(model.diff.rows, range)
     const first = model.diff.rows[range.start]
     const last = model.diff.rows[range.end] ?? first
-    // The anchor is stored as new-file lines: those are what survive the model
-    // being rebuilt (a keep/revert, a later edit), and they are also what the
-    // reference label shows.
-    const startLine = first?.newLine ?? first?.oldLine
+    const startLine = newLines?.startLine ?? first?.newLine ?? first?.oldLine
     if (startLine === undefined) return
-    const endLine = last?.newLine ?? last?.oldLine ?? startLine
+    const endLine = newLines?.endLine ?? last?.newLine ?? last?.oldLine ?? startLine
     // A new block reserves rows below the anchored row. When that row sits above
     // the viewport, everything the user is reading moves down by the same amount,
     // so the scroll offset follows it - the same rule folding and removal use.
@@ -5477,11 +5513,17 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const rule = commentSkill === undefined
       ? t('discussion.promptRule')
       : t('discussion.promptRuleSkill', { skill: commentSkill })
-    // The prompt is the marker, the question and the rules — the same one a live thread sends.
-    // An outdated thread asks from the lines it was WRITTEN about (the anchor never moved), and
-    // the quote of them stays on the block; the quoted text itself does not ride the prompt,
-    // because the agent already has this thread's own transcript to answer in.
-    const prompt = `${marker}\n${text}\n\n${rule}`
+    // The frame the reader drew rides the question as a block of its own lines. A reference is one
+    // number, and a number cannot say which of the rows it was written on is a REMOVAL: annotating a
+    // deleted line sent `a.txt:2`, and the reader of that prompt went to line 2 of the file — which is
+    // another line entirely, since a removed line keeps only the OLD file's numbers. The block carries
+    // every row, its side, and that side's number (see `quotedFrame`), so what the comment is about is
+    // in the question instead of being reconstructed from one integer.
+    const frame = quotedFrame(discussion.quote, discussion.quoteLines)
+    const legend = frameCoversRemovedRow(discussion.quoteLines) ? `\n${t('discussion.frameLegend')}` : ''
+    const prompt = frame === ''
+      ? `${marker}\n${text}\n\n${rule}`
+      : `${marker}\n${frame}${legend}\n\n${text}\n\n${rule}`
     if (fileComments.some(record => record.id === id)) {
       // Already written down: this is a follow-up, and it appends a question of its own rather than
       // writing a second comment (see `CommentAsk`).
@@ -5561,12 +5603,20 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    */
   const discussionLineRange = (discussion: Discussion): string => {
     const resolved = commentLines[discussion.id]
-    return referenceLabelOf(
+    const label = referenceLabelOf(
       file.path,
       workspacePath,
       resolved?.start ?? discussion.anchor.startLine,
       resolved?.end ?? discussion.anchor.endLine,
     )
+    // A frame of removed rows alone has no current line to name, so the numbers it carries are the
+    // OLD file's: the label says which file they came from rather than pointing the reader (and the
+    // question) at whatever line now happens to read that number. A comment the host placed, or one
+    // whose frame kept no sides, is labelled exactly as before.
+    const oldOnly = resolved === undefined
+      && discussion.quoteLines !== undefined
+      && discussion.quoteLines.every(line => line.new === undefined)
+    return oldOnly ? `${label}${t('discussion.deletedLabel')}` : label
   }
   const rowAtY = (y: number): number => {
     if (rowOffsets === null) return Math.floor(y / ROW_HEIGHT_PX)

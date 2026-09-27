@@ -618,7 +618,13 @@ function remapOne(
   // — no outdated note, none of the grey, its quote never shown — while the host, which resolves against
   // the file's own lines and has no deletions to match against, had already answered that it cannot
   // place the quote at all. The two halves of one panel disagreed about one comment.
-  if (start !== -1 && textAt(start) === quote && (windowIsCurrent(start) || writtenOnRemoval)) return live(start, end)
+  if (start !== -1 && textAt(start) === quote && (windowIsCurrent(start) || writtenOnRemoval)) {
+    // The frame is the QUOTED WINDOW, and only that: one row per quoted line, so the last row is
+    // `start + span`. Taking the last row the range's numbers happened to reach instead is what drew
+    // a band over rows the reader never picked — a removal below the frame carries an OLD number that
+    // can fall inside the frame's new-file range, and the band then stretched down to it.
+    return live(start, start + span)
+  }
   // They do not hold it: follow the quote instead. Where the same code appears more than once the
   // nearest occurrence wins, since that is where the reader last saw it — the windows are already
   // joined, so this is a lookup rather than a scan. The recorded context has to agree as well wherever
@@ -662,6 +668,57 @@ function remapOne(
   // at a time instead of staying beside the lines its header still shows.
   if (start === -1) return gone()
   return markOutdated({ ...discussion, anchor: { ...discussion.anchor, start, end } })
+}
+
+/**
+ * The frame the reader drew, as a block of quoted lines for the question to carry.
+ *
+ * A reference is one number, and one number cannot say what the comment is about: a reader annotating
+ * a DELETED line produced `a.txt:2`, and the agent read line 2 of the file — which is another line
+ * entirely, because a removed line has no number in the file as it reads now (its `2` is the old
+ * file's). This block says what the number cannot: every row of the frame, in order, with the side it
+ * was on (`-` removed, `+` added, a space for context) and the number THAT side's file gave it.
+ *
+ * `quote` and `quoteLines` are what the record already holds — one entry per frame row, in row order —
+ * so nothing new is recorded for this: the question is built from the same snapshot the re-anchor uses.
+ * A record from before `quoteLines` was kept (or one the agent annotated, which names current lines
+ * only) has the text alone, and the block is that text with no numbers rather than a made-up side.
+ *
+ * @param quote - the anchored lines as they read when the comment was written.
+ * @param quoteLines - their gutter numbers and sides, in the same order.
+ * @returns the block, or `''` when there is nothing to show.
+ */
+export function quotedFrame(
+  quote: string | undefined,
+  quoteLines: readonly DiscussionQuoteLine[] | undefined,
+): string {
+  if (quote === undefined || quote === '') return ''
+  const lines = quote.split('\n')
+  if (quoteLines === undefined || quoteLines.length !== lines.length) return lines.join('\n')
+  return lines
+    .map((text, index) => {
+      const row = quoteLines[index]!
+      const marker = row.kind === 'del' ? '-' : row.kind === 'add' ? '+' : ' '
+      // The removed rows are the OLD file's (a `del` row has no new-file line), and every other row is
+      // the current file's: each number is read from the side its own marker names.
+      const number = row.kind === 'del' ? row.old ?? row.new : row.new ?? row.old
+      return number === undefined ? `${marker} ${text}` : `${marker} ${number}  ${text}`
+    })
+    .join('\n')
+}
+
+/**
+ * Whether a frame covers a line the file no longer has.
+ *
+ * The one thing a frame can hide behind its numbers: `anchor` is documented as new-file lines, but a
+ * frame of removed rows alone has none of those, so the numbers it carries are the old file's. A
+ * caller that must not present them as current lines asks this.
+ *
+ * @param quoteLines - the frame's gutter numbers and sides, when the record kept them.
+ * @returns true when at least one row of the frame is a removed line.
+ */
+export function frameCoversRemovedRow(quoteLines: readonly DiscussionQuoteLine[] | undefined): boolean {
+  return quoteLines?.some(line => line.kind === 'del') === true
 }
 
 /** What the selection frame shows for the current selection. */

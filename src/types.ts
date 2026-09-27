@@ -358,7 +358,8 @@ export interface CommentRecord {
   entryId: string
   /** The entry's display path when the comment was written. */
   path: string
-  /** The lines the annotation was made on. */
+  /** The lines the annotation was made on, as NEW-file line numbers: the numbers every label,
+   *  jump and reference shows, and the ones the host resolves the quote against. */
   anchor: CommentAnchor
   /** The anchored lines as they read then (the re-anchor fingerprint). */
   quote: string
