@@ -12043,6 +12043,31 @@ describe('PendingPanel: the rows a comment covers', () => {
     expect(lastDraft(props)).toBeDefined()
   }
 
+  it('writes a comment where `randomUUID` does not exist — a tablet over plain HTTP', async () => {
+    const { props } = changedLinePanel()
+    selectRows(2, 2)
+    // `crypto.randomUUID` is a SECURE CONTEXT API, so it does not exist when the reader is on a phone
+    // or tablet reaching this host over the LAN. The write used to mint its id with it, outside any
+    // `try`: the click threw, no request was made, nothing was reported, and the composer stayed open
+    // with the reader's words in it. Defined as an own property holding undefined, which is what an
+    // insecure context looks like from inside the page.
+    const had = Object.getOwnPropertyDescriptor(crypto, 'randomUUID')
+    Object.defineProperty(crypto, 'randomUUID', { value: undefined, configurable: true, writable: true })
+    try {
+      fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+      fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+      await act(async () => {
+        fireEvent.click(document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement)
+      })
+    } finally {
+      if (had === undefined) delete (crypto as { randomUUID?: unknown }).randomUUID
+      else Object.defineProperty(crypto, 'randomUUID', had)
+    }
+    // The host was asked, and with an id — the same record a secure context would have written.
+    expect(lastDraft(props)).toBeDefined()
+    expect(lastDraft(props)?.text).toBe('why?')
+  })
+
   it('marks the picked line alone, not the removal that sits beside it', async () => {
     const { props } = changedLinePanel()
     // The reader picked the ADDED line — new-file line 2 — and nothing else.

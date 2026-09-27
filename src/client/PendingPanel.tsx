@@ -44,6 +44,7 @@ import type { HighlightSpan } from './highlight.ts'
 import { highlightWindow } from './highlight.ts'
 import { langFromPath, suffixOfPath } from './lang.ts'
 import { lineRangeLabel, referenceLabelOf } from './reference.ts'
+import { newId } from './ids.ts'
 import { CHIP_MENU_EVENT, OPEN_FILE_EVENT, replayFilePress } from './produced-diff.ts'
 import type { ProducedChipMenuDetail } from './produced-diff.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
@@ -5563,7 +5564,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     // The id the host will know this thread by is minted here, not taken from the local block: the
     // page's state for a thread is keyed by that id (see `threadState`), so the draft follows the id
     // the snapshot will carry.
-    const commentId = crypto.randomUUID()
+    const commentId = newId()
     const draft: CommentDraft = {
       id: commentId,
       entryId: file.id,
