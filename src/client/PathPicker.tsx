@@ -17,7 +17,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 import {
   IconChevronDownOutline14, IconChevronRightOutline14, IconCloseOutline16, IconFolderClose16, IconFolderOpen16,
-} from '@deepseek-ai/dsh-client-ui-primitives'
+} from './dsh-icons.ts'
 import type { DiffApprovalAddValue, DiffApprovalBrowseEntry } from '../types.ts'
 import type { Translator } from './locales.ts'
 import css from './PendingPanel.module.css'

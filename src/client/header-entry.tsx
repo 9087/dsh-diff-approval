@@ -20,7 +20,8 @@
 
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { IconListPenOutline16, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconListPenOutline16, Tooltip } from './dsh-icons.ts'
+import { publishSessionId, selectedSessionOf, sessionIsBlank } from './session-seat.ts'
 import type { HostObservable, InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingDiffSnapshot } from './slots.ts'
@@ -46,14 +47,29 @@ export interface HeaderEntryFace {
 export interface HeaderEntrySeat {
   /** The selected session and its rows; the entry is inert without one. */
   useSessions?: ((select: (state: HeaderEntrySessions) => boolean) => boolean) | undefined
+  /**
+   * The session this seat is about, composed by the shell.
+   *
+   * This is where 0.1.7 hands it over: the session-list store it gives `useSessions` carries
+   * `{ ids, byId, phase, projectionsBySession }` and no selected session at all, while the shell's
+   * own session-scoped seats take the id from their props and ask the store about that row
+   * (`useSessions(s => s.byId[sessionId]?.blank)`). Older shells put `current` in the store, which is
+   * why both are read (see `session-seat.ts`).
+   */
+  sessionId?: SessionId | undefined
 }
 
-/** The slice of the session list this entry reads. */
+/** The slice of the session list this entry reads: whichever of these a shell carries. */
 export interface HeaderEntrySessions {
-  /** The session the app is showing. */
+  /** The session the app is showing, on the shells that keep it here (0.1.5 and earlier). */
   current?: SessionId | undefined
   /** Known sessions by id, for the blank-session check. */
-  byId: Record<string, { blank?: boolean } | undefined>
+  byId?: Record<string, { blank?: boolean } | undefined> | undefined
+  /** A blank flag carried by the STATE itself on the shells that place it there. */
+  blank?: boolean | undefined
+  /** Every other field a shell may carry: this plugin reads none of them, and a shape it does not
+   *  know must not disable the entry (see `session-seat.ts`). */
+  [field: string]: unknown
 }
 
 /** Full props of the header entry: the injected face's hooks bound as
@@ -66,7 +82,7 @@ export type DiffApprovalHeaderEntryProps =
  * @param props - the bound hooks, the session seat, and the translator.
  * @returns the icon button, with the pending count while there is one.
  */
-export function DiffApprovalHeaderEntry({ usePending, useSessions, useDock, t }: DiffApprovalHeaderEntryProps): ReactNode {
+export function DiffApprovalHeaderEntry({ usePending, useSessions, useDock, sessionId, t }: DiffApprovalHeaderEntryProps): ReactNode {
   const count = usePending(snapshot => snapshot.files.length)
   // Whether the panel is showing *dock-side* is observable here; whether it is
   // showing as the overlay comes back as an event, from the mount that owns it.
@@ -80,10 +96,20 @@ export function DiffApprovalHeaderEntry({ usePending, useSessions, useDock, t }:
     return () => { window.removeEventListener(PANEL_STATE_EVENT, onState) }
   }, [])
   // No reviewable session (none selected, or a freshly created blank one): the
-  // same rule the footer entry applies, so the two are never differently enabled.
+  // same rule the footer entry applies, so the two are never differently enabled. A host that offers
+  // no session seat at all is not a host without a session: the entry stays usable there, as it always
+  // did (the seat is the framework's, and demanding it would take the header cluster down).
   const noSession = useSessions === undefined
     ? false
-    : useSessions(state => state.current === undefined || (state.byId[state.current]?.blank ?? false))
+    : useSessions(state => {
+        const id = sessionId ?? selectedSessionOf(state)
+        return id === undefined || sessionIsBlank(state, id)
+      })
+  // This seat is session-scoped and is the one mount the shell tells; the footer mounts are handed no
+  // id at all on 0.1.7 (`renderSlot('sidebar.footer.action', { wide })`), so what is shown here is
+  // published for them. A shell that keeps the selection in the store needs no bridge: the footer
+  // reads that itself (see `session-seat.ts`).
+  publishSessionId(sessionId)
   const active = open || dockShowing
   return (
     <Tooltip label={summonHint(t)} side="bottom" delayMs={500}>

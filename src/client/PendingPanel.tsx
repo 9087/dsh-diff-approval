@@ -3,8 +3,9 @@
 import { Component, Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
-import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconEllipsisOutline16, IconFolderOpenOutline16, IconListPenOutline16, IconPanelLeftOutline16, IconPlusOutline16, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconEllipsisOutline16, IconFolderOpenOutline16, IconListPenOutline16, IconPanelLeftOutline16, IconPlusOutline16, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from './dsh-icons.ts'
+import type { MenuEntry } from './dsh-icons.ts'
+import { publishedSessionId, selectedSessionOf, sessionIsBlank } from './session-seat.ts'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
@@ -701,7 +702,18 @@ interface PreviewFlashPlacement {
 /** Full panel props composed by the sidebar footer-action slot. */
 export type PendingPanelProps =
   PropsRuntime<'sidebar.footer.action'> & InjectFace<PendingPanelFace> & PropsLocale<'diff-approval'>
-  & PendingPanelDockProps
+  & PendingPanelDockProps & PendingPanelSeat
+
+/**
+ * The session this mount is for, when the shell composes one into the seat.
+ *
+ * Session-scoped seats are handed it on 0.1.7; the root-scoped footer slot that hosts this panel is
+ * not, and neither is the dock tab. The other two sources are read where this is absent (see
+ * `session-seat.ts`).
+ */
+export interface PendingPanelSeat {
+  sessionId?: SessionId | undefined
+}
 
 /** How the panel is hosted when it is not the footer's floating overlay: the
  *  right sidebar's tab renders it docked, filling the tab and portaling its
@@ -7898,16 +7910,17 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onCommentAdd, onCommentRemove, onCommentRemoveMany, onCommentAsk, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onRevertAll, onKeepMany, onRevertMany, onAckRedoCleared, onAckUndoNotice, collapseSidebar, t,
+  wide, useSessions, sessionId, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onCommentAdd, onCommentRemove, onCommentRemoveMany, onCommentAsk, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onRevertAll, onKeepMany, onRevertMany, onAckRedoCleared, onAckUndoNotice, collapseSidebar, t,
   docked = false, dockHost, onOpenDock, closeDock, useDock,
 }: PendingPanelProps) {
-  const current = useSessions(state => state.current)
+  const storeSelected = useSessions(state => selectedSessionOf(state))
+  // The session this panel is about: what the shell composed (session-scoped seats), else the store's
+  // own selection (shells that keep it there), else what the header entry published — 0.1.7 hands the
+  // root-scoped footer slot nothing but `wide`, so the header's answer is the only one there is.
+  const current = sessionId ?? storeSelected ?? publishedSessionId()
   // A newly created session is selected but still blank (no messages yet); it
   // has nothing to review, so the entry is grayed out exactly like no session.
-  const currentBlank = useSessions(state => {
-    const id = state.current
-    return id === undefined ? false : (state.byId[id]?.blank ?? false)
-  })
+  const currentBlank = useSessions(state => sessionIsBlank(state, sessionId ?? selectedSessionOf(state)))
   const noSession = current === undefined || currentBlank
   // Whether the panel is showing in the right sidebar's tab right now (absent
   // hook: this build has no right sidebar). The face is fixed per mount, so the

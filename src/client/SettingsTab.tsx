@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { IconChevronDownOutline14, IconRefreshOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconChevronDownOutline14, IconRefreshOutline14, Menu } from './dsh-icons.ts'
 import { DEFAULT_KEYBINDINGS, DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, COVER_CHANGED_EVENT, codeFontEnabled, commentModeEnabled, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, discussionRoundLimit, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, pasteOnCopyEnabled, quickSummonKey, setCodeFontEnabled, setCommentModeEnabled, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setDiscussionRoundLimit, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPanelCover, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN,
   DISCUSSION_ROUNDS_MAX, DISCUSSION_ROUNDS_MIN } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'

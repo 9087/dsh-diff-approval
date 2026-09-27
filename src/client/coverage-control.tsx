@@ -16,7 +16,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReactElement, ReactNode } from 'react'
-import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Tooltip } from './dsh-icons.ts'
 import css from './PendingPanel.module.css'
 import { withChord } from './chords.ts'
 import type { DiffApprovalCover } from './settings.ts'

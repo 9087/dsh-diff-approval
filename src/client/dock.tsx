@@ -16,7 +16,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { HostObservable, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
-import { IconListPenOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconListPenOutline16 } from './dsh-icons.ts'
 import css from './PendingPanel.module.css'
 import { PanelBoundary } from './boundary.tsx'
 import { PendingPanel } from './PendingPanel.tsx'

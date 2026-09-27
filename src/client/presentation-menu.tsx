@@ -15,8 +15,8 @@
 
 import { useMemo, useState } from 'react'
 import type { ReactElement, ReactNode } from 'react'
-import { IconChevronDownOutline14, IconPanelLeftOutline16, Menu, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconChevronDownOutline14, IconPanelLeftOutline16, Menu, Tooltip } from './dsh-icons.ts'
+import type { MenuEntry } from './dsh-icons.ts'
 import css from './PendingPanel.module.css'
 import type { DiffApprovalPresentation } from './settings.ts'
 import type { Translator } from './locales.ts'
