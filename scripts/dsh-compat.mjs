@@ -27,7 +27,23 @@ const here = dirname(fileURLToPath(import.meta.url))
 const projectRoot = resolve(here, '..')
 const compatRoot = join(projectRoot, '.compat')
 const pluginLib = join(projectRoot, 'lib', 'index.js')
+const pluginClientLib = join(projectRoot, 'lib', 'client.js')
 const bootScript = join(here, 'dsh-compat-boot.mjs')
+
+/**
+ * The one DSH package this plugin's CLIENT half imports at runtime.
+ *
+ * Every other `@deepseek-ai/...` the client names is an `import type`, which is erased before the
+ * browser ever sees it and therefore cannot break a shell. This one is a value import, so the release
+ * has to actually export what the client asks for. That is not hypothetical: 0.1.7 renamed the whole
+ * icon set (`…Outline16` → `…OutlineMedium`), every name this plugin used vanished, and a shell whose
+ * import hands back `undefined` where a component belongs dies with React error #130 — the panel did
+ * exactly that, and `pnpm run compat` was 22/22 green through the whole incident because it only ever
+ * booted the HOST half.
+ */
+const CLIENT_PACKAGE = '@deepseek-ai/dsh-client-ui-primitives'
+/** The size words a shell has used as an icon name's tail (`16`/`14` before 0.1.7, `Medium`/`Regular` after). */
+const ICON_SIZE_WORDS = ['16', '14', 'Medium', 'Regular', 'Small', 'Large']
 
 /**
  * Run npm. `npm` is a `.cmd` shim on Windows, which needs a shell, so the command
@@ -153,12 +169,191 @@ async function probe(version, dir) {
   }
 }
 
+/**
+ * What the built client asks the primitives package for, read off `lib/client.js` itself.
+ *
+ * Reading the BUILD rather than the sources is deliberate: what has to exist in a shell is what the
+ * bundle reaches for at run time, after every `import type` is gone and after the bundler has decided
+ * what is external. The bundle is CommonJS, so the package arrives as
+ * `x = require("@deepseek-ai/dsh-client-ui-primitives")` and its names as `x.Name`.
+ *
+ * Glyphs are separated from the rest because the client treats them differently: `dsh-icons.ts`
+ * resolves a glyph at run time from a list of names and draws nothing when a shell offers none, so a
+ * glyph needs at least ONE of its candidate names — not a specific one. Everything else is used
+ * unconditionally, so it must be there exactly.
+ *
+ * @param source - the text of `lib/client.js`.
+ * @returns `{ required, glyphs }`: names that must all exist, and glyph stems with their candidates.
+ */
+function clientNeeds(source) {
+  const required = new Set()
+  const shellNames = new Set()
+  const alias = /([A-Za-z_$][\w$]*)\s*=\s*require\("@deepseek-ai\/dsh-client-ui-primitives"\)/.exec(source)
+  if (alias !== null) {
+    for (const match of source.matchAll(new RegExp(`${alias[1]}\\.([A-Za-z_$][\\w$]*)`, 'g'))) shellNames.add(match[1])
+  }
+  // Names the shim asks for at RUN time are string literals, not property accesses. Only these two
+  // sources count, because the bundle also contains names of the plugin's own: the shim re-exports
+  // `IconFolderOpen16 = IconFolderOpenOutline16` for its callers, and reading that as a name to ask the
+  // shell for reported a glyph no shell has ever had (measured: 0.1.7 exports
+  // `IconFolderOpenOutlineMedium`, which the same file names a line later).
+  for (const match of source.matchAll(/['"](Icon[A-Za-z0-9_]*)['"]/g)) shellNames.add(match[1])
+  const glyphs = new Map()
+  for (const name of shellNames) {
+    const size = ICON_SIZE_WORDS.find(word => name.endsWith(word))
+    // A name with no size word is not a glyph candidate: it is used unconditionally and must exist.
+    if (size === undefined) {
+      required.add(name)
+      continue
+    }
+    const stem = name.slice(0, -size.length)
+    if (!glyphs.has(stem)) glyphs.set(stem, new Set())
+    glyphs.get(stem).add(name)
+  }
+  return { required: [...required], glyphs: [...glyphs].map(([stem, names]) => ({ stem, names: [...names] })) }
+}
+
+/**
+ * A self-check of {@link clientNeeds}, run before the matrix.
+ *
+ * The extractor is the one part of this gate that can be wrong quietly, and it was: reading every
+ * `Icon…` word in the bundle made a glyph out of the plugin's OWN alias — `dsh-icons.ts` re-exports
+ * `IconFolderOpen16 = IconFolderOpenOutline16` for PathPicker — so the gate demanded a name no shell
+ * has ever had and failed 0.1.7 for the wrong reason. This pins the three shapes the bundle really
+ * contains (a property access on the package, a quoted run-time name, and a local alias) and refuses
+ * to run the matrix when the reading of them changes.
+ *
+ * @throws when the extractor reads a name the bundle never asks a shell for.
+ */
+function selfCheckClientNeeds() {
+  const source = [
+    'let primitives = require("@deepseek-ai/dsh-client-ui-primitives");',
+    'let LegacyFolderOpen = primitives.IconFolderOpenOutline16;',
+    'let IconFolderOpen16 = LegacyFolderOpen;',
+    'let Menu = primitives.Menu;',
+    'const asked = "IconFolderOpenOutlineMedium";',
+  ].join('\n')
+  const read = clientNeeds(source)
+  const stems = read.glyphs.map(entry => entry.stem)
+  const names = read.glyphs.find(entry => entry.stem === 'IconFolderOpenOutline')?.names.slice().sort() ?? []
+  const ok = read.required.length === 1 && read.required[0] === 'Menu'
+    && stems.length === 1 && stems[0] === 'IconFolderOpenOutline'
+    && names.join(',') === 'IconFolderOpenOutline16,IconFolderOpenOutlineMedium'
+  if (!ok) {
+    throw new Error(
+      `client-needs self-check failed: read glyphs ${JSON.stringify(read.glyphs)} and required `
+      + `${JSON.stringify(read.required)} from a bundle that asks for IconFolderOpenOutline16, `
+      + 'IconFolderOpenOutlineMedium and Menu — a name the plugin defines itself is not a name to ask a shell for.',
+    )
+  }
+}
+
+/**
+ * Every name a release's primitives package exports, from its own type declarations.
+ *
+ * `package.json` points `types` at `lib/types/index.d.ts`, and that file both names exports (`export {
+ * Menu, MenuItemButton }`) and re-exports whole modules (`export * from './icons/index.tsx'`), so the
+ * star exports are followed by turning the source path into its declaration path. A name that cannot
+ * be resolved this way is reported by the caller as an unreadable package rather than silently passing.
+ *
+ * @param packageDir - the installed release's package directory.
+ * @returns the exported names.
+ */
+async function exportedNames(packageDir) {
+  const names = new Set()
+  const queue = [join(packageDir, 'lib', 'types', 'index.d.ts')]
+  const seen = new Set()
+  while (queue.length > 0) {
+    const file = queue.pop()
+    if (file === undefined || seen.has(file) || !existsSync(file)) continue
+    seen.add(file)
+    const text = await readFile(file, 'utf8')
+    for (const match of text.matchAll(/export (?:declare )?(?:const|function|class|let|var)\s+([A-Za-z_$][\w$]*)/g)) {
+      names.add(match[1])
+    }
+    for (const match of text.matchAll(/export (?:type )?\{([^}]*)\}/g)) {
+      for (const entry of match[1].split(',')) {
+        const name = entry.trim().split(/\s+as\s+/).pop()?.trim()
+        if (name !== undefined && /^[A-Za-z_$][\w$]*$/.test(name)) names.add(name)
+      }
+    }
+    for (const match of text.matchAll(/export \* from '([^']+)'/g)) {
+      queue.push(join(dirname(file), match[1].replace(/\.tsx?$/, '.d.ts')))
+    }
+  }
+  return names
+}
+
+/** Install the client-side package for one release into that release's isolated directory. */
+async function ensureClientInstalled(version, dir) {
+  if (existsSync(join(dir, 'node_modules', CLIENT_PACKAGE, 'package.json'))) return {}
+  try {
+    await runNpm(['install', '--no-audit', '--no-fund', '--silent', `${CLIENT_PACKAGE}@${version}`], dir)
+    return {}
+  } catch (error) {
+    const detail = (error.stderr || error.message || String(error)).trim().split('\n').slice(-3).join(' ').slice(0, 300)
+    return { clientInstallError: detail }
+  }
+}
+
+/**
+ * Check one release's client-side package against what the built client asks of it.
+ *
+ * @param version - the release.
+ * @param dir - that release's isolated directory.
+ * @param needs - the result of {@link clientNeeds}.
+ * @returns `{ ok, detail, missing }`.
+ */
+async function checkClient(version, dir, needs) {
+  const installed = await ensureClientInstalled(version, dir)
+  if (installed.clientInstallError !== undefined) return { ok: false, detail: installed.clientInstallError }
+  const packageDir = join(dir, 'node_modules', CLIENT_PACKAGE)
+  const exports = await exportedNames(packageDir)
+  if (exports.size === 0) return { ok: false, detail: 'the release\'s type declarations named no exports' }
+  const missing = needs.required.filter(name => !exports.has(name))
+  const undrawable = needs.glyphs.filter(glyph => !glyph.names.some(name => exports.has(name)))
+  if (missing.length === 0 && undrawable.length === 0) {
+    return { ok: true, detail: `${needs.glyphs.length} glyph(s), ${needs.required.length} name(s)` }
+  }
+  const detail = [
+    missing.length > 0 ? `no export named ${missing.join(', ')}` : '',
+    undrawable.length > 0 ? `no name at all for ${undrawable.map(glyph => glyph.stem).join(', ')}` : '',
+  ].filter(Boolean).join('; ')
+  return { ok: false, detail, missing: [...missing, ...undrawable.map(glyph => glyph.stem)] }
+}
+
+/** Every published release of the client package, or an empty array when it cannot be read. */
+async function publishedClientVersions() {
+  try {
+    const { stdout } = await runNpm(['view', CLIENT_PACKAGE, 'versions', '--json'], projectRoot)
+    const parsed = JSON.parse(stdout)
+    return (Array.isArray(parsed) ? parsed : [parsed]).filter(value => typeof value === 'string')
+  } catch {
+    return []
+  }
+}
+
 const options = parseArgs(process.argv.slice(2))
 
 if (!existsSync(pluginLib)) {
   console.error(`compat: ${pluginLib} is missing — run \`pnpm run build\` first.`)
   process.exit(1)
 }
+if (!existsSync(pluginClientLib)) {
+  console.error(`compat: ${pluginClientLib} is missing — run \`pnpm run build\` first.`)
+  process.exit(1)
+}
+
+// What the client half needs, read once off the build under test. The reader is checked before it is
+// trusted, so a wrong reading fails the run instead of failing some release for the wrong reason.
+try {
+  selfCheckClientNeeds()
+} catch (error) {
+  console.error(`compat: ${error instanceof Error ? error.message : String(error)}`)
+  process.exit(1)
+}
+const needs = clientNeeds(await readFile(pluginClientLib, 'utf8'))
+const clientVersions = await publishedClientVersions()
 
 const all = await publishedVersions()
 let targets
@@ -170,6 +365,7 @@ if (options.recent > 0) targets = targets.slice(-options.recent)
 const skipped = options.all ? [] : all.filter(version => compareVersions(version, PEER_FLOOR) < 0)
 
 console.log(`compat: ${targets.length} release(s) in scope, plugin build ${pluginLib}`)
+console.log(`compat: client needs ${needs.glyphs.length} glyph(s) and ${needs.required.length} unconditional name(s) from ${CLIENT_PACKAGE} (reader self-checked)`)
 console.log(`compat: peer floor ${PEER_FLOOR}${skipped.length > 0 ? `, ${skipped.length} older release(s) skipped (use --all)` : ''}`)
 console.log('')
 
@@ -201,17 +397,26 @@ for (const version of targets) {
     continue
   }
   const { activated, mounted, error, routes, skills, skillBody } = probed.result
-  if (activated && mounted) {
-    rows.push({ version, status: 'ok', routes, skills, skillBody })
-    const skillNote = (skills ?? []).length > 0
-      ? `, skill: ${skills.join(', ')}${skillBody === true ? ' (body loaded)' : ' (NO BODY)'}`
-      : ', no skill registry'
-    console.log(`  ${version.padEnd(14)} ok              channel mounted (routes: ${(routes ?? []).join(', ')}${skillNote})${note}`)
+  // The client check runs for every release that published the package, whether or not the host half
+  // mounted: "the shell renamed what we import" and "the host service moved" are different failures,
+  // and a run that stops at the first one would hide the second until the first was fixed.
+  const client = clientVersions.includes(version)
+    ? await checkClient(version, installed.dir, needs)
+    : { ok: true, detail: `${CLIENT_PACKAGE} is not published at this version (not checked)` }
+  const mountedNote = `channel mounted (routes: ${(routes ?? []).join(', ')}`
+    + `${(skills ?? []).length > 0 ? `, skill: ${skills.join(', ')}${skillBody === true ? ' (body loaded)' : ' (NO BODY)'}` : ', no skill registry'}`
+    + `, client: ${client.detail})`
+  if (activated && mounted && client.ok) {
+    rows.push({ version, status: 'ok', routes, skills, skillBody, client: client.detail })
+    console.log(`  ${version.padEnd(14)} ok              ${mountedNote}${note}`)
   } else {
     if (supported) failed += 1
     else outOfScopeFailures += 1
-    rows.push({ version, status: 'FAIL', detail: error })
-    console.log(`  ${version.padEnd(14)} FAIL            ${error ?? 'plugin activated but the channel was not mounted'}${note}`)
+    const detail = activated && mounted
+      ? `client: ${client.detail}`
+      : (error ?? 'plugin activated but the channel was not mounted')
+    rows.push({ version, status: 'FAIL', detail })
+    console.log(`  ${version.padEnd(14)} FAIL            ${detail}${note}`)
   }
 }
 
