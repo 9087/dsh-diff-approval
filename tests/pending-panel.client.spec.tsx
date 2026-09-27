@@ -1103,12 +1103,11 @@ describe('PendingPanel', () => {
     expect(props.onRevert).toHaveBeenCalledWith(FILE.sessionId, FILE.id, true)
   })
 
-  it('stops asking whether a file should leave the list, once the prompt is told to', () => {
+  it('stops asking whether a file should leave the list, once the prompt is answered that way', () => {
     // Keeping or reverting a file asks whether the row should go, and a reader working through one
-    // file's blocks answers that the same way every time. The box in the dialog is about the
-    // questions STILL TO COME rather than the answer being given: the action runs as the button
-    // says, and from then on the file stops asking — the row stays in the list, and the reader
-    // takes it out by hand (the row's own 移出) when they are done with it.
+    // file's blocks answers that the same way every time. The third answer is that whole sentence as
+    // one button — keep the row AND stop asking — rather than the tick this dialog used to carry,
+    // which read as a modifier of whichever of the two buttons was pressed.
     resetPanelMemory()
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
@@ -1116,12 +1115,12 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByText('a.txt'))
 
     fireEvent.click(screen.getByText('action.keep'))
-    const box = document.querySelector('[data-diff-file-confirm-quiet]') as HTMLInputElement
-    expect(box).not.toBeNull()
-    expect(box.checked).toBe(false)
-    fireEvent.click(box)
-    fireEvent.click(document.querySelector('[data-diff-file-confirm-keep]') as HTMLButtonElement)
-    // The button the reader pressed is the answer to THIS question, box or no box.
+    expect(document.querySelector('[data-diff-file-confirm-quiet]')).toBeNull()
+    const quiet = document.querySelector('[data-diff-file-confirm-keep-quiet]') as HTMLButtonElement
+    expect(quiet).not.toBeNull()
+    // What "for now" is — the client's lifetime, not the session's — is the hover hint.
+    expect(quiet.getAttribute('title')).toBe('panel.keepInListQuietHint')
+    fireEvent.click(quiet)
     expect(props.onKeep).toHaveBeenCalledWith(FILE.sessionId, FILE.id, true)
 
     // The next keep on that file runs straight through — no dialog — and still leaves the row listed.
@@ -4657,8 +4656,8 @@ describe('PendingPanel', () => {
   })
 
   it('runs a last-block action straight through for a file that is not to be asked about', () => {
-    // The same box the whole-file dialog carries, on the dialog a block action raises: one answer
-    // per file is enough, and the file keeps its row until the reader takes it out.
+    // The same third answer the whole-file dialog carries, on the dialog a block action raises: one
+    // answer per file is enough, and the file keeps its row until the reader takes it out.
     resetPanelMemory()
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
@@ -4669,8 +4668,10 @@ describe('PendingPanel', () => {
     const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
     fireEvent.mouseEnter(rows[0]!)
     fireEvent.click(document.querySelector('[data-diff-block-keep]') as HTMLElement)
-    fireEvent.click(document.querySelector('[data-diff-confirm-quiet]') as HTMLInputElement)
-    fireEvent.click(document.querySelector('[data-diff-confirm-keep]') as HTMLButtonElement)
+    expect(document.querySelector('[data-diff-confirm-quiet]')).toBeNull()
+    const quiet = document.querySelector('[data-diff-confirm-keep-quiet]') as HTMLButtonElement
+    expect(quiet.getAttribute('title')).toBe('panel.keepInListQuietHint')
+    fireEvent.click(quiet)
     expect(props.onBlockKeep).toHaveBeenLastCalledWith(S1, FILE.id, block, false)
 
     // The same action on the same file again: no dialog, and the row is left in the list again.

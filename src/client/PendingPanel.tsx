@@ -8190,17 +8190,6 @@ export function PendingPanel({
     else if (prompt.kind === 'revert-picked') void onRevertMany(prompt.sessionId, ids, true)
     else void onRevertMany(prompt.sessionId, ids, undefined)
   }
-  /** The confirm dialog's own checkbox: stop asking about this file for the rest of the page. */
-  const [quietRemoval, setQuietRemoval] = useState(false)
-  /**
-   * Record the confirm dialog's checkbox, if it was ticked, and put it back for the next dialog.
-   * The tick is about the questions still to come, not about the answer just given: the button the
-   * reader presses is the answer, and it runs either way.
-   */
-  const settleRemovalAsk = (id: string): void => {
-    if (quietRemoval) quietenRemovalAsk(current, id)
-    setQuietRemoval(false)
-  }
   /**
    * The comments the reader has picked in the list (Ctrl/Cmd-click), by id.
    *
@@ -8675,8 +8664,9 @@ export function PendingPanel({
   const blockKeepWithPrompt: PendingPanelFace['onBlockKeep'] = (sessionId, id, block, removeWhenResolved) => {
     const file = files.find(entry => entry.id === id)
     if (removeWhenResolved === undefined && file !== undefined && blockResolvesWholeFile(file, block)) {
-      // The reader has already answered this question for this file (`panel.removalQuiet`): run the
-      // action with the row left in the list, for them to take out by hand when they are done.
+      // The reader has already answered this question for this file (the keep-and-stop-asking
+      // button in the dialog): run the action with the row left in the list, for them to take out
+      // by hand when they are done.
       if (removalAskQuiet(current, id)) return onBlockKeep(sessionId, id, block, false)
       setBlockPrompt({ action: 'keep', sessionId, id, block })
       return Promise.resolve()
@@ -8701,8 +8691,8 @@ export function PendingPanel({
   const keepWithPrompt: PendingPanelFace['onKeep'] = (sessionId, id, keepListed) => {
     // An explicit `false` is the detail view's own 移出 (the one a file with no diff left offers): it DROPS
     // the entry, and a dropped entry takes its comments with it — so a file that has any is confirmed
-    // first. The quiet box the other dialog carries is the reader's answer to exactly this question, so a
-    // tick there silences this one too.
+    // first. The keep-and-stop-asking button in the dialog is the reader's answer to exactly this
+    // question, so pressing it silences this one too.
     if (keepListed === false && commentsOn([id]).count > 0 && !removalAskQuiet(current, id)) {
       setBatchPrompt({ sessionId, kind: 'remove-one', ids: [id], doomed: [] })
       return Promise.resolve()
@@ -10386,17 +10376,6 @@ export function PendingPanel({
                     {t('panel.removeCommentsOne', { file: basenameOf(promptFile.path), count: commentsOn([promptFile.id]).count })}
                   </p>
                 )}
-                {/* The same checkbox the whole-file dialog carries: this question comes back for
-                    every block of the file, and the answer is usually the same one. */}
-                <label className={css.pickerCheck} title={t('panel.removalQuietHint')}>
-                  <input
-                    type="checkbox"
-                    data-diff-confirm-quiet
-                    checked={quietRemoval}
-                    onChange={(event) => { setQuietRemoval(event.target.checked) }}
-                  />
-                  {t('panel.removalQuiet')}
-                </label>
                 <div className={css.confirmActions}>
                   <button
                     type="button"
@@ -10407,7 +10386,6 @@ export function PendingPanel({
                       // the choice rides the same block RPC as `removeWhenResolved`.
                       setBlockPrompt(null)
                       const { action, sessionId, id, block } = blockPrompt
-                      settleRemovalAsk(id)
                       void (action === 'keep'
                         ? onBlockKeep(sessionId, id, block, true)
                         : onBlockRevert(sessionId, id, block, true))
@@ -10423,13 +10401,36 @@ export function PendingPanel({
                       // Keep the file listed: run the action with it not removed.
                       setBlockPrompt(null)
                       const { action, sessionId, id, block } = blockPrompt
-                      settleRemovalAsk(id)
                       void (action === 'keep'
                         ? onBlockKeep(sessionId, id, block, false)
                         : onBlockRevert(sessionId, id, block, false))
                     }}
                   >
                     {t('panel.keepInList')}
+                  </button>
+                  {/* The third answer, and the only one that is about the questions STILL TO COME: keep
+                      the row listed and stop asking about this file. It is a button rather than the tick
+                      this dialog used to carry, because a tick beside two buttons reads as a modifier of
+                      whichever one is pressed — so "yes, and stop asking" had to be spelled as an answer
+                      of its own. The title carries what "for now" is: the client's own lifetime, not the
+                      session's (see `quietenRemovalAsk`). */}
+                  <button
+                    type="button"
+                    className={css.action}
+                    data-diff-confirm-keep-quiet
+                    title={t('panel.keepInListQuietHint')}
+                    onClick={() => {
+                      setBlockPrompt(null)
+                      const { action, sessionId, id, block } = blockPrompt
+                      quietenRemovalAsk(current, id)
+                      // Not removed, exactly as the button above: the difference is only what the file
+                      // is told about the questions that follow (see `removalAskQuiet`).
+                      void (action === 'keep'
+                        ? onBlockKeep(sessionId, id, block, false)
+                        : onBlockRevert(sessionId, id, block, false))
+                    }}
+                  >
+                    {t('panel.keepInListQuiet')}
                   </button>
                 </div>
               </div>
@@ -10447,19 +10448,6 @@ export function PendingPanel({
                     {t('panel.removeCommentsOne', { file: basenameOf(promptEntry.path), count: commentsOn([promptEntry.id]).count })}
                   </p>
                 )}
-                {/* Tick it and this file stops asking: the action below runs, the row stays in the
-                    list, and the reader takes it out by hand when they are done with it. The scope is
-                    the page's memory — this session, this visit — so the label says the session and
-                    the title says the visit, which is the bound a reload is. */}
-                <label className={css.pickerCheck} title={t('panel.removalQuietHint')}>
-                  <input
-                    type="checkbox"
-                    data-diff-file-confirm-quiet
-                    checked={quietRemoval}
-                    onChange={(event) => { setQuietRemoval(event.target.checked) }}
-                  />
-                  {t('panel.removalQuiet')}
-                </label>
                 <div className={css.confirmActions}>
                   <button
                     type="button"
@@ -10470,7 +10458,6 @@ export function PendingPanel({
                       // keep/revert RPC as `keepListed: false`.
                       setFilePrompt(null)
                       const { action, sessionId, id } = filePrompt
-                      settleRemovalAsk(id)
                       void (action === 'keep' ? onKeep(sessionId, id, false) : onRevert(sessionId, id, false))
                     }}
                   >
@@ -10484,11 +10471,27 @@ export function PendingPanel({
                       // Keep the resolved file listed, with no pending diff.
                       setFilePrompt(null)
                       const { action, sessionId, id } = filePrompt
-                      settleRemovalAsk(id)
                       void (action === 'keep' ? onKeep(sessionId, id, true) : onRevert(sessionId, id, true))
                     }}
                   >
                     {t('panel.keepInList')}
+                  </button>
+                  {/* The same third answer the block dialog carries, on the whole-file question: keep the
+                      row and stop asking about this file. The scope is the page's memory — this client's
+                      lifetime, not the session's — which the title spells out (see `quietenRemovalAsk`). */}
+                  <button
+                    type="button"
+                    className={css.action}
+                    data-diff-file-confirm-keep-quiet
+                    title={t('panel.keepInListQuietHint')}
+                    onClick={() => {
+                      setFilePrompt(null)
+                      const { action, sessionId, id } = filePrompt
+                      quietenRemovalAsk(current, id)
+                      void (action === 'keep' ? onKeep(sessionId, id, true) : onRevert(sessionId, id, true))
+                    }}
+                  >
+                    {t('panel.keepInListQuiet')}
                   </button>
                 </div>
               </div>
@@ -10501,7 +10504,11 @@ export function PendingPanel({
                   {batchAskOf(batchPrompt)}
                 </p>
                 {/* The file's comments go with it: the host DELETES them when the entry leaves the list
-                    (see `dropEntry`), and nothing brings them back. */}
+                    (see `dropEntry`). Every dropping action that carries an undo pair snapshots them
+                    into that pair's `before` side (see `droppingComments`), so Ctrl+Z brings the
+                    threads back with the row — the two drops that record no pair at all are the ones
+                    that really lose them: a revert that deletes a created file, and a file the host
+                    finds unavailable. */}
                 {batchCommentsText() !== '' && (
                   <p className={css.confirmText} data-diff-batch-comments>
                     {batchCommentsText()}

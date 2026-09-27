@@ -1329,9 +1329,13 @@
   overflow-wrap: anywhere;
 }
 
+/* The dialog's answers, right-aligned. They wrap: the third answer ("keep it listed and stop
+   asking") is long enough that it and the two it joins do not share one 340px line, and a row
+   that overflowed the card would put a button outside the dialog. */
 .confirmActions {
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;

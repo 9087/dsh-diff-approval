@@ -231,9 +231,10 @@ export function forgetPlacedThreadsNotIn(sessionId: string | undefined, listed: 
  * The files this page has been told to stop asking about, by session.
  *
  * Keeping or reverting a file asks whether the row should leave the list, and a reader working
- * through one file's blocks answers that the same way every time. Ticking the box in that prompt is
- * a fact about this visit rather than a preference — it is not the host's to keep, and a reload
- * starts clean, exactly like the thread state above.
+ * through one file's blocks answers that the same way every time. The dialog's keep-and-stop-asking
+ * button is that whole answer; what it records here is a fact about this visit rather than a
+ * preference — it is not the host's to keep, and a reload starts clean, exactly like the thread
+ * state above.
  */
 const quietRemovals = new Map<string, Set<string>>()
 
