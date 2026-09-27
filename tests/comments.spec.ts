@@ -337,6 +337,51 @@ describe('mutations', () => {
     expect(second.list(S2).map(row => row.id)).toEqual(['c3'])
   })
 
+  it('writes a batch of additions in one save per session, and one revision for the batch', async () => {
+    const comments = await store()
+    const before = comments.commentsRevision()
+    const stored = comments.addMany([
+      comment(),
+      comment({ id: 'c2' }),
+      comment({ id: 'c3', sessionId: S2, entryId: '/repo/b.txt', path: '/repo/b.txt' }),
+    ])
+    // Index-aligned with the input, which is what makes the batch `add` per record: a caller that
+    // needs what was STORED (the merged record, not the one it handed over) reads it here rather
+    // than `get`-ing each id back and racing a later change.
+    expect(stored.map(record => record.id)).toEqual(['c1', 'c2', 'c3'])
+    // ONE revision for the batch, which is what one write per session means (the same reading the
+    // `removeMany` test above takes): a loop of `add` calls would have bumped it once per record.
+    expect(comments.commentsRevision()).toBe(before + 1)
+
+    // A batch that carries nothing does not rewrite anything, exactly as a removal that matches nothing.
+    expect(comments.addMany([])).toEqual([])
+    expect(comments.commentsRevision()).toBe(before + 1)
+
+    // Each affected session's own file holds its own records — the saves the one revision stands for.
+    await comments.settled()
+    const second = new CommentStore(root)
+    await expect(second.loadAll()).resolves.toBe(3)
+    expect(second.list(S1).map(record => record.id)).toEqual(['c1', 'c2'])
+    expect(second.list(S2).map(record => record.id)).toEqual(['c3'])
+  })
+
+  it('merges a rewritten record exactly as a single add does', async () => {
+    const comments = await store()
+    // The same history driven through the two doors: written once, asked in, then written again. A
+    // batch is meant to be `add` per record without the N writes, so what it stores has to be what
+    // `add` stores — field for field, including the identity a rewrite must not lose.
+    comments.add(comment({ id: 'single' }))
+    comments.addMany([comment({ id: 'batch' })])
+    comments.recordAsk(S1, 'single', 'req-7', 3, 'why?')
+    comments.recordAsk(S1, 'batch', 'req-7', 3, 'why?')
+
+    const viaAdd = comments.add(comment({ id: 'single', text: 'why, though?', createdAt: 99, updatedAt: 99 }))
+    const viaBatch = comments.addMany([comment({ id: 'batch', text: 'why, though?', createdAt: 99, updatedAt: 99 })])[0]!
+    expect(viaAdd.createdAt).toBe(1)
+    // Only the ids differ, so projecting one onto the other is the whole comparison.
+    expect({ ...viaBatch, id: viaAdd.id }).toEqual(viaAdd)
+  })
+
   it('records the questions asked in a thread, with their own words, and never an answer', async () => {
     const comments = await store()
     comments.add(comment())

@@ -353,16 +353,68 @@ export class CommentStore {
    * @returns the stored comment, which is the existing one when the id was already here.
    */
   add(record: CommentRecord): CommentRecord {
-    const before = this.byId.get(record.id)
-    const stored: CommentRecord = before === undefined ? record : {
-      ...record,
-      createdAt: before.createdAt,
-      ...(before.asks === undefined ? {} : { asks: before.asks }),
-    }
+    const stored = this.mergeOf(record)
     this.byId.set(record.id, stored)
     this.revision += 1
     this.save(record.sessionId)
     return stored
+  }
+
+  /**
+   * Record several annotations at once, as ONE write per affected session.
+   *
+   * This is what putting a batch of restored comments back needs and what a loop of `add` calls
+   * cannot give it: each `add` saves its session's file, so an undo that restored ten threads wrote
+   * that file ten times — ten chances for a transient failure to leave the store and the disk
+   * disagreeing about an action the reader already watched happen. The records are stored by the SAME
+   * rule as `add` (a new id verbatim, an existing one merged with its `createdAt` and its questions
+   * kept), which is what lets a restore be an ordinary write rather than a special case: a snapshot
+   * that came back as a new comment, with a fresh id and no questions, would be a look-alike of the
+   * reader's thread.
+   *
+   * A batch that carries nothing changes nothing, so a no-op restore does not rewrite a file.
+   *
+   * @param records - the comments to store, in the caller's order.
+   * @returns the stored record for each input, index-aligned: what landed, which is not always what
+   *   was handed over (a merge keeps the fields the existing comment owns). A count would drop that,
+   *   and a caller needing it would have to `get` each id back and race a later change.
+   */
+  addMany(records: readonly CommentRecord[]): CommentRecord[] {
+    const stored: CommentRecord[] = []
+    const sessions = new Set<SessionId>()
+    for (const record of records) {
+      // Read through `mergeOf` per record, so a batch that names one id twice behaves exactly as two
+      // `add` calls do (the second merges against the first).
+      const merged = this.mergeOf(record)
+      this.byId.set(record.id, merged)
+      stored.push(merged)
+      sessions.add(record.sessionId)
+    }
+    if (records.length === 0) return stored
+    this.revision += 1
+    for (const sessionId of sessions) this.save(sessionId)
+    return stored
+  }
+
+  /**
+   * The record as the store keeps it: a new id VERBATIM, an id already here merged.
+   *
+   * The one place the merge rule lives, so `add` and `addMany` cannot drift: writing a comment that
+   * is already here is the same comment written again — a client retrying a request whose response
+   * was dropped, or a second client sending the id it was handed — so the questions already asked in
+   * it are kept and only the annotation's own fields move. Overwriting the whole record would erase
+   * the identity of a question that is in flight, and its answer could then never be matched back to
+   * this thread; `createdAt` is kept for the same reason, since it is what a list read orders by.
+   * @param record - the comment as the caller wrote it.
+   * @returns the record to store under its id.
+   */
+  private mergeOf(record: CommentRecord): CommentRecord {
+    const before = this.byId.get(record.id)
+    return before === undefined ? record : {
+      ...record,
+      createdAt: before.createdAt,
+      ...(before.asks === undefined ? {} : { asks: before.asks }),
+    }
   }
 
   /**
@@ -405,6 +457,24 @@ export class CommentStore {
     this.revision += 1
     this.save(sessionId)
     return removed
+  }
+
+  /**
+   * Every comment one pending entry carries, oldest first.
+   *
+   * The read half of `removeForEntry` and kept beside it, because they are two answers about the same
+   * fact: which comments an entry owns. A caller that is about to drop the entry asks this first, so
+   * the undo pair can carry them back; the two must agree on that set, or a restore would put back
+   * fewer (or more) threads than the drop took.
+   * @param entryId - the entry id (= path).
+   * @returns that entry's comments, in list order.
+   */
+  forEntry(entryId: string): CommentRecord[] {
+    const listed: CommentRecord[] = []
+    for (const comment of this.byId.values()) {
+      if (comment.entryId === entryId) listed.push(comment)
+    }
+    return listed.sort((left, right) => left.createdAt - right.createdAt)
   }
 
   /**

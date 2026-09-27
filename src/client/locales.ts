@@ -124,9 +124,14 @@ export const zh = {
   // Taking a file out of the list DELETES its comments on the host (see `dropEntry`), so every press that
   // drops an entry says so first: in the dialog it already has, or in one raised only for this. Per-file
   // counts are inline — a table would need headers and dwarf the question it is attached to.
+  //
+  // It does NOT claim the loss cannot be undone. Most of these presses are undoable and now carry the
+  // comments with them (see `droppingComments`), while a few record no undo pair at all (a revert that
+  // deletes a created file, a file that reads as unavailable) — one sentence cannot be true for both, so
+  // it says the one thing that always holds: the comments close with the file.
   'panel.removeOneAsk': '{action}「{file}」？',
-  'panel.removeCommentsOne': '「{file}」上的 {count} 条评论会一起关闭，且无法撤销',
-  'panel.removeCommentsMany': '{files} 个文件上的 {count} 条评论会一起关闭，且无法撤销：{list}',
+  'panel.removeCommentsOne': '「{file}」上的 {count} 条评论会一起关闭',
+  'panel.removeCommentsMany': '{files} 个文件上的 {count} 条评论会一起关闭：{list}',
   'panel.removeCommentsMore': '等 {count} 个文件',
   'row.added': '+{added}',
   'row.removed': '-{removed}',
@@ -376,8 +381,8 @@ export const en = {
   'panel.batchAndMore': 'and {count} more',
   'panel.batchGo': 'Confirm',
   'panel.removeOneAsk': '{action} "{file}"?',
-  'panel.removeCommentsOne': 'The {count} comment(s) on "{file}" will be closed too, with no undo',
-  'panel.removeCommentsMany': 'The {count} comment(s) on {files} file(s) will be closed too, with no undo: {list}',
+  'panel.removeCommentsOne': 'The {count} comment(s) on "{file}" will be closed too',
+  'panel.removeCommentsMany': 'The {count} comment(s) on {files} file(s) will be closed too: {list}',
   'panel.removeCommentsMore': 'and {count} more file(s)',
   'row.added': '+{added}',
   'row.removed': '-{removed}',

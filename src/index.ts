@@ -297,6 +297,18 @@ interface DiffApprovalUndoState {
   /** A batch of entries restored/removed together (one VCS import). Each item's
    * `entry` decides restore vs remove; present only on the import's pair. */
   batch?: readonly DiffApprovalUndoState[] | undefined
+  /** What this side is ABOUT. Absent means the entry/file state every other
+   * snapshot carries; `'comments'` means it is a set of comment threads. The two
+   * kinds ride ONE pair type and ONE stack because undo is a single global LIFO:
+   * Ctrl+Z takes back the reader's last action whether that action settled a file
+   * or ended a comment, so a second stack would have to be merged back into this
+   * one at every pop — and `popOwnPair` would have to know which kind goes first. */
+  kind?: 'comments' | undefined
+  /** The comment records this side holds (`kind === 'comments'` only): the ones a
+   * restore installs, while the OTHER side's are the ones it removes. A record is
+   * stored verbatim rather than rebuilt, which is what brings a thread back with
+   * its id, its anchor and the questions it was asked in. */
+  comments?: readonly CommentRecord[] | undefined
 }
 
 /** Before/after pair pushed on each undoable keep/revert action. */
@@ -749,25 +761,20 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   }
 
   /**
-   * Drop one entry from the list, and its comments with it.
+   * Drop one entry from its session's list, ALONG WITH THE COMMENTS it carries.
    *
-   * The comments go in the same tick as the entry — rather than being swept on some
-   * later read — because a second client polling in between must never be handed a
-   * comment naming a file the same read no longer lists. Synchronous: the comment
-   * store applies changes to memory as it goes and persists on its own chain.
+   * The comments go in the same tick as the entry — rather than being swept on some later read —
+   * because a second client polling in between must never be handed a comment naming a file the same
+   * read no longer lists. Synchronous: the comment store applies changes to memory as it goes and
+   * persists on its own chain.
+   *
+   * This call is the DESTRUCTION the undo pair of every dropping action has to be able to reverse, so
+   * each of those actions snapshots the entry's comments into its `before` side first (see
+   * `droppingComments`). The panel still asks before a press that drops an entry carrying comments
+   * (see the `remove-one` / `remove-*` prompts): undo covers the paths that have a pair, and the ask
+   * covers the reader's intent either way.
    * @param id - the entry id (= path) leaving the list.
    * @returns whether the entry was there.
-   */
-  /**
-   * Drop an entry from its session's list, ALONG WITH THE COMMENTS it carries.
-   *
-   * That second half is deliberate FOR NOW: a comment is a note about a change, not a change, so it is not
-   * part of what undo/redo keeps (`pushUndo` is the one place that would have to grow if comments are ever
-   * to survive a removal). A file that leaves the list and comes back — through the deleted-file checkpoint
-   * below, through a re-import, or through the reader adding it again — comes back without its comments.
-   * The panel therefore asks before any press that drops an entry carrying comments (see the `remove-one` /
-   * `remove-*` prompts); the paths with no press of their own stay silent, because there is no moment to ask
-   * at.
    */
   function dropEntry(id: string): boolean {
     const removed = store.remove(id)
@@ -931,12 +938,13 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       if (live.kind === 'deleted') {
         // The file is gone: remove it from the list, keeping an undoable
         // checkpoint that recreates the file (its tracked content) and restores
-        // the entry to the list. Undo/redo covers the DIFF for now, so the comments this file carried are
-        // not in the checkpoint and do not come back with it (see `dropEntry`) — the current scope, not an
-        // oversight: they would have to join the snapshot in `pushUndo` to survive.
+        // the entry to the list. The comments the file carried ride the checkpoint's `before` side, so
+        // this checkpoint means the same thing as a button's drop: one Ctrl+Z gives back the file, the
+        // row and the threads written on it. It is snapshotted BEFORE the drop, which is what that call
+        // is about to take away.
+        const checkpoint = droppingComments({ id: entry.path, path: entry.path, entry, fileText: entry.newText })
         dropEntry(entry.path)
-        pushUndo(sessionId,
-          { id: entry.path, path: entry.path, entry, fileText: entry.newText },
+        pushUndo(sessionId, checkpoint,
           { id: entry.path, path: entry.path, entry: undefined, fileText: undefined })
         persistSession()
         continue
@@ -1295,10 +1303,93 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   }
 
   /**
+   * One side of a comment pair: the records it holds, and the entry they hang off.
+   *
+   * The pair's `id`/`path` are that ENTRY's id (= its path, the store's global identity), which is the
+   * one field that makes a comment pair behave like a file pair everywhere the stack is walked:
+   * `purgeForEntry` filters by paths, so a comment whose file left the review cannot be restored onto
+   * it. A pick of comments can span several files, in which case the pair names its first record's
+   * entry — each record still carries its own `entryId`, which is where the restore puts it back.
+   * @param entryId - the entry the pair's comments hang off.
+   * @param records - the threads this side holds.
+   * @returns the snapshot for `pushUndo`.
+   */
+  function commentState(entryId: string, records: readonly CommentRecord[]): DiffApprovalUndoState {
+    return { id: entryId, path: entryId, entry: undefined, fileText: undefined, kind: 'comments', comments: records }
+  }
+
+  /**
+   * The `before` side of an action that DROPS its entry, with the comments that drop is about to
+   * delete riding along.
+   *
+   * Undo means one thing to the reader — their last action, taken back — so a pair whose action takes
+   * a file out of the list has to bring back the threads that went with it, exactly as the pair for a
+   * closed card brings the card back. Without this, Ctrl+Z gave the row back empty and the same
+   * gesture meant two different things depending on whether the action was about a file or a comment.
+   *
+   * The snapshot goes on the `before` side ONLY: `after` carries none, which is what makes a redo the
+   * same drop again rather than something that reinstalls a thread.
+   *
+   * Only the paths that really drop take one. A keep asked to leave its entry listed never deletes a
+   * comment, and a snapshot there would re-add what the store still holds — and worse, would make the
+   * undo of that keep resurrect comments the reader wrote after it.
+   *
+   * Must be called BEFORE `dropEntry`: the snapshot is of what that call is about to take away.
+   * @param state - the `before` side as the action's own bookkeeping built it.
+   * @returns that side, carrying the entry's records when it has any (absent rather than empty, so
+   *   "this pair is about comments too" is one check for the restore).
+   */
+  function droppingComments(state: DiffApprovalUndoState): DiffApprovalUndoState {
+    const carried = comments.forEntry(state.path)
+    return carried.length === 0 ? state : { ...state, comments: carried }
+  }
+
+  /**
+   * Install one side of a comment pair: the comments that side holds go back into the store, and the
+   * ones only the other side holds are what this restore removes.
+   *
+   * The records go in VERBATIM (`CommentStore.add` stores a record it has never seen exactly as it
+   * arrived), which is the whole point of snapshotting them: a rebuilt record would come back as a new
+   * comment, with a fresh id, a fresh `createdAt` and no questions, and the reader's thread would be
+   * gone behind a look-alike.
+   *
+   * The resolved lines of the entry are forgotten afterwards, because a range resolved against the
+   * content the comment was written on is not a fact about the content it is being restored onto: the
+   * file may have moved on while the thread was closed, so the next read has to place the quote again.
+   *
+   * Nothing here touches `ctx.fs` or the pending store: a comment is not a change to a file, and a
+   * restore that also wrote one would turn "take the comment back" into "take the edit back".
+   * @param sessionId - the session the pair was taken in (a pair's comments are one session's).
+   * @param state - the side to install.
+   * @param expectedFile - the other side; the comments only it lists are the ones to remove.
+   */
+  function restoreComments(
+    sessionId: SessionId,
+    state: DiffApprovalUndoState,
+    expectedFile: DiffApprovalUndoState | undefined,
+  ): void {
+    const installing = state.comments ?? []
+    const installed = new Set(installing.map(record => record.id))
+    const stale = (expectedFile?.comments ?? [])
+      .map(record => record.id)
+      .filter(id => !installed.has(id))
+    if (stale.length > 0) {
+      comments.removeMany(sessionId, stale)
+      for (const id of stale) commentLines.delete(id)
+    }
+    // One write for the whole side, not one per record: a pick of twenty comments is one undo, and it
+    // must not become twenty saves of the session's file (see `CommentStore.addMany`).
+    if (installing.length > 0) comments.addMany(installing)
+    forgetCommentLinesForEntry(state.path)
+  }
+
+  /**
    * Restore one snapshot (the before/after side of an undo pair). File writes
    * carry the session sandbox policy; a divergence guard refuses to overwrite
    * a file an outside writer has since changed. The store change is applied
-   * only after the write succeeds, keeping the restore all-or-nothing.
+   * only after the write succeeds, keeping the restore all-or-nothing — and the
+   * comments a dropping action removed are the LAST thing put back, so a refused
+   * restore cannot leave a thread on a row that did not come back.
    * @param sessionId - the owning session.
    * @param state - the snapshot to restore.
    * @param expectedFile - the other side's file content, checked before a write.
@@ -1310,6 +1401,13 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     expectedFile: DiffApprovalUndoState | undefined,
     signal: AbortSignal,
   ): Promise<void> {
+    // A comment pair carries no file and no entry, so it takes the one branch that has neither.
+    // Dispatching on the pair's own kind is what keeps ONE stack honest: the top of it decides what
+    // the pop means, and everything below this line is about files.
+    if (state.kind === 'comments') {
+      restoreComments(sessionId, state, expectedFile)
+      return
+    }
     if (state.fileText !== undefined) {
       const resolved = await ctx.fs.resolve(state.path, { signal })
       if (expectedFile?.fileText !== undefined) {
@@ -1338,6 +1436,21 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     }
     if (state.entry !== undefined) store.restore(state.entry)
     else dropEntry(state.path)
+    // The comments come back LAST, and only for a restore that got this far: everything above can
+    // refuse (a divergence guard, a write the sandbox denies), and a refused restore must not leave
+    // behind the threads of a row that did not come back — a comment on a file the list does not hold
+    // is exactly the orphan the store's guards exist to prevent, and the panel would draw a card
+    // pointing at nothing.
+    //
+    // `comments` is present only on a pair whose action DROPPED the entry, so this also covers the
+    // batch case: `pushBatchUndo` hands each item to this same path, item by item.
+    if (state.comments !== undefined && state.comments.length > 0) {
+      comments.addMany(state.comments)
+      // Their resolved lines were computed against the content the thread was written on, which is not
+      // a fact about the content it is coming back onto; the next read places the quote again (the same
+      // reason `restoreComments` forgets them).
+      forgetCommentLinesForEntry(state.path)
+    }
   }
 
   /**
@@ -1526,6 +1639,11 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           ...(input.quoteLines === undefined ? {} : { quoteLines: input.quoteLines }),
         }
         comments.add(record)
+        // Writing a comment is an action the reader took, so it joins the same history as their file
+        // decisions — as an empty → {it} pair, because the comment IS the change. Nothing about the
+        // conversation goes near this: `comment-ask` and the answer arriving patch the thread, and a
+        // Ctrl+Z that took a question back would be rewinding a conversation rather than an action.
+        pushUndo(input.sessionId, commentState(entry.path, []), commentState(entry.path, [record]))
         const value: DiffApprovalCommentAddValue = { outcome: 'added', comment: record }
         return { ok: true, value }
       }
@@ -1533,8 +1651,13 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const target = targetOf(payload)
         if (target === undefined) return rpcError('sessionId and id must be non-empty strings')
         await ensureLoaded()
-        const value: DiffApprovalCommentRemoveValue = {
-          outcome: comments.remove(target.sessionId, target.id) ? 'removed' : 'missing',
+        // Read the record BEFORE the removal: `remove` keeps nothing, so a pair built afterwards could
+        // only put an id back with no thread behind it.
+        const record = comments.get(target.id)
+        const removed = comments.remove(target.sessionId, target.id)
+        const value: DiffApprovalCommentRemoveValue = { outcome: removed ? 'removed' : 'missing' }
+        if (removed && record !== undefined) {
+          pushUndo(target.sessionId, commentState(record.entryId, [record]), commentState(record.entryId, []))
         }
         // The comment is gone, so the lines it resolved to are about nothing: a later comment reusing
         // the id (the client mints them, and a retry may) must not read as already resolved.
@@ -1547,8 +1670,20 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         await ensureLoaded()
         // One batch is one write of the session's comment file (see `CommentStore.removeMany`), which is
         // the whole reason this endpoint exists beside `comment-remove`.
+        // The snapshot is taken first, and in the order given: `removeMany` reports the ids it actually
+        // dropped under those same two rules (it is here, and it is this session's), so the records
+        // below are exactly the ones that left.
+        const snapshot = request.ids
+          .map(id => comments.get(id))
+          .filter((record): record is CommentRecord => record !== undefined && record.sessionId === request.sessionId)
         const removed = comments.removeMany(request.sessionId, request.ids)
         for (const id of removed) commentLines.delete(id)
+        // ONE pair for the whole batch, like the pick that asked for it: a step per comment would make
+        // the reader press Ctrl+Z once per thread to take back one decision.
+        const first = snapshot[0]
+        if (first !== undefined) {
+          pushUndo(request.sessionId, commentState(first.entryId, snapshot), commentState(first.entryId, []))
+        }
         const value: DiffApprovalCommentRemoveManyValue = { removed: removed.length }
         return { ok: true, value }
       }
@@ -1587,9 +1722,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           const value: DiffApprovalActionValue = { outcome: 'kept', resolved: true }
           return { ok: true, value }
         }
+        // Snapshotted BEFORE the drop: the threads are what that call is about to take away.
+        const beforeDrop = droppingComments({ id: entry.path, path: entry.path, entry, fileText: undefined })
         dropEntry(target.id)
-        pushUndo(target.sessionId,
-          { id: entry.path, path: entry.path, entry, fileText: undefined },
+        pushUndo(target.sessionId, beforeDrop,
           { id: entry.path, path: entry.path, entry: undefined, fileText: undefined })
         persistSession(true)
         const value: DiffApprovalActionValue = { outcome: 'kept' }
@@ -1632,8 +1768,13 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           const value: DiffApprovalActionValue = { outcome: 'reverted', resolved: true }
           return { ok: true, value }
         }
+        // The snapshot happens BEFORE the drop takes the comments away. A revert of a created file has
+        // no undo state at all (the file is deleted, so there is nothing to go back to) and therefore
+        // no pair for a snapshot to ride — the one revert whose threads cannot come back, which is the
+        // same "this action is not undoable" the file itself already is.
+        const pair = undo === undefined ? undefined : { before: droppingComments(undo.before), after: undo.after }
         dropEntry(target.id)
-        if (undo !== undefined) pushUndo(target.sessionId, undo.before, undo.after)
+        if (pair !== undefined) pushUndo(target.sessionId, pair.before, pair.after)
         persistSession(true)
         const value: DiffApprovalActionValue = { outcome: 'reverted' }
         return { ok: true, value }
@@ -1646,7 +1787,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const before: DiffApprovalUndoState[] = []
         const after: DiffApprovalUndoState[] = []
         for (const entry of entries) {
-          before.push({ id: entry.id, path: entry.path, entry, fileText: undefined })
+          before.push(droppingComments({ id: entry.id, path: entry.path, entry, fileText: undefined }))
           after.push({ id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
           dropEntry(entry.id)
         }
@@ -1673,7 +1814,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             // entry) rather than silently dropped; stop the bulk here.
             return rpcError(`revert-all failed for ${entry.path}`)
           }
-          if (undo !== undefined) { batchBefore.push(undo.before); batchAfter.push(undo.after) }
+          if (undo !== undefined) {
+            batchBefore.push(droppingComments(undo.before))
+            batchAfter.push(undo.after)
+          }
           dropEntry(entry.id)
         }
         if (batchBefore.length > 0) {
@@ -1706,7 +1850,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             })
             continue
           }
-          before.push({ id: entry.id, path: entry.path, entry, fileText: undefined })
+          // Snapshotted before the drop below takes them away (the keep-list branch above returns
+          // first, and must NOT snapshot: its entry never leaves the list, so nothing was deleted).
+          before.push(droppingComments({ id: entry.id, path: entry.path, entry, fileText: undefined }))
           after.push({ id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
           dropEntry(id)
         }
@@ -1753,7 +1899,11 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           // A file the agent created has no undo state at all: putting it back DELETED it (see
           // `revertEntryContent`). The panel asks before sending a pick into this — the delete is the one
           // thing here that cannot be taken back, so the batch's undo covers only what it can.
-          if (undo !== undefined) { before.push(undo.before); after.push(undo.after) }
+          // The snapshot is taken here, before the drop below; `keepListed` returned above without one.
+          if (undo !== undefined) {
+            before.push(droppingComments(undo.before))
+            after.push(undo.after)
+          }
           dropEntry(id)
         }
         pushBatchUndo(request.sessionId, before, after)
@@ -1786,9 +1936,11 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         persistSession()
         const fullyResolved = contentEqual(updatedOld, entry.newText)
         if (fullyResolved && blockTarget.removeWhenResolved === true) {
+          // Snapshotted before the drop: an entry whose last block just resolved leaves the list here,
+          // and it takes its threads with it.
+          const resolvedDrop = droppingComments({ id: entry.id, path: entry.path, entry: afterEntry, fileText: undefined })
           dropEntry(blockTarget.id)
-          pushUndo(blockTarget.sessionId,
-            { id: entry.id, path: entry.path, entry: afterEntry, fileText: undefined },
+          pushUndo(blockTarget.sessionId, resolvedDrop,
             { id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
           persistSession(true)
         }
@@ -1837,9 +1989,11 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         persistSession()
         const fullyResolved = contentEqual(updatedNew, entry.oldText)
         if (fullyResolved && blockTarget.removeWhenResolved === true) {
+          // Snapshotted before the drop: an entry whose last block just resolved leaves the list here,
+          // and it takes its threads with it.
+          const resolvedDrop = droppingComments({ id: entry.id, path: entry.path, entry: afterEntry, fileText: undefined })
           dropEntry(blockTarget.id)
-          pushUndo(blockTarget.sessionId,
-            { id: entry.id, path: entry.path, entry: afterEntry, fileText: undefined },
+          pushUndo(blockTarget.sessionId, resolvedDrop,
             { id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
           persistSession(true)
         }

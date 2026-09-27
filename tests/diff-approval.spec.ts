@@ -2824,7 +2824,7 @@ describe('comments over the channel', () => {
     expect(await listComments(handle, 'session-1')).toEqual([])
   })
 
-  it('does not bring a comment back when the entry it hung off is undone', async () => {
+  it('brings a comment back with the entry it hung off, and takes it away again on redo', async () => {
     const { ctx, handle } = await harness()
     emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
     const comment = await addComment(handle)
@@ -2832,12 +2832,247 @@ describe('comments over the channel', () => {
     await handle('keep', { sessionId: 'session-1', id: entry!.id }, signal())
     expect(await listComments(handle, 'session-1')).toEqual([])
 
-    // Undo puts the ENTRY back; the comment that died with it stays dead. That is the
-    // rule the reader asked for — rewinding a review does not resurrect an annotation
-    // whose file already left the list, and the sweep at load cannot find it either.
+    // Undo puts the ENTRY back — and this is the rule that CHANGED: the thread that died with the
+    // row comes back with it, because a drop's pair now carries the comments it was about to
+    // delete. Leaving them dead made Ctrl+Z mean two different things depending on whether the
+    // action it took back was about a file or a comment, and a row the reader is looking at again
+    // showed none of the notes that were written on it.
     await handle('undo', { sessionId: 'session-1' }, signal())
     expect((await listEntries(handle, 'session-1')).map(listed => listed.id)).toEqual([comment.entryId])
+    expect(await listComments(handle, 'session-1')).toEqual([comment])
+
+    // …and the redo is the removal again, so the row and the thread go together as the keep left them.
+    await handle('redo', { sessionId: 'session-1' }, signal())
+    expect(await listEntries(handle, 'session-1')).toEqual([])
     expect(await listComments(handle, 'session-1')).toEqual([])
+  })
+
+  describe('undo and redo of comments', () => {
+    /**
+     * The host services an ask needs, with an EMPTY session log: what these tests are about is the
+     * action (a question posted into a thread), not the answer read that rides a list poll.
+     * @returns the `prepare` callback to hand the harness.
+     */
+    function askable(): (prepared: Context) => void {
+      return (prepared) => {
+        prepared.provide('sessionController', { prompt: () => Promise.resolve({ accepted: true }) } as never)
+        prepared.provide('agents', { get: () => ({ ctx: { on: () => () => {} } }) } as never)
+        prepared.provide('sessions', { get: () => ({ snapshotEvents: () => [] }) } as never)
+      }
+    }
+
+    /**
+     * Ask one question in a stored thread, so the record carries an `asks` entry that a removal
+     * would otherwise lose.
+     * @param handle - the channel handler.
+     * @param id - the comment to ask in.
+     */
+    async function ask(handle: ConnectionRpcHandler, id: string): Promise<void> {
+      await expect(handle('comment-ask', { sessionId: 'session-1', id, prompt: 'the prompt', text: 'why?' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'asked', requestId: expect.any(String) as string } })
+    }
+
+    it('brings a closed comment back with its id, its anchor and its question, and redoes the close', async () => {
+      const { ctx, handle } = await harness({ prepare: askable() })
+      emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+      const comment = await addComment(handle)
+      await ask(handle, comment.id)
+      const [thread] = await listComments(handle, 'session-1')
+      // The state the removal has to be able to rebuild, spelled out so a restore that drops one
+      // field cannot pass on a loose comparison: the identity, where the thread was written, and the
+      // question it was asked in.
+      expect(thread?.id).toBe(comment.id)
+      expect(thread?.anchor).toEqual({ startLine: 1, endLine: 1 })
+      expect(thread?.asks).toHaveLength(1)
+
+      await expect(handle('comment-remove', { sessionId: 'session-1', id: comment.id }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'removed' } })
+      expect(await listComments(handle, 'session-1')).toEqual([])
+
+      // The snapshot is the record itself rather than a rebuilt one, so the id, the anchor, the quote
+      // and the question come back exactly as they were.
+      await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: '/repo/a.txt' } })
+      expect(await listComments(handle, 'session-1')).toEqual([thread])
+      expect((await listComments(handle, 'session-1'))[0]?.asks).toHaveLength(1)
+
+      // …and a redo closes it again: comments ride the one undo stack, so the move back is the same
+      // pair the other way round.
+      await expect(handle('redo', { sessionId: 'session-1' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'redone', id: '/repo/a.txt' } })
+      expect(await listComments(handle, 'session-1')).toEqual([])
+    })
+
+    it('brings a dropped entry back with its thread\'s id, its anchor and its question', async () => {
+      const { ctx, handle } = await harness({ prepare: askable() })
+      emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+      const comment = await addComment(handle)
+      await ask(handle, comment.id)
+      const [thread] = await listComments(handle, 'session-1')
+
+      // A whole-file keep takes the file out of the list, and the thread with it.
+      const [entry] = await listEntries(handle, 'session-1')
+      await handle('keep', { sessionId: 'session-1', id: entry!.id }, signal())
+      expect(await listEntries(handle, 'session-1')).toEqual([])
+      expect(await listComments(handle, 'session-1')).toEqual([])
+
+      // ONE undo for the one action: the row comes back, and the thread comes back as it was. The
+      // record is snapshotted verbatim, so the identity, where it was written and the question it was
+      // asked in are those values rather than a look-alike rebuilt from the row.
+      await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: '/repo/a.txt' } })
+      expect((await listEntries(handle, 'session-1')).map(listed => listed.id)).toEqual(['/repo/a.txt'])
+      const [restored] = await listComments(handle, 'session-1')
+      expect(restored?.id).toBe(comment.id)
+      expect(restored?.anchor).toEqual({ startLine: 1, endLine: 1 })
+      expect(restored?.asks).toHaveLength(1)
+      expect(restored).toEqual(thread)
+
+      // …and redo removes both halves again: the pair's `after` side carries no comments, so the
+      // move back is the drop the keep performed.
+      await expect(handle('redo', { sessionId: 'session-1' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'redone', id: '/repo/a.txt' } })
+      expect(await listEntries(handle, 'session-1')).toEqual([])
+      expect(await listComments(handle, 'session-1')).toEqual([])
+    })
+
+    it('brings two dropped entries and their comments back with ONE undo', async () => {
+      const { ctx, handle } = await harness()
+      emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+      emitResult(ctx, editExec(), editSuccess('/repo/b.txt', 'a', 'b'))
+      const first = await addComment(handle, 'session-1', 0)
+      const second = await addComment(handle, 'session-1', 1)
+
+      await expect(handle('keep-many', { sessionId: 'session-1', ids: [first.entryId, second.entryId] }, signal()))
+        .resolves.toEqual({ ok: true, value: { affected: 2 } })
+      expect(await listEntries(handle, 'session-1')).toEqual([])
+      expect(await listComments(handle, 'session-1')).toEqual([])
+
+      // The pick was one decision, so one Ctrl+Z brings back both rows AND both threads. A snapshot
+      // only on the pair's own face — or only on the last item pushed — would leave one of them dead.
+      await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: expect.any(String) as string } })
+      expect((await listEntries(handle, 'session-1')).map(listed => listed.id).sort())
+        .toEqual(['/repo/a.txt', '/repo/b.txt'])
+      expect((await listComments(handle, 'session-1')).map(row => row.id).sort())
+        .toEqual([first.id, second.id].sort())
+
+      await expect(handle('redo', { sessionId: 'session-1' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'redone', id: expect.any(String) as string } })
+      expect(await listEntries(handle, 'session-1')).toEqual([])
+      expect(await listComments(handle, 'session-1')).toEqual([])
+    })
+
+    it('brings a file that vanished outside the panel back with its row and its comments', async () => {
+      const { ctx, fs, handle } = await harness()
+      emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a\n', 'b\n'))
+      const comment = await addComment(handle)
+
+      // The file is deleted outside the panel. The list read that notices keeps a checkpoint which
+      // recreates the file and restores the row — and now the thread that hung off it, which is the
+      // same drop a button performs and must be undoable in the same way.
+      fs.stat.mockResolvedValue(undefined)
+      expect(await listEntries(handle, 'session-1')).toEqual([])
+      expect(await listComments(handle, 'session-1')).toEqual([])
+
+      await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: '/repo/a.txt' } })
+      // The tracked content is written back verbatim, and the row and thread are listed again.
+      expect(fs.writeText).toHaveBeenCalledWith(
+        { displayPath: '/repo/a.txt', targetKey: 'key:/repo/a.txt' }, 'b\n', undefined, expect.anything() as AbortSignal,
+      )
+      // The file exists again, so the read below is about the restored list rather than a second drop.
+      fs.stat.mockResolvedValue({ version: 'v1', type: 'file' })
+      fs.readText.mockResolvedValue('b\n')
+      expect((await listEntries(handle, 'session-1')).map(listed => listed.id)).toEqual(['/repo/a.txt'])
+      expect(await listComments(handle, 'session-1')).toEqual([comment])
+    })
+
+    it('adds no second copy of a kept-listed entry\'s comments when that keep is undone', async () => {
+      const { ctx, handle } = await harness()
+      emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+      const comment = await addComment(handle)
+      const [entry] = await listEntries(handle, 'session-1')
+
+      // A keep asked to leave the row listed never drops the entry, so the thread never left the
+      // store: its pair must carry NO snapshot, or the undo would add a copy of what the reader still
+      // has. "The entry is dropped" is the one thing a comment snapshot is about.
+      await handle('keep', { sessionId: 'session-1', id: entry!.id, keepListed: true }, signal())
+      expect(await listComments(handle, 'session-1')).toHaveLength(1)
+
+      await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: '/repo/a.txt' } })
+      const left = await listComments(handle, 'session-1')
+      expect(left).toHaveLength(1)
+      expect(left).toEqual([comment])
+    })
+
+    it('takes an added comment back with one undo, and puts it back with redo', async () => {
+      const { ctx, handle } = await harness()
+      emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+      const comment = await addComment(handle)
+      expect(await listComments(handle, 'session-1')).toEqual([comment])
+
+      await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: '/repo/a.txt' } })
+      expect(await listComments(handle, 'session-1')).toEqual([])
+      // The entry the comment hung off is NOT what the undo was about: a comment restore writes no file
+      // and leaves the list exactly as it was.
+      expect((await listEntries(handle, 'session-1')).map(listed => listed.id)).toEqual(['/repo/a.txt'])
+
+      await expect(handle('redo', { sessionId: 'session-1' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'redone', id: '/repo/a.txt' } })
+      expect(await listComments(handle, 'session-1')).toEqual([comment])
+    })
+
+    it('takes a closed batch back with ONE undo, and redoes the whole batch', async () => {
+      const { ctx, handle } = await harness()
+      emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+      emitResult(ctx, editExec(), editSuccess('/repo/b.txt', 'a', 'b'))
+      emitResult(ctx, editExec(), editSuccess('/repo/c.txt', 'a', 'b'))
+      const first = await addComment(handle, 'session-1', 0)
+      const second = await addComment(handle, 'session-1', 1)
+      const third = await addComment(handle, 'session-1', 2)
+
+      await expect(handle('comment-remove-many', { sessionId: 'session-1', ids: [first.id, third.id] }, signal()))
+        .resolves.toEqual({ ok: true, value: { removed: 2 } })
+      expect((await listComments(handle, 'session-1')).map(row => row.id)).toEqual([second.id])
+
+      // ONE undo for the one request the reader made. A pair pushed per comment would put back only
+      // the last one it removed, and the assertion below would be short of two ids.
+      await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: '/repo/a.txt' } })
+      // The ids, not the order: every record was written in the same millisecond, and a restore appends
+      // to the store's map, so the order a session's comments read back in is not what this is about.
+      expect((await listComments(handle, 'session-1')).map(row => row.id).sort())
+        .toEqual([first.id, second.id, third.id].sort())
+
+      await expect(handle('redo', { sessionId: 'session-1' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'redone', id: '/repo/a.txt' } })
+      expect((await listComments(handle, 'session-1')).map(row => row.id)).toEqual([second.id])
+    })
+
+    it('stacks no question: an undo after a comment-ask takes back the comment, not the ask', async () => {
+      const { ctx, handle } = await harness({ prepare: askable() })
+      emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+      const comment = await addComment(handle)
+      await ask(handle, comment.id)
+      // A list read is where the answer is derived and where the comment's lines are resolved against
+      // the entry's current content, so this poll is the second half of "a conversation is not an
+      // action": neither the ask nor the read may reach the stack.
+      expect((await listComments(handle, 'session-1'))[0]?.asks).toHaveLength(1)
+
+      // The last ACTION the reader took is the comment's own addition, so that is what this undo is
+      // about. Had the question gone on the stack, the undo would have installed the thread without its
+      // ask and the read below would show one comment.
+      await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: '/repo/a.txt' } })
+      expect(await listComments(handle, 'session-1')).toEqual([])
+
+      // …and the history is spent: the ask is not waiting behind it, so the stack itself is empty.
+      await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'nothing' } })
+    })
   })
 })
 
