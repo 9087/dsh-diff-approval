@@ -467,6 +467,13 @@ function panelProps(
   snapshot: Partial<PendingDiffSnapshot> & { files: PendingFileDiff[] },
   viewsFor: Record<string, Partial<PendingDiffSnapshot> & { files: PendingFileDiff[] }> | null = null,
   sessionId: SessionId = S1,
+  /**
+   * A comment WITHOUT a bumped revision changes nothing: the pane holds the records still across reads
+   * that changed nothing and re-reads them only when `commentsRevision` moves (PendingPanel.tsx:4207).
+   * So a case that writes a record gets the same call the real host makes — both together — through this.
+   * @param bump - moves the harness's revision, the way a host write does.
+   */
+  onReady?: (bump: () => void) => void,
 ): PanelProps {
   const comments = [...(snapshot.comments ?? [])]
   const answers: Record<string, string> = { ...(snapshot.commentAnswers ?? {}) }
@@ -627,6 +634,7 @@ function panelProps(
     t: (key: string, params?: Record<string, unknown>) => params === undefined ? key : `${key} ${JSON.stringify(params)}`,
   } as unknown as PanelProps
   HOSTS.set(props, host)
+  onReady?.(() => { revision += 1 })
   return props
 }
 
@@ -1351,6 +1359,120 @@ describe('PendingPanel', () => {
     }
   })
 
+  it('takes the comment card\'s unseen dot down as the observer reports it, before the host has answered', () => {
+    // The dot used to ride the host: the observer cleared it by telling the host, and the dot only went
+    // when the next list read came back, so the card the reader was looking at wore the mark for the
+    // dwell PLUS a round trip. The file row was already spared that (`file.unseen === true && !selected`,
+    // where `selected` IS the local reading of "the reader is on this file"); the card now carries the
+    // same local reading (see `useSeenOnView`'s `dotOff`), and the host is still told exactly as before.
+    vi.useFakeTimers()
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-card-latency', path: '/repo/latency.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\n' })
+    const props = panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [
+        { ...comment({ id: 'd-latency', entryId: file.id, text: '这是新的。', anchor: { startLine: 2, endLine: 2 }, quote: 'b' }), unseen: true },
+      ],
+    })
+    const cross = stubIntersectionObserver()
+    try {
+      render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      const card = (): HTMLElement => document.querySelector('[data-diff-discussion-id="d-latency"]') as HTMLElement
+      expect(card().querySelector('[data-diff-comment-unseen]')).not.toBeNull()
+
+      // The dwell is up: the report goes out about this card. Nothing has ANSWERED it — the host's record
+      // still carries the flag, and no read has carried a cleared one back — which is exactly the state the
+      // dot used to be painted through, for the dwell plus the round trip that would clear it.
+      cross([{ element: card(), isIntersecting: true, intersectionRatio: 0.9 }])
+      act(() => { vi.advanceTimersByTime(1000) })
+      expect(hostOf(props).comments[0]?.unseen).toBe(true)
+      expect(props.onCommentSeen).toHaveBeenCalledTimes(1)
+      expect(props.onCommentSeen).toHaveBeenCalledWith(S1, 'd-latency')
+      expect(card().querySelector('[data-diff-comment-unseen]')).toBeNull()
+
+      // …while the card itself is still drawn, with the reader's own words on it: the dot is what went, not
+      // the card. The local mark is what did it — the record above still says `unseen`, so nothing else could.
+      expect(card()).not.toBeNull()
+      expect(card().textContent).toContain('这是新的。')
+    } finally {
+      Reflect.deleteProperty(globalThis, 'IntersectionObserver')
+      vi.useRealTimers()
+    }
+  })
+
+  it('wears the card\'s unseen dot again, and reports the new look again, when a second answer arrives', () => {
+    // A comment is not one episode. The host's flag goes out when the reader is seen, and a LATER answer
+    // puts it back — for the same record, the same id, and therefore the same key: the card's render sites
+    // key it `discussion.id` (PendingPanel.tsx:7826 single-column, :3326 split) and `discussion.id` IS
+    // `record.id` (:1143), while `unseen` is a plain prop (:1166) that never takes part in the key. React
+    // therefore REUSES the card's instance, and everything `useSeenOnView` remembers — `seenRef` and
+    // `dotOff` — came from the FIRST episode unless the hook scopes it to the episode it belongs to.
+    // If it does not, this case fails twice over: the new answer's dot is never drawn, and looking at it
+    // is never reported.
+    vi.useFakeTimers()
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-episode', path: '/repo/episode.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\n' })
+    let bumpRevision = (): void => { throw new Error('panelProps did not hand the revision bump over') }
+    const props = panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [
+        { ...comment({ id: 'd-episode', entryId: file.id, text: '这是新的。', anchor: { startLine: 2, endLine: 2 }, quote: 'b' }), unseen: true },
+      ],
+    }, null, S1, (bump) => { bumpRevision = bump })
+    const cross = stubIntersectionObserver()
+    try {
+      render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      const card = (): HTMLElement => document.querySelector('[data-diff-discussion-id="d-episode"]') as HTMLElement
+      const dot = (): Element | null => card().querySelector('[data-diff-comment-unseen]')
+
+      // Episode one: the reader looks, the dwell passes, the host is told once and the dot goes.
+      expect(dot()).not.toBeNull()
+      cross([{ element: card(), isIntersecting: true, intersectionRatio: 0.9 }])
+      act(() => { vi.advanceTimersByTime(1000) })
+      expect(props.onCommentSeen).toHaveBeenCalledTimes(1)
+      expect(dot()).toBeNull()
+
+      // The host takes the flag down, as a write on the host does: the record changes AND the revision
+      // moves. The revision is not decoration — the pane holds the records still across reads that
+      // changed nothing and only re-reads them when `commentsRevision` moves (PendingPanel.tsx:4207),
+      // so a test that mutated the record alone would be testing a panel that never heard.
+      const firstNode = card()
+      act(() => {
+        hostOf(props).comments[0]!.unseen = false
+        bumpRevision()
+        hostOf(props).publish()
+      })
+      expect(card()).toBe(firstNode)
+      expect(dot()).toBeNull()
+
+      // A SECOND answer arrives on that same comment: the host's flag is back, and there is nothing local
+      // left over from the first look. The dot has to be drawn again.
+      act(() => {
+        hostOf(props).comments[0]!.unseen = true
+        bumpRevision()
+        hostOf(props).publish()
+      })
+      expect(card()).toBe(firstNode)
+      expect(dot()).not.toBeNull()
+
+      // And looking at the new one is its own look: reported once, and the dot goes with it.
+      cross([{ element: card(), isIntersecting: true, intersectionRatio: 0.9 }])
+      act(() => { vi.advanceTimersByTime(1000) })
+      expect(props.onCommentSeen).toHaveBeenCalledTimes(2)
+      expect(props.onCommentSeen).toHaveBeenLastCalledWith(S1, 'd-episode')
+      expect(dot()).toBeNull()
+    } finally {
+      Reflect.deleteProperty(globalThis, 'IntersectionObserver')
+      vi.useRealTimers()
+    }
+  })
+
   it('wears the unseen dot on the comment\'s row in the comments tab, so a comment on a file the reader is not looking at still says an answer arrived', () => {
     // The card's dot is drawn by the code view, and the code view renders the SELECTED file alone: a
     // comment on any other file has no card on screen, so its dot had nowhere to appear and the reader
@@ -1400,6 +1522,36 @@ describe('PendingPanel', () => {
     const rule = (name: string): string => new RegExp(`^\\.${name} \\{([^}]*)\\}`, 'm').exec(sheet)?.[1] ?? ''
     expect(rule('unseenDot')).toContain('position: absolute')
     expect(rule('commentRow')).toContain('position: relative')
+
+    // DELIBERATE — the row does NOT get the card's local read, and this pins that: the card's mark
+    // clears the moment the card's own observer reports it (`useSeenOnView`'s `dotOff`), because the
+    // reader is looking straight at the card when that happens. This row is the opposite case: it is
+    // the "you are elsewhere" mark for a card with no observer of its own (a card off screen, or on the
+    // comments tab where no card is drawn at all). Clearing it before the host confirms would take away
+    // the only thing telling the reader an answer arrived on a comment they have not opened — a lie the
+    // card cannot commit, because the card's dot only goes when the card itself has been read.
+    const source = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.tsx'), 'utf8')
+    // Only the CODE, not the prose: several comments in this file mention the attribute by name, and the
+    // first of those would otherwise be mistaken for a mark. Comments are blanked rather than removed, so
+    // the text still reads exactly where it is.
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' '))
+    // Both marks carry the same svg, and the card's is written first (the card is defined above the
+    // panel's own row lists). So the FIRST occurrence is the card's and the SECOND is the row's.
+    const cardDotAt = code.indexOf('data-diff-comment-unseen')
+    const rowDotAt = code.indexOf('data-diff-comment-unseen', cardDotAt + 1)
+    expect(cardDotAt).toBeGreaterThan(-1)
+    expect(rowDotAt).toBeGreaterThan(cardDotAt)
+    // Exactly two: a third mark would make this locator wrong and the case would have to be revisited.
+    expect(code.indexOf('data-diff-comment-unseen', rowDotAt + 1)).toBe(-1)
+    // The lines that OPEN a mark, read from the code in front of it rather than from an offset: the
+    // condition is the `{` expression the mark hangs under, and nothing between them but whitespace.
+    const opens = (dotAt: number): string => code.slice(dotAt - 200, dotAt).replace(/\s+/g, ' ').trim()
+    // The card's mark IS suppressed locally: the reader looking at it is what `dotOff` means.
+    expect(opens(cardDotAt)).toContain('{discussion.unseen === true && !dotOff && (')
+    // The row's own condition names the host's record and nothing local — its whole test is `unseen`.
+    expect(opens(rowDotAt)).toContain('{entry.unseen === true && (')
+    const rowOpens = opens(rowDotAt)
+    expect(rowOpens).not.toMatch(/dotOff|useSeenOnView|seenLocally|reported|!selected/)
   })
 
   it('labels the whole-file button Delete when there is no earlier version, and tags nothing on the row', () => {

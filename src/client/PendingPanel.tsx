@@ -1520,26 +1520,50 @@ const COMMENT_SEEN_THRESHOLD = 0.5
 const COMMENT_SEEN_DWELL_MS = 700
 
 /**
- * Report a card seen once the reader has actually been looking at it.
+ * Report a card seen once the reader has actually been looking at it, and say so on screen at the
+ * same moment.
  *
  * The intersection is only half the question: the browser has no idea whether a visible card was read
  * or flung past, so the dwell above is what turns "on screen" into "looked at". Nothing is ever
  * reported twice — the first report is the reader's one look, and the flag cannot come back without a
  * new answer.
  *
+ * The second half is the dot. The host only takes the flag down on its next list read, so a card that
+ * reported itself would go on wearing its dot for the dwell PLUS that round trip (up to a poll cycle):
+ * the panel would spend that whole time telling the reader about attention it had just said was spent.
+ * The report and the local clearing are therefore one act, in the same tick, and `dotOff` below is what
+ * the card's dot reads — the host is still told (nothing about `comment-seen` moved, and the flag still
+ * has to travel), but the panel no longer draws a mark it knows is answered.
+ *
  * @param unseen - whether the host still has attention to clear for this card.
  * @param onSeen - what to tell the host (absent in a panel with no host behind it).
- * @returns the ref to hang on the card's own element.
+ * @returns the ref to hang on the card's own element, and `dotOff` — this reader has already reported
+ *   that card, so its dot stays down whatever the host has answered.
  */
-function useSeenOnView(unseen: boolean, onSeen: (() => void) | undefined): (element: HTMLElement | null) => void {
+function useSeenOnView(unseen: boolean, onSeen: (() => void) | undefined): {
+  ref: (element: HTMLElement | null) => void
+  dotOff: boolean
+} {
   const cardRef = useRef<HTMLElement | null>(null)
   const seenRef = useRef(false)
+  const [dotOff, setDotOff] = useState(false)
   const onSeenRef = useRef(onSeen)
   onSeenRef.current = onSeen
   useEffect(() => {
     const card = cardRef.current
-    // Observed only while there is attention to clear, and stop observing for good once it is gone: a
-    // card that has been read is not a card to report again on the next scroll.
+    // The host's flag is the EPISODE, and one card outlives its episodes: the render sites key the card
+    // `discussion.id`, which is `record.id`, and `unseen` is a plain prop — so a second answer on the same
+    // comment comes back to this same instance with `seenRef` and `dotOff` still standing from the first
+    // look. The host clearing the flag is the one moment the episode is over: the look it was waiting for
+    // has been reported and taken down, so the guard is re-armed and the local mark dropped here. A later
+    // `unseen: true` is then a new episode — a new dot, and a new look to report — rather than a card that
+    // looks permanently read.
+    if (!unseen) {
+      seenRef.current = false
+      setDotOff(false)
+    }
+    // Observed only while there is attention to clear, and stop observing once THIS episode's look has been
+    // reported: the same episode is not reported twice.
     if (card === null || !unseen || seenRef.current) return undefined
     if (typeof IntersectionObserver !== 'function') return undefined
     let timer: number | undefined
@@ -1557,6 +1581,9 @@ function useSeenOnView(unseen: boolean, onSeen: (() => void) | undefined): (elem
       timer = window.setTimeout(() => {
         seenRef.current = true
         observer.disconnect()
+        // The reader's look is spent HERE, and the dot goes with it: `dotOff` lands in the same
+        // render as the report, so the card cannot wear a mark the reader has just answered.
+        setDotOff(true)
         onSeenRef.current?.()
       }, COMMENT_SEEN_DWELL_MS)
     }, { threshold: COMMENT_SEEN_THRESHOLD })
@@ -1566,7 +1593,9 @@ function useSeenOnView(unseen: boolean, onSeen: (() => void) | undefined): (elem
       observer.disconnect()
     }
   }, [unseen])
-  return useCallback((element: HTMLElement | null) => { cardRef.current = element }, [])
+  // Held only while the host still has attention for this card: once its answer lands the flag is
+  // false, and this local mark can never outlive the episode it was made for.
+  return { ref: useCallback((element: HTMLElement | null) => { cardRef.current = element }, []), dotOff: unseen && dotOff }
 }
 
 /** One comment thread as the panel draws it, whoever is drawing it. */
@@ -1619,7 +1648,7 @@ function DiscussionBlock({
   const menuItems: MenuEntry[] = [{ id: 'delete', label: t('action.discussionEnd') }]
   // The reader looking at the card is what clears the host's dot: the card is the only place a comment
   // can be read in full, so its own visibility is the signal (see `useSeenOnView`).
-  const cardRef = useSeenOnView(discussion.unseen === true, onSeen)
+  const { ref: cardRef, dotOff } = useSeenOnView(discussion.unseen === true, onSeen)
   return (
     <div
       className={css.discussion}
@@ -1654,8 +1683,10 @@ function DiscussionBlock({
           {/* The dot is the first thing the header says after the fold arrow, and it says it about the whole
               card. It is an inline mark here rather than the file row's out-of-flow one: this card clips its
               overflow, and the head's left edge is the arrow's. It carries a title and an aria-label, so
-              colour is never the only cue. */}
-          {discussion.unseen === true && (
+              colour is never the only cue. `dotOff` is the file row's `!selected` in this card's shape: the
+              card has reported the reader's look, so drawing the mark while the host's answer is in flight
+              would say the opposite of what the card just told it. */}
+          {discussion.unseen === true && !dotOff && (
             <svg className={css.unseenDot} data-diff-comment-unseen width="3" height="3" viewBox="0 0 3 3" role="img" aria-label={t('panel.unseen')}>
               <title>{t('panel.unseen')}</title>
               <circle cx="1.5" cy="1.5" r="1.5" fill="var(--dsw-alias-state-business-primary)" />
