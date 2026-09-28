@@ -46,29 +46,34 @@ export async function newGuiPage(browser: Browser): Promise<Page> {
 /**
  * Dismiss the first-run notices, whatever they are.
  *
- * They are modals over a mask, so a click on anything underneath is swallowed rather
- * than merely misplaced: this loops until no mask is left, not once per button. Every
- * known wording is tried in both languages, because the GUI's locale is the host's.
+ * Dismissed through the notice's OWN button, not by looking for its mask. The first version of this
+ * helper looked for `div[aria-hidden="true"][class*="mask"]` and gave up when it found none — and 0.1.7's
+ * notice is not that mask, so it exited having clicked nothing. The notice then stayed up over the app,
+ * where it swallows every click: measured as ten-second timeouts on a "New session" button that was on
+ * screen the whole time, and a composer that never became editable because a modal owned the page. The
+ * loop therefore runs while a known dismiss control is VISIBLE, and stops when none is, which needs no
+ * knowledge of the overlay at all.
+ *
+ * Every known wording is tried in both languages, because the GUI's locale is the host's.
  */
 export async function dismissNotices(page: Page): Promise<void> {
-  const mask = page.locator('div[aria-hidden="true"][class*="mask"]')
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    if (await mask.count() === 0) break
+  const names = [
+    '继续', '稍后配置', '稍后', '以后再说', '知道了', '关闭',
+    'Continue', 'Later', 'Skip', 'Skip for now', 'Not now', 'Got it', 'Dismiss', 'Close',
+  ]
+  for (let attempt = 0; attempt < 12; attempt += 1) {
     let clicked = false
-    for (const name of ['继续', '稍后配置', '稍后', '以后再说', 'Continue', 'Later', 'Skip', 'Skip for now', 'Not now']) {
-      const button = page.getByRole('button', { name, exact: true })
-      if (await button.count() === 0) continue
-      if (!await button.first().isVisible().catch(() => false)) continue
-      await button.first().click({ timeout: 5000 }).catch(() => {})
+    for (const name of names) {
+      const button = page.getByRole('button', { name, exact: true }).first()
+      if (!await button.isVisible().catch(() => false)) continue
+      await button.click({ timeout: 5000 }).catch(() => {})
       clicked = true
-      await sleep(2000)
+      await sleep(1500)
       break
     }
-    if (!clicked) {
-      await sleep(2000)
-    }
+    if (!clicked) break
   }
-  await sleep(1000)
+  await sleep(500)
 }
 
 /**
@@ -103,7 +108,11 @@ async function openWorkspace(page: Page, title: string): Promise<void> {
     }
     await sleep(500)
   }
-  await sessionViewUp(page, 30_000)
+  // The view is what the press was FOR. Waiting silently here hands the cost to the next step, which
+  // then fails with a locator timeout that says nothing about the page it was on.
+  if (!await sessionViewUp(page, 30_000)) {
+    throw new Error(`the workspace "${title}" opened but no session view appeared.\n${await describeSidebar(page)}`)
+  }
 }
 
 /**
@@ -201,11 +210,25 @@ export async function beginSession(page: Page, workspaceTitle: string, home: str
   // is right there. Whatever happens is printed, with what the sidebar was offering (see
   // `describeSidebar`), because a silent fallback is how a harness stops testing what it says it does.
   const newSession = page.getByRole('button', { name: new RegExp(NEW_SESSION.join('|'), 'i') })
-  if (await newSession.count() > 0) {
-    await newSession.first().click({ timeout: 10_000 }).catch(async (error: unknown) => {
-      console.log('[beginSession] the new-session press did not land:', String(error).split('\n')[0])
-      console.log(await describeSidebar(page))
-    })
+  // The press and the wait for a composer that can TAKE WORDS are one step, retried: with no session
+  // bound to it the shell renders the editor host inert (`contenteditable="false"` — the hero state and
+  // the no-session state are the same div), and typing into that does nothing at all. So a press that did
+  // not land is not something to log and walk past: it is the difference between a session with a message
+  // and a run that dies in the next helper. A press that lands first time makes this one iteration.
+  let ready = false
+  for (let attempt = 0; attempt < 3 && !ready; attempt++) {
+    // A notice that appears a beat after the page loads is a notice nothing can be clicked through, so it
+    // is cleared again on every attempt rather than once in `beforeAll` (see `dismissNotices`).
+    await dismissNotices(page)
+    if (await newSession.count() > 0) {
+      await newSession.first().click({ timeout: 10_000 }).catch(async (error: unknown) => {
+        console.log(`[beginSession] the new-session press did not land (attempt ${attempt + 1}):`, String(error).split('\n')[0])
+      })
+    }
+    ready = await focusComposer(page, 20_000)
+  }
+  if (!ready) {
+    throw new Error(`no session took the composer, so nothing could be typed into it.\n${await describeSidebar(page)}`)
   }
   // The message comes BEFORE the id is read. A new session is provisional until its first turn, and only
   // then does the host write `sessions/<bucket>/<id>/session.v3.jsonl.zstd`: measured on 0.1.7, the press
@@ -239,16 +262,72 @@ export async function beginSession(page: Page, workspaceTitle: string, home: str
  * @returns the locator to type into.
  * @throws when nothing visible is editable, naming what the page was offering instead.
  */
-async function composerOf(page: Page): Promise<Locator> {
+async function composerOf(page: Page, timeoutMs = 60_000): Promise<Locator> {
   const selectors = ['[data-composer-input][contenteditable="true"]', '[data-composer-input]', '[contenteditable="true"]']
-  for (const selector of selectors) {
-    const candidates = page.locator(selector)
-    const count = await candidates.count()
-    for (let index = 0; index < count; index++) {
-      if (await candidates.nth(index).isVisible().catch(() => false)) return candidates.nth(index)
+  // Polled, not scanned once: a cold host draws the session view a beat after the workspace is open, and a
+  // single scan on a loaded machine found nothing and then spent twenty seconds clicking a locator that was
+  // never going to resolve (measured on this suite's first page, while the same step passed a minute later).
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    for (const selector of selectors) {
+      const candidates = page.locator(selector)
+      const count = await candidates.count()
+      for (let index = 0; index < count; index++) {
+        if (await candidates.nth(index).isVisible().catch(() => false)) return candidates.nth(index)
+      }
     }
+    if (Date.now() >= deadline) break
+    await sleep(500)
   }
-  throw new Error(`there was no visible composer to type into.\n${await describeSidebar(page)}`)
+  throw new Error(`no composer became visible within ${timeoutMs} ms.\n${await describeSidebar(page)}`)
+}
+
+/**
+ * Focus the composer through the DOM, the way a reader's own click does.
+ *
+ * Not `locator.click()`: the composer is a Lexical editor the shell re-renders while the session view
+ * settles, and a locator re-resolved at click time can land on the hidden node that replaced the visible
+ * one — measured as twenty seconds of "waiting for element to be visible, enabled and stable" on a
+ * composer that was on screen and focusable the whole time.
+ *
+ * Searched the way Playwright searches, too: the shell's UI lives inside shadow roots, which
+ * `document.querySelectorAll` does not enter, and the focused node there is not `document.activeElement`
+ * (its shadow HOST is). So the walk enters every shadow root, and "focused" is asked of the node itself
+ * with `:focus`.
+ *
+ * @param page - the GUI page.
+ * @param timeoutMs - how long to keep trying, in ms.
+ * @returns whether an editable composer took focus.
+ */
+async function focusComposer(page: Page, timeoutMs = 15_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const focused = await page.evaluate(() => {
+      const selectors = ['[data-composer-input][contenteditable="true"]', '[data-composer-input]', '[contenteditable="true"]']
+      const found: HTMLElement[] = []
+      const walk = (root: Document | ShadowRoot): void => {
+        for (const selector of selectors) {
+          for (const node of root.querySelectorAll(selector)) found.push(node as HTMLElement)
+        }
+        for (const node of root.querySelectorAll('*')) {
+          const shadow = (node as HTMLElement).shadowRoot
+          if (shadow !== null) walk(shadow)
+        }
+      }
+      walk(document)
+      for (const element of found) {
+        // ONLY an editor that can take words: the resident host is rendered inert
+        // (`contenteditable="false"`) whenever no editor is bound, and focusing that does nothing.
+        if (!element.isContentEditable) continue
+        element.focus()
+        if (element.matches(':focus')) return true
+      }
+      return false
+    })
+    if (focused) return true
+    if (Date.now() >= deadline) return false
+    await sleep(300)
+  }
 }
 
 /**
@@ -285,11 +364,13 @@ export async function sendMessage(page: Page, sessionId: string | undefined, tex
     })
   })
 
-  // The composer is the first VISIBLE editable in the tree, not a fixed position in it — see
-  // `composerOf` for what the shell puts there and why both obvious selectors failed.
-  const composer = await composerOf(page)
-  await composer.click({ timeout: 20_000 })
-  await composer.type(text, { delay: 10 })
+  // Wait for the composer, then FOCUS it through the DOM and type with real key events rather than
+  // clicking it — see `focusComposer` for why both of those are the reliable way here.
+  await composerOf(page)
+  if (!await focusComposer(page)) {
+    throw new Error(`no composer could take focus.\n${await describeSidebar(page)}`)
+  }
+  await page.keyboard.type(text, { delay: 10 })
   await page.keyboard.press('Enter')
   await accepted
 }
@@ -382,11 +463,29 @@ export async function pick(page: Page, rows: readonly Locator[]): Promise<void> 
 }
 
 /** Right-click a row and click the menu item with one of these names. */
-export async function chooseMenuItem(page: Page, target: Locator, names: readonly string[]): Promise<void> {
+export async function chooseMenuItem(
+  page: Page,
+  target: Locator,
+  names: readonly string[],
+  options: { exact?: boolean } = {},
+): Promise<void> {
   await target.click({ button: 'right', timeout: 20_000 })
-  const item = page.locator('[role="menuitem"]').filter({ hasText: new RegExp(names.join('|')) }).first()
-  await expect(item).toBeVisible({ timeout: 20_000 })
-  await item.click({ timeout: 20_000 })
+  const items = page.locator('[role="menuitem"]')
+  await expect(items.first()).toBeVisible({ timeout: 20_000 })
+  // The item is picked by its OWN label, not by a substring of it: `hasText` matches "回退并移出" when the
+  // caller asked for "回退", so a spec could press one action and assert the other one's semantics
+  // (measured: a revert that was expected to drop the row kept it listed, because the plain revert is the
+  // one that does). The labels are read out and compared here, so a miss says what the menu did offer.
+  const normalize = (text: string): string => text.replace(/\s+/g, ' ').trim()
+  const wanted = names.map(normalize)
+  const labels = (await items.allInnerTexts()).map(normalize)
+  const at = options.exact === false
+    ? labels.findIndex(label => wanted.some(name => label.includes(name)))
+    : labels.findIndex(label => wanted.includes(label))
+  if (at < 0) {
+    throw new Error(`no menu item named ${JSON.stringify(names)}; the menu offered ${JSON.stringify(labels)}`)
+  }
+  await items.nth(at).click({ timeout: 20_000 })
   await sleep(800)
 }
 
@@ -406,11 +505,21 @@ export async function confirmBatch(page: Page): Promise<void> {
  * test that decided in advance which of the two it is would be testing its own guess.
  */
 export async function confirmIfAsked(page: Page): Promise<boolean> {
-  const go = page.locator('[data-diff-batch-confirm-go]').first()
-  const asked = await go.waitFor({ state: 'visible', timeout: 4000 }).then(() => true).catch(() => false)
-  if (!asked) return false
+  // TWO dialogs ask, not one: the batch confirmation (`data-diff-batch-confirm-go`) and the SINGLE-FILE one
+  // a keep or a revert raises when that file is about to leave the list
+  // (`data-diff-file-confirm-remove` = "移出列表", the answer the reader's own action means). Only the first
+  // was known here, so a spec that reverted one file left the dialog on screen and the action never ran —
+  // measured as a row that stayed put for twenty seconds with a dialog over it.
+  const batch = page.locator('[data-diff-batch-confirm-go]').first()
+  const single = page.locator('[data-diff-file-confirm-remove]').first()
+  const asked = await Promise.race([
+    batch.waitFor({ state: 'visible', timeout: 4_000 }).then(() => 'batch' as const).catch(() => undefined),
+    single.waitFor({ state: 'visible', timeout: 4_000 }).then(() => 'single' as const).catch(() => undefined),
+  ])
+  if (asked === undefined) return false
+  const go = asked === 'batch' ? batch : single
   await go.click({ timeout: 20_000 })
-  await expect(page.locator('[data-diff-batch-confirm]').first()).toBeHidden({ timeout: 20_000 })
+  await expect(page.locator('[data-diff-batch-confirm], [data-diff-confirm-file]').first()).toBeHidden({ timeout: 20_000 })
   await sleep(1200)
   return true
 }
