@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.30.0](https://github.com/9087/dsh-diff-approval/compare/v0.29.1...v0.30.0) (2026-09-28)
+
+### Features
+
+* **annotate:** let the agent annotate code with the review panel's cards ([1bf3008](https://github.com/9087/dsh-diff-approval/commit/1bf30084b8aa93f9a00575e7aa7927be91f3c749))
+* **chip:** branch a produced-file chip press into the review menu ([1e78323](https://github.com/9087/dsh-diff-approval/commit/1e78323c00631f8d968b2815388b85b71e85c209))
+* **comments:** pick comments in the list, and close the pick in one host call ([554d985](https://github.com/9087/dsh-diff-approval/commit/554d9855a35f4e6a155a4280dd88cbb4ae8ffea8))
+* **comments:** store a comment on the host and read its answer from its turn ([049f78e](https://github.com/9087/dsh-diff-approval/commit/049f78e93b2d01c7fb2c1c10db1263877f1577ee))
+* **comments:** undo and redo a comment card, and keep the cards a removal takes ([dbfeb4c](https://github.com/9087/dsh-diff-approval/commit/dbfeb4ccb2b5157b28a7291f5576e4c5bf6f57b3))
+* **panel:** draw the host's comments, and land the box a jump named ([5531acb](https://github.com/9087/dsh-diff-approval/commit/5531acb4b8db54a0a4b2508e830dda3d142462f9))
+* **panel:** say version control in the VCS actions' copy ([2dd2940](https://github.com/9087/dsh-diff-approval/commit/2dd294037bc46421340c7db29b8318ac2ed2cc1d))
+* **pick:** pick files in the list, and ask before every bulk action ([bb7981e](https://github.com/9087/dsh-diff-approval/commit/bb7981e6c7fa1bb165170a9ca7953ebf38373d69))
+* **pick:** pick on the press, and keep the list out of the menu's way ([9f842f1](https://github.com/9087/dsh-diff-approval/commit/9f842f156a25c1dee1d818db237579dee8fee637))
+* **pick:** settle a pick of files in one host call ([1515c57](https://github.com/9087/dsh-diff-approval/commit/1515c57031defcc755ea8d962b875ece984658b2))
+
+### Bug Fixes
+
+* **client:** mint a comment's id without a secure context, so a tablet can write one ([5cde958](https://github.com/9087/dsh-diff-approval/commit/5cde958bda87ef4d30e3b525e6b02a7e099bedfe))
+* **client:** route every press the shell answers with its own file preview ([8258d12](https://github.com/9087/dsh-diff-approval/commit/8258d122faca35938cbe092e8f947a2027a0d6d3))
+* **client:** survive the 0.1.7 shell, which renamed every icon and moved the session ([e762acb](https://github.com/9087/dsh-diff-approval/commit/e762acb9f3dc602da885c2e11ecd74b3140e2af5)), references [#130](https://github.com/9087/dsh-diff-approval/issues/130)
+* **comments:** say which file a removal-only comment's numbers came from ([5457985](https://github.com/9087/dsh-diff-approval/commit/54579851fb05f0ccc18ca2f6dd126f516e5194c0))
+* **comments:** the band is the frame the reader drew, and the question carries it ([6cd6c23](https://github.com/9087/dsh-diff-approval/commit/6cd6c23690e58eebec1f9338e80c2d57a951b745))
+* **panel:** answer the removal ask with a button, and stop over-claiming ([dcbc485](https://github.com/9087/dsh-diff-approval/commit/dcbc48559f5ffd1fe8cebfa256fc8a09780e38cb))
+* **panel:** ask before a removal takes comments, and let a docked panel undo ([a4a56f7](https://github.com/9087/dsh-diff-approval/commit/a4a56f788f1d38f21f70cb1607fb5f07c631a2fb))
+* **panel:** draw an agent's card as the agent's turn, and list comments by arrival ([cc00dfe](https://github.com/9087/dsh-diff-approval/commit/cc00dfeee4988b4cb5bc0c4893883f2e90ccdc0c))
+* **panel:** keep a jump trying until it lands, not just on one measurement ([901322a](https://github.com/9087/dsh-diff-approval/commit/901322a68b12d06d9cf900a865331c45de34f10b))
+* **panel:** keep a landing true while the heights it was computed from settle ([6b238b3](https://github.com/9087/dsh-diff-approval/commit/6b238b348430e2c46edf09035be2d17d857091eb))
+* **panel:** land a jump again once the pane can hold where it points ([bbbd69c](https://github.com/9087/dsh-diff-approval/commit/bbbd69c541c12a427764c29738d983b15dbfa83a))
+* **panel:** mark a comment outdated once its own line has been deleted ([6723d59](https://github.com/9087/dsh-diff-approval/commit/6723d59d0ea9bb5b2828a6ed3a847cf47253f307))
+* **panel:** pin the thread header's menu and ellipsise a long path from the front ([d0190ca](https://github.com/9087/dsh-diff-approval/commit/d0190ca4e6e2e7df974c45d56111b54fd2246182))
+* **panel:** tell the panel's own scroll from the reader's, so a landing can correct itself ([2403cad](https://github.com/9087/dsh-diff-approval/commit/2403cadf7bf69f17c3e75132eabfaabb41c41fb3))
+* **pick:** make 回退并移出 drop the row, and warn when a removal takes comments ([7252ac4](https://github.com/9087/dsh-diff-approval/commit/7252ac4a2e4ddae219cdb593f4944f17dcd2c29e))
+* **state:** retry an atomic write whose rename a held handle refused ([de8c287](https://github.com/9087/dsh-diff-approval/commit/de8c28772b29a98e4086009858e839cdc7b5ee4f))
+* **vcs:** read the git import against the last commit, not the index ([c5c2a31](https://github.com/9087/dsh-diff-approval/commit/c5c2a3175373a2119efd48a25dca0e384c0fdf04))
+* **vcs:** resolve both sides before deciding a change is in scope ([5a8534d](https://github.com/9087/dsh-diff-approval/commit/5a8534dc1f3b447904b7d3d8cadb07bae90df8d8))
+* **vcs:** run version-control commands on 0.1.7's shell seam too ([ba60f54](https://github.com/9087/dsh-diff-approval/commit/ba60f549e99168d9bfdc6521a5f4e9859053b434))
+
 ## [0.29.1](https://github.com/9087/dsh-diff-approval/compare/v0.29.0...v0.29.1) (2026-09-22)
 
 ### Bug Fixes
