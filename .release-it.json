@@ -1,6 +1,6 @@
 {
   "hooks": {
-    "before:bump": "pnpm run build && pnpm run compat"
+    "before:bump": "pnpm run build && pnpm test && pnpm run compat"
   },
   "plugins": {
     "@release-it/conventional-changelog": {
