@@ -66,6 +66,8 @@ export interface DiffApprovalPort {
    * path must be one regular file: a directory is refused instead of being scanned.
    */
   addPath(sessionId: SessionId, path: string, includeUnchanged: boolean, exact?: boolean): Promise<DiffApprovalAddValue>
+  /** Tell the host the reader is looking at a file: the row's unseen dot goes out. */
+  markSeen(sessionId: SessionId, id: string): Promise<void>
   /** Open one file with its default application or reveal it in the folder. */
   open(sessionId: SessionId, id: string, action: DiffApprovalOpenAction): Promise<DiffApprovalOpenValue>
   /** Keep every pending entry of one session in a single host call (one batch). */
@@ -100,8 +102,10 @@ export interface DiffApprovalPort {
    * calls is a different thing — N requests, N writes — which is what this endpoint exists to avoid.
    */
   commentRemoveMany(sessionId: SessionId, ids: readonly string[]): Promise<DiffApprovalCommentRemoveManyValue>
-  /** Ask one stored comment as its own turn of the session. */
+  /** Asks one stored comment as its own turn of the session. */
   commentAsk(sessionId: SessionId, id: string, prompt: string, text: string): Promise<DiffApprovalCommentAskValue>
+  /** Tell the host the reader is looking at a comment: the card's unseen dot goes out. */
+  commentSeen(sessionId: SessionId, id: string): Promise<void>
 }
 
 /** Build the port over one generic RPC caller.
@@ -153,6 +157,11 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
         ...(exact === true ? { exact: true } : {}),
       }))
     },
+    async markSeen(sessionId, id) {
+      // Nothing to narrow: the host answers whether anything changed, and the dot's state arrives with the
+      // next list read.
+      await rpc.call(DIFF_APPROVAL_CHANNEL, 'seen', { sessionId, id })
+    },
     async open(sessionId, id, action) {
       return openOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'open', { sessionId, id, action }))
     },
@@ -187,6 +196,11 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
       // `prompt` is what the agent is asked; `text` is the reader's own words inside it, which the
       // host stores on the question so the thread can draw what was written.
       return commentAskValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'comment-ask', { sessionId, id, prompt, text }))
+    },
+    async commentSeen(sessionId, id) {
+      // Nothing to narrow: the host answers whether anything changed, and the dot's state arrives with
+      // the next list read.
+      await rpc.call(DIFF_APPROVAL_CHANNEL, 'comment-seen', { sessionId, id })
     },
   }
 }
@@ -228,6 +242,9 @@ function pendingFileOf(value: unknown): PendingFileDiff | undefined {
     // An absent flag keeps older hosts listable; the flags are host truth.
     missing: missing === true,
     diverged: diverged === true,
+    // The dot is host truth too, and dropping it here is invisible: everything upstream lights, and the row
+    // simply never shows it. Only `true` is carried, so an older host's silence stays silence.
+    ...(record.unseen === true ? { unseen: true } : {}),
   }
 }
 
@@ -264,6 +281,9 @@ function commentOf(value: unknown): CommentRecord | undefined {
     text,
     createdAt,
     updatedAt,
+    // The attention flag is host truth and rides this read: a field not copied here is a dot the panel
+    // can never draw, exactly as `author` above is a card drawn in the wrong voice.
+    ...(row.unseen === true ? { unseen: true } : {}),
     ...(author === undefined ? {} : { author }),
     ...(typeof context === 'string' && context !== '' ? { quoteContext: context } : {}),
     ...(quoteLines.length > 0 ? { quoteLines } : {}),

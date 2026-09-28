@@ -16,6 +16,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { HostObservable, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import { IconListPenOutline16 } from './dsh-icons.ts'
 import css from './PendingPanel.module.css'
 import { PanelBoundary } from './boundary.tsx'
@@ -24,7 +25,8 @@ import type { PendingPanelProps } from './PendingPanel.tsx'
 import { PresentationMenu } from './presentation-menu.tsx'
 import { setPanelPresentation } from './settings.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
-import type { PendingDiffSnapshot } from './slots.ts'
+import type { PendingDiffSnapshot, PendingViewHooks } from './slots.ts'
+import { publishedSessionId, selectedSessionOf } from './session-seat.ts'
 
 /** The tab type's `kind`: what `openTab` names. */
 export const DIFF_DOCK_KIND = 'diff-approval'
@@ -146,11 +148,15 @@ type TabInfoHook = () => {
   }
 }
 
-export interface DiffDockBodyProps extends PropsLocale<'diff-approval'> {
+export interface DiffDockBodyProps extends PropsLocale<'diff-approval'>, PendingViewHooks {
   /** The seat's own tab hook (the sidebar framework injects it). */
   readonly useTabInfo?: TabInfoHook
-  /** This plugin's pending store hook, for the chip's count. */
+  /** This plugin's pending store hook, for the chip's count where no per-session reader reaches it. */
   readonly usePending?: (select: (snapshot: PendingDiffSnapshot) => unknown) => unknown
+  /** The session seat, when this host composes one into the tab (see `session-seat.ts`). */
+  readonly useSessions?: ((select: (state: unknown) => unknown) => unknown) | undefined
+  /** The session this dock tab belongs to, when the shell composes one. */
+  readonly sessionId?: SessionId | undefined
   /** Whether the panel renders as the docked body (set by the tab seat's face). */
   readonly docked?: boolean
   /** Report this body's visibility to the dock state (see {@link DockFace}). */
@@ -311,6 +317,10 @@ export function DiffDockBody(props: DiffDockBodyProps): ReactNode {
             t={t}
             docked
             dockHost={host}
+            // The tab framework's own verdict on whether this body is on screen gates the poll: a tab
+            // that has been switched away from draws nothing, so it must not read a list nobody is
+            // looking at, once a second, for the session it was opened from.
+            showing={visible}
           />
         </PanelBoundary>
       )}
@@ -333,16 +343,26 @@ export function DiffDockBody(props: DiffDockBodyProps): ReactNode {
  * @returns the chip content.
  */
 export function DiffDockTitle(props: DiffDockBodyProps): ReactNode {
-  const { t, usePending, useTabInfo, onDockClose } = props
-  // A chip that cannot read the list must still render a title: the tab is the
-  // only way back to a docked panel.
+  const { t, usePending, useTabInfo, onDockClose, pendingView, sessionId, useSessions } = props
+  // The chip's count is ITS session's own view, the same one the body beside it draws: reading the
+  // page-wide snapshot here is how a chip came to show another session's count (see `PendingViewHooks`).
+  // The hook calls themselves stay outside the guard below, so every render makes the same calls in the
+  // same order; only the reading is guarded, because a chip that cannot read the list must still render
+  // a title — the tab is the only way back to a docked panel.
+  const storeSelected = useSessions?.((state: unknown) => selectedSessionOf(state)) as SessionId | undefined
+  const here = sessionId ?? storeSelected ?? publishedSessionId()
+  // The page-wide read doubles as the subscription that re-renders this chip when anything publishes:
+  // one call, made on every render, and its answer is the fallback for a face with no per-session reader.
+  const pageWide = usePending?.((snapshot: PendingDiffSnapshot) => snapshot) as PendingDiffSnapshot | undefined
+  const tab = useTabInfo?.()
   let count = 0
   try {
-    count = (usePending?.((snapshot: PendingDiffSnapshot) => snapshot.files.length) as number | undefined) ?? 0
+    count = pendingView !== undefined
+      ? pendingView(here, view => view.files.length)
+      : pageWide?.files.length ?? 0
   } catch {
     count = 0
   }
-  const tab = useTabInfo?.()
   // The latest tab actions, read at close time: the hook's own object is fresh on
   // every render, and the registration below must not churn with it.
   const tabRef = useRef(tab)

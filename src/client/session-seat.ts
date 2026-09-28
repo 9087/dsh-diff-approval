@@ -17,6 +17,7 @@
  * @module dsh-diff-approval/client/session-seat
  */
 
+import { useEffect, useState } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 
 /** The frames a session id can arrive in: the id itself, or a row that carries one. */
@@ -26,17 +27,49 @@ interface SessionCarrier {
 
 /** What the header entry last saw the app showing; the root-scoped mounts read it. */
 let published: SessionId | undefined
+/** Bumped whenever `published` changes, so the hook below re-renders its readers. */
+let publishedRevision = 0
+const publishedListeners = new Set<() => void>()
 
 /**
- * Publish the session the header entry is showing.
+ * Publish the session the header entry is showing. Call it from an EFFECT, never during render.
+ *
+ * Writing this during the header's render was the cross-talk's other half: the value a render read
+ * depended on whether another component had already rendered, so two mounts could disagree about which
+ * session was showing — and, in concurrent rendering, a discarded render could publish a session that
+ * was never committed. From an effect the value only ever describes a committed render.
  * @param id - the id, or `undefined` when the shell named none.
  */
 export function publishSessionId(id: SessionId | undefined): void {
+  if (published === id) return
   published = id
+  publishedRevision += 1
+  for (const listener of [...publishedListeners]) listener()
 }
 
 /** The session the header entry last showed, or `undefined` when it never named one. */
 export function publishedSessionId(): SessionId | undefined {
+  return published
+}
+
+/**
+ * The published session as a React value: the root-scoped mounts (the sidebar footer's badge) have no
+ * session prop, so this is how they follow the one the Session header is showing.
+ *
+ * It subscribes rather than reading the module global at render time, because the write now happens in
+ * an effect: a reader that only read the global would keep whatever the value was on its first render
+ * and never notice the reader switching sessions.
+ * @returns the session the header entry is showing, or `undefined`.
+ */
+export function usePublishedSessionId(): SessionId | undefined {
+  const [, setRevision] = useState(publishedRevision)
+  useEffect(() => {
+    // Re-read on subscribe: the value may have been published between this render and the effect.
+    setRevision(publishedRevision)
+    const listener = (): void => { setRevision(publishedRevision) }
+    publishedListeners.add(listener)
+    return () => { publishedListeners.delete(listener) }
+  }, [])
   return published
 }
 

@@ -138,6 +138,13 @@ export interface Discussion {
   quoteWrap?: boolean
   /** How many older messages the row cap left out of the render. */
   hidden?: number
+  /**
+   * Something the reader has not looked at yet arrived in this thread — an agent's own annotation, or
+   * an answer to one of its questions — so the card wears the dot. Host truth, carried through from
+   * the stored record (see `CommentRecord.unseen`): the block draws it and the card's own visibility
+   * is what asks the host to take it down.
+   */
+  unseen?: boolean
 }
 
 /** Rows a folded block occupies: its header line. */

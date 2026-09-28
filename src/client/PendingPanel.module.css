@@ -1117,11 +1117,14 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  /* No right inset of its own: the rows keep their 8px through the scroller's own padding,
-     measured so that a platform which reserves no scrollbar strip still leaves them 8px in
-     (see `.listScroll`), while the header and the bulk footer carry their own 8px — they sit
-     outside the scroller, so they would otherwise come out flush against the border. The
-     docked list adds its frame's 8px on top, which is what keeps it on its 16px line. */
+  /* No right inset of its own: the rows keep their band through the scroller's reserved strip of
+     scrollbar (see `.listScroll`), which is reserved in the files list and the comments list alike,
+     while the header and the bulk footer carry their own 8px — they sit outside the scroller, so
+     they would otherwise come out flush against the border. The docked list carries no right
+     padding either any more (see `.fileList`): it is the scroller's own strip that fills that band,
+     which is why the two mounts now measure the same and this card did not have to change. What the
+     card does carry is the 2px the scroller is held off its right edge by (see
+     `.fileListFloat .listScroll`). */
   padding: 6px 0 10px 8px;
   box-sizing: border-box;
   border: 1px solid var(--dsw-alias-border-l2);
@@ -1173,36 +1176,78 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  /* The 8px right inset equals the left one, and the scroller's scroll strip (see
-     `.listScroll`) sits inside it, which is what puts the rows and the bulk footer
-     on the same 16px line. */
-  padding: 4px 8px 12px 8px;
+  /* The frame's right inset carries NO padding of its own any more: the scroller's reserved strip
+     of scrollbar (see `.listScroll`) is already 8px wide where the engine lays a classic bar out in
+     the flow — the theme publishes `--dsh-scrollbar-width: 8px` — so an 8px padding here put a 16px
+     band between a row's fill and the pane's edge against the 8px the same row keeps on the left,
+     which is what made the docked list read as lopsided. With the padding at 0 the two bands measure
+     the same 9px (`li.row`'s own 8px inset plus its 1px hairline, against the 8px strip plus this
+     frame's 1px border). A platform that OVERLAYS its bars and takes no gutter reserves none of that
+     8px, so there the band comes out at the 1px border alone — the same in the comments list, which
+     scrolls in the very same `.listScroll`: that is what `.listScroll`'s `scrollbar-gutter: stable`
+     is for, and it is why the two lists can no longer part company on any platform. The bulk footer
+     sits outside the scroller and keeps its own 8px (see `.bulkActions`); only the scroller's band is
+     this. */
+  padding: 4px 0 12px 8px;
   box-sizing: border-box;
   border-right: 1px solid var(--dsw-alias-border-l2);
 }
 
-/* The file rows scroll; the Keep-all / Revert-all footer stays pinned. Asking for the
-   scrollbar outright is what reserves its strip whether or not the list overflows:
-   `scrollbar-gutter: stable` would do it too, but only where the engine honours that
-   property alongside a classic bar — the engines that ignore it (Safari before 18.2,
-   which styles this very 8px bar through the theme's `::-webkit-scrollbar` all the same)
-   left the strip out whenever the list did not overflow, so the folded card's rows sat
-   flush against its edge. A bar that is always there cannot be missed; with nothing to
-   scroll, the theme's transparent track paints nothing.
-   The rows' right inset is NOT set here: the panel measures the strip the platform
-   actually reserved and pads this element by whatever is left of the 8px the rows are
-   meant to keep, so the inset is the same number on a desktop with a classic bar (the bar
-   is the whole 8px) and on a touch browser that overlays its bars (nothing is reserved, so
-   the padding is the whole 8px). See `LIST_RIGHT_INSET_PX`. */
+/* Both lists scroll in this one class — the files list's rows and the comments tree — while the
+   Keep-all / Revert-all footer stays pinned. The strip a vertical bar needs is ALWAYS reserved, and
+   in the same place in both lists, so a row's right band is one fixed number whether or not a bar is
+   painted, and the bar sits in the same spot whichever list is showing:
+     - `overflow-y: scroll` asks for the bar outright on the engines that lay it out in the flow:
+       without it a list short enough to fit reserved no strip at all, and the folded card's rows sat
+       flush against its edge;
+     - `scrollbar-gutter: stable` is the standard name for the same reservation, and it is what holds
+       the strip on an engine that overlays its bars and honours the property.
+   Neither list is measured or padded in JS any more. The panel used to pad the FILES scroller with
+   whatever was left of 8px after the strip the platform had reserved, and that reached one list
+   only: on a platform that overlays its bars the comments list kept no band at all while the files
+   list kept 8px, and the comments band moved as the bar came and went — the mismatch the reader saw.
+   With both lists the same `.listScroll` and nothing measured onto either, they are equal by
+   construction on every platform. The one `padding` this rule declares is the deliberate 2px of
+   air the reader asked for between the rows and the bar: a fixed value cannot reintroduce the
+   mismatch the old measurement caused, and because the strip is always reserved the gap is the
+   same whether or not a bar is painted. */
 .listScroll {
   flex: 1;
   min-height: 0;
   overflow-y: scroll;
+  scrollbar-gutter: stable;
+  /* Air between the rows and the bar. This does NOT move the bar — a native one is pinned to the
+     box's inner right edge, and the floating rule below is what moves it — it moves the content
+     away from it, by the same 2px in every state and in both lists. */
+  padding-right: 2px;
+}
+
+/* Floating, the scroller is held 2px off the card's right edge, which is the only way to move
+   a scrollbar: a native bar is pinned to the inner edge of its own scroll container, so
+   `padding` on this element cannot move it and neither can anything on the rows. The 2px
+   therefore comes off the right of the box the bar is laid out in — and a margin sits OUTSIDE
+   that box, so the bar moves 2px left while the reserved strip the rows clear is untouched.
+   Both effects the reader asked for follow from the one number: the bar is 2px nearer the
+   content on its left (`.rows` ends where the box does) and 2px further from the card's right
+   edge. The rows stay as far in on the right as the shared `.listScroll` strip leaves them,
+   because that strip is inside the box and only the box moved.
+   Scoped to the floating card rather than shared with the docked mount: docked, the scroller
+   meets the pane's own 1px divider and the bar belongs against it (see `.fileList`).
+   `.fileListFloat` is the card's own class (`data-diff-floating-file-list` in the JSX); the
+   docked mount is `.fileList` with `data-diff-approval-file-list`, so this reaches the card
+   and only the card. Which scroller it moves depends on the tab: the card mounts the files list
+   and, with the comments tab active, the comments list in the same `.listScroll`, so the bar of
+   whichever list is showing gets the 2px — the same in both. What the card's rule never did was
+   give the comments list the inset the FILES scroller carried inline: that came from JS that
+   only ever attached to the files mount, and it is gone; the two lists are held in step by the
+   shared `.listScroll` rule above, not by this one. */
+.fileListFloat .listScroll {
+  margin-right: 2px;
 }
 
 /* Bulk decisions under the file list: two equal-width actions. The footer does not
    scroll, so it has no strip of its own to clear: its 8px right padding plus the
-   frame's 8px lands the buttons on the rows' 16px line. */
+   frame's 1px border keeps the buttons just inside the pane's edge. */
 .bulkActions {
   flex: none;
   display: flex;
@@ -1734,10 +1779,15 @@
 
 /* The file a group belongs to: the name it is known by in the list, smaller and quieter than the
    comments under it — it is the group's label, not one of the comments, and the rows the eye has to
-   find here are the comment titles. It starts on the comments' own column (the same 8px inset). */
+   find here are the comment titles. This heading is the ONE level the comments list has that the file
+   list does not; a file list that grows a group takes these two classes (`.commentGroup`,
+   `.commentGroupName`) and the rows' own `ul.rows` under them, and lands on this same column.
+   It starts on the rows' own text column: `li.row`'s 1px hairline, the row's 8px inset and the 4px
+   lead-in a title takes (see `.commentRow` / `.commentTitle`) — 13px, which is where a file name
+   starts in the other list, so the name above a group and the titles under it read as one column. */
 .commentGroupName {
   margin: 0;
-  padding: 4px 8px 2px;
+  padding: 4px 13px 2px;
   color: var(--dsw-alias-label-tertiary);
   font-size: 11px;
   line-height: 16px;
@@ -1747,11 +1797,17 @@
 /* One comment in that tab: the rows it hangs on, and the first sentence of what was asked. A plain
    button — the list is a way to reach a comment, not a selection — carrying the file rows' own box
    (see `.row` / `.rowHead`): the same 8px inset and the same 2px of air between items, so the two
-   lists' text starts on one column and their hover fills are the same shape. */
+   lists' text starts on one column and their hover fills are the same shape. The group heading above
+   a file's comments (see `.commentGroupName`) is the only level the two lists do not share. */
 .commentRow {
   display: block;
   width: 100%;
   box-sizing: border-box;
+  /* The containing block for this row's unseen dot, which is out of flow in the row's own 8px inset
+     (see `.unseenDot`): without this the dot would be placed against whatever ancestor happened to be
+     positioned, and the row it belongs to would not be the thing it sits on. The row carries it the way
+     a file row does — the dot takes no room, so the title never moves because a dot came or went. */
+  position: relative;
   padding: 6px 8px;
   border: none;
   border-radius: 10px;
@@ -1772,40 +1828,46 @@
 }
 
 /* One comment: what was asked and where it sits in the file, on the row's single line — the title from
-   the left, the line numbers against the right edge. The item is one line the way a file row is. */
+   the left, the line numbers against the right edge. The item is one line the way a file row is, and it
+   is spaced the way a file row is: the gap is the file row's own 8px (see `.rowHead`) between its name
+   and its counts, so the room before the right-hand figure is the same in both lists. */
 .commentHead {
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
 }
 
-/* The lines the comment names, in the code face, last on the row and held to its right edge: `path:lines`
-   is the panel's own vocabulary for "there", and with the path gone (the group above IS that file) the
-   numbers are the whole label — bracketed, so it reads as a marker, and bold, so that marker reads as
-   one. Tabular, so a file's comments line up down that edge. */
+/* The lines the comment names, last on the row and held to its right edge: `path:lines` is the panel's
+   own vocabulary for "there", and with the path gone (the group above IS that file) the numbers are the
+   whole label — bracketed, so it reads as a marker. It is the row's right-hand FIGURE, so it wears the
+   file row's own figure treatment (see `.rowMeta` / `.addCount`): the app font at 12px on a 16px line,
+   in the metadata tone, tabular so a file's comments line up down that edge, and no weight of its own —
+   the add/del counts beside a file name are plain too, and the code face at 700 made this the loudest
+   thing on the row. The ONE part of that treatment it does not copy is the hue: the add/del colours say
+   "added" and "removed", and a line range says neither. */
 .commentLabel {
   flex: none;
   white-space: nowrap;
   text-align: right;
-  color: var(--dsw-alias-label-secondary);
-  font: var(--dsw-font-markdown-code-block);
-  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
   line-height: 16px;
   font-variant-numeric: tabular-nums;
-  /* After the `font` shorthand, which would otherwise set the weight back: 700 is what a code font
-     ships (see `.discussionBody strong`). */
-  font-weight: 700;
 }
 
 /* The first sentence of what was asked: the one item on the row that takes the room that is left, and
-   the only one that is ever cut short. It reads from the left, so every title starts on one column. */
+   the only one that is ever cut short. It reads from the left, so every title starts on one column —
+   and that column is the file name's own: the row's 8px inset plus the same 4px lead-in `.rowPath`
+   takes, which is what keeps a title clear of the unseen dot at 5px. Same 12px on an 18px line as the
+   file name, too. */
 .commentTitle {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  margin-left: 4px;
   text-align: left;
   color: var(--dsw-alias-label-primary);
   font-size: 12px;
@@ -1857,6 +1919,10 @@
 
 .rowHead {
   display: flex;
+  /* The containing block for the row's unseen dot (see `.unseenDot`): that mark is out of flow at 5px,
+     so the row itself has to be the thing it is measured from — the comments list's row carries it the
+     same way (see `.commentRow`). */
+  position: relative;
   /* Centred, not baseline-aligned: the row mixes the name with 11px metadata and a tag
      whose padding sits above and below the text, and on the baseline the name read high
      against both. */
@@ -1898,11 +1964,34 @@
      metadata rather than among code. The size is a step down from the default too, since
      that metadata is what it has to sit level with. The small inset keeps the name off the
      card's edge — on the row rather than in the row's padding, so the hover fill still
-     spans the whole row. Vertically the row centres it (see `.rowHead`), with no nudge of its
-     own: a pixel of it here only pushed the name below the line it is meant to sit on. */
+     spans the whole row — and it is the same 4px lead-in `.commentTitle` takes in the
+     comments list, at the same 12px on an 18px line, so a file name and a comment title
+     start on one column in either list. Vertically the row centres it (see `.rowHead`),
+     with no nudge of its own: a pixel of it here only pushed the name below the line it is
+     meant to sit on. */
   margin-left: 4px;
   font-size: 12px;
   line-height: 18px;
+}
+
+/* The unread dot: a change arrived on this row that the reader has not looked at. It takes NO room in the row
+   (it sits in the gap between the button's left edge and the file name, and the name never moves because a dot
+   came or went), and the mark is an SVG CIRCLE rather than a styled box: a styled box came out an oval once the
+   panel's scaling stretched it, while an SVG keeps its circle whatever the box does. It carries a title and an
+   aria-label, so colour is never the only cue.
+   One rule, both lists: the offsets are measured from the containing block's padding box, and BOTH row rules
+   (`.rowHead`, `.commentRow`) are `position: relative` with no border of their own — so this 5px lands 5px from
+   each row's own left edge, whichever list the row is in, and the shared `li.row` hairline moves both by the
+   same 1px. A group level added to the file list gives its heading those same two properties if a dot is ever
+   to sit on it. */
+.unseenDot {
+  position: absolute;
+  top: 50%;
+  left: 5px;
+  flex: none;
+  align-self: center;
+  transform: translateY(-50%);
+  overflow: visible;
 }
 
 .kindHint {
@@ -2613,6 +2702,19 @@
   font: var(--dsw-font-markdown-code-block);
 }
 
+/* The comment card CLIPS its overflow (see the note on `.discussionRangeWrap`), and the head's own left
+   edge belongs to the fold arrow, so its dot cannot take the file row's out-of-flow placement: it stays a
+   mark immediately before the thread's title instead. `inline-block` is load-bearing — as a plain inline
+   span the width and height are ignored and it draws a sliver instead of a circle. */
+.discussionHead .unseenDot {
+  position: static;
+  display: inline-block;
+  flex: none;
+  align-self: center;
+  transform: none;
+  margin-right: 6px;
+  vertical-align: middle;
+}
 /* The thread's own text is the app's message text, not the code's: the very shorthand the chat's
    markdown body wears (`--dsw-font-markdown-base` — the reader's content font size, in the UI
    family, over that family's own line height), so a comment reads exactly like the message it came

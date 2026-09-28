@@ -45,7 +45,7 @@ describe('list', () => {
           files: [
             {
               id: 'e1', sessionId: 'session-1', path: '/repo/a.txt', earlierVersion: 'file',
-              oldText: 'a', newText: 'b', updatedAt: 10, missing: true, diverged: false,
+              oldText: 'a', newText: 'b', updatedAt: 10, missing: true, diverged: false, unseen: true,
             },
             { sessionId: 'session-1', path: 42 },
             {
@@ -81,6 +81,9 @@ describe('list', () => {
         {
           id: 'e1', sessionId: 'session-1', path: '/repo/a.txt', earlierVersion: 'file',
           oldText: 'a', newText: 'b', updatedAt: 10, missing: true, diverged: false,
+          // The dot must survive this narrowing: dropping it here lights everything upstream and shows
+          // nothing on screen, which is exactly how the first build of it behaved.
+          unseen: true,
           sessionIds: ['session-1'],
         },
         {
@@ -367,5 +370,14 @@ describe('comments', () => {
   it('rejects a malformed ask outcome', async () => {
     const seam = fakeRpc({ 'comment-ask': { ok: true, value: { outcome: 'perhaps' } } })
     await expect(createDiffApprovalPort(seam.rpc).commentAsk(S1, 'c1', 'p', 'w')).rejects.toThrow('malformed outcome')
+  })
+
+  it('tells the host a comment has been seen, and narrows nothing from the answer', async () => {
+    // The dot's state is the host's and arrives on the next list read, so this verb carries only the
+    // identity of the card the reader is looking at — the endpoint's own outcome is not something the
+    // client draws.
+    const seam = fakeRpc({ 'comment-seen': { ok: true, value: { outcome: 'seen' } } })
+    await expect(createDiffApprovalPort(seam.rpc).commentSeen(S1, 'c1')).resolves.toBe(undefined)
+    expect(seam.call).toHaveBeenCalledWith('/diff-approval', 'comment-seen', { sessionId: 'session-1', id: 'c1' })
   })
 })

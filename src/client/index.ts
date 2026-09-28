@@ -158,7 +158,7 @@ export function apply(ctx: ClientContext): void {
   // content changes (agent edit, block revert, or an external adoption).
   // `remapFile` is also called directly after a whole-file revert (whose entry
   // leaves the list, so the observation loop cannot see its content change).
-  let remapFile: (path: string, oldText: string, newText: string) => void = () => {}
+  let remapFile: (sessionId: SessionId, path: string, oldText: string, newText: string) => void = () => {}
   const access = conversationAccess(ctx, () => currentSessionId)
   ctx.effect(() => {
     const attached = attachReferenceRemap({
@@ -167,6 +167,9 @@ export function apply(ctx: ClientContext): void {
       writeDraft: access.writeDraft,
       readQueue: access.readQueue,
       writeQueue: access.writeQueue,
+      // The draft and the queue this rewrites are the CURRENT session's, so the list it follows is that
+      // session's own view: another session's files would remap its references inside this composer.
+      sessionId: () => currentSessionId,
     })
     remapFile = attached.remapFile
     return attached.unsubscribe
@@ -205,14 +208,22 @@ export function apply(ctx: ClientContext): void {
   /** The face both the footer panel and the docked tab render with. */
   const buildFace = (): PendingPanelFace => ({
       hooks: { pending: store, dock: dock.face.hooks.dock },
+      // The per-session read every seat draws from: a seat asks for ITS session's view and gets that
+      // one, so a poll another seat runs for another session cannot put its files under this badge.
+      // It sits beside `hooks` rather than inside it — that compartment holds observables only, and
+      // the framework binds each of those onto the props (see `PendingViewHooks`).
+      pendingView: (sessionId, select) => select(store.viewFor(sessionId)),
       onOpenDock: dock.face.open,
       onDockShowing: dock.face.setShowing,
       onDockClose: dock.face.setClose,
       closeDock: dock.face.close,
       onRefresh: (sessionId) => { currentSessionId = sessionId; void store.refresh(sessionId) },
+      onMarkSeen: (sessionId, id) => { if (sessionId !== undefined) void store.markSeen(sessionId, id) },
       onKeep: (sessionId, path, keepListed) => store.keep(sessionId, path, keepListed),
       onRevert: (sessionId, path, keepListed) => {
-        const entry = store.getSnapshot().files.find(file => file.id === path)
+        // The entry comes from THIS session's own view: the whole-page snapshot may be pointed at another
+        // session's read (another seat's poll), and the reference remap below is about the reader's file.
+        const entry = store.viewFor(sessionId).files.find(file => file.id === path)
         const before = entry?.newText
         const after = entry?.oldText
         const filePath = entry?.path
@@ -220,7 +231,7 @@ export function apply(ctx: ClientContext): void {
           // A whole-file revert writes the old text back, so references to the
           // file shift from `newText` to `oldText`.
           if (filePath !== undefined && before !== undefined && after !== undefined) {
-            remapFile(filePath, before, after)
+            remapFile(sessionId, filePath, before, after)
           }
         })
       },
@@ -242,6 +253,7 @@ export function apply(ctx: ClientContext): void {
       onCommentRemove: (sessionId, id) => store.commentRemove(sessionId, id),
       onCommentRemoveMany: (sessionId, ids) => store.commentRemoveMany(sessionId, ids),
       onCommentAsk: (sessionId, id, prompt, text) => store.commentAsk(sessionId, id, prompt, text),
+      onCommentSeen: (sessionId, id) => { void store.commentSeen(sessionId, id) },
       onAckRedoCleared: () => store.clearRedoCleared(),
       onAckUndoNotice: () => store.clearUndoNotice(),
       onPasteReference: (sessionId, reference) => {
@@ -332,10 +344,11 @@ export function apply(ctx: ClientContext): void {
   if (typeof window !== 'undefined') {
     ctx.effect(() => startProducedChipMenu({
       // The panel's list, read at press time: the press is prevented on this answer, so it cannot
-      // wait for a poll to settle.
+      // wait for a poll to settle. It is the CURRENT session's view — the chip belongs to that
+      // session's conversation, and the page-wide snapshot may be pointed at another seat's read.
       isPending: (path) => {
-        const snapshot = store.getSnapshot()
-        return snapshot.files.some(file => diffPathsMatch(path, file.path, snapshot.workspacePath))
+        const view = store.viewFor(currentSessionId)
+        return view.files.some(file => diffPathsMatch(path, file.path, view.workspacePath))
       },
       onMenu: (detail) => {
         window.dispatchEvent(new CustomEvent(CHIP_MENU_EVENT, { detail }))

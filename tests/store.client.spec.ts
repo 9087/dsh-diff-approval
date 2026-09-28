@@ -42,6 +42,8 @@ interface PortSeam {
   commentRemove: ReturnType<typeof vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalCommentRemoveValue>>>
   commentRemoveMany: ReturnType<typeof vi.fn<(sessionId: SessionId, ids: readonly string[]) => Promise<DiffApprovalCommentRemoveManyValue>>>
   commentAsk: ReturnType<typeof vi.fn<(sessionId: SessionId, id: string, prompt: string, text: string) => Promise<DiffApprovalCommentAskValue>>>
+  markSeen: ReturnType<typeof vi.fn<(sessionId: SessionId, id: string) => Promise<void>>>
+  commentSeen: ReturnType<typeof vi.fn<(sessionId: SessionId, id: string) => Promise<void>>>
 }
 
 /** Build one seam whose answers the test controls through typed mocks. */
@@ -58,9 +60,15 @@ function port(overrides: Partial<Pick<PortSeam, 'list' | 'keep' | 'revert' | 'bl
   const commentRemove = vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalCommentRemoveValue>>(async () => ({ outcome: 'removed' }))
   const commentRemoveMany = vi.fn<(sessionId: SessionId, ids: readonly string[]) => Promise<DiffApprovalCommentRemoveManyValue>>(async (_sessionId, ids) => ({ removed: ids.length }))
   const commentAsk = vi.fn<(sessionId: SessionId, id: string, prompt: string, text: string) => Promise<DiffApprovalCommentAskValue>>(async () => ({ outcome: 'asked', requestId: 'req-1' }))
+  const markSeen = vi.fn<(sessionId: SessionId, id: string) => Promise<void>>(async () => {})
+  const commentSeen = vi.fn<(sessionId: SessionId, id: string) => Promise<void>>(async () => {})
   return {
-    port: { list, keep, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentRemoveMany, commentAsk, ...overrides },
-    list, keep, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentRemoveMany, commentAsk,
+    // `...overrides` LAST in BOTH objects: a test's own answer must win. Spreading the defaults after it
+    // silently replaced the caller's `list` (and every other mock) with the canned one here, so a test
+    // that staged a bespoke answer was handed the default and could not tell — and the store under test
+    // received the canned one too.
+    port: { list, keep, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentRemoveMany, commentAsk, markSeen, commentSeen, ...overrides },
+    list, keep, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentRemoveMany, commentAsk, markSeen, commentSeen, ...overrides,
   }
 }
 
@@ -173,6 +181,155 @@ describe('refresh epochs', () => {
     // newest response's to carry.
     expect(store.getSnapshot().read).toBe(true)
     expect(store.getSnapshot().busy).toEqual(new Set())
+  })
+})
+
+describe('one view per session', () => {
+  const S2 = 'session-2' as SessionId
+  const FILE_B: PendingFileDiff = { ...FILE, id: 'entry-2', sessionId: S2, path: '/repo/b.txt' }
+
+  it('holds both sessions\' views at once, and shows the newest read as the page-wide one', async () => {
+    // The reporter's bug, in the store: a badge for A showed B's list because there was ONE snapshot
+    // and two seats polling into it. Each session keeps its own slot now, so both are live and neither
+    // read can move the other's list.
+    let releaseB: ((value: DiffApprovalListValue) => void) | undefined
+    const seam = port({
+      list: vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>((sessionId) => (
+        sessionId === S2
+          ? new Promise((resolve) => { releaseB = resolve })
+          : Promise.resolve(listValue({ files: [FILE] }))
+      )),
+    })
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+
+    // B's read is in flight. A's consumer is unaffected: it reads A's slot, whose count is A's own.
+    const readingB = store.refresh(S2)
+    expect(store.viewFor(S1).files).toEqual([FILE])
+    expect(store.viewFor(S1).files.length).toBe(1)
+
+    releaseB?.(listValue({ files: [FILE_B] }))
+    await readingB
+    // Both are live, side by side, and the page-wide reader follows the newest read (B).
+    expect(store.viewFor(S1).files).toEqual([FILE])
+    expect(store.viewFor(S2).files).toEqual([FILE_B])
+    expect(store.getSnapshot().files).toEqual([FILE_B])
+  })
+
+  it('a read for B does not change what an A consumer sees', async () => {
+    const seam = port({
+      list: vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>(async (sessionId) => (
+        sessionId === S1 ? listValue({ files: [FILE], workspacePath: '/repo-a' }) : listValue({ files: [FILE_B], workspacePath: '/repo-b' })
+      )),
+    })
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+    const beforeA = store.viewFor(S1)
+
+    await store.refresh(S2)
+    // A's view is the same object it was, with the same files, the same count and A's own workspace.
+    expect(store.viewFor(S1)).toBe(beforeA)
+    expect(store.viewFor(S1).files).toEqual([FILE])
+    expect(store.viewFor(S1).files.length).toBe(1)
+    expect(store.viewFor(S1).workspacePath).toBe('/repo-a')
+    expect(store.viewFor(S2).files).toEqual([FILE_B])
+  })
+
+  it('answers an unread empty view for a session that has never been read, never another session\'s list', async () => {
+    const seam = port()
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+    const untouched = store.viewFor(S2)
+    expect(untouched.read).toBe(false)
+    expect(untouched.files).toEqual([])
+  })
+
+  it('keeps a session\'s own list when its read fails', async () => {
+    // A failed poll knows nothing new. It must not blank the session's list — neither as empty nor as a
+    // fresh snapshot — so the reader keeps the files, and the reason, that this session already had.
+    const seam = port({
+      list: vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>(async (sessionId) => (
+        sessionId === S1 ? listValue({ files: [FILE] }) : listValue({ files: [FILE_B] })
+      )),
+    })
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+    await store.refresh(S2)
+    expect(seam.list.mock.calls).toEqual([[S1], [S2]])
+    seam.list.mockRejectedValue(new Error('socket closed'))
+    await store.refresh(S2)
+    // B keeps B's list and says why; A is untouched by B's failure.
+    expect(store.viewFor(S2).files).toEqual([FILE_B])
+    expect(store.viewFor(S2).error).toBe('socket closed')
+    expect(store.viewFor(S2).read).toBe(true)
+    expect(store.viewFor(S1).files).toEqual([FILE])
+    expect(store.viewFor(S1).error).toBeUndefined()
+  })
+
+  it('drops only the failed session\'s error when that session reads again', async () => {
+    const seam = port()
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+    seam.list.mockRejectedValueOnce(new Error('socket closed'))
+    await store.refresh(S1)
+    expect(store.viewFor(S1).error).toBe('socket closed')
+    seam.list.mockResolvedValue(listValue({ files: [FILE] }))
+    await store.refresh(S1)
+    expect(store.viewFor(S1).error).toBeUndefined()
+    expect(store.viewFor(S1).files).toEqual([FILE])
+  })
+})
+
+describe('seen', () => {
+  it('tells the host the row was seen and does NOT re-read the list', async () => {
+    // Clearing a dot is not a reason to read anything. The file on screen draws no dot anyway (its row
+    // renders one only while it is not the selected one), and the next poll carries the cleared flag for
+    // the list the reader goes back to. The re-read this used to do was a refresh per report: it published
+    // a NEW `files` array, which re-armed the panel's "the shown row is still unseen" effect, which
+    // reported the same path again — a list read, a render and another report as fast as the host could
+    // answer, with the badge flapping between whatever two sessions' reads answered with.
+    const seam = port()
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+    expect(seam.list).toHaveBeenCalledTimes(1)
+
+    const published = vi.fn()
+    const off = store.subscribe(published)
+    await store.markSeen(S1, FILE.id)
+    expect(seam.markSeen).toHaveBeenCalledWith(S1, FILE.id)
+    // No read, and no publish at all: the mark changes nothing the panel is drawing.
+    expect(seam.list).toHaveBeenCalledTimes(1)
+    expect(published).not.toHaveBeenCalled()
+    expect(store.getSnapshot().files).toEqual([FILE])
+    off()
+  })
+
+  it('does not let a read of the session the reader left land on the current view', async () => {
+    // The reader switched A → B and has since been shown one of B's files. A's read was issued before the
+    // switch and answers LAST, so publishing it would put A's rows under B's badge — the flip the reader
+    // saw. Nothing done in between may reopen that door, which is why the mark is exercised here too: it
+    // used to refresh, and a refresh issued from the session the reader is on is exactly what let the two
+    // lists take turns.
+    const S2 = 'session-2' as SessionId
+    const FILE_B: PendingFileDiff = { ...FILE, id: 'entry-2', sessionId: S2, path: '/repo/b.txt' }
+    let releaseA: ((value: DiffApprovalListValue) => void) | undefined
+    const seam = port({
+      list: vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>((sessionId) => (
+        sessionId === S1
+          ? new Promise((resolve) => { releaseA = resolve })
+          : Promise.resolve(listValue({ files: [FILE_B] }))
+      )),
+    })
+    const store = createPendingDiffStore(seam.port)
+    const readingA = store.refresh(S1)
+    await store.refresh(S2)
+    await store.markSeen(S2, FILE_B.id)
+    expect(store.getSnapshot().files).toEqual([FILE_B])
+
+    // A's answer now lands, after the switch and after the mark.
+    releaseA?.(listValue({ files: [FILE] }))
+    await readingA
+    expect(store.getSnapshot().files).toEqual([FILE_B])
   })
 })
 

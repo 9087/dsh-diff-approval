@@ -116,6 +116,73 @@ function stubCodeScroll(scrollHeight = 2000, clientHeight = 800): () => void {
 }
 
 const S1 = 'session-1' as SessionId
+/** One entry the panel would be handed for an observed element, as this double reports it. */
+interface ObservedEntry {
+  target: Element
+  isIntersecting: boolean
+  intersectionRatio: number
+}
+/** What one observer was told: the callback the panel registered, and the elements it observes. */
+interface FakeObserver {
+  callback: (entries: readonly ObservedEntry[]) => void
+  targets: Element[]
+}
+const OBSERVERS: FakeObserver[] = []
+
+/**
+ * A stand-in for the platform's IntersectionObserver, which jsdom does not implement — and which,
+ * more to the point, a test cannot drive: the real one reports whatever the layout engine decided, and
+ * jsdom has no layout at all. This records each observer the panel creates and lets the case deliver an
+ * observation to it, so the two things the dot's rule is made of can be tested on their own: how much
+ * of the card is on screen, and how long it stays there.
+ */
+class FakeIntersectionObserver {
+  callback: (entries: readonly ObservedEntry[]) => void
+  targets: Element[] = []
+
+  constructor(callback: (entries: readonly ObservedEntry[]) => void) {
+    this.callback = callback
+    OBSERVERS.push(this as unknown as FakeObserver)
+  }
+
+  observe(target: Element): void {
+    this.targets.push(target)
+  }
+
+  disconnect(): void {
+    this.targets = []
+  }
+
+  unobserve(target: Element): void {
+    this.targets = this.targets.filter(known => known !== target)
+  }
+
+  takeRecords(): ObservedEntry[] {
+    return []
+  }
+}
+
+/**
+ * Install the double for one case, and hand the case a way to deliver an observation.
+ * @returns a function that reports the crossed elements as `{ isIntersecting, intersectionRatio }`,
+ *   each to the observers watching it.
+ */
+function stubIntersectionObserver(): (crossed: readonly { element: Element; isIntersecting: boolean; intersectionRatio: number }[]) => void {
+  OBSERVERS.length = 0
+  Object.defineProperty(globalThis, 'IntersectionObserver', {
+    configurable: true,
+    writable: true,
+    value: FakeIntersectionObserver,
+  })
+  return (crossed) => {
+    for (const observer of OBSERVERS) {
+      const entries = crossed.filter(one => observer.targets.includes(one.element))
+      if (entries.length === 0) continue
+      observer.callback(entries)
+    }
+  }
+}
+
 const FILE: PendingFileDiff = {
   id: 'entry-1', sessionId: S1, path: '/repo/a.txt', earlierVersion: 'file',
   oldText: 'a\n', newText: 'b\n', updatedAt: 10, missing: false, diverged: false,
@@ -154,6 +221,8 @@ interface CommentHost {
   forget: (id: string) => void
   /** The pending list a later poll read: the files it now holds, in its own order. */
   setFiles: (files: PendingFileDiff[]) => void
+  /** The host published a new read: every seat re-reads, and every session's view is rebuilt. */
+  publish: () => void
   /** The observable face the panel's `usePending` reads: a write re-renders the panel. */
   subscribe: (listener: () => void) => () => void
   /** The snapshot as the latest write left it; identity-stable until the next write. */
@@ -391,7 +460,11 @@ function lookalikeBox(): { boxTop: number; boxHeight: number } {
   return { boxTop: rowEnd - charge, boxHeight: charge }
 }
 
-function panelProps(snapshot: Partial<PendingDiffSnapshot> & { files: PendingFileDiff[] }): PanelProps {
+function panelProps(
+  snapshot: Partial<PendingDiffSnapshot> & { files: PendingFileDiff[] },
+  viewsFor: Record<string, Partial<PendingDiffSnapshot> & { files: PendingFileDiff[] }> | null = null,
+  sessionId: SessionId = S1,
+): PanelProps {
   const comments = [...(snapshot.comments ?? [])]
   const answers: Record<string, string> = { ...(snapshot.commentAnswers ?? {}) }
   let revision = snapshot.commentsRevision ?? 0
@@ -409,8 +482,27 @@ function panelProps(snapshot: Partial<PendingDiffSnapshot> & { files: PendingFil
     commentLines: snapshot.commentLines ?? {},
   })
   let current = build()
+  /**
+   * Each session's OWN view, as the real store keeps them.
+   *
+   * The panel draws the view of the session it is about, so a harness that answered one snapshot for
+   * every session could not stage the bug this exists for — two sessions live at once, each with its
+   * own list. A test passes `viewsFor` to give a session a list of its own; every other session is
+   * shown the single snapshot above.
+   */
+  const viewCache = new Map<string, PendingDiffSnapshot>()
+  const viewFor = (sessionId: string | undefined): PendingDiffSnapshot => {
+    const override = sessionId === undefined ? undefined : viewsFor?.[sessionId]
+    if (override === undefined) return current
+    const cached = viewCache.get(sessionId!)
+    if (cached !== undefined) return cached
+    const built = build()
+    viewCache.set(sessionId!, { ...built, files: override.files, ...override })
+    return viewCache.get(sessionId!)!
+  }
   const publish = (): void => {
     current = build()
+    viewCache.clear()
     for (const listener of [...listeners]) listener()
   }
   const host: CommentHost = {
@@ -440,6 +532,7 @@ function panelProps(snapshot: Partial<PendingDiffSnapshot> & { files: PendingFil
       snapshot.files = next
       publish()
     },
+    publish: () => { publish() },
     subscribe: (listener) => {
       listeners.add(listener)
       return () => { listeners.delete(listener) }
@@ -449,12 +542,18 @@ function panelProps(snapshot: Partial<PendingDiffSnapshot> & { files: PendingFil
   const props = {
     wide: true,
     useSessions: (select: (state: { current: SessionId; byId: Record<string, { blank?: boolean }> }) => SessionId) =>
-      select({ current: S1, byId: {} }),
+      select({ current: sessionId, byId: {} }),
     // The panel's snapshot, as an observable: the host's writes re-render it, the same way the
     // store's poll does in the app.
     usePending: (select: (state: PendingDiffSnapshot) => PendingDiffSnapshot) =>
       select(useSyncExternalStore(host.subscribe, host.getSnapshot)),
+    // …and each session's OWN view, which is what the panel actually draws: a session with an
+    // override in `viewsFor` sees that list, and no session ever sees another's.
+    pendingView: (sessionId: SessionId | undefined, select: (view: PendingDiffSnapshot) => unknown) =>
+      select(viewFor(sessionId)),
     onRefresh: vi.fn(),
+    onMarkSeen: vi.fn(),
+    onCommentSeen: vi.fn(),
     onKeep: vi.fn(async () => {}),
     onRevert: vi.fn(async () => {}),
     onBlockKeep: vi.fn(async () => {}),
@@ -529,6 +628,53 @@ function panelProps(snapshot: Partial<PendingDiffSnapshot> & { files: PendingFil
 }
 
 describe('PendingPanel', () => {
+  /**
+   * The reader's bug, at the level they saw it: two sessions alive at once, each with a list of its own,
+   * and a badge that has to show ITS session's count. One page-wide snapshot could not do this — the
+   * mount that polled last won — so the panel reads its own session's view.
+   */
+  it('shows its own session\'s list and count, and switches sides with the session', () => {
+    const S2 = 'session-2' as SessionId
+    const mine = entry({ id: 'entry-1', path: '/repo/a.txt' })
+    const theirs = entry({ id: 'entry-2', path: '/repo/b.txt', sessionId: S2 })
+    // A is the session the seat is in; B has a list of its own that no A consumer may see.
+    const forA = panelProps({ read: true, files: [mine], busy: new Set() }, { [S2]: { read: true, files: [theirs], busy: new Set() } })
+    const badge = (): HTMLElement => document.querySelector('[data-diff-approval-badge]') as HTMLElement
+    const view = render(<PendingPanel {...forA} />)
+
+    // A's count is A's — one — and never B's.
+    expect(badge().dataset.diffApprovalBadge).toBe('1')
+    fireEvent.click(badge())
+    // A's list draws A's file, and none of B's: this is the half where the reader saw an empty list for
+    // a session that had thirty files.
+    expect(screen.getAllByText('a.txt')).toHaveLength(1)
+    expect(screen.queryByText('b.txt')).toBeNull()
+    view.unmount()
+
+    // The seat is now about B: it shows B's view, and A's is not lost with it.
+    const forB = panelProps({ read: true, files: [mine], busy: new Set() }, { [S2]: { read: true, files: [theirs], busy: new Set() } }, S2)
+    render(<PendingPanel {...forB} />)
+    expect(badge().dataset.diffApprovalBadge).toBe('1')
+    fireEvent.click(badge())
+    expect(screen.getAllByText('b.txt')).toHaveLength(1)
+    expect(screen.queryByText('a.txt')).toBeNull()
+  })
+
+  it('performs no read while it is not showing anything', () => {
+    // A seat that is not on screen (an undocked tab the reader has switched away from) draws nothing, so
+    // its poll is a read of a list nobody is looking at — once a second, for a session the reader may not
+    // even be in. Showing again is what starts it.
+    const hidden = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const view = render(<PendingPanel {...hidden} showing={false} />)
+    const refreshMock = hidden.onRefresh as unknown as { mock: { calls: unknown[][] } }
+    expect(refreshMock.mock.calls).toHaveLength(0)
+
+    // …and a shown seat does read, so the gate is not simply "never".
+    const shown = panelProps({ read: true, files: [FILE], busy: new Set() })
+    view.rerender(<PendingPanel {...shown} showing />)
+    expect((shown.onRefresh as unknown as { mock: { calls: unknown[][] } }).mock.calls).toHaveLength(1)
+  })
+
   it('disables the pending button when no session is selected', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     props.useSessions = ((select: (state: { current: SessionId | undefined; byId: Record<string, { blank?: boolean }> }) => SessionId | undefined) =>
@@ -1034,6 +1180,180 @@ describe('PendingPanel', () => {
     expect(screen.getAllByText('a.txt')).toHaveLength(2)
     expect(shownPath()).toBe(FILE.path)
     expect(screen.queryByText(sibling.path)).toBeNull()
+  })
+
+  it('wears the unseen dot on a row the reader is not looking at, and never on the row on screen', () => {
+    const lit = entry({ id: 'entry-lit', path: '/repo/lit.txt', unseen: true })
+    const quiet = entry({ id: 'entry-quiet', path: '/repo/quiet.txt' })
+    const props = panelProps({ read: true, files: [lit, quiet], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // The reader is looking at the OTHER file. A dot only ever marks a file that is not on screen, so the
+    // host's flag for the file in front of them must draw nothing — that is what stops the dot from flashing
+    // at them when they open a row, or when the agent touches the file they are reading.
+    fireEvent.click(screen.getByText('quiet.txt'))
+    const dots = document.querySelectorAll('[data-diff-unseen]')
+    expect(dots).toHaveLength(1)
+    // It names itself, so colour is never the only cue… (an SVG carries its name on `aria-label` / a
+    // `<title>` child — it has no `title` attribute)
+    expect(dots[0]!.getAttribute('aria-label')).toBe('panel.unseen')
+    // …and the row wearing it is the one the host lit.
+    expect(dots[0]!.closest('[data-diff-file]')?.getAttribute('data-diff-file')).toBe('entry-lit')
+    // The file on screen wears none, whatever the host says about it.
+    expect(document.querySelector('[data-diff-file="entry-quiet"] [data-diff-unseen]')).toBeNull()
+  })
+
+  it('reports the row it is showing seen once, not once per read of the list', () => {
+    const lit = entry({ id: 'entry-shown-lit', path: '/repo/shown.txt', unseen: true })
+    const props = panelProps({ read: true, files: [lit], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // The only row is the one on screen, so the reader looking at it is reported once…
+    expect(props.onMarkSeen).toHaveBeenCalledTimes(1)
+    expect(props.onMarkSeen).toHaveBeenCalledWith(S1, lit.id)
+
+    // …and a poll hands over the same row in a NEW array, exactly as the store's every read does. The flag
+    // is the same flag the host has already been told about, so there is nothing to say a second time: a
+    // report per read is a read per report once the mark re-reads, which is the loop that flapped the badge.
+    act(() => { hostOf(props).setFiles([{ ...lit }]) })
+    act(() => { hostOf(props).setFiles([{ ...lit }]) })
+    expect(props.onMarkSeen).toHaveBeenCalledTimes(1)
+
+    // The episode ends when the host takes the dot down, so the NEXT change to this path is news again.
+    act(() => { hostOf(props).setFiles([{ ...lit, unseen: false }]) })
+    act(() => { hostOf(props).setFiles([{ ...lit, unseen: true }]) })
+    expect(props.onMarkSeen).toHaveBeenCalledTimes(2)
+    expect(props.onMarkSeen).toHaveBeenLastCalledWith(S1, lit.id)
+  })
+
+  it('never reports a row of another session seen, even when the shared snapshot holds it', () => {
+    // The snapshot is ONE object every mount on the page reads, so it can hold another session's rows
+    // while this panel is showing this one — and an id is a path, which two sessions of one workspace can
+    // both have pending. Naming such a row would take the dot down for a file the reader was never shown.
+    const S2 = 'session-2' as SessionId
+    const mine = entry({ id: 'entry-mine', path: '/repo/mine.txt' })
+    const theirs = entry({ id: 'entry-theirs', path: '/repo/theirs.txt', sessionId: S2, unseen: true })
+    const props = panelProps({ read: true, files: [mine, theirs], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // The panel is put on the other session's row the way the produced-file chip does it, and that row is
+    // lit. This session has nothing lit, so the panel has nothing to report to the host at all.
+    act(() => { window.dispatchEvent(new CustomEvent(OPEN_PANEL_FILE_EVENT, { detail: { fileId: theirs.id } })) })
+    expect(props.onMarkSeen).not.toHaveBeenCalled()
+  })
+
+  it('wears the unseen dot on the comment card the reader has not looked at, and clears it only once the card has been read', () => {
+    // The file row's dot answers "a change arrived"; the comment card's answers the same question
+    // about a thread. What CLEARS it is the difference: a row is cleared by the reader selecting it,
+    // while a card is cleared by the reader actually looking at it — the client has no event for
+    // "read", so the card's own visibility is what says so (see `useSeenOnView`).
+    vi.useFakeTimers()
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-comment-dot', path: '/repo/dot.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\n' })
+    const props = panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [
+        { ...comment({ id: 'd-lit', entryId: file.id, text: '这是新的。', anchor: { startLine: 2, endLine: 2 }, quote: 'b' }), unseen: true },
+        comment({ id: 'd-quiet', entryId: file.id, text: '这条看过了。', anchor: { startLine: 3, endLine: 3 }, quote: 'c' }),
+      ],
+    })
+    const cross = stubIntersectionObserver()
+    try {
+      render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+
+      const cardOf = (id: string): HTMLElement =>
+        document.querySelector(`[data-diff-discussion-id="${id}"]`) as HTMLElement
+      const dots = document.querySelectorAll('[data-diff-comment-unseen]')
+      expect(dots).toHaveLength(1)
+      // It names itself, so colour is never the only cue…
+      expect(dots[0]!.getAttribute('aria-label')).toBe('panel.unseen')
+      // …and the card wearing it is the one the host lit — to the LEFT of that card's own title, the
+      // way a file row wears it.
+      const card = cardOf('d-lit')
+      expect(card.contains(dots[0]!)).toBe(true)
+      expect(dots[0]!.compareDocumentPosition(card.querySelector('[data-diff-discussion-range]')!))
+        .toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+
+      // A card on its way past is not a card that has been read: one frame of half-visibility, then
+      // gone again, and the dot is still there.
+      cross([{ element: card, isIntersecting: true, intersectionRatio: 0.9 }])
+      act(() => { vi.advanceTimersByTime(100) })
+      cross([{ element: card, isIntersecting: false, intersectionRatio: 0 }])
+      act(() => { vi.advanceTimersByTime(5000) })
+      expect(props.onCommentSeen).not.toHaveBeenCalled()
+
+      // Held in view, it is: the dwell passes and the host is told exactly once, about this card.
+      cross([{ element: card, isIntersecting: true, intersectionRatio: 0.9 }])
+      act(() => { vi.advanceTimersByTime(1000) })
+      expect(props.onCommentSeen).toHaveBeenCalledTimes(1)
+      expect(props.onCommentSeen).toHaveBeenCalledWith(S1, 'd-lit')
+      cross([{ element: card, isIntersecting: true, intersectionRatio: 0.9 }])
+      act(() => { vi.advanceTimersByTime(5000) })
+      expect(props.onCommentSeen).toHaveBeenCalledTimes(1)
+
+      // The quiet card never even observes: only a card with something to clear is watched.
+      expect(OBSERVERS.some(observer => observer.targets.includes(cardOf('d-quiet')))).toBe(false)
+    } finally {
+      Reflect.deleteProperty(globalThis, 'IntersectionObserver')
+      vi.useRealTimers()
+    }
+  })
+
+  it('wears the unseen dot on the comment\'s row in the comments tab, so a comment on a file the reader is not looking at still says an answer arrived', () => {
+    // The card's dot is drawn by the code view, and the code view renders the SELECTED file alone: a
+    // comment on any other file has no card on screen, so its dot had nowhere to appear and the reader
+    // saw nothing at all when the answer arrived. The comments tab's row is always rendered — it is the
+    // reader's way to the card — so it is what carries the mark for a reader who is somewhere else.
+    act(() => { setCommentModeEnabled(true) })
+    const elsewhere = entry({ id: 'entry-elsewhere', path: '/repo/elsewhere.txt', earlierVersion: 'none', oldText: '', newText: 'x\n' })
+    const file = entry({ id: 'entry-list-dot', path: '/repo/list-dot.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\n' })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [file, elsewhere],
+      busy: new Set(),
+      comments: [
+        { ...comment({ id: 'd-row-lit', entryId: file.id, text: '这是新的。', anchor: { startLine: 2, endLine: 2 }, quote: 'b' }), unseen: true },
+        comment({ id: 'd-row-quiet', entryId: file.id, text: '这条看过了。', anchor: { startLine: 3, endLine: 3 }, quote: 'c' }),
+      ],
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    // The reader opens ANOTHER file before switching to the tab — the situation the card's dot cannot
+    // answer. The commented file's card is then not rendered at all, which is what makes the row's own
+    // dot the only thing that can speak here.
+    fireEvent.click(screen.getByText('elsewhere.txt'))
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    expect(document.querySelector('[data-diff-discussion-id="d-row-lit"]')).toBeNull()
+
+    const rowOf = (id: string): HTMLElement => document.querySelector(`[data-diff-comment-link="${id}"]`) as HTMLElement
+    const lit = rowOf('d-row-lit')
+    const quiet = rowOf('d-row-quiet')
+    // With no card on screen, the whole document holds exactly one comment dot, and it is the row's.
+    const dots = document.querySelectorAll('[data-diff-comment-unseen]')
+    expect(dots).toHaveLength(1)
+    const dot = dots[0]!
+    expect(lit.contains(dot)).toBe(true)
+    // It names itself, so colour is never the only cue (an SVG carries its name on `aria-label` / a
+    // `<title>` child — it has no `title` attribute)…
+    expect(dot.getAttribute('aria-label')).toBe('panel.unseen')
+    expect(dot.querySelector('title')?.textContent).toBe('panel.unseen')
+    // …it sits to the LEFT of the row's own content, the way the card's dot sits left of its header…
+    expect(dot.compareDocumentPosition(lit.querySelector('[data-diff-comment-title]')!))
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    // …and a row whose comment the host has said nothing about wears none.
+    expect(quiet.querySelector('[data-diff-comment-unseen]')).toBeNull()
+
+    // It takes no room in the row, and the row is its containing block: jsdom lays nothing out, so the
+    // two rules are compared in the sheet (`position: absolute` against the row's own `position`).
+    const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const rule = (name: string): string => new RegExp(`^\\.${name} \\{([^}]*)\\}`, 'm').exec(sheet)?.[1] ?? ''
+    expect(rule('unseenDot')).toContain('position: absolute')
+    expect(rule('commentRow')).toContain('position: relative')
   })
 
   it('labels the whole-file button Delete when there is no earlier version, and tags nothing on the row', () => {
@@ -1979,19 +2299,39 @@ describe('PendingPanel', () => {
     expect(items[0]!.getAttribute('role')).toBe('button')
     // The items wear the file rows' own box, so the two lists' text shares a column.
     const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
-    const rowRule = /^\.commentRow \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
+    const ruleOf = (name: string): string => new RegExp(`^\\.${name} \\{([^}]*)\\}`, 'm').exec(sheet)?.[1] ?? ''
+    const declared = (block: string, property: string): string =>
+      new RegExp(`${property}:\\s*([^;]+);`).exec(block)?.[1]?.trim() ?? ''
+    const rowRule = ruleOf('commentRow')
     expect(rowRule).toContain('padding: 6px 8px')
     expect(rowRule).toContain('border-radius: 10px')
+    // …and it is the file row's box to the letter, not merely a box of its own with the same numbers.
+    expect(declared(rowRule, 'padding')).toBe(declared(ruleOf('rowHead'), 'padding'))
+    expect(declared(rowRule, 'border-radius')).toBe(declared(ruleOf('rowHead'), 'border-radius'))
+    // A comment's title takes the file name's own lead-in inside that box (`rowPath`'s 4px), so the two
+    // lists' titles start on one column — and both clear the unseen dot, which is out of flow at 5px.
+    const pathRule = ruleOf('rowPath')
+    expect(declared(pathRule, 'margin-left')).not.toBe('')
+    expect(declared(ruleOf('commentTitle'), 'margin-left')).toBe(declared(pathRule, 'margin-left'))
     // The line numbers never shrink and the first sentence is the only thing that gives way: the row is
     // one line even when the column is narrow. Titles read from the left, the numbers sit on the right.
-    const labelRule2 = /^\.commentLabel \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
+    const labelRule2 = ruleOf('commentLabel')
     expect(labelRule2).toContain('flex: none')
     expect(labelRule2).toContain('text-align: right')
-    // The label is bold, and it has to be declared after the `font` shorthand: that shorthand carries a
-    // weight of its own, so a weight written before it is silently set back.
-    expect(labelRule2).toContain('font-weight: 700')
-    expect(labelRule2.indexOf('font-weight')).toBeGreaterThan(labelRule2.indexOf('font:'))
-    const title = /^\.commentTitle \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
+    // …and those numbers are the row's right-hand FIGURE, so they wear the file row's own figure
+    // treatment (`rowMeta`) — 12px on a 16px line, the metadata tone, tabular figures, the app font (no
+    // `font-family` of its own) and no weight of its own. Read off that rule rather than repeated here,
+    // so the two cannot drift apart. The add/del HUES are the one part they do not copy: those say
+    // "added" and "removed", and a line range says neither.
+    const metaRule = ruleOf('rowMeta')
+    for (const property of ['color', 'font-size', 'line-height', 'font-variant-numeric']) {
+      expect(declared(metaRule, property), property).not.toBe('')
+      expect(declared(labelRule2, property), property).toBe(declared(metaRule, property))
+    }
+    expect(labelRule2).not.toContain('font-family')
+    expect(labelRule2).not.toContain('font-weight')
+    expect(labelRule2).not.toContain('--dsw-font-markdown-code-block')
+    const title = ruleOf('commentTitle')
     expect(title).toContain('flex: 1')
     expect(title).toContain('text-align: left')
     expect(title).toContain('text-overflow: ellipsis')
@@ -2493,6 +2833,16 @@ describe('PendingPanel', () => {
     const size = (name: string): number => Number.parseFloat(/font-size:\s*([\d.]+)px/.exec(rule(name))?.[1] ?? '0')
     expect(size('commentGroupName')).toBeLessThan(size('commentTitle'))
     expect(rule('commentGroupName')).toContain('color: var(--dsw-alias-label-tertiary)')
+    // The heading is the one level the comments list has that the file list does not, and it sits on the
+    // rows' OWN text column rather than on the row box's edge: `li.row`'s 1px hairline, the row's 8px
+    // inset (the 2nd value of its padding) and the 4px lead-in a title takes. Read off those rules, so a
+    // file list that grows a group lands on this same column instead of on the box's edge.
+    const inset = (name: string): number => {
+      const [, right] = /padding:\s*[^\s;]+\s+([^\s;]+)/.exec(rule(name)) ?? []
+      return Number.parseFloat(right ?? '0')
+    }
+    const lead = Number.parseFloat(/margin-left:\s*([\d.]+)px/.exec(rule('commentTitle'))?.[1] ?? '0')
+    expect(inset('commentGroupName')).toBe(1 + inset('commentRow') + lead)
   })
 
   it('lists the comments in the order they were added, not the order their lines run', () => {
@@ -3405,61 +3755,95 @@ describe('PendingPanel', () => {
   })
 
   it('keeps the folded list symmetric, on the scroller\'s own strip', () => {
-    // The two lists hold the same rows, but their frames differ. The docked one carries an 8px
-    // right padding — the same as its left — and the rows keep their 8px inside it, which lines
-    // its rows, the heading's buttons and the bulk footer up at 16px. The floating card takes no
-    // right padding at all, so its rows keep the same 8px and the card reads symmetric instead of
-    // carrying 16px on one side and 8px on the other. The heading and the footer sit outside the
-    // scroller and keep their own 8px, or they would come out flush against the border.
+    // The two lists hold the same rows, but their frames differ. NEITHER FRAME declares a right
+    // padding: the band the rows keep on the right is the scroller's own reserved strip of scrollbar
+    // attached to its right edge. The scroller itself carries one deliberate padding — the 2px of air
+    // the reader asked for between the rows and the bar, pinned below — where an 8px padding on top of
+    // the strip made the right band 16px against the 8px the same rows kept on the left and the docked
+    // list read lopsided. The rows still keep their 8px
+    // (inside the scroller, from the strip the shared `.listScroll` reserves): 9px of band at each
+    // side, the row's own 8px inset plus its 1px hairline against the 8px strip plus the pane's 1px
+    // border. A platform that overlays its bars and reserves no gutter drops that strip in the files
+    // list and the comments list together, which is the point of the shared rule. The heading and the
+    // footer sit outside the scroller and keep their own 8px, or they would come out flush against
+    // the border.
     const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const block = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
     const rightPadding = (name: string): string => /padding:\s*([^;]*);/.exec(block(name))?.[1]?.trim().split(/\s+/)[1] ?? ''
-    expect(rightPadding('fileList')).toBe('8px')
+    expect(rightPadding('fileList')).toBe('0')
     expect(rightPadding('fileListFloat')).toBe('0')
     expect(/padding:\s*8px 8px 0 0;/.test(block('bulkActions'))).toBe(true)
     expect(/padding-right:\s*8px;/.test(block('groupHead'))).toBe(true)
-    // The rows' own inset is measured at runtime rather than declared, so nothing here may pin a
-    // right padding on the scroller (see the test below).
-    expect(block('listScroll')).not.toContain('padding')
+    // The rows' band is the scroller's reserved strip, declared once on the shared rule (see the
+    // test below). The one padding the scroller itself carries is the deliberate 2px of air the
+    // reader asked for between the rows and the bar — a fixed value, never the old 8px band.
+    expect(/padding-right:\s*2px;/.test(block('listScroll'))).toBe(true)
+    expect(block('listScroll')).not.toMatch(/padding:\s*8px/)
+    // What the floating card does give the scroller is a MARGIN: a bar is pinned to the inner edge
+    // of its own scroll container, so 2px of margin on that container is the only thing that moves
+    // the bar 2px left. The card shows the files list or — on the comments tab — the comments list,
+    // and both are the same `.listScroll` inside the card's own `.fileListFloat`, so the bar moves
+    // 2px left in both and the two stay in step.
+    expect(/\.fileListFloat \.listScroll \{[^}]*margin-right: 2px/.test(css)).toBe(true)
     // Both dividers keep the gesture for themselves: without `touch-action: none`
     // the browser takes a finger drag as a page pan and cancels the pointer stream.
     expect(block('resizeHandle')).toContain('touch-action: none')
     expect(block('floatResizeHandle')).toContain('touch-action: none')
   })
 
-  it('keeps the list\'s rows 8px in, whatever the platform reserves for a scrollbar', () => {
+  it('reserves the scroll strip in both lists, with no inline padding left to fight it', () => {
     // A classic bar is laid out in the card's own right band, so on a desktop the rows are already
     // 8px in; a platform that overlays its bars (a touch browser, macOS with "show scrollbars when
-    // scrolling") reserves nothing, and the rows came out flush against the card. So the scroller
-    // is padded with whatever is left of the 8px after the strip the platform actually reserved —
-    // measured, not assumed. jsdom reserves nothing, so the padding is the whole 8px here.
+    // scrolling") reserves nothing of its own. The shared `.listScroll` rule reserves that band for
+    // BOTH lists — `overflow-y: scroll` plus `scrollbar-gutter: stable` (pinned in the CSS test
+    // below) — so it is one fixed number whether or not a bar is painted and the bar sits in the same
+    // place in the files list and the comments list. The panel used to pad only the FILES scroller
+    // with whatever was left of 8px after the strip the platform had actually reserved (`offsetWidth
+    // - clientWidth`): the comments list never carried that ref, so on an overlay platform it kept a
+    // band 8px narrower than the files list and its band moved with the bar. That measurement is
+    // gone, and both mounts of the class are asserted here. jsdom reserves no strip, so what this can
+    // pin is that neither scroller carries a measured inline inset at all.
+    act(() => { setCommentModeEnabled(true) })
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
-    const scroller = (): HTMLElement => document.querySelector('[data-diff-list-scroll]') as HTMLElement
-    // A wide panel: the list is its own column, and its rows keep the same 8px there.
+    const scrollers = (): HTMLElement[] => Array.from(document.querySelectorAll('[data-diff-list-scroll]'))
+    // A wide panel: the files list is its own column, and its rows keep the same band there.
     expect(document.querySelector('[data-diff-approval-file-list]')).not.toBeNull()
-    expect(scroller().style.paddingRight).toBe('8px')
+    expect(scrollers()).toHaveLength(1)
+    expect(scrollers()[0]!.style.paddingRight).toBe('')
 
-    // Fold it for good: the card takes over, and the rows keep the very same inset.
+    // Fold it for good: the card takes over, and the very same scroller is still unpadded.
     fireEvent.click(document.querySelector('[data-diff-file-list-float]') as HTMLElement)
     expect(document.querySelector('[data-diff-floating-file-list]')).not.toBeNull()
-    expect(scroller().style.paddingRight).toBe('8px')
+    expect(scrollers()).toHaveLength(1)
+    expect(scrollers()[0]!.style.paddingRight).toBe('')
+
+    // And the comments list — the other mount of that same `.listScroll`. The reader's mismatch was
+    // the measured padding reaching one list and not the other, so it must carry none either; the
+    // empty-state paragraph is what proves this is the comments scroller, not the files one.
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    expect(scrollers()).toHaveLength(1)
+    expect(scrollers()[0]!.querySelector('[data-diff-comments-empty], [data-diff-comment-list]')).not.toBeNull()
+    expect(scrollers()[0]!.style.paddingRight).toBe('')
   })
 
   it('reserves the scroll strip of a list that is not overflowing', () => {
-    // `scrollbar-gutter: stable` is not honoured by every engine, and where it is
-    // ignored — Safari before 18.2 styles this very 8px bar through the theme's
-    // `::-webkit-scrollbar`, so it takes layout space all the same — a list short
-    // enough to fit reserved no strip at all: the folded card's rows then sat flush
-    // against its edge and the card read 8px narrower than the same card holding a
-    // bar. Asking for the scrollbar is what reserves the strip in every engine.
+    // A list short enough to fit reserved no strip at all under `overflow-y: auto`, so the folded
+    // card's rows sat flush against its edge and the card read 8px narrower than the same card
+    // holding a bar. `overflow-y: scroll` is what reserves the strip in every engine: a bar that is
+    // always asked for cannot be missed, and with nothing to scroll the theme's transparent track
+    // paints nothing. `scrollbar-gutter: stable` names the same reservation for the engines that
+    // honour it (and is the only declaration that holds the strip on an engine that overlays its
+    // bars); it sits on the SHARED rule, so the strip is reserved in the files list and the comments
+    // list alike — which the JS this rule replaced never did, since it padded the files scroller only.
     // Measured in a headless Chromium: three rows with `overflow-y: auto` + `stable`
     // gave an 8px strip, but with the property ignored (`auto`) 0px; `overflow-y:
     // scroll` gave 8px either way.
     const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const block = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
     expect(block('listScroll')).toContain('overflow-y: scroll')
+    expect(block('listScroll')).toContain('scrollbar-gutter: stable')
     // The add-path tree is the same scroll box one dialog over, and gets the same
     // treatment — but only vertically: a path too long for the box still asks for
     // the horizontal bar on its own.

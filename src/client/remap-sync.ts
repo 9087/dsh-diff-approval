@@ -7,7 +7,9 @@
  * @module dsh-diff-approval/client/remap-sync
  */
 
+import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingDiffStore } from './store.ts'
+import type { PendingDiffSnapshot } from './slots.ts'
 import { referencePathOf, remapReferences } from './reference.ts'
 import { contentKey } from './whole-file-diff.ts'
 
@@ -30,6 +32,15 @@ export interface ReferenceRemapOpts {
   readQueue: () => readonly QueueMessage[]
   /** Apply an edit mutation to one queued message's full content. */
   writeQueue: (itemId: string, content: readonly QueueBlock[]) => void
+  /**
+   * The session whose list this sync follows, read per observation.
+   *
+   * The pending list is per session now, and the draft and the queue this sync rewrites are the CURRENT
+   * session's: observing another session's files would remap one session's references inside another
+   * session's composer. The baselines are dropped whenever this answers a different session, so the
+   * arrival of a new session's list seeds fresh baselines instead of reading as "this file changed".
+   */
+  sessionId?: (() => SessionId | undefined) | undefined
 }
 
 /**
@@ -42,10 +53,14 @@ export interface ReferenceRemapOpts {
  */
 export function attachReferenceRemap(opts: ReferenceRemapOpts): {
   unsubscribe: () => void
-  remapFile: (path: string, oldText: string, newText: string) => void
+  remapFile: (sessionId: SessionId, path: string, oldText: string, newText: string) => void
 } {
-  const { store, readDraft, writeDraft, readQueue, writeQueue } = opts
+  const { store, readDraft, writeDraft, readQueue, writeQueue, sessionId } = opts
   const lastContent = new Map<string, string>()
+  /** The session the baselines below belong to; a change drops them (see `sessionId`). */
+  let baselined: SessionId | undefined
+  /** The view this sync observes: the named session's own slot, or the page-wide one without a name. */
+  const view = (): PendingDiffSnapshot => sessionId === undefined ? store.getSnapshot() : store.viewFor(sessionId())
 
   const remap = (path: string, oldText: string, newText: string, workspacePath: string | undefined): void => {
     const referencePath = referencePathOf(path, workspacePath)
@@ -72,7 +87,15 @@ export function attachReferenceRemap(opts: ReferenceRemapOpts): {
   }
 
   const observe = (): void => {
-    const snapshot = store.getSnapshot()
+    const now = sessionId?.()
+    if (now !== baselined) {
+      // A different session's list is about to be walked. Its files are not "the same files, changed":
+      // dropping the baselines makes this first look a seed, so nothing is remapped into the composer of
+      // a session that has just been opened.
+      baselined = now
+      lastContent.clear()
+    }
+    const snapshot = view()
     // @deprecated The host now returns one entry per path (the list is globally
     // unique), so this newest-by-updatedAt dedup is a safety net for any stale
     // client transport that still delivers duplicate path entries. It is kept
@@ -105,6 +128,6 @@ export function attachReferenceRemap(opts: ReferenceRemapOpts): {
   observe()
   return {
     unsubscribe,
-    remapFile: (path, oldText, newText) => { remap(path, oldText, newText, store.getSnapshot().workspacePath) },
+    remapFile: (session, path, oldText, newText) => { remap(path, oldText, newText, store.viewFor(session).workspacePath) },
   }
 }

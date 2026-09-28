@@ -246,6 +246,24 @@ describe('DiffDockTitle', () => {
     expect(screen.getByText('panel.title')).not.toBeNull()
   })
 
+  it('shows Its own session\'s count, never another session\'s', () => {
+    // The chip belongs to the session whose conversation it sits in, so its count comes from that
+    // session's own view. Reading the page-wide snapshot here is how a chip showed another session's
+    // count — the same cross-talk the panel's badge had.
+    const views: Record<string, number> = { 'session-1': 2, 'session-2': 7 }
+    const chip = {
+      t: (key: string) => key,
+      usePending: ((select: (snapshot: PendingDiffSnapshot) => unknown) =>
+        select({ files: new Array(7).fill({}) } as unknown as PendingDiffSnapshot)) as never,
+      pendingView: ((sessionId: string | undefined, select: (view: PendingDiffSnapshot) => unknown) =>
+        select({ files: new Array(views[sessionId ?? ''] ?? 0).fill({}) } as unknown as PendingDiffSnapshot)) as never,
+      sessionId: 'session-1',
+    } as never
+    render(<DiffDockTitle {...chip} />)
+    expect(screen.getByText('panel.title · 2')).not.toBeNull()
+    expect(screen.queryByText('panel.title · 7')).toBeNull()
+  })
+
   it('carries the mode switch, and handing the panel back closes this tab', () => {
     const close = vi.fn()
     const shown: string[] = []

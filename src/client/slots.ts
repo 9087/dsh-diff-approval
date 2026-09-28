@@ -75,8 +75,45 @@ export interface PendingDiffSnapshot {
   redoCleared?: boolean
 }
 
+/** One filter over one session's view of the pending list; the shape every view hook takes. */
+export type PendingViewSelector<T> = (view: PendingDiffSnapshot) => T
+
+/** Function shape of {@link PendingViewHooks.pendingView}; named so a seat can call it directly. */
+export type PendingViewReader = <T>(sessionId: SessionId | undefined, select: PendingViewSelector<T>) => T
+
+/**
+ * How a seat reads pending state for the session it is actually about.
+ *
+ * The page runs several seats at once — the sidebar footer's badge, the Session header's entry, the
+ * docked tab's chip and body — and they can belong to different sessions. Reading the ONE page-wide
+ * snapshot is what let a badge show another session's count, so a seat that knows its session reads
+ * that session's own view through {@link PendingViewHooks.pendingView} and nothing else.
+ *
+ * This lives BESIDE the face's `hooks`, not inside it: that compartment is a map of observables
+ * (`HooksSources`), and the framework binds each one onto the component props as a `use<Name>` selector
+ * hook. Folding a non-observable in there would stop the whole compartment from matching, and the panel
+ * would lose `usePending` and `useDock` with it. `pendingView` is a read, not an observable: the panel's
+ * `usePending` subscription is what re-renders it.
+ *
+ * The hook is optional because the shapes are read structurally: a host (or a test) that offers only
+ * `pending` still renders, with the panel falling back to the page-wide snapshot.
+ */
+export interface PendingViewHooks {
+  /**
+   * Read one session's own view, with `select` applied inside the subscription.
+   *
+   * `sessionId === undefined` means "I have no session of my own": the answer is then the page-wide
+   * view (the newest session read), which is what a whole-page caller wants. A session that has never
+   * been read answers an unread empty view — never another session's list.
+   * @param sessionId - the session whose view to read.
+   * @param select - what to take out of that view.
+   * @returns the selected value.
+   */
+  pendingView?: PendingViewReader | undefined
+}
+
 /** The injected face the panel component receives from the plugin body. */
-export interface PendingPanelFace {
+export interface PendingPanelFace extends PendingViewHooks {
   hooks: {
     /** Live pending-diff snapshot for the current page. */
     pending: HostObservable<PendingDiffSnapshot>
@@ -99,6 +136,8 @@ export interface PendingPanelFace {
   closeDock?: (() => void) | undefined
   /** Read the pending list for the current session into the snapshot. */
   onRefresh: (sessionId: SessionId | undefined) => void
+  /** The reader is looking at this file now: its row's unseen dot goes out. */
+  onMarkSeen?: ((sessionId: SessionId | undefined, id: string) => void) | undefined
   /** Keep one operation. `keepListed` leaves the resolved entry in the list. */
   onKeep: (sessionId: SessionId, id: string, keepListed?: boolean) => Promise<void>
   /** Revert one operation (restore its prior content, or remove a created file).
@@ -165,6 +204,12 @@ export interface PendingPanelFace {
    * question so the thread can draw what was written.
    */
   onCommentAsk: (sessionId: SessionId, id: string, prompt: string, text: string) => Promise<DiffApprovalCommentAskValue>
+  /**
+   * The reader has this comment's card in view: its unseen dot goes out, and the answers on it become
+   * the baseline a later rewrite is measured against. A reader action, so it is its own call rather
+   * than something a read does — a read that cleared attention would make the dot impossible to see.
+   */
+  onCommentSeen?: ((sessionId: SessionId, id: string) => void) | undefined
   /** Acknowledge the redo-cleared notice so it is only surfaced once. */
   onAckRedoCleared: () => void
   /** Acknowledge a refused-undo notice once the panel has said it (see `undoNotice`). */

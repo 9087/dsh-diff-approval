@@ -24,18 +24,19 @@ import { IconListPenOutline16, Tooltip } from './dsh-icons.ts'
 import { publishSessionId, selectedSessionOf, sessionIsBlank } from './session-seat.ts'
 import type { HostObservable, InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
-import type { PendingDiffSnapshot } from './slots.ts'
+import type { PendingDiffSnapshot, PendingViewHooks } from './slots.ts'
 import type { DockSnapshot, PanelStateDetail } from './dock.tsx'
 import { PANEL_STATE_EVENT, TOGGLE_PANEL_EVENT } from './dock.tsx'
 import { summonHint } from './chords.ts'
 import css from './PendingPanel.module.css'
 
-/** What the header entry reads from this plugin's own face: the two observables.
- *  Everything else it needs (the button's own click) goes through the window
- *  events, so the entry never holds a copy of the panel's state. */
-export interface HeaderEntryFace {
+/** What the header entry reads from this plugin's own face: the two observables, and the per-session
+ *  view reader (`pendingView`) that keeps its count on ITS session. Everything else it needs (the
+ *  button's own click) goes through the window events, so the entry never holds a copy of the panel's
+ *  state. */
+export interface HeaderEntryFace extends PendingViewHooks {
   hooks: {
-    /** Live pending-diff snapshot: the count on the button. */
+    /** Live pending-diff snapshot: the fallback count for a face with no per-session reader. */
     pending: HostObservable<PendingDiffSnapshot>
     /** The dock's state, absent in a build without a right sidebar. */
     dock?: HostObservable<DockSnapshot>
@@ -82,8 +83,14 @@ export type DiffApprovalHeaderEntryProps =
  * @param props - the bound hooks, the session seat, and the translator.
  * @returns the icon button, with the pending count while there is one.
  */
-export function DiffApprovalHeaderEntry({ usePending, useSessions, useDock, sessionId, t }: DiffApprovalHeaderEntryProps): ReactNode {
-  const count = usePending(snapshot => snapshot.files.length)
+export function DiffApprovalHeaderEntry({ usePending, useSessions, useDock, pendingView, sessionId, t }: DiffApprovalHeaderEntryProps): ReactNode {
+  // This session's own count, never another session's: the page-wide snapshot is only the fallback for a
+  // face with no per-session reader. The `usePending` call is also the subscription that re-renders this
+  // button whenever anything publishes, so the count tracks the list without a second store hook.
+  const pageWide = usePending(snapshot => snapshot) as PendingDiffSnapshot
+  const count = pendingView === undefined
+    ? pageWide.files.length
+    : pendingView(sessionId, view => view.files.length)
   // Whether the panel is showing *dock-side* is observable here; whether it is
   // showing as the overlay comes back as an event, from the mount that owns it.
   const dockShowing = useDock?.((state: DockSnapshot) => state.open) === true
@@ -109,7 +116,12 @@ export function DiffApprovalHeaderEntry({ usePending, useSessions, useDock, sess
   // id at all on 0.1.7 (`renderSlot('sidebar.footer.action', { wide })`), so what is shown here is
   // published for them. A shell that keeps the selection in the store needs no bridge: the footer
   // reads that itself (see `session-seat.ts`).
-  publishSessionId(sessionId)
+  //
+  // From an EFFECT, never during render: the published value has to describe a committed render. A
+  // render-phase write let two mounts disagree about which session was showing (the value a render saw
+  // depended on whether the other had already rendered), which is what put one session's list under
+  // another's badge.
+  useEffect(() => { publishSessionId(sessionId) }, [sessionId])
   const active = open || dockShowing
   return (
     <Tooltip label={summonHint(t)} side="bottom" delayMs={500}>

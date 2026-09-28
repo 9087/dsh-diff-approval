@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconEllipsisOutline16, IconFolderOpenOutline16, IconListPenOutline16, IconPanelLeftOutline16, IconPlusOutline16, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from './dsh-icons.ts'
 import type { MenuEntry } from './dsh-icons.ts'
-import { publishedSessionId, selectedSessionOf, sessionIsBlank } from './session-seat.ts'
+import { usePublishedSessionId, selectedSessionOf, sessionIsBlank } from './session-seat.ts'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
@@ -14,7 +14,7 @@ import type {
   DiffApprovalCommentRemoveValue, DiffApprovalOpenAction, DiffApprovalRefreshOutcome, PendingFileDiff,
 } from '../types.ts'
 import type { CommentDraft } from './port.ts'
-import type { PendingPanelFace } from './slots.ts'
+import type { PendingDiffSnapshot, PendingPanelFace, PendingViewHooks } from './slots.ts'
 import type { Translator } from './locales.ts'
 import { PathPicker, pathPickerOpen } from './PathPicker.tsx'
 import { PresentationMenu } from './presentation-menu.tsx'
@@ -160,10 +160,6 @@ export const MIN_LIST_WIDTH_PX = 260
 const MAX_LIST_WIDTH_PX = 560
 /** Inset of the floating file-list card from the code scroll box, in px. */
 const FLOAT_LIST_MARGIN_PX = 12
-/** How far the list's rows sit from the right edge of whichever card holds them, in px — a fixed
- *  number on every platform, which is why the scroller's own padding makes up whatever the
- *  platform's scrollbar has already taken (see `applyListInset`). */
-const LIST_RIGHT_INSET_PX = 8
 /** The folded card's width grip: how wide its hit strip is, and how much of it
  *  lies over the card (the rest overhangs the code view, so the card's own
  *  scrollbar strip stays clear). */
@@ -202,6 +198,52 @@ export function diffPathsMatch(chipPath: string, filePath: string, workspacePath
   // suffix of the absolute pending path.
   const rel = normalizeDiffPath(chipPath).toLowerCase()
   return file === rel || file.endsWith(`/${rel}`)
+}
+
+/**
+ * Whether one pending row belongs to a session's own view.
+ *
+ * A globally-unique entry is shown to every session that touched it (its `sessionIds`), so the rows a
+ * panel may act on are the ones this answers true for — never whatever `snapshot.files` happens to hold
+ * at that moment. The panel draws its own session's view (see `useSessionView`), so a row of another
+ * session should not be there at all; this is the second line of that defence, and the one that still
+ * holds for a legacy row carrying only a single `sessionId`.
+ *
+ * @param file - the pending row.
+ * @param sessionId - the session this panel is showing.
+ * @returns true only when that session is one of the row's own.
+ */
+function belongsToSession(file: PendingFileDiff, sessionId: SessionId | undefined): boolean {
+  return sessionId !== undefined && (file.sessionIds ?? [file.sessionId]).includes(sessionId)
+}
+
+/**
+ * One seat's own view of the pending list, as it is actually drawn.
+ *
+ * The seat reads the view for the session IT is about, so a poll another seat runs for another session
+ * cannot put its files under this seat's badge — which is exactly what two live mounts did while they
+ * shared one page-wide snapshot. The view arrives through `pendingView` (the store's per-session
+ * reader); the SUBSCRIPTION that re-renders this seat is the `usePending` call beside it, which fires on
+ * every publish and so wakes the seat to re-read its own slot. A publish that moved another session's
+ * slot leaves this one's identity alone, so the render that follows draws the very same thing.
+ *
+ * `pageWide` is the fallback for a face with no per-session reader (a host, or a test, that offers only
+ * `pending`), and it is also what a seat with no session of its own is shown.
+ *
+ * @param pendingView - the store's per-session view hook, when this face has one.
+ * @param sessionId - the session this seat is about.
+ * @param pageWide - the page-wide snapshot, used when there is no per-session reader.
+ * @returns the view to draw.
+ */
+function useSessionView(
+  pendingView: PendingViewHooks['pendingView'],
+  sessionId: SessionId | undefined,
+  pageWide: PendingDiffSnapshot,
+): PendingDiffSnapshot {
+  return useMemo(
+    () => pendingView === undefined ? pageWide : pendingView(sessionId, view => view),
+    [pendingView, sessionId, pageWide],
+  )
 }
 /** The diff view-mode toggle glyph: the whole file as one column of text lines
  *  (unified) or two side-by-side columns of text lines (split). Hand-drawn
@@ -726,6 +768,16 @@ export interface PendingPanelDockProps {
   docked?: boolean
   /** The element the docked panel portals its content into. */
   dockHost?: HTMLElement
+  /**
+   * Whether this seat is SHOWING anything, and so whether it should read the host at all.
+   *
+   * A seat that is not on screen — a docked tab the reader has switched away from — draws nothing, so
+   * its poll reads a list nobody is looking at, once a second, for a session the reader may not even be
+   * in. `false` stops that read; the seat keeps what it last read and starts again the moment it is
+   * shown. Absent means "always showing", which is what the footer entry is: its badge is the reader's
+   * at-a-glance count, and a badge that never read would simply show nothing.
+   */
+  showing?: boolean
 }
 
 /** A last-block keep/revert awaiting the user's remove-or-keep choice; the choice
@@ -1108,6 +1160,10 @@ function discussionOfRecord(
     // ended. Only ever read when there is no answer — the transcript is what decides that.
     ...(last !== undefined && answered === undefined && last.ended === true && last.dropped !== true
       ? { stopped: true } : {}),
+    // What the host has not been told the reader has looked at: the card's dot. Carried through
+    // untouched — the panel never decides this for itself, because a client's idea of "seen" would be
+    // the second client of the same session reading a thread the reader has not opened.
+    ...(record.unseen === true ? { unseen: true } : {}),
   }
 }
 
@@ -1233,11 +1289,15 @@ interface PendingDiffProps {  file: PendingFileDiff
    * on the question, which is the only place a follow-up's words exist (see `CommentAsk`).
    */
   onCommentAsk: (sessionId: SessionId, id: string, prompt: string, text: string) => Promise<DiffApprovalCommentAskValue>
+  /** The reader has this comment's card in view: its unseen dot goes out. */
+  onCommentSeen?: ((sessionId: SessionId, id: string) => void) | undefined
   /** Show a transient toast (used when a reference is copied to the clipboard). */
   onToast: (text: string) => void
   t: Translator
   /** `keepListed` answers the whole-file prompt up front: false removes the entry outright. */
   onKeep: (sessionId: SessionId, id: string, keepListed?: boolean) => Promise<void>
+  /** The reader is looking at this file now: its row's unseen dot goes out. */
+  onMarkSeen?: ((sessionId: SessionId, id: string) => void) | undefined
   onRevert: (sessionId: SessionId, id: string, keepListed?: boolean) => Promise<void>
   /** Replace this file's diff with its current local VCS change. */
   onRefreshVcs: (file: PendingFileDiff) => void
@@ -1440,6 +1500,75 @@ function DiscussionQuote({ quote, lines, lang, wrap, split }: {
  *  away at the boundary. */
 const SPLIT_DISCUSSION_MARGIN_PX = 200
 
+/**
+ * How much of a comment's card must be visible before the reader counts as having looked at it.
+ *
+ * Half is the point where the card is in front of them rather than passing by, and it is the same
+ * bar for the fold: a card the reader has only scrolled past on the way somewhere else never reaches
+ * it, so a change they never saw does not go quiet.
+ */
+const COMMENT_SEEN_THRESHOLD = 0.5
+
+/**
+ * How long that half-visible state must HOLD before the card is reported seen, in ms.
+ *
+ * The observer fires on the way past as well as on the way to: a scroll that flings a card through
+ * the viewport for two frames is not reading it, and clearing the dot then would lose the one signal
+ * the dot carries. Three quarters of a second is below the time it takes to read the header of a card
+ * the reader actually stopped on, and well above a scroll's own pass.
+ */
+const COMMENT_SEEN_DWELL_MS = 700
+
+/**
+ * Report a card seen once the reader has actually been looking at it.
+ *
+ * The intersection is only half the question: the browser has no idea whether a visible card was read
+ * or flung past, so the dwell above is what turns "on screen" into "looked at". Nothing is ever
+ * reported twice — the first report is the reader's one look, and the flag cannot come back without a
+ * new answer.
+ *
+ * @param unseen - whether the host still has attention to clear for this card.
+ * @param onSeen - what to tell the host (absent in a panel with no host behind it).
+ * @returns the ref to hang on the card's own element.
+ */
+function useSeenOnView(unseen: boolean, onSeen: (() => void) | undefined): (element: HTMLElement | null) => void {
+  const cardRef = useRef<HTMLElement | null>(null)
+  const seenRef = useRef(false)
+  const onSeenRef = useRef(onSeen)
+  onSeenRef.current = onSeen
+  useEffect(() => {
+    const card = cardRef.current
+    // Observed only while there is attention to clear, and stop observing for good once it is gone: a
+    // card that has been read is not a card to report again on the next scroll.
+    if (card === null || !unseen || seenRef.current) return undefined
+    if (typeof IntersectionObserver !== 'function') return undefined
+    let timer: number | undefined
+    const observer = new IntersectionObserver((entries) => {
+      const entry = entries[entries.length - 1]
+      if (entry === undefined) return
+      const dwelling = entry.isIntersecting && entry.intersectionRatio >= COMMENT_SEEN_THRESHOLD
+      if (!dwelling) {
+        // Scrolled back out before the dwell was up: the reader was passing, not reading.
+        if (timer !== undefined) window.clearTimeout(timer)
+        timer = undefined
+        return
+      }
+      if (timer !== undefined) return
+      timer = window.setTimeout(() => {
+        seenRef.current = true
+        observer.disconnect()
+        onSeenRef.current?.()
+      }, COMMENT_SEEN_DWELL_MS)
+    }, { threshold: COMMENT_SEEN_THRESHOLD })
+    observer.observe(card)
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer)
+      observer.disconnect()
+    }
+  }, [unseen])
+  return useCallback((element: HTMLElement | null) => { cardRef.current = element }, [])
+}
+
 /** One comment thread as the panel draws it, whoever is drawing it. */
 interface DiscussionBlockProps {
   discussion: Discussion
@@ -1461,6 +1590,11 @@ interface DiscussionBlockProps {
   onSend: (id: string) => void
   /** Hands the writing field's element to the panel, so a send can ask for the caret back. */
   registerInput: (id: string, element: HTMLInputElement | null) => void
+  /**
+   * The reader has this card in front of them, held there: the host takes its unseen dot down. Not
+   * called for a card the panel never drew, and never called twice for one look.
+   */
+  onSeen?: (() => void) | undefined
   /** The card is drawn in the side-by-side view, whose code it quotes as two columns. */
   split: boolean
 }
@@ -1479,16 +1613,20 @@ interface DiscussionBlockProps {
  */
 function DiscussionBlock({
   discussion, label, bodyWidth, lang, menuOpen, asking, t,
-  onToggle, onMenuOpen, onRemove, onDraft, onSend, registerInput, split,
+  onToggle, onMenuOpen, onRemove, onDraft, onSend, registerInput, onSeen, split,
 }: DiscussionBlockProps) {
   const rows = discussionRows(discussion)
   const menuItems: MenuEntry[] = [{ id: 'delete', label: t('action.discussionEnd') }]
+  // The reader looking at the card is what clears the host's dot: the card is the only place a comment
+  // can be read in full, so its own visibility is the signal (see `useSeenOnView`).
+  const cardRef = useSeenOnView(discussion.unseen === true, onSeen)
   return (
     <div
       className={css.discussion}
       data-diff-discussion
       data-lost={discussion.lost === true ? '' : undefined}
       data-diff-discussion-id={discussion.id}
+      ref={cardRef}
       style={{
         // The panel's own width, ruler strip included. The block's background is transparent, so the
         // only thing that would land on the ruler is what the reader came for: its two edge lines
@@ -1513,6 +1651,16 @@ function DiscussionBlock({
             : <IconChevronUpOutline14 size={12} />}
         </button>
         <span className={css.discussionRangeWrap}>
+          {/* The dot is the first thing the header says after the fold arrow, and it says it about the whole
+              card. It is an inline mark here rather than the file row's out-of-flow one: this card clips its
+              overflow, and the head's left edge is the arrow's. It carries a title and an aria-label, so
+              colour is never the only cue. */}
+          {discussion.unseen === true && (
+            <svg className={css.unseenDot} data-diff-comment-unseen width="3" height="3" viewBox="0 0 3 3" role="img" aria-label={t('panel.unseen')}>
+              <title>{t('panel.unseen')}</title>
+              <circle cx="1.5" cy="1.5" r="1.5" fill="var(--dsw-alias-state-business-primary)" />
+            </svg>
+          )}
           {/* One isolated left-to-right run inside a right-to-left box: the box is what makes a long
               path ellipsise from the FRONT — a path is told apart by its tail, and the header's own
               left edge is the least informative character it has (see `.discussionRange`) — while the
@@ -3642,6 +3790,16 @@ function PendingFileRow({ file, selected, picked, failedMessage, t, onSelect, on
           }}
           onClick={(event) => { onSelect(event, file.id) }}
         >
+          {/* A file ON SCREEN wears no dot: the reader is looking at it right now, so waiting for the host to
+              acknowledge `seen` would flash a dot at them for a poll cycle — and again every time the agent
+              touches the open file. The host is still told (see the effect that marks the shown row seen),
+              which is what keeps the dot out after the row is left. */}
+          {file.unseen === true && !selected && (
+            <svg className={css.unseenDot} data-diff-unseen width="3" height="3" viewBox="0 0 3 3" role="img" aria-label={t('panel.unseen')}>
+              <title>{t('panel.unseen')}</title>
+              <circle cx="1.5" cy="1.5" r="1.5" fill="var(--dsw-alias-state-business-primary)" />
+            </svg>
+          )}
           <span className={css.rowPath}>{basenameOf(file.path)}</span>
           {file.missing && <span className={css.missing} title={t('panel.missingHint')}>{t('panel.missing')}</span>}
           {failedMessage !== undefined && <span className={css.rowFailed} title={failedMessage}>{t('row.failed')}</span>}
@@ -3728,7 +3886,7 @@ export function inlineItemCount(widths: readonly number[], available: number, ga
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, landingLine, landingOld, landingComment, landingCard, onLanded, failedMessage, commentSkill, comments, commentAnswers, commentsRevision, commentLines, onCommentAdd, onCommentRemove, onCommentAsk, onPasteReference, onToast, t, onAddTypedPath, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
+function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, landingLine, landingOld, landingComment, landingCard, onLanded, failedMessage, commentSkill, comments, commentAnswers, commentsRevision, commentLines, onCommentAdd, onCommentRemove, onCommentAsk, onCommentSeen, onPasteReference, onToast, t, onAddTypedPath, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -6750,14 +6908,20 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
         patchThreads({ [id]: { draft: value } })
       }}
       onSend={sendDiscussion}
+      // Only a STORED thread has a dot to clear: a block the reader placed but has not written yet is
+      // not the host's record, so there is nothing on the host to tell.
+      onSeen={discussion.unseen === true && fileComments.some(record => record.id === discussion.id)
+        ? () => { onCommentSeen?.(sessionId, discussion.id) }
+        : undefined}
       registerInput={(id, element) => {
         if (element === null) discussionInputEls.current.delete(id)
         else discussionInputEls.current.set(id, element)
       }}
     />
   // The card is given its width as an ARGUMENT (`renderDiscussion(discussion, bodyWidth)`), so this
-  // callback reads nothing but the menu, the question in flight and where the reader's words go.
-  ), [discussionMenuFor, t, lang, toggleDiscussion, removeDiscussion, sendDiscussion, discussionLineRange, patchThreads, draftThreads])
+  // callback reads nothing but the menu, the question in flight, where the reader's words go, and which
+  // of the threads on screen the host is holding (only those have a dot to clear).
+  ), [discussionMenuFor, t, lang, toggleDiscussion, removeDiscussion, sendDiscussion, discussionLineRange, patchThreads, draftThreads, fileComments, onCommentSeen])
 
   /**
    * The lines a selection names, whichever view made it, or undefined when it names none this panel
@@ -7910,18 +8074,31 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, sessionId, usePending, onRefresh, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onCommentAdd, onCommentRemove, onCommentRemoveMany, onCommentAsk, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onRevertAll, onKeepMany, onRevertMany, onAckRedoCleared, onAckUndoNotice, collapseSidebar, t,
+  wide, useSessions, sessionId, usePending, pendingView, showing = true, onRefresh, onMarkSeen, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onCommentAdd, onCommentRemove, onCommentRemoveMany, onCommentAsk, onCommentSeen, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onRevertAll, onKeepMany, onRevertMany, onAckRedoCleared, onAckUndoNotice, collapseSidebar, t,
   docked = false, dockHost, onOpenDock, closeDock, useDock,
 }: PendingPanelProps) {
   const storeSelected = useSessions(state => selectedSessionOf(state))
   // The session this panel is about: what the shell composed (session-scoped seats), else the store's
   // own selection (shells that keep it there), else what the header entry published — 0.1.7 hands the
-  // root-scoped footer slot nothing but `wide`, so the header's answer is the only one there is.
-  const current = sessionId ?? storeSelected ?? publishedSessionId()
+  // root-scoped footer slot nothing but `wide`, so the header's answer is the only one there is. That
+  // answer is read as a subscribed value, because the header publishes it from an effect: a plain read
+  // here would keep whatever it was on this mount's first render and never follow a session switch.
+  const published = usePublishedSessionId()
+  const current = sessionId ?? storeSelected ?? published
   // A newly created session is selected but still blank (no messages yet); it
   // has nothing to review, so the entry is grayed out exactly like no session.
   const currentBlank = useSessions(state => sessionIsBlank(state, sessionId ?? selectedSessionOf(state)))
   const noSession = current === undefined || currentBlank
+  /**
+   * The list this seat draws: THIS session's own view, never another session's.
+   *
+   * The page-wide snapshot (`usePending`) stays subscribed as the fallback for a face that offers no
+   * per-session view and as the source of the change signal that re-renders this seat; what the panel
+   * reads is `current`'s slot, so a poll another seat runs for another session cannot put its files
+   * under this badge.
+   */
+  const pageWide = usePending(snapshot => snapshot)
+  const snapshot = useSessionView(pendingView, current, pageWide)
   // Whether the panel is showing in the right sidebar's tab right now (absent
   // hook: this build has no right sidebar). The face is fixed per mount, so the
   // optional hook never appears mid-life: the call order stays stable.
@@ -7964,7 +8141,6 @@ export function PendingPanel({
   useEffect(() => {
     if (docked) setPanelPresentation('dock')
   }, [docked])
-  const snapshot = usePending(snapshot => snapshot)
   const [open, setOpen] = useState(false)
   const [selected, setSelected] = useState('')
   /**
@@ -8424,10 +8600,14 @@ export function PendingPanel({
   const [floatBox, setFloatBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
 
   useEffect(() => {
+    // A seat that is not showing anything draws no list, so it reads none: an undocked tab the reader
+    // has switched away from was polling its own session once a second for nobody, and (before the
+    // per-session views) its answers were what every badge on the page was reading.
+    if (!showing || current === undefined || currentBlank) return
     onRefresh(current)
     const timer = setInterval(() => { onRefresh(current) }, POLL_INTERVAL_MS)
     return () => { clearInterval(timer) }
-  }, [current, onRefresh])
+  }, [current, currentBlank, showing, onRefresh])
 
   /**
    * A file the list no longer holds takes its placed-but-unsent blocks with it, on every poll.
@@ -8622,33 +8802,9 @@ export function PendingPanel({
     }
   }, [floatMode, floatOpen, panelWidth, selected])
 
-  // The list's rows sit a fixed 8px from the right edge of whichever card holds them, with the
-  // scrollbar inside that 8px rather than added to it. A classic bar is laid out in that very
-  // band (the theme's bar is 8px wide), so a desktop is already right — but a platform that
-  // overlays its bars (touch browsers, macOS with "show scrollbars when scrolling") reserves no
-  // space at all, and there the rows came out flush against the card. The scroller's own padding
-  // makes up the difference, measured rather than assumed: `offsetWidth - clientWidth` is the bar
-  // the platform actually reserved, so the two insets always add up to the same 8px. (The docked
-  // list's own frame inset is on top of this, which is what keeps it on its 16px line.)
-  const applyListInset = useCallback((scroller: HTMLDivElement | null): void => {
-    if (scroller === null) return
-    const bar = Math.max(0, scroller.offsetWidth - scroller.clientWidth)
-    scroller.style.paddingRight = `${Math.max(0, LIST_RIGHT_INSET_PX - bar)}px`
-  }, [])
-  /** The scroller, for the re-measure below; the inset itself is applied on attach. */
-  const listScrollRef = useRef<HTMLDivElement | null>(null)
-  // Applied from the ref rather than only from an effect: the docked column and the floating card
-  // mount at different moments (the card needs the box it is measured into first), so an effect
-  // keyed on the layout would leave whichever of them arrived later without its inset.
-  const attachListScroll = useCallback((scroller: HTMLDivElement | null): void => {
-    listScrollRef.current = scroller
-    applyListInset(scroller)
-  }, [applyListInset])
-  // And re-measured whenever the list's own geometry can have changed: a resize, a drag of the
-  // list's width, or a row count that changes whether the platform shows a bar at all.
-  useLayoutEffect(() => {
-    applyListInset(listScrollRef.current)
-  }, [applyListInset, open, docked, floatMode, floatOpen, listWidth, panelWidth, snapshot.files.length])
+  // The list rows' right band is the shared `.listScroll` gutter alone now (`scrollbar-gutter:
+  // stable` there). The JS that measured the platform's strip and padded the FILES scroller is gone:
+  // it never reached the comments list, and against a reserved gutter it would double the inset.
 
   // Surface a detected external change that superseded the redo history. The
   // notice is deferred until the panel is open, and the store latches the flag
@@ -8726,6 +8882,34 @@ export function PendingPanel({
   // surface, not a popover: closing it is a decision, and the ways to make it are
   // the ✕ Escape, and the quick-summon chord. (The folded file-list card inside
   // it is still dismissed by a press away from the card — see below.)
+  /**
+   * The one path this panel has already reported seen, for the episode its dot was in.
+   *
+   * An "episode" is the dot being up: the ref is cleared the moment the flag is false again, so a later
+   * change that lights the same path is reported afresh. What it exists for is that the effect below runs
+   * on EVERY publish — a poll hands over a new `files` array even when nothing changed — and reporting a
+   * row that is already reported is not free: the store used to re-read the list on `markSeen`, which
+   * published another `files` array, which re-ran this effect, which reported again — a list read per
+   * report, with the badge counting whatever that read answered with.
+   */
+  const markedSeenRef = useRef<string | null>(null)
+  // The reader is looking at this file: a dot that arrived for it is already stale — a file on screen wears
+  // none. The host owns the flag, so it is told, and the next read brings the list back without it.
+  useEffect(() => {
+    if (selected === null || selected === undefined) return
+    // The row has to be THIS session's as well as this id's: an id is a path that more than one session
+    // can have pending, so a row the view holds for another session (or a legacy row whose single
+    // `sessionId` names one) must not be taken for the file the reader is looking at. Reporting such a
+    // row would take a dot down for a file the reader was never shown — and name the wrong session for it.
+    const row = snapshot.files.find(file => file.id === selected && belongsToSession(file, current))
+    // No dot on it now — the host answered, the row left the list, or it was never this session's: the
+    // episode is over, so the next one that lights this path is reported again.
+    if (row?.unseen !== true) { markedSeenRef.current = null; return }
+    if (markedSeenRef.current === selected) return
+    markedSeenRef.current = selected
+    onMarkSeen?.(current, selected)
+  }, [selected, snapshot.files, current, onMarkSeen])
+
   // The panel reviews only the current session's files; other sessions of the
   // same workspace stay out of the list, badge, and auto-advance. Sort by the
   // displayed file name so the list reads in dictionary order even before the
@@ -8734,7 +8918,7 @@ export function PendingPanel({
     // A globally-unique entry is shown to every session that touched it (its
     // sessionIds), so a file edited by multiple sessions appears once in each
     // of their views. Tolerant of a legacy row carrying only `sessionId`.
-    .filter(file => current !== undefined && (file.sessionIds ?? [file.sessionId]).includes(current))
+    .filter(file => belongsToSession(file, current))
     .sort((left, right) => compareFileNames(left.path, right.path))
   // Wrap the block keep/revert so a last-block action prompts for remove-or-keep
   // up front; the choice rides the same RPC as `removeWhenResolved`. A file with
@@ -9334,6 +9518,11 @@ export function PendingPanel({
         // measures from — the same rule as a Ctrl press (see `pickAnchor`).
         setPickAnchor(id)
         clearPickedFiles()
+        // The dot for the file coming on screen is cleared by the effect above, off `selected`, and
+        // nowhere else: a second report from this press would be the same look told to the host twice —
+        // and, since the row's flag is still up in the snapshot this press renders from, the effect's own
+        // report would follow it. Every other way a file comes on screen (auto-advance, a jump, the
+        // restored view) ends in `selected` too, so one reporter covers them all.
         if (id === selected) setJumpSignal(signal => signal + 1)
         else {
           setSelected(id)
@@ -9543,6 +9732,12 @@ export function PendingPanel({
             // does not write those, but a record from elsewhere can be one).
             title: empty ? t('discussion.placeholder') : written,
             empty,
+            // What the host has not been told the reader has looked at: the row's own dot, carried through
+            // untouched for the same reason the card's is (see the discussion the code view builds). It is
+            // the ONLY dot that can reach a reader who is not on this comment's file: the card's is drawn
+            // in the code view, which renders the selected file alone, and the file row's is about the
+            // file rather than about the thread.
+            ...(record.unseen === true ? { unseen: true } : {}),
           }
         }),
       }))
@@ -9843,6 +10038,21 @@ export function PendingPanel({
                               jumpToComment(entry.fileId, entry.line, entry.id, entry.oldSide)
                             }}
                           >
+                            {/* The card's own dot, on the row that is always there to carry it: the code
+                                view renders the SELECTED file alone, so a comment on a file the reader is
+                                not looking at has no card on screen — and with no card there is nowhere for
+                                its dot to appear. This row is that place. Same mark as the card's, out of
+                                flow to the LEFT of the row's own content (the row is the containing block,
+                                see `.commentRow`), naming itself on `aria-label` / a `<title>` child —
+                                an SVG has no `title` attribute. What clears it is unchanged: this row is
+                                how the reader reaches the card, and the card coming into view is what
+                                tells the host the attention is spent. */}
+                            {entry.unseen === true && (
+                              <svg className={css.unseenDot} data-diff-comment-unseen width="3" height="3" viewBox="0 0 3 3" role="img" aria-label={t('panel.unseen')}>
+                                <title>{t('panel.unseen')}</title>
+                                <circle cx="1.5" cy="1.5" r="1.5" fill="var(--dsw-alias-state-business-primary)" />
+                              </svg>
+                            )}
                             {/* One line: what was asked, then where in the file it sits — the title takes
                                 the room and reads from the left, the line numbers sit at the row's right
                                 edge, so a file's comments line up on the side the eye scans them by. */}
@@ -9865,7 +10075,7 @@ export function PendingPanel({
         </div>
       ) : (
         <>
-          <div className={css.listScroll} data-diff-list-scroll ref={attachListScroll}>
+          <div className={css.listScroll} data-diff-list-scroll>
             {files.length > 0 && <ul className={css.rows}>{files.map(renderEntry)}</ul>}
           </div>
           {files.length > 0 && (
@@ -10412,6 +10622,7 @@ export function PendingPanel({
                     onCommentAdd={onCommentAdd}
                     onCommentRemove={onCommentRemove}
                     onCommentAsk={onCommentAsk}
+                    onCommentSeen={onCommentSeen}
                     onToast={showCopyToast}
                     t={t}
                     onAddTypedPath={addTypedPath}
