@@ -47,18 +47,46 @@ export interface VcsChange {
   newText: string
 }
 
-/** The subset of `ctx.shell`'s executor this module calls (kept structural so
- * the module stays dependency-light and testable with a fake). */
+/**
+ * The subset of `ctx.shell`'s executor this module calls — for BOTH eras of that seam.
+ *
+ * Kept structural so the module stays dependency-light and testable with a fake, and both eras are here
+ * because the seam changed under this plugin. Up to 0.1.6 the executor was `resolve(request)` +
+ * `run(spec)`, and 0.1.7 replaced `run` with `execute(spec)`, which resolves to a PROCESS HANDLE whose
+ * foreground projection is `result()` (measured in `@deepseek-ai/dsh-shell`: `abstract resolve`,
+ * `abstract execute`, `ShellExecution.result(): Promise<ShellRunResult>`). On 0.1.7 the old shape failed
+ * with `shell.run is not a function` — the whole text the import button could show — so both are
+ * accepted, and an executor offering neither is reported by the methods it does have.
+ */
 export interface ShellExecutorLike {
-  resolve(request: {
-    command: string
-    workdir?: string | undefined
-    timeoutMs?: number | undefined
-    signal?: AbortSignal | undefined
-    /** Foreground stdout capture budget in bytes; absent uses the executor's cap. */
-    stdoutMaxBytes?: number | undefined
-  }): unknown
-  run(spec: unknown): Promise<{ exitCode: number | null; stdout: { text: string }; stderr: { text: string } }>
+  /** 0.1.7: apply the implementation's defaults and caps before execution. */
+  resolve?(request: ShellExecRequestLike): unknown
+  /** 0.1.7: prepare and spawn; the returned handle carries `result()`. */
+  execute?(spec: unknown): Promise<ShellExecutionLike>
+  /** Up to 0.1.6: resolve and run in one call. */
+  run?(spec: unknown): Promise<ShellRunResultLike>
+}
+
+/** One command, as the seam's request takes it (`workdir`/`timeoutMs` are required only on the spec). */
+interface ShellExecRequestLike {
+  command: string
+  workdir: string
+  timeoutMs: number
+  signal?: AbortSignal | undefined
+  /** Foreground stdout capture budget in bytes; absent uses the executor's cap. */
+  stdoutMaxBytes?: number | undefined
+}
+
+/** 0.1.7's execution handle, reduced to the part this module reads. */
+interface ShellExecutionLike {
+  result?: (() => Promise<ShellRunResultLike>) | undefined
+}
+
+/** The outcome this module reads, in the shape both eras report it. */
+interface ShellRunResultLike {
+  exitCode: number | null
+  stdout: { text: string }
+  stderr: { text: string }
 }
 
 /** Reads one file's working content; undefined when the file is absent. */
@@ -210,13 +238,47 @@ async function runShell(
   signal: AbortSignal | undefined,
   stdoutMaxBytes?: number,
 ): Promise<string> {
-  const spec = shell.resolve({ command, workdir, timeoutMs: VCS_COMMAND_TIMEOUT_MS, signal, stdoutMaxBytes })
-  const result = await shell.run(spec)
+  const request: ShellExecRequestLike = { command, workdir, timeoutMs: VCS_COMMAND_TIMEOUT_MS, signal, stdoutMaxBytes }
+  const result = await runThrough(shell, request)
   if (result.exitCode !== 0) {
     const detail = (result.stderr.text || result.stdout.text).trim()
     throw new Error(`command failed (exit ${String(result.exitCode)}): ${detail || command}`)
   }
   return result.stdout.text
+}
+
+/**
+ * One command, through whichever era of the shell seam is loaded.
+ *
+ * @param shell - the deployment's shell service.
+ * @param request - the command, its workdir, deadline and capture budget.
+ * @returns the run's exit code and collected streams.
+ * @throws when the service offers neither entry point, naming the methods it does offer — the alternative
+ *   is the message that brought this code here, `shell.run is not a function`, which says nothing about
+ *   what the seam became.
+ */
+async function runThrough(shell: ShellExecutorLike, request: ShellExecRequestLike): Promise<ShellRunResultLike> {
+  if (typeof shell.execute === 'function') {
+    const spec = typeof shell.resolve === 'function' ? shell.resolve(request) : request
+    const handle = await shell.execute(spec)
+    // The handle IS the process; `result()` is its foreground projection. Awaiting the handle alone
+    // yields the process, not its exit status (see `ShellExecution extends ShellProcess`).
+    if (handle !== null && typeof handle.result === 'function') return await handle.result()
+    throw new Error('the shell executor returned a handle with no result(); the seam changed again')
+  }
+  if (typeof shell.run === 'function') {
+    // The earlier era resolved first, so it keeps doing so: `run` is documented to take a SPEC there.
+    return await shell.run(typeof shell.resolve === 'function' ? shell.resolve(request) : request)
+  }
+  // Own properties, then the class chain — but never `Object.prototype`, whose methods are on every
+  // object and would bury the two or three names that actually say what this service is.
+  const names = new Set<string>()
+  for (let node: object | null = shell; node !== null && node !== Object.prototype; node = Object.getPrototypeOf(node) as object | null) {
+    for (const name of Object.getOwnPropertyNames(node)) names.add(name)
+  }
+  const offered = [...names]
+    .filter(name => name !== 'constructor' && typeof (shell as unknown as Record<string, unknown>)[name] === 'function')
+  throw new Error(`the shell service offers neither execute() nor run() (it has: ${offered.join(', ') || 'no methods'})`)
 }
 
 /** Parse `git status --porcelain=v1 -z` output into (XY, repo-relative path)

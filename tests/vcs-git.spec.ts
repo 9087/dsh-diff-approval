@@ -127,6 +127,24 @@ describe.skipIf(!hasGit)('the git import, against a real checkout', () => {
   }
 
   /**
+   * The same executor in 0.1.7's shape: `resolve(request)` then `execute(spec)`, whose handle carries the
+   * foreground projection `result()`.
+   *
+   * This is the shape the plugin did NOT have, and the reason the import button failed with
+   * `shell.run is not a function`: 0.1.7 replaced `run` with `execute` (measured in
+   * `@deepseek-ai/dsh-shell`: `abstract resolve`, `abstract execute`, `ShellExecution.result()`).
+   *
+   * @returns an executor over the real git, in that shape.
+   */
+  function modernShell(): ShellExecutorLike {
+    const old = realShell()
+    return {
+      resolve: old.resolve,
+      execute: async (spec: unknown) => ({ result: async () => await old.run!(spec) }),
+    }
+  }
+
+  /**
    * A directory link at a fresh temp path pointing at `target`: a junction on Windows (no admin
    * needed), a symlink elsewhere. A platform that refuses the link is reported rather than
    * silently skipped, so a case that never ran cannot read as a case that passed.
@@ -155,6 +173,46 @@ describe.skipIf(!hasGit)('the git import, against a real checkout', () => {
     // The index holds "staged" and HEAD holds "base": the review item is the difference between
     // them, which is exactly what the reader has not committed yet.
     expect(change).toMatchObject({ kind: 'edit', oldText: 'base\n', newText: 'staged\n' })
+  })
+
+  it('reads a change through 0.1.7\'s executor: resolve, execute, handle.result()', async () => {
+    const root = await repo()
+    await writeFile(join(root, 'a.txt'), 'modern\n')
+    const shell = modernShell()
+
+    const changes = await listVcsChanges({
+      kind: 'git',
+      root,
+      workspaceRoot: root,
+      includeUntracked: false,
+      shell,
+      readText: (path) => readFile(path, 'utf8').catch(() => undefined),
+      signal: undefined,
+    })
+
+    // The same answer the `run`-shaped executor gives: which era of the seam is loaded is not what the
+    // scan is about, and this is the era the import button actually runs on.
+    expect(changeFor(changes, 'a.txt')).toMatchObject({ kind: 'edit', oldText: 'base\n', newText: 'modern\n' })
+  })
+
+  it('names the methods the shell service does offer when it offers neither entry point', async () => {
+    const root = await repo()
+    // Neither `execute` nor `run`. The message has to say what IS there: the failure that brought this code
+    // here was `shell.run is not a function` — true, and no help at all in finding what 0.1.7 had become.
+    const shell = {
+      resolve: (request: unknown) => request,
+      exec: async () => undefined,
+    } as unknown as ShellExecutorLike
+
+    await expect(listVcsChanges({
+      kind: 'git',
+      root,
+      workspaceRoot: root,
+      includeUntracked: false,
+      shell,
+      readText: (path) => readFile(path, 'utf8').catch(() => undefined),
+      signal: undefined,
+    })).rejects.toThrow('offers neither execute() nor run() (it has: resolve, exec)')
   })
 
   it('reads the whole uncommitted change when part of it is staged and part is not', async () => {
