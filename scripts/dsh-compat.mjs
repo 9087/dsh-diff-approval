@@ -85,6 +85,10 @@ const SHELL_CONTRACTS = [
     what: 'the docked seat the panel mounts into',
     any: ['sidebar.right.pane.tab', 'sidebar.right.pane.tab.title'],
     in: ['@deepseek-ai/dsh-client-ui-sidebar-right', '@deepseek-ai/dsh-client-ui-deliverables'],
+    // Measured, not guessed: the matrix is what said 0.1.5-alpha.1 is the first release carrying this seat.
+    // Below it the seat does not exist, and this plugin's dock mount feature-detects exactly that — the
+    // gate is here to catch the seat being RENAMED later, not to demand one a release never had.
+    since: '0.1.5-alpha.1',
   },
   {
     what: 'the session-header seat the header entry mounts into',
@@ -100,6 +104,9 @@ const SHELL_CONTRACTS = [
     what: 'the shell\'s own review-pane file picker, which this plugin leaves alone',
     any: ['data-review-file'],
     in: ['@deepseek-ai/dsh-client-ui-deliverables'],
+    // Measured: 0.1.6-alpha.2 is the first release with this picker. Before it there is nothing for this
+    // plugin to leave alone, so the contract is skipped rather than failed.
+    since: '0.1.6-alpha.2',
   },
 ]
 
@@ -401,11 +408,19 @@ async function shellSourcesOf(dir) {
  * @param sources - {@link shellSourcesOf}'s map.
  * @returns `{ ok, detail }`, naming what is missing rather than only that something is.
  */
-function checkContracts(sources) {
+function checkContracts(sources, version) {
   const broken = []
   let checked = 0
   let skipped = 0
   for (const contract of SHELL_CONTRACTS) {
+    // A contract with a floor is about a surface some releases never carried: this plugin feature-detects
+    // the absence (its dock mount stands down, its picker exclusion simply never matches), so BELOW the
+    // floor there is nothing to be compatible with. Above it, a missing name is exactly the rename this
+    // gate exists to catch — the floor is not a licence to drop a name quietly.
+    if (contract.since !== undefined && compareVersions(version, contract.since) < 0) {
+      skipped += 1
+      continue
+    }
     const usable = contract.in.filter(name => sources.has(name))
     if (usable.length === 0) {
       skipped += 1
@@ -443,7 +458,7 @@ async function checkClient(version, dir, needs) {
     undrawable.length > 0 ? `no name at all for ${undrawable.map(glyph => glyph.stem).join(', ')}` : '',
   ].filter(Boolean).join('; ')
   if (names !== '') return { ok: false, detail: names, missing: [...missing, ...undrawable.map(glyph => glyph.stem)] }
-  const contracts = checkContracts(await shellSourcesOf(dir))
+  const contracts = checkContracts(await shellSourcesOf(dir), version)
   if (!contracts.ok) return { ok: false, detail: `contract: ${contracts.detail}` }
   return {
     ok: true,
