@@ -316,9 +316,16 @@ describe('the comment-answering skill', () => {
     // sides the file's own text (the "no pending diff" shape) and the reader opens it as it reads.
     type Definition = { name?: string; execute?: (args: unknown, exec: unknown) => Promise<string> }
     const definitions: Definition[] = []
+    // The workspace root has to be absolute FOR THE RUNNING PLATFORM: the plugin resolves the relative path
+    // the annotation names against it, and `C:\repo` is only absolute on Windows. On Linux it is a relative
+    // name, so the root itself gets resolved against the runner's directory first. Measured in CI on
+    // ubuntu-latest: expected `C:\repo/src/a.ts`, received
+    // `/home/runner/work/dsh-diff-approval/dsh-diff-approval/C:\repo/src/a.ts` — the case passed on Windows
+    // and could not pass there, which is why it took a push to find out.
+    const root = process.platform === 'win32' ? 'C:\\repo' : '/repo'
     const { fs, handle } = await harness({
       sessionIds: [SessionId('session-1')],
-      workspacePath: 'C:\\repo',
+      workspacePath: root,
       prepare: (ctx) => {
         ctx.provide('tools', {
           register: (definition: unknown) => { definitions.push(definition as Definition); return () => {} },
@@ -337,7 +344,7 @@ describe('the comment-answering skill', () => {
 
     // The file is in the list now, as the "no pending diff" shape a hand-added clean path takes…
     const entries = await listEntries(handle, 'session-1')
-    expect(entries.map(entry => entry.path)).toEqual([join('C:\\repo', 'src', 'a.ts')])
+    expect(entries.map(entry => entry.path)).toEqual([join(root, 'src', 'a.ts')])
     expect(entries[0]).toMatchObject({ kind: 'edit' })
     expect(entries[0]!.oldText).toBe(entries[0]!.newText)
     expect(entries[0]!.oldText).toContain('two')
@@ -352,7 +359,7 @@ describe('the comment-answering skill', () => {
       text: '1. 这一行是入口。',
       anchor: { startLine: 2, endLine: 2 },
       quote: 'two',
-      entryId: join('C:\\repo', 'src', 'a.ts'),
+      entryId: join(root, 'src', 'a.ts'),
     })
     // The step number is the agent's own words in the note: there is no field beside it, which is what
     // makes it travel with the text (a copy of the card, the agent's reply) rather than being drawn.
