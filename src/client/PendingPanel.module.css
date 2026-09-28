@@ -1471,19 +1471,26 @@
 }
 
 /* The tree: one scroll box holding the workspace's levels; it takes whatever
-   height the card's fixed share leaves, so nothing else ever resizes. Unlike the
-   file list's `.listScroll` it declares `overflow-y: scroll` with no
-   `scrollbar-gutter`, and on the one engine measured (headless Chromium 153,
-   Windows, DPR 1) a bare element in that shape reserved 0 — there the strip comes
-   from the gutter, not from the overflow — so this box very likely reserves no strip
-   on that engine either and opening a level would shift the rows. That is inferred
-   from the probe, not measured on `.tree` itself. Only the vertical bar is asked
-   for: the horizontal one still appears solely for a path too long for the box. */
+   height the card's fixed share leaves, so nothing else ever resizes. It reserves
+   its scroll strip the same way the file list's `.listScroll` does. The probe this
+   comment first stood on measured that reservation on the one engine tried (headless
+   Chromium 153, Windows, DPR 1): a bare overflowing element with `overflow-y: scroll`
+   and no `scrollbar-gutter` reserved 0, while the same overflow plus the gutter
+   reserved 5px, the runtime `--dsh-scrollbar-width` there. Reading that back onto
+   `.tree` — then still `overflow-y: scroll` with no gutter — was an INFERENCE from the
+   probe, not a measurement of `.tree` itself; this rule now declares the gutter (see
+   `scrollbar-gutter` below), so the strip is reserved by the same declaration that was
+   measured to reserve it, and opening a level no longer moves the rows. Only the
+   vertical bar is asked for: the horizontal one still appears solely for a path too
+   long for the box. */
 .tree {
   flex: 1 1 auto;
   min-height: 0;
   overflow-x: auto;
   overflow-y: scroll;
+  /* The same reservation `.listScroll` makes, for the same reason: the strip is held
+     open whether or not a bar is painted, so a level that opens shifts no row. */
+  scrollbar-gutter: stable;
   /* The strip sits in this right edge, with the padding as the sliver between the
      strip and the frame: nothing else is added on that side. */
   padding: 4px 2px 4px 4px;

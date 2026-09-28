@@ -3895,9 +3895,13 @@ describe('PendingPanel', () => {
     expect(block('listScroll')).toContain('scrollbar-gutter: stable')
     // The add-path tree is the same scroll box one dialog over, and gets the same
     // treatment — but only vertically: a path too long for the box still asks for
-    // the horizontal bar on its own.
+    // the horizontal bar on its own. The tree's own gutter was missing (its rule had
+    // the overflow but not the reservation, which on the engine measured above leaves
+    // the strip at 0), so expanding a level shifted the rows; it is pinned here beside
+    // the shared scroller's, since it is the same declaration doing the same work.
     expect(block('tree')).toContain('overflow-y: scroll')
     expect(block('tree')).toContain('overflow-x: auto')
+    expect(block('tree')).toContain('scrollbar-gutter: stable')
   })
 
   it('opens the panel\'s dialogs above anything it floats over the code view', () => {
