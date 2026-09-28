@@ -9795,11 +9795,13 @@ export function PendingPanel({
    * The chip menu's rows: the two ways a produced file can be opened now that this plugin is holding
    * it. The first is DSH's own open — the press the reader made, replayed by `replayChipClick`, which
    * is the only way to run it faithfully (what the harness does with that press is its business) — and
-   * the second is this panel, which is the whole reason the press was taken over.
+   * the second is this panel, which is the whole reason the press was taken over. The third is not a
+   * way to open it at all: it hands back the path the shell itself gave the menu.
    */
   const chipMenuItems = useMemo<MenuEntry[]>(() => [
     { id: 'default', label: t('chip.openDefault') },
     { id: 'review', label: t('chip.reviewInPanel') },
+    { id: 'copy-path', label: t('chip.copyPath') },
   ], [t])
   /** Open the produced file the chip menu was raised for, the way the reader chose. */
   const runChipMenu = (id: string): void => {
@@ -9810,6 +9812,15 @@ export function PendingPanel({
       // The press is looked up by path rather than kept: the row is React's and may have re-rendered
       // between the press and this pick, and a stale element would swallow the press in silence.
       if (!replayFilePress(target.path)) showCopyToast(t('chip.gone'))
+      return
+    }
+    if (id === 'copy-path') {
+      // The path is copied exactly as the shell handed it over — the Markdown link's own spelling, the
+      // `@file` token with its `@` and quotes already stripped, or the absolute path a changed-files
+      // row carries. This menu has no spelling of its own to prefer, so it invents none: a conversion
+      // here would copy a path the reader never pointed at. The toast is the acceptance, not the
+      // attempt — a host that refused the write has copied nothing to confirm.
+      void writeClipboard(target.path).then((accepted) => { if (accepted) showCopyToast(t('action.copied')) })
       return
     }
     if (id !== 'review') return

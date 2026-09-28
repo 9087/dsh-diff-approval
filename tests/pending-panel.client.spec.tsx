@@ -4425,7 +4425,7 @@ describe('PendingPanel', () => {
       }))
     })
     const items = [...document.querySelectorAll('[role="menuitem"]')]
-    expect(items.map(item => item.textContent)).toEqual(['chip.openDefault', 'chip.reviewInPanel'])
+    expect(items.map(item => item.textContent)).toEqual(['chip.openDefault', 'chip.reviewInPanel', 'chip.copyPath'])
 
     // The first row is DSH's own press, run on the chip itself: and the panel does NOT open.
     fireEvent.click(items[0]!)
@@ -4455,6 +4455,74 @@ describe('PendingPanel', () => {
     fireEvent.click([...document.querySelectorAll('[role="menuitem"]')][0]!)
 
     await waitFor(() => { expect(screen.getAllByText('chip.gone').length).toBeGreaterThanOrEqual(1) })
+  })
+
+  it('copies the path the chip menu was raised for, and toasts only what the clipboard took', async () => {
+    const writeText = vi.fn(async () => {})
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
+        detail: { path: FILE.path, x: 10, y: 20 },
+      }))
+    })
+    const items = [...document.querySelectorAll('[role="menuitem"]')]
+    expect(items.map(item => item.textContent)).toEqual(['chip.openDefault', 'chip.reviewInPanel', 'chip.copyPath'])
+
+    fireEvent.click(items[2]!)
+    // Exactly what the shell handed the menu, with nothing converted on the way out: the menu knows no
+    // spelling of a path but this one, so a "make it absolute" step here would copy something the reader
+    // did not point at.
+    await vi.waitFor(() => { expect(writeText).toHaveBeenCalledWith(FILE.path) })
+    await vi.waitFor(() => { expect(screen.getAllByText('action.copied').length).toBeGreaterThanOrEqual(1) })
+    // The pick closes the menu, like the other two rows do.
+    expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
+  })
+
+  it('says nothing when the clipboard refuses the copied path', async () => {
+    // writeClipboard reports the host's answer rather than throwing; a refusal is not a copy, so the
+    // reader must not be told one happened.
+    const writeText = vi.fn(async () => { throw new Error('denied') })
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
+        detail: { path: FILE.path, x: 10, y: 20 },
+      }))
+    })
+    fireEvent.click([...document.querySelectorAll('[role="menuitem"]')][2]!)
+
+    await vi.waitFor(() => { expect(writeText).toHaveBeenCalledWith(FILE.path) })
+    // Let the refusal's own continuation run before looking for the toast it must not have shown.
+    await act(async () => {})
+    expect(screen.queryAllByText('action.copied')).toHaveLength(0)
+  })
+
+  it('offers the copy row to a chat Markdown file link, through the real press bridge', async () => {
+    // The chat's Markdown file link, a produced-file card, a presented-file card, a changed-files row
+    // and an `@file` chip all reach the panel as the same `diff-approval:chip-menu` event, and the panel
+    // builds its rows once — so one row list serves every entry point. This runs the bridge `index.ts`
+    // starts, over a link shaped the way the shell's own file link is, rather than dispatching the event
+    // by hand: the entry point itself is what is under test, not only the panel's half of it.
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+    const link = document.createElement('button')
+    link.type = 'button'
+    link.setAttribute('title', FILE.path)
+    document.body.appendChild(link)
+    const stop = startProducedChipMenu({
+      isPending: path => path === FILE.path,
+      onMenu: detail => { window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', { detail })) },
+    })
+    try {
+      act(() => { fireEvent.click(link) })
+      expect([...document.querySelectorAll('[role="menuitem"]')].map(item => item.textContent))
+        .toEqual(['chip.openDefault', 'chip.reviewInPanel', 'chip.copyPath'])
+    } finally {
+      stop()
+      link.remove()
+    }
   })
 
   it('records the docked tab\'s place as its tab closes', () => {
