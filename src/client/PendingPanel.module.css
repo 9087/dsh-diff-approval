@@ -1176,18 +1176,22 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  /* The frame's right inset carries NO padding of its own any more: the scroller's reserved strip
-     of scrollbar (see `.listScroll`) is already 8px wide where the engine lays a classic bar out in
-     the flow — the theme publishes `--dsh-scrollbar-width: 8px` — so an 8px padding here put a 16px
-     band between a row's fill and the pane's edge against the 8px the same row keeps on the left,
-     which is what made the docked list read as lopsided. With the padding at 0 the two bands measure
-     the same 9px (`li.row`'s own 8px inset plus its 1px hairline, against the 8px strip plus this
-     frame's 1px border). A platform that OVERLAYS its bars and takes no gutter reserves none of that
-     8px, so there the band comes out at the 1px border alone — the same in the comments list, which
-     scrolls in the very same `.listScroll`: that is what `.listScroll`'s `scrollbar-gutter: stable`
-     is for, and it is why the two lists can no longer part company on any platform. The bulk footer
-     sits outside the scroller and keeps its own 8px (see `.bulkActions`); only the scroller's band is
-     this. */
+  /* The frame's right inset carries NO padding of its own any more: the band belongs to the strip
+     of scrollbar the scroller's own gutter reserves (see `.listScroll`), and a padding here put a
+     double band
+     between a row's fill and the pane's edge against the single one the same row keeps on the left,
+     which is what made the docked list read as lopsided. Measured in the one engine tried (headless
+     Chromium 153, Windows, DPR 1): the runtime theme value `--dsh-scrollbar-width` is 5px, not the
+     8px a classic desktop bar is often assumed to be, and the docked frame's bands came out 8px on
+     the right against 8px on the left — symmetric, and reached from the 5px strip plus the scroller's
+     2px inset plus this frame's 1px divider, against the row's own 8px inset plus its 1px hairline.
+     Those are the measured numbers; the earlier "9px of band at each side" was derived from a strip
+     width this host does not publish. A platform that OVERLAYS its bars and reserves no gutter drops
+     the strip, so there the band comes out at the divider alone — the same in the comments list,
+     which scrolls in the very same `.listScroll`: that is what `.listScroll`'s
+     `scrollbar-gutter: stable` is for, and it is why the two lists can no longer part company on any
+     platform. The bulk footer sits outside the scroller and keeps its own 8px (see `.bulkActions`);
+     only the scroller's band is this. */
   padding: 4px 0 12px 8px;
   box-sizing: border-box;
   border-right: 1px solid var(--dsw-alias-border-l2);
@@ -1197,20 +1201,24 @@
    Keep-all / Revert-all footer stays pinned. The strip a vertical bar needs is ALWAYS reserved, and
    in the same place in both lists, so a row's right band is one fixed number whether or not a bar is
    painted, and the bar sits in the same spot whichever list is showing:
-     - `overflow-y: scroll` asks for the bar outright on the engines that lay it out in the flow:
-       without it a list short enough to fit reserved no strip at all, and the folded card's rows sat
-       flush against its edge;
-     - `scrollbar-gutter: stable` is the standard name for the same reservation, and it is what holds
-       the strip on an engine that overlays its bars and honours the property.
+     - `scrollbar-gutter: stable` is what reserves the strip on the engine measured (headless
+       Chromium 153, Windows, DPR 1): there a bare overflowing div with `overflow-y: scroll` and no
+       gutter reserved 0, while this scroller — the same overflow plus `stable` — reserved 5px, the
+       runtime value of `--dsh-scrollbar-width` on that host. The gutter is the standard name for the
+       reservation, and it also holds on an engine that overlays its bars and honours the property;
+     - `overflow-y: scroll` is kept for the other half of the problem: it keeps the box a scroller in
+       every state, so a list short enough to fit does not switch modes and take its bar away. It is
+       NOT what reserves the strip by itself — that is the gutter, on the engine measured above, where
+       the gutter was the only difference between 0 and 5px.
    Neither list is measured or padded in JS any more. The panel used to pad the FILES scroller with
-   whatever was left of 8px after the strip the platform had reserved, and that reached one list
-   only: on a platform that overlays its bars the comments list kept no band at all while the files
-   list kept 8px, and the comments band moved as the bar came and went — the mismatch the reader saw.
-   With both lists the same `.listScroll` and nothing measured onto either, they are equal by
-   construction on every platform. The one `padding` this rule declares is the deliberate 2px of
-   air the reader asked for between the rows and the bar: a fixed value cannot reintroduce the
-   mismatch the old measurement caused, and because the strip is always reserved the gap is the
-   same whether or not a bar is painted. */
+   whatever was left of the theme's width after the strip the platform had reserved, and that reached
+   one list only: on a platform that overlays its bars the comments list kept no band at all while the
+   files list kept that much, and the comments band moved as the bar came and went — the mismatch the
+   reader saw. With both lists the same `.listScroll` and nothing measured onto either, they are equal
+   by construction on every platform. The one padding this rule declares is the deliberate 2px of air
+   the reader asked for between the rows and the bar: a fixed value cannot reintroduce the mismatch the
+   old measurement caused, and because the strip is always reserved the gap is the same whether or not
+   a bar is painted. */
 .listScroll {
   flex: 1;
   min-height: 0;
@@ -1463,9 +1471,13 @@
 }
 
 /* The tree: one scroll box holding the workspace's levels; it takes whatever
-   height the card's fixed share leaves, so nothing else ever resizes. Its scroll
-   strip is reserved the same way as the file list's — and for the same reason, so
-   opening a level never changes the rows' width. Only the vertical bar is asked
+   height the card's fixed share leaves, so nothing else ever resizes. Unlike the
+   file list's `.listScroll` it declares `overflow-y: scroll` with no
+   `scrollbar-gutter`, and on the one engine measured (headless Chromium 153,
+   Windows, DPR 1) a bare element in that shape reserved 0 — there the strip comes
+   from the gutter, not from the overflow — so this box very likely reserves no strip
+   on that engine either and opening a level would shift the rows. That is inferred
+   from the probe, not measured on `.tree` itself. Only the vertical bar is asked
    for: the horizontal one still appears solely for a path too long for the box. */
 .tree {
   flex: 1 1 auto;
@@ -2198,7 +2210,8 @@
 /* Side by side there are two code boxes rather than one, and the reader reads the RIGHT one, so the popup
    is centred on that pane: the two columns split the root evenly, and the right half starts at its middle.
    What is not code is cut off inside that half too — the scroller's own vertical bar along its right edge,
-   and the pinned strips row along the bottom of the root (8px + its 1px border-top). */
+   and the pinned strips row along the bottom of the root (the theme's bar width plus its 1px border-top:
+   5px + 1px on the host measured, headless Chromium 153, Windows, DPR 1; 8px only as the fallback). */
 .gotoLayerRight {
   left: 50%;
   right: var(--dsh-scrollbar-width, 8px);
@@ -4001,7 +4014,9 @@
   overflow-x: auto;
   overflow-y: hidden;
   /* The app's own scrollbar thickness (the harness publishes it as
-     `--dsh-scrollbar-width`, 8px, and styles every other bar with it), so the
+     `--dsh-scrollbar-width` and styles every other bar with it; 8px is only the
+     fallback in the declarations below — the live value on the host measured was
+     5px, headless Chromium 153, Windows, DPR 1), so the
      split view's pinned horizontal bar and its vertical one read as one control
      surface. Hard-coding a thicker bar here was a visible mismatch. */
   height: var(--dsh-scrollbar-width, 8px);

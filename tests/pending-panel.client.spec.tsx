@@ -3758,15 +3758,18 @@ describe('PendingPanel', () => {
     // The two lists hold the same rows, but their frames differ. NEITHER FRAME declares a right
     // padding: the band the rows keep on the right is the scroller's own reserved strip of scrollbar
     // attached to its right edge. The scroller itself carries one deliberate padding — the 2px of air
-    // the reader asked for between the rows and the bar, pinned below — where an 8px padding on top of
-    // the strip made the right band 16px against the 8px the same rows kept on the left and the docked
-    // list read lopsided. The rows still keep their 8px
-    // (inside the scroller, from the strip the shared `.listScroll` reserves): 9px of band at each
-    // side, the row's own 8px inset plus its 1px hairline against the 8px strip plus the pane's 1px
-    // border. A platform that overlays its bars and reserves no gutter drops that strip in the files
-    // list and the comments list together, which is the point of the shared rule. The heading and the
-    // footer sit outside the scroller and keep their own 8px, or they would come out flush against
-    // the border.
+    // the reader asked for between the rows and the bar, pinned below — where a further padding on top of
+    // the strip made the right band double the one the same rows kept on the left and the docked
+    // list read lopsided. The rows still keep their right band
+    // (inside the scroller, from the strip the shared `.listScroll` reserves), and it is one measured
+    // number: in the one engine tried (headless Chromium 153, Windows, DPR 1) the strip is 5px and the
+    // docked frame measured 8px on the right against 8px on the left — symmetric, and reached from
+    // those numbers, not from a fixed "9px of band at each side" (which counted an 8px strip this host
+    // does not publish). The floating card measures 10px right against 9px left, the deliberate 2px
+    // margin-right on top of the shared padding. A platform that overlays its bars and reserves no
+    // gutter drops that strip in the files list and the comments list together, which is the point of
+    // the shared rule. The heading and the footer sit outside the scroller and keep their own 8px, or
+    // they would come out flush against the border.
     const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const block = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
     const rightPadding = (name: string): string => /padding:\s*([^;]*);/.exec(block(name))?.[1]?.trim().split(/\s+/)[1] ?? ''
@@ -3830,16 +3833,16 @@ describe('PendingPanel', () => {
 
   it('reserves the scroll strip of a list that is not overflowing', () => {
     // A list short enough to fit reserved no strip at all under `overflow-y: auto`, so the folded
-    // card's rows sat flush against its edge and the card read 8px narrower than the same card
-    // holding a bar. `overflow-y: scroll` is what reserves the strip in every engine: a bar that is
-    // always asked for cannot be missed, and with nothing to scroll the theme's transparent track
-    // paints nothing. `scrollbar-gutter: stable` names the same reservation for the engines that
-    // honour it (and is the only declaration that holds the strip on an engine that overlays its
-    // bars); it sits on the SHARED rule, so the strip is reserved in the files list and the comments
-    // list alike — which the JS this rule replaced never did, since it padded the files scroller only.
-    // Measured in a headless Chromium: three rows with `overflow-y: auto` + `stable`
-    // gave an 8px strip, but with the property ignored (`auto`) 0px; `overflow-y:
-    // scroll` gave 8px either way.
+    // card's rows sat flush against its edge and the card read a strip narrower than the same card
+    // holding a bar. `scrollbar-gutter: stable` is what reserves the strip on the one engine measured
+    // (headless Chromium 153, Windows, DPR 1: a bare overflowing div with `overflow-y: scroll` and no
+    // gutter reserved 0, while this scroller — the same overflow plus `stable` — reserved 5px, the
+    // runtime theme value there). `overflow-y: scroll` is kept so the box stays a scroller in every
+    // state: a bar that is always asked for cannot be missed, and with nothing to scroll the theme's
+    // transparent track paints nothing. The gutter sits on the SHARED rule, so the strip is reserved in
+    // the files list and the comments list alike — which the JS this rule replaced never did, since it
+    // padded the files scroller only. What the assertions below pin is that both declarations are on
+    // the shared rule; the strip's measured width is not pinned anywhere.
     const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const block = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
     expect(block('listScroll')).toContain('overflow-y: scroll')
