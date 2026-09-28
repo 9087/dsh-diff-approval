@@ -35,6 +35,13 @@ export interface PendingEntry {
   sessionId: SessionId
   /** Every session that touched the file (drives the per-session list filter). */
   sessionIds: SessionId[]
+  /**
+   * Whether a change the reader has not looked at yet arrived on this path — the dot beside its row. Set
+   * when an agent operation (or an agent-side admission) changes the entry, cleared when the reader opens
+   * the file or acts on the row, and deliberately NOT part of an undo snapshot: a snapshot restores
+   * CONTENT, and having seen something is not content.
+   */
+  unseen?: boolean | undefined
 }
 
 /** Whether an entry has an earlier version of its file to restore. */
@@ -388,6 +395,35 @@ export interface CommentRecord {
   updatedAt: number
   /** The questions asked in this thread, oldest first; empty until one is asked. */
   asks?: CommentAsk[] | undefined
+  /**
+   * Whether something the reader has not looked at yet arrived in this thread — the dot beside its
+   * card. Set when an agent-authored annotation is written or when an answer lands in the thread,
+   * cleared when the card comes into view, and deliberately NOT part of an undo snapshot: a snapshot
+   * restores CONTENT, and having seen something is not content.
+   */
+  unseen?: boolean | undefined
+  /**
+   * The answer text the reader has already been told about, keyed by question id.
+   *
+   * The answer's text is deliberately absent from this record (see the doc above) — the transcript is
+   * the one source
+   * of truth for what the agent said — but "is this the answer I have already seen?" cannot be
+   * answered from the transcript alone, because a read has nothing to compare against. This is the
+   * baseline the comparison takes: the host writes the current answer here when the card goes out of
+   * the reader's way, and an answer whose text differs from this is news. Persisted rather than held
+   * in memory, so a restart does not light a dot the reader had already cleared.
+   */
+  answerSeen?: Record<string, string> | undefined
+  /**
+   * The latest answer text the host has observed for each question, keyed by question id.
+   *
+   * The other half of the comparison above, and kept apart from it on purpose: this follows what the
+   * agent said, while `answerSeen` follows what the reader has looked at. An answer whose text differs
+   * from its stored `answerSeen` entry is what lights the dot — and an answer that disappears leaves
+   * this empty rather than looking like a change, so a transcript that cannot be read never re-lights
+   * a thread the reader already read.
+   */
+  answerNow?: Record<string, string> | undefined
 }
 
 /** Value returned by the channel's comment-add endpoint. */

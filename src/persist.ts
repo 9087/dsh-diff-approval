@@ -69,6 +69,7 @@ function pendingEntryOf(value: unknown): PendingEntry | undefined {
     // The global identity is the path, so `id` must equal it regardless of any
     // legacy uuid — the client uses `id` as the per-file action key.
     id: path, path, earlierVersion, oldText, newText, updatedAt,
+    unseen: record.unseen === true ? true : undefined,
     sessionId: sessionId as SessionId,
     sessionIds: ids.length > 0 ? ids as SessionId[] : [sessionId as SessionId],
   }

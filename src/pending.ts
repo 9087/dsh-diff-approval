@@ -126,6 +126,9 @@ export class PendingDiffStore {
       oldText: onlyCreations ? '' : earlier.earlierVersion === 'none' ? earlier.newText : earlier.oldText,
       earlierVersion: onlyCreations ? 'none' : 'file',
       sessionIds,
+      // Sticky until the reader looks: a capture that arrives while the dot is up does not take it down, and
+      // one that arrives after it went out puts it back (that is what the capture site sets).
+      unseen: earlier.unseen === true || later.unseen === true,
     }
   }
 
@@ -181,6 +184,9 @@ export class PendingDiffStore {
    * version to restore — what the reader kept. The whole-file action must therefore become 回退, not 删除:
    * deleting would throw away the part they just accepted. (Leaving the field alone kept a partly-kept new
    * file offering to delete itself, which is what sent the reader here.)
+   *
+   * Every caller of this is a reader action — a block keep or revert, a refresh from version control — so it
+   * also takes the unseen dot down: the reader has just handled this file.
    * @param path - the file path.
    * @param patch - the side to advance (`oldText` for keep, `newText` for revert).
    * @returns whether the entry changed.
@@ -189,10 +195,56 @@ export class PendingDiffStore {
     const entry = this.entries.get(pathKeyOf(path))
     if (entry === undefined) return false
     const kept = patch.oldText !== undefined
-    const next: PendingEntry = { ...entry, ...patch, ...(kept ? { earlierVersion: 'file' as const } : {}), updatedAt: Date.now() }
+    const next: PendingEntry = {
+      ...entry,
+      ...patch,
+      ...(kept ? { earlierVersion: 'file' as const } : {}),
+      unseen: false,
+      updatedAt: Date.now(),
+    }
     this.entries.set(pathKeyOf(path), next)
     if (next.newText !== entry.newText) this.bumpContent(path)
     return true
+  }
+
+  /**
+   * Mark paths the reader has now seen — the file was opened, or its row was acted on. The dot is about
+   * attention rather than content, so this and the entry leaving the list are the only ways it goes out, and
+   * nothing brings it back except a new capture.
+   * @param paths - one path, or several.
+   * @returns whether anything changed.
+   */
+  markSeen(paths: string | readonly string[]): boolean {
+    const list = typeof paths === 'string' ? [paths] : paths
+    let changed = false
+    for (const path of list) {
+      const key = pathKeyOf(path)
+      const entry = this.entries.get(key)
+      if (entry === undefined || entry.unseen !== true) continue
+      this.entries.set(key, { ...entry, unseen: false })
+      changed = true
+    }
+    return changed
+  }
+
+  /**
+   * Raise the dot for paths whose content moved WITHOUT the reader asking — a writer outside the panel, a
+   * second process. The capture sites set the field on the entry they fold; this is for the changes the
+   * plugin notices by itself while refreshing, which do not come through a capture.
+   * @param paths - one path, or several.
+   * @returns whether anything changed.
+   */
+  markUnseen(paths: string | readonly string[]): boolean {
+    const list = typeof paths === 'string' ? [paths] : paths
+    let changed = false
+    for (const path of list) {
+      const key = pathKeyOf(path)
+      const entry = this.entries.get(key)
+      if (entry === undefined || entry.unseen === true) continue
+      this.entries.set(key, { ...entry, unseen: true })
+      changed = true
+    }
+    return changed
   }
 
   /**
@@ -205,7 +257,10 @@ export class PendingDiffStore {
     const key = pathKeyOf(entry.path)
     const existing = this.entries.get(key)
     if (existing !== undefined && sameEntry(existing, entry)) return false
-    this.entries.set(key, { ...entry })
+    // Whatever a snapshot says about `unseen`, the live value wins: an undo restores CONTENT, and whether the
+    // reader has looked at a change is not content. Taking the snapshot's word would clear a dot that a
+    // newer capture had just set.
+    this.entries.set(key, { ...entry, unseen: existing?.unseen === true })
     // An undo/redo replays a snapshot: when it carries different content (or puts the entry back),
     // that content is now what the path holds, so anything derived from it is stale.
     if (existing === undefined || existing.newText !== entry.newText) this.bumpContent(entry.path)

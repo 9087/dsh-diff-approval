@@ -112,6 +112,68 @@ describe('PendingDiffStore.fold', () => {
     expect(store.size).toBe(1)
   })
 
+  it('keeps the dot up while more changes arrive, and takes it down when the reader acts', () => {
+    const store = new PendingDiffStore()
+    store.fold(entry({ unseen: true, oldText: 'v1', newText: 'v2', updatedAt: 10 }))
+    // A second agent capture: nothing has been looked at, so the dot stays up.
+    store.fold(entry({ oldText: 'v2', newText: 'v3', updatedAt: 20 }))
+    expect(store.get('/repo/a.txt')?.unseen).toBe(true)
+    // A block keep / revert / refresh is the reader acting on the row: the dot goes out.
+    store.update('/repo/a.txt', { oldText: 'v3' })
+    expect(store.get('/repo/a.txt')?.unseen).toBe(false)
+  })
+
+  it('marks a path seen without touching its content, and only once', () => {
+    const store = new PendingDiffStore()
+    store.fold(entry({ unseen: true, oldText: 'v1', newText: 'v2', updatedAt: 10 }))
+    expect(store.markSeen('/repo/a.txt')).toBe(true)
+    expect(store.get('/repo/a.txt')).toMatchObject({ unseen: false, oldText: 'v1', newText: 'v2' })
+    expect(store.markSeen('/repo/a.txt')).toBe(false)
+    expect(store.markSeen('/repo/absent.txt')).toBe(false)
+  })
+
+  it('lets an undo restore content without reviving the dot', () => {
+    const store = new PendingDiffStore()
+    store.fold(entry({ unseen: true, oldText: 'v1', newText: 'v2', updatedAt: 10 }))
+    const content = { ...store.get('/repo/a.txt')! }
+    store.markSeen('/repo/a.txt')
+    // `unseen` is deliberately not part of a snapshot, and the live answer wins even when one carries it:
+    // an undo restores CONTENT, and whether the reader has looked at a change is not content.
+    store.restore({ ...content, unseen: true })
+    expect(store.get('/repo/a.txt')).toMatchObject({ unseen: false, oldText: 'v1', newText: 'v2' })
+  })
+
+  it('lights the dot only when a capture says so', () => {
+    const store = new PendingDiffStore()
+    store.fold(entry({ oldText: 'v1', newText: 'v2', updatedAt: 10 }))
+    expect(store.get('/repo/a.txt')?.unseen).toBe(undefined)
+    store.fold(entry({ unseen: true, oldText: 'v2', newText: 'v3', updatedAt: 20 }))
+    expect(store.get('/repo/a.txt')?.unseen).toBe(true)
+  })
+
+  it('raises the dot again for a change nobody asked for', () => {
+    const store = new PendingDiffStore()
+    store.fold(entry({ oldText: 'v1', newText: 'v2', updatedAt: 10 }))
+    // The list read adopts a file an outside writer changed: `update` took the dot down as the reader's own
+    // action, and the adoption is exactly what the dot is for.
+    store.update('/repo/a.txt', { newText: 'v9' })
+    expect(store.markUnseen('/repo/a.txt')).toBe(true)
+    expect(store.get('/repo/a.txt')).toMatchObject({ unseen: true, newText: 'v9' })
+    expect(store.markUnseen('/repo/a.txt')).toBe(false)
+  })
+
+  it('does not bring the dot back when an undo re-lists a removed entry', () => {
+    const store = new PendingDiffStore()
+    store.fold(entry({ unseen: true, oldText: 'v1', newText: 'v2', updatedAt: 10 }))
+    const snapshot = { ...store.get('/repo/a.txt')! }
+    store.remove('/repo/a.txt')
+    // An undo of a removal replays a snapshot with no live entry to consult, and a snapshot restores
+    // CONTENT: re-listing the row must not raise a dot the reader never cleared.
+    store.restore(snapshot)
+    expect(store.get('/repo/a.txt')).toMatchObject({ oldText: 'v1', newText: 'v2' })
+    expect(store.get('/repo/a.txt')?.unseen).not.toBe(true)
+  })
+
   it('folds nothing for a no-op or an unchanged extension', () => {
     const store = new PendingDiffStore()
     expect(store.fold(entry({ oldText: 'same', newText: 'same' }))).toBe(false)

@@ -708,7 +708,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     ready: ensureLoaded,
     entriesOf: sessionId => store.list(sessionId),
     commentsOf: sessionId => comments.list(sessionId),
-    addComment: (record) => { comments.add(record) },
+    // An AGENT authored this card while the reader was looking elsewhere, so it is news and wears the
+    // dot. The reader's own write goes through `comment-add` below and lights nothing — they are the
+    // one who made it, and it is on screen as they make it.
+    addComment: (record) => { comments.add(record.author === 'agent' ? { ...record, unseen: true } : record) },
     listFile: (sessionId, asked, signal) => listFileForAnnotation(sessionId, asked, signal),
     log: message => ctx.logger.info(`diff-approval: ${message}`),
   })
@@ -756,6 +759,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       newText: content,
       updatedAt: now,
       sessionIds: [sessionId],
+      // The AGENT put this file in the list (to hang a comment on it) while the reader was elsewhere: the
+      // row is news. The reader's own add-path goes through `add-path` instead and lights nothing.
+      unseen: true,
     }], true)
     const landed = store.list(sessionId).find(entry => pathIdentity(entry.path) === pathIdentity(absolute))
     return landed === undefined ? { kind: 'missing' } : { kind: 'listed', entry: landed, added: true }
@@ -851,6 +857,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       newText: after,
       updatedAt: Date.now(),
       sessionIds: [sessionId],
+      // An agent changed the file: the reader has not seen this yet, so its row wears the dot.
+      unseen: true,
     }
     await ensureLoaded()
     if (store.fold(entry)) persistSession()
@@ -971,6 +979,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const beforeText = entry.newText
         const redoWasPresent = redoStackOf(sessionId).length > 0
         store.update(entry.path, { newText: content })
+        // The file moved without the reader asking (another tool, an editor, a second process): the row is
+        // news again, and `update` — which is the reader acting — had just taken the dot down.
+        store.markUnseen(entry.path)
         pushUndo(sessionId,
           { id: entry.path, path: entry.path, entry, fileText: beforeText },
           { id: entry.path, path: entry.path, entry: { ...entry, newText: content, updatedAt: Date.now() }, fileText: content })
@@ -1536,7 +1547,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     const outcome = exec.name === 'edit' ? editOutcomeOf(result.value) : exec.name === 'write' ? writeOutcomeOf(result.value) : undefined
     if (outcome === undefined || outcome.oldText === outcome.newText) return
     const sessionId = exec.agent.id
-    const entry: PendingEntry = { id: outcome.path, sessionId, ...outcome, updatedAt: Date.now(), sessionIds: [sessionId] }
+    const entry: PendingEntry = { id: outcome.path, sessionId, ...outcome, updatedAt: Date.now(), sessionIds: [sessionId], unseen: true }
     // Fold synchronously so the very next list sees the capture; persistence
     // (hydration + save) rides the same turn asynchronously.
     if (store.fold(entry)) persistSession()
@@ -1581,6 +1592,13 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             if (read.turn !== undefined) comments.recordTurnForRequest(sessionId, requestId, read.turn)
           }
           for (const turn of commentAsker.endedTurns(sessionId)) comments.markTurnEnded(sessionId, turn)
+          // An answer that has arrived (or been rewritten) is news the reader has not looked at yet,
+          // so this fold is what raises the card's dot — and it raises nothing on a read that found
+          // the same text as last time (see `CommentStore.syncAnswers`). Runs before the list below is
+          // taken, because the flag rides the records this read hands over. The read is already the
+          // session's questions and nothing else, so it is handed over as it is: a question whose turn
+          // has written nothing yet simply carries no answer, which is not a change.
+          comments.syncAnswers(sessionId, answers)
           for (const [requestId, read] of Object.entries(answers)) {
             if (read.answer !== undefined) commentAnswers[requestId] = read.answer
           }
@@ -1612,6 +1630,20 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           commentPersistError: comments.persistError(),
         }
         return { ok: true, value }
+      }
+      case 'comment-seen': {
+        // The reader has this card in front of them in the diff: its dot goes out, and the answers it
+        // shows become the baseline a later rewrite is measured against. A reader action, which is why
+        // it is an endpoint of its own rather than something the list read does.
+        const seen = targetOf(payload)
+        if (seen === undefined) return rpcError('sessionId and id must be non-empty strings')
+        await ensureLoaded()
+        const record = comments.get(seen.id)
+        if (record === undefined || record.sessionId !== seen.sessionId) {
+          return { ok: true, value: { outcome: 'missing' as const } }
+        }
+        comments.markSeen(seen.id)
+        return { ok: true, value: { outcome: 'seen' as const } }
       }
       case 'comment-add': {
         const input = commentAddOf(payload)
@@ -2146,6 +2178,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           updatedAt: Date.now(),
         }
         store.restore(refreshed)
+        // The reader asked for this refresh, so the row's dot goes out with it.
+        store.markSeen(entry.path)
         // The refresh is undoable as one action: the entry's tracked diff moves
         // from what the review captured to what the VCS reports now.
         pushUndo(target.sessionId,
@@ -2373,6 +2407,16 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         }
         return await admitNamed(candidates, isDirectory, truncated)
       }
+      case 'seen': {
+        // The reader has this file in front of them in the panel: the row's dot goes out. Deliberately NOT
+        // `open`, which launches the file with the OS — the panel's own way of opening a file is selecting
+        // its row, and that is the signal this carries.
+        const seen = (payload ?? {}) as Record<string, unknown>
+        if (typeof seen.id !== 'string' || seen.id.length === 0) return rpcError('id must be a non-empty string')
+        await ensureLoaded()
+        if (store.markSeen(seen.id)) persistSession()
+        return { ok: true, value: { outcome: 'seen' } }
+      }
       case 'open': {
         const target = openTargetOf(payload)
         if (target === undefined) return rpcError('sessionId, id, and action must be valid')
@@ -2382,6 +2426,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           const value: DiffApprovalOpenValue = { outcome: 'missing' }
           return { ok: true, value }
         }
+        // Opening the file is the reader looking at it: the row's dot goes out before the launch is even
+        // attempted, because the intent to look is what the dot was waiting for.
+        if (store.markSeen(entry.path)) persistSession()
         try {
           const resolved = await ctx.fs.resolve(entry.path, { signal })
           await launchPath(ctx.fs.processPath(resolved), target.action)

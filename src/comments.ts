@@ -21,6 +21,9 @@ import { writeJsonAtomic } from './atomic-write.ts'
 import { basename, dirname, join } from 'node:path'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { CommentAsk, CommentQuoteLine, CommentRecord } from './types.ts'
+// Type-only: what one transcript read found for a question is the shape the answer fold takes, and
+// `comment-ask.ts` owns it. Nothing here reaches that module at run time.
+import type { AskRead } from './comment-ask.ts'
 
 /** On-disk envelope of one session's comments. */
 const COMMENT_FILE_VERSION = 1
@@ -56,6 +59,22 @@ function fileOf(root: string, sessionId: SessionId): string {
   return join(root, `${encodeURIComponent(String(sessionId))}.json`)
 }
 
+/**
+ * One answer map as a comment record keeps it: keys that name a question, values that are the text
+ * read for it. Narrowed here like every other stored field, so a file that has drifted (or been
+ * hand-edited) cannot put a non-string where an answer's text is expected.
+ * @param value - the stored value.
+ * @returns the map, or undefined when there is nothing usable in it.
+ */
+function answersOf(value: unknown): Record<string, string> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const map: Record<string, string> = {}
+  for (const [requestId, text] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof text === 'string') map[requestId] = text
+  }
+  return Object.keys(map).length === 0 ? undefined : map
+}
+
 /** Narrow one JSON value to a comment record; malformed rows are skipped. */
 function commentOf(value: unknown): CommentRecord | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
@@ -79,6 +98,9 @@ function commentOf(value: unknown): CommentRecord | undefined {
   // the only door a stored row comes back through, so a field it does not copy is a field that survives
   // exactly until the next host restart — the card would come back drawn as the reader's own words.
   const author = row.author === 'agent' ? 'agent' as const : undefined
+  const asks = asksOf(row.asks)
+  const answerSeen = answersOf(row.answerSeen)
+  const answerNow = answersOf(row.answerNow)
   return {
     id,
     sessionId: sessionId as SessionId,
@@ -89,10 +111,15 @@ function commentOf(value: unknown): CommentRecord | undefined {
     text,
     createdAt,
     updatedAt,
+    // The attention flags are read the same way the pending store reads its own dot: only a stored
+    // `true` raises one, and a file written before they existed simply has neither.
+    ...(row.unseen === true ? { unseen: true } : {}),
     ...(author === undefined ? {} : { author }),
     ...(typeof context === 'string' && context !== '' ? { quoteContext: context } : {}),
     ...(quoteLines.length > 0 ? { quoteLines } : {}),
-    ...(asksOf(row.asks).length > 0 ? { asks: asksOf(row.asks) } : {}),
+    ...(asks.length > 0 ? { asks } : {}),
+    ...(answerSeen === undefined ? {} : { answerSeen }),
+    ...(answerNow === undefined ? {} : { answerNow }),
   }
 }
 
@@ -121,6 +148,68 @@ function asksOf(value: unknown): CommentAsk[] {
 /** Whether one thread holds a question with this request id that `wanted` still describes. */
 function hasAsk(comment: CommentRecord, requestId: string, wanted: (ask: CommentAsk) => boolean): boolean {
   return (comment.asks ?? []).some(ask => ask.requestId === requestId && wanted(ask))
+}
+
+/** Whether two answer maps say the same thing, key for key and text for text. */
+function sameAnswers(left: Readonly<Record<string, string>> | undefined, right: Readonly<Record<string, string>> | undefined): boolean {
+  const one = Object.entries(left ?? {})
+  const two = right ?? {}
+  if (one.length !== Object.keys(two).length) return false
+  return one.every(([requestId, text]) => two[requestId] === text)
+}
+
+/**
+ * What the transcript currently says about one thread's questions, as the record keeps it.
+ *
+ * Only the questions this thread actually asked are taken: the read is the whole session's, and a
+ * thread that stored every other thread's answers would be a copy of the transcript rather than its
+ * own state — and one whose text grows without bound as the conversation does. A question the read
+ * found no answer for is LEFT OUT rather than stored empty, so a turn that has not written yet cannot
+ * look like an answer that changed.
+ * @param comment - the thread, for the questions it asked.
+ * @param answers - the session's answer text per question id.
+ * @returns the thread's own answers, by question id.
+ */
+function answerNowOf(comment: CommentRecord, answers: Readonly<Record<string, AskRead>>): Record<string, string> {
+  const own: Record<string, string> = {}
+  for (const ask of comment.asks ?? []) {
+    const text = answers[ask.requestId]?.answer
+    if (text !== undefined) own[ask.requestId] = text
+  }
+  return own
+}
+
+/**
+ * One thread as a read of the transcript leaves it: its questions' current answers, and the dot up if
+ * those say something the reader has not been told about.
+ *
+ * "New" is a DIFFERENCE, not a presence: the transcript answers a question once and hands back the
+ * same text on every read afterwards, so "is there an answer" would leave the dot up forever, and
+ * "did it change since the last read" would lose the answer entirely on the restart that forgot the
+ * previous read. The comparison is against `answerSeen` — the baseline the reader's own visit writes
+ * down — and it is STICKY: an answer that arrived while the dot was already up does not need to raise
+ * it again. A question the transcript shows no answer for is absent here, so a log this process cannot
+ * read, or a turn that has not written yet, leaves the thread exactly as it was.
+ * @param comment - the thread as it stands.
+ * @param answers - the session's answer text per question id.
+ * @returns what the record should hold after this read.
+ */
+function answerStateOf(comment: CommentRecord, answers: Readonly<Record<string, AskRead>>): CommentRecord {
+  const answerNow = answerNowOf(comment, answers)
+  const seen = comment.answerSeen ?? {}
+  const lit = comment.unseen === true
+    || Object.entries(answerNow).some(([requestId, text]) => seen[requestId] !== text)
+  const next: CommentRecord = { ...comment, answerNow, unseen: lit }
+  // `unseen` is only ever stored as `true` (see `CommentRecord`), so a thread with nothing to say
+  // carries no flag at all rather than `false` — that is what keeps an old file byte-identical
+  // through a read that changed nothing.
+  if (!lit) delete next.unseen
+  return next
+}
+
+/** Whether a patch would leave a comment exactly as it stands (the check that keeps a read from saving). */
+function sameRecord(before: CommentRecord, after: CommentRecord): boolean {
+  return before.unseen === after.unseen && sameAnswers(before.answerNow, after.answerNow)
 }
 
 /** Read one file's JSON; `undefined` when absent (the normal empty state). */
@@ -340,6 +429,68 @@ export class CommentStore {
   }
 
   /**
+   * Fold what the session's transcript now says into the threads that asked, so a thread whose answer
+   * has arrived (or been rewritten) wears the dot.
+   *
+   * The answers are DERIVED on every list read and never trusted from the file (see
+   * `CommentRecord.answerNow`): the read is the only moment the host knows what the agent has said, and
+   * the comparison it makes is against a baseline that survives a restart — a restart must not light a
+   * dot the reader already cleared, and a read that changed nothing must not light one at all. That is
+   * what `answerSeen` is, and why this writes a baseline only when the text actually moved.
+   *
+   * A question the transcript shows no answer for goes back to ABSENT rather than looking like an
+   * empty answer: a log this process cannot read (or a turn that has not written yet) then leaves the
+   * dot exactly as it was, instead of raising it on every poll.
+   *
+   * @param sessionId - the session whose comments to fold.
+   * @param answers - the answer text per question id, as the transcript read it.
+   * @returns whether any thread changed.
+   */
+  syncAnswers(sessionId: SessionId, answers: Readonly<Record<string, AskRead>>): boolean {
+    // The session guard is the patch's own: the read is one session's, and a patch keyed on the
+    // transcript alone would fold a second session's answers into threads that never asked.
+    const lit = (comment: CommentRecord): CommentRecord | undefined => {
+      if (comment.sessionId !== sessionId) return undefined
+      const next = answerStateOf(comment, answers)
+      return sameRecord(comment, next) ? undefined : next
+    }
+    return this.patch(
+      comment => lit(comment) !== undefined,
+      comment => lit(comment) ?? comment,
+    ) > 0
+  }
+
+  /**
+   * Mark one comment as looked at: the dot goes out, and the answers it currently shows become the
+   * baseline a later rewrite is measured against — otherwise the next read would find the same answer
+   * "new" again and put the dot straight back up.
+   *
+   * Deliberately its own seam rather than something a read does: only a reader action (the card coming
+   * into view) may clear attention, and a read that cleared it would make the dot impossible to see.
+   *
+   * @param id - the comment the reader has in front of them.
+   * @returns whether the comment existed.
+   */
+  markSeen(id: string): boolean {
+    const before = this.byId.get(id)
+    if (before === undefined) return false
+    // The answers the comment holds NOW are the ones being acknowledged, so the baseline is taken from
+    // the record's own last read rather than from a second transcript walk at this seam.
+    const seen = before.answerNow ?? {}
+    const next: CommentRecord = { ...before, answerSeen: { ...seen } }
+    // `unseen` is only ever stored as `true`: the dot is the presence of the flag, and leaving a
+    // `false` behind would make the file say something it has no state for.
+    delete next.unseen
+    // Nothing to take down and nothing to record: a save here would rewrite the session's file for a
+    // request that changed nothing.
+    if (before.unseen !== true && sameAnswers(before.answerSeen, next.answerSeen)) return false
+    this.byId.set(id, next)
+    this.revision += 1
+    this.save(before.sessionId)
+    return true
+  }
+
+  /**
    * Record one annotation.
    *
    * Writing a comment that is already here is the SAME comment written again — a client
@@ -410,11 +561,20 @@ export class CommentStore {
    */
   private mergeOf(record: CommentRecord): CommentRecord {
     const before = this.byId.get(record.id)
-    return before === undefined ? record : {
+    if (before === undefined) return record
+    const merged: CommentRecord = {
       ...record,
       createdAt: before.createdAt,
       ...(before.asks === undefined ? {} : { asks: before.asks }),
+      ...(record.answerSeen === undefined && before.answerSeen !== undefined ? { answerSeen: before.answerSeen } : {}),
     }
+    // Attention is the LIVE value's, never the written record's: the re-add this most often is is an
+    // undo/redo replaying a snapshot, and a snapshot restores CONTENT — whether the reader has looked
+    // at a thread is not content, so a stored `unseen` must not raise a dot the reader already cleared
+    // (nor take one down that a newer answer just raised).
+    delete merged.unseen
+    if (before.unseen === true) merged.unseen = true
+    return merged
   }
 
   /**

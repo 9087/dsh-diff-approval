@@ -376,6 +376,9 @@ describe('the comment-answering skill', () => {
     // The step number is the agent's own words in the note: there is no field beside it, which is what
     // makes it travel with the text (a copy of the card, the agent's reply) rather than being drawn.
     expect(comments[0]).not.toHaveProperty('order')
+    // The agent wrote this while the reader was looking elsewhere, so it is news: the card wears the
+    // dot until the reader has actually been shown it.
+    expect(comments[0]!.unseen).toBe(true)
 
     // Annotating the same lines again is refused for the reason the feature turns on, and the file is not
     // re-listed (the listing seam answers from the list, so a review in progress is never re-baselined).
@@ -2380,6 +2383,52 @@ describe('comments over the channel', () => {
     expect(value.files.map(entry => entry.id)).toEqual(['/repo/a.txt'])
     expect(value.comments).toEqual([comment])
     expect(value.commentsRevision).toBeGreaterThan(0)
+    // The reader is the one who wrote this comment, in the card they had open, so its arrival is not
+    // news: only an agent's own annotation (and an answer) lights the dot.
+    expect(value.comments?.[0]).not.toHaveProperty('unseen')
+  })
+
+  it('takes the dot down through its own endpoint, and persists that', async () => {
+    // The reader looking at a card is a host action of its own (the panel reports it from an
+    // IntersectionObserver), so it has to be an endpoint rather than a side effect of a read: a read
+    // that cleared the dot would make it impossible to see. The card is seeded the way an ANNOTATION
+    // leaves one — a record on the disk, already lit — because "the reader has not looked at this" is
+    // exactly the state that has to survive a restart.
+    const commentId = 'c-agent'
+    const target = join(tmpdir(), `dsh-diff-approval-seen-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    const storageDir = join(target, 'state')
+    const file = join(commentsDirFor(storageDir), 'session-1.json')
+    await mkdir(commentsDirFor(storageDir), { recursive: true })
+    await writeFile(file, JSON.stringify({
+      version: 1,
+      comments: [{
+        id: commentId, sessionId: 'session-1', entryId: '/repo/a.txt', path: '/repo/a.txt',
+        anchor: { startLine: 1, endLine: 1 }, quote: 'a', text: 'why is this here?',
+        createdAt: 1, updatedAt: 1, unseen: true,
+      }],
+    }), 'utf8')
+    const { ctx, handle } = await harness({ storageDir })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    await handle('list', { sessionId: 'session-1' }, signal())
+
+    expect((await listComments(handle, 'session-1')).find(row => row.id === commentId)?.unseen).toBe(true)
+    await expect(handle('comment-seen', { sessionId: 'session-1', id: commentId }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'seen' } })
+    const cleared = (await listComments(handle, 'session-1')).find(row => row.id === commentId)!
+    expect(cleared.unseen).toBe(undefined)
+    expect(cleared).not.toHaveProperty('unseen')
+
+    // "Cleared" has to mean the file, not just this process's memory: a restart that read the dot back
+    // would hand the reader a card they had already looked at.
+    await vi.waitFor(async () => {
+      expect(await readFile(file, 'utf8')).not.toContain('"unseen"')
+    }, FILE_WAIT)
+
+    // A malformed request is refused, and another session's comment is not this session's to clear.
+    await expect(handle('comment-seen', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: false, error: { code: 'internal', message: expect.any(String) as string, details: {} } })
+    await expect(handle('comment-seen', { sessionId: 'session-2', id: commentId }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
   })
 
   it('refuses a comment on an entry that is not in that session\'s list', async () => {

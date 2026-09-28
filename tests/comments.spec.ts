@@ -93,8 +93,130 @@ describe('loadAll', () => {
     expect(reader).not.toHaveProperty('author')
   })
 
-  it('keeps each session in its own file, and lists only that session', async () => {
+  it('lights the dot for an agent\'s own annotation and for nothing the reader wrote', async () => {
+    // Which direction a card came from is what decides whether its arrival is news: an agent's
+    // annotation lands on code the reader was not looking at (see `annotate-tool.ts`), while the
+    // reader's own comment is written in the card they just opened, so lighting that one would put a
+    // dot on the very thing they are looking at.
     const comments = await store()
+    comments.add(comment({ id: 'c-agent', unseen: true }))
+    comments.add(comment({ id: 'c-reader' }))
+    expect(comments.get('c-agent')?.unseen).toBe(true)
+    expect(comments.get('c-reader')?.unseen).toBe(undefined)
+  })
+
+  it('lights a thread the first time an answer arrives, and not on the reads after it', async () => {
+    const comments = await store()
+    comments.add(comment())
+    comments.recordAsk(S1, 'c1', 'req-1', 3, 'why?')
+    // The turn has not written anything: no answer is not an answer.
+    expect(comments.syncAnswers(S1, { 'req-1': { answer: undefined, turn: 3, ended: false } })).toBe(false)
+    expect(comments.get('c1')?.unseen).toBe(undefined)
+
+    // The answer lands. "New" is the DIFFERENCE from what the reader has already been told about —
+    // the transcript hands back the same text on every read afterwards, so a plain "is there an
+    // answer" test would leave the dot up for the rest of the session.
+    expect(comments.syncAnswers(S1, { 'req-1': { answer: '因为它是守卫', turn: 3, ended: true } })).toBe(true)
+    expect(comments.get('c1')).toMatchObject({ unseen: true, answerNow: { 'req-1': '因为它是守卫' } })
+    expect(comments.syncAnswers(S1, { 'req-1': { answer: '因为它是守卫', turn: 3, ended: true } })).toBe(false)
+
+    // A read that cannot reach the transcript answers nothing, and a question with no answer goes back
+    // to ABSENT: a thread with nothing to say — or a log this process could not read — is not a change.
+    expect(comments.syncAnswers(S1, {})).toBe(true)
+    expect(comments.get('c1')).toMatchObject({ unseen: true, answerNow: {} })
+  })
+
+  it('lights a thread again when the same answer is rewritten, and only then', async () => {
+    const comments = await store()
+    comments.add(comment())
+    comments.recordAsk(S1, 'c1', 'req-1', 3, 'why?')
+    comments.syncAnswers(S1, { 'req-1': { answer: 'first', turn: 3, ended: true } })
+    // The reader looks: the dot goes out and the answer they were shown becomes the baseline.
+    expect(comments.markSeen('c1')).toBe(true)
+    expect(comments.get('c1')?.unseen).toBe(undefined)
+    expect(comments.get('c1')?.answerSeen).toEqual({ 'req-1': 'first' })
+
+    // The same text again is not news…
+    expect(comments.syncAnswers(S1, { 'req-1': { answer: 'first', turn: 3, ended: true } })).toBe(false)
+    expect(comments.get('c1')?.unseen).toBe(undefined)
+    // …and a rewritten answer is.
+    expect(comments.syncAnswers(S1, { 'req-1': { answer: 'first, and then some', turn: 3, ended: true } })).toBe(true)
+    expect(comments.get('c1')?.unseen).toBe(true)
+  })
+
+  it('remembers what the reader has seen across a restart instead of lighting it again', async () => {
+    // The baseline is the reason the dot can be cleared at all: it is written to the comment file, so
+    // the first read after a restart does not hand the reader the same answer as news.
+    const comments = await store()
+    comments.add(comment())
+    comments.recordAsk(S1, 'c1', 'req-1', 3, 'why?')
+    comments.syncAnswers(S1, { 'req-1': { answer: 'because', turn: 3, ended: true } })
+    comments.markSeen('c1')
+    await comments.settled()
+
+    const second = new CommentStore(root)
+    await expect(second.loadAll()).resolves.toBe(1)
+    expect(second.get('c1')?.answerSeen).toEqual({ 'req-1': 'because' })
+    expect(second.syncAnswers(S1, { 'req-1': { answer: 'because', turn: 3, ended: true } })).toBe(false)
+    expect(second.get('c1')?.unseen).toBe(undefined)
+  })
+
+  it('takes the dot down once, and only for the comment it was asked about', async () => {
+    const comments = await store()
+    comments.add(comment({ id: 'c-lit', unseen: true }))
+    comments.add(comment({ id: 'c-quiet' }))
+    const before = comments.commentsRevision()
+    expect(comments.markSeen('c-lit')).toBe(true)
+    expect(comments.get('c-lit')?.unseen).toBe(undefined)
+    expect(comments.get('c-lit')).not.toHaveProperty('unseen')
+    expect(comments.commentsRevision()).toBe(before + 1)
+    // Nothing left to take down and nothing to record: a second request is not a second write.
+    expect(comments.markSeen('c-lit')).toBe(false)
+    expect(comments.commentsRevision()).toBe(before + 1)
+    expect(comments.markSeen('c-gone')).toBe(false)
+    // The untouched thread keeps whatever it had.
+    expect(comments.get('c-quiet')?.unseen).toBe(undefined)
+  })
+
+  it('lets a restored snapshot put the content back without reviving the dot', async () => {
+    // The undo/redo path is `addMany` — a snapshot of records put back verbatim — and a snapshot
+    // restores CONTENT: whether the reader has looked at a thread is not content, so a stored `unseen`
+    // must not raise a dot they already cleared (nor take down one a newer answer just raised).
+    const comments = await store()
+    comments.add(comment({ id: 'c1', unseen: true }))
+    const snapshot = { ...comments.get('c1')! }
+    comments.markSeen('c1')
+    comments.addMany([snapshot])
+    expect(comments.get('c1')?.unseen).toBe(undefined)
+
+    // …and the live flag wins the other way too: a thread the reader has not looked at stays lit when
+    // a snapshot that knows nothing about it is replayed.
+    comments.add(comment({ id: 'c2', unseen: true }))
+    const quiet = { ...comments.get('c2')!, unseen: undefined }
+    delete (quiet as { unseen?: boolean }).unseen
+    comments.addMany([quiet])
+    expect(comments.get('c2')?.unseen).toBe(true)
+  })
+
+  it('keeps a comment file written before these flags existed loadable', async () => {
+    // The compatibility promise the pending store makes, for the same reason: the file this version
+    // reads is one an older version WROTE, and a loader that insisted on a field it added would drop
+    // every thread of the workspace on the first start after the upgrade.
+    await store()
+    const legacy = comment({ id: 'c-old' })
+    await writeFile(join(root, `${S1}.json`), JSON.stringify({ version: 1, comments: [legacy] }), 'utf8')
+    const comments = new CommentStore(root)
+    await expect(comments.loadAll()).resolves.toBe(1)
+    expect(comments.list(S1)).toEqual([legacy])
+    expect(comments.get('c-old')).not.toHaveProperty('unseen')
+    expect(comments.get('c-old')).not.toHaveProperty('answerNow')
+    // The older file is still writable, and reading it changed nothing on disk.
+    comments.add(comment({ id: 'c-new' }))
+    await comments.settled()
+    await expect(readFile(join(root, `${S1}.json`), 'utf8')).resolves.toContain('c-old')
+  })
+
+  it('keeps each session in its own file, and lists only that session', async () => {    const comments = await store()
     comments.add(comment())
     comments.add(comment({ id: 'c2', sessionId: S2, entryId: '/repo/b.txt', path: '/repo/b.txt' }))
     await comments.settled()
