@@ -11,6 +11,7 @@ import type { ComponentProps, ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { CommentRecord, PendingFileDiff } from '../src/types.ts'
 import { OPEN_PANEL_FILE_EVENT, PendingPanel, fittingItems, frameInsets, inlineItemCount, makeMeasurer, rowOfLine, wrapChipRows, MIN_LIST_WIDTH_PX } from '../src/client/PendingPanel.tsx'
+import { startProducedChipMenu } from '../src/client/produced-diff.ts'
 import { computeWholeFileDiff } from '../src/client/whole-file-diff.ts'
 import panelCss from '../src/client/PendingPanel.module.css'
 import { codeFontCss } from '../src/client/code-font.ts'
@@ -20,6 +21,8 @@ import { diffLineHeight, navLeadRows, setCommentModeEnabled, setConfirmFileRemov
 import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
 import { DiffApprovalHeaderEntry } from '../src/client/header-entry.tsx'
 import { DiffApprovalSettingsTab } from '../src/client/SettingsTab.tsx'
+import { createPendingDiffStore } from '../src/client/store.ts'
+import type { DiffApprovalPort } from '../src/client/port.ts'
 import { renderMarkdownPreview } from '../src/client/markdown-preview.ts'
 import { highlightWindow } from '../src/client/highlight.ts'
 import type { PendingDiffSnapshot } from '../src/client/slots.ts'
@@ -680,6 +683,49 @@ describe('PendingPanel', () => {
     props.useSessions = ((select: (state: { current: SessionId | undefined; byId: Record<string, { blank?: boolean }> }) => SessionId | undefined) =>
       select({ current: undefined, byId: {} })) as unknown as typeof props.useSessions
     const view = render(<PendingPanel {...props} />)
+    const badge = document.querySelector('[data-diff-approval-badge]') as HTMLButtonElement
+    expect(badge.disabled).toBe(true)
+  })
+
+  it('reads the page\u2019s newest view through pendingView when the seat names no session', async () => {
+    // The panel's own reader, as the plugin builds it: `pendingView(current, …)` straight onto the real
+    // store. With no session of its own (`current === undefined`) that call must REACH
+    // `store.viewFor(undefined)` — the newest read, the same view `getSnapshot()` answers — rather than a
+    // slot no session read ever writes; that empty slot is what made this seat's badge read 0 while the
+    // page's list sat behind it.
+    const real = createPendingDiffStore({
+      // Every session's list answers on demand: the drive-by session first, then the one that read last.
+      async list(sessionId: string): Promise<unknown> {
+        const files = sessionId === 'drive-by'
+          ? [entry({ id: 'drive-by-1', path: '/repo/x.txt', sessionId: 'drive-by' as SessionId })]
+          : [
+              entry({ id: 'page-1', path: '/repo/a.txt' }),
+              entry({ id: 'page-2', path: '/repo/b.txt' }),
+              entry({ id: 'page-3', path: '/repo/c.txt' }),
+            ]
+        return { files, comments: [], commentLines: {}, commentsRevision: 0, commentAnswers: {}, workspacePath: '/repo' }
+      },
+    } as unknown as DiffApprovalPort)
+    await real.refresh('drive-by' as never)
+    await real.refresh(S1)
+    // The page-wide answer really is the newest read (three), not the drive-by session's one.
+    expect(real.getSnapshot().files).toHaveLength(3)
+
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    props.usePending = ((select: (state: PendingDiffSnapshot) => unknown) => select(real.getSnapshot())) as never
+    const askedFor: (SessionId | undefined)[] = []
+    props.pendingView = ((sessionId: SessionId | undefined, select: (view: PendingDiffSnapshot) => unknown) => {
+      askedFor.push(sessionId)
+      return select(real.viewFor(sessionId))
+    }) as never
+    props.useSessions = ((select: (state: { current: SessionId | undefined; byId: Record<string, { blank?: boolean }> }) => SessionId | undefined) =>
+      select({ current: undefined, byId: {} })) as unknown as typeof props.useSessions
+
+    render(<PendingPanel {...props} />)
+    // The seat asked the page-wide question, and the store answered the newest read for it.
+    expect(askedFor).toEqual([undefined])
+    expect(real.viewFor(askedFor[0]).files).toHaveLength(3)
+    // Nothing is selected, so the entry stays inert — the count is a reading, not an invitation.
     const badge = document.querySelector('[data-diff-approval-badge]') as HTMLButtonElement
     expect(badge.disabled).toBe(true)
   })

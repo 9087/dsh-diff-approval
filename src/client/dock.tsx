@@ -26,7 +26,7 @@ import { PresentationMenu } from './presentation-menu.tsx'
 import { setPanelPresentation } from './settings.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
 import type { PendingDiffSnapshot, PendingViewHooks } from './slots.ts'
-import { publishedSessionId, selectedSessionOf } from './session-seat.ts'
+import { usePublishedSessionId, selectedSessionOf } from './session-seat.ts'
 
 /** The tab type's `kind`: what `openTab` names. */
 export const DIFF_DOCK_KIND = 'diff-approval'
@@ -350,7 +350,11 @@ export function DiffDockTitle(props: DiffDockBodyProps): ReactNode {
   // same order; only the reading is guarded, because a chip that cannot read the list must still render
   // a title — the tab is the only way back to a docked panel.
   const storeSelected = useSessions?.((state: unknown) => selectedSessionOf(state)) as SessionId | undefined
-  const here = sessionId ?? storeSelected ?? publishedSessionId()
+  // The published session is read as a SUBSCRIBED value, not as a plain module read: the header publishes
+  // it from an effect, so a chip that only read the global kept whatever the value was on its first
+  // render and showed the previous session's count until something else happened to re-render it.
+  const published = usePublishedSessionId()
+  const here = sessionId ?? storeSelected ?? published
   // The page-wide read doubles as the subscription that re-renders this chip when anything publishes:
   // one call, made on every render, and its answer is the fallback for a face with no per-session reader.
   const pageWide = usePending?.((snapshot: PendingDiffSnapshot) => snapshot) as PendingDiffSnapshot | undefined

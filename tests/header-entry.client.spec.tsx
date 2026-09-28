@@ -9,9 +9,37 @@ import type { DiffApprovalHeaderEntryProps } from '../src/client/header-entry.ts
 import { PANEL_STATE_EVENT, TOGGLE_PANEL_EVENT } from '../src/client/dock.tsx'
 import type { DockSnapshot } from '../src/client/dock.tsx'
 import type { PendingDiffSnapshot } from '../src/client/slots.ts'
+import { createPendingDiffStore } from '../src/client/store.ts'
+import type { PendingDiffStore } from '../src/client/store.ts'
+import { publishSessionId, publishedSessionId, usePublishedSessionId } from '../src/client/session-seat.ts'
+import type { DiffApprovalPort } from '../src/client/port.ts'
+import type { PendingFileDiff } from '../src/types.ts'
 
 afterEach(cleanup)
 afterEach(() => { localStorage.clear() })
+afterEach(() => { act(() => { publishSessionId(undefined) }) })
+
+/** One pending row good enough for the store: identity and text are all it reads. */
+function row(id: string, session: string): PendingFileDiff {
+  return {
+    id, sessionId: session, sessionIds: [session], path: `${id}.txt`,
+    oldText: '', newText: `${id}\n`, updatedAt: 1,
+  } as unknown as PendingFileDiff
+}
+
+/** A store over a port whose per-session list is fixed. */
+async function storeOf(bySession: Record<string, PendingFileDiff[]>): Promise<PendingDiffStore> {
+  const store = createPendingDiffStore({
+    async list(sessionId: string): Promise<unknown> {
+      return {
+        files: bySession[sessionId] ?? [], comments: [], commentLines: {},
+        commentsRevision: 0, commentAnswers: {}, workspacePath: `/repo-${sessionId}`,
+      }
+    },
+  } as unknown as DiffApprovalPort)
+  for (const sessionId of Object.keys(bySession)) await store.refresh(sessionId as never)
+  return store
+}
 
 /** The entry as the header's utilities seat draws it: our face's hooks bound, the
  *  session seat, and the translator. */
@@ -113,5 +141,90 @@ describe('DiffApprovalHeaderEntry', () => {
     // the whole header cluster down on a build that stopped providing it.
     render(<DiffApprovalHeaderEntry {...entryProps({ count: 1 })} />)
     expect(button().disabled).toBe(false)
+  })
+})
+
+/**
+ * The entry's PER-SESSION count, which the page-wide `entryProps` above cannot stage: a seat that
+ * knows its session reads that session's own view (`pendingView`), and a seat whose shell names no
+ * session must fall back to the page's newest view rather than to a permanently empty slot.
+ */
+describe('DiffApprovalHeaderEntry per-session count', () => {
+  /** The face as the plugin builds it: the real store's two readers bound to the framework hooks. */
+  function faceFor(store: PendingDiffStore): Pick<DiffApprovalHeaderEntryProps, 'usePending' | 'pendingView'> {
+    return {
+      usePending: (<T,>(select: (view: PendingDiffSnapshot) => T): T => select(store.getSnapshot())) as never,
+      pendingView: ((sessionId: string | undefined, select: (view: PendingDiffSnapshot) => unknown) =>
+        select(store.viewFor(sessionId as never))) as never,
+    }
+  }
+
+  /**
+   * `useSessions` as the slot framework binds it: the hook hands the session-list state to the
+   * selector and returns the selector's answer (the framework preserves it — it does not coerce it),
+   * while the component's declared selector is a boolean one. This fake states that contract.
+   */
+  function sessionsState(state: unknown): (select: (value: unknown) => boolean) => boolean {
+    return (select) => select(state)
+  }
+
+  it('counts the page\u2019s newest list when the shell names no session, rather than a dead zero', async () => {
+    // The shape `session-seat.ts` exists to support: the seat is handed no `sessionId` and the
+    // session-list state names no selection either — so the button is inert (nothing is selected) but
+    // its badge is still the page's list. `viewFor(undefined)` answers the newest read, the same view
+    // `getSnapshot()` answers; before the store fix it answered a slot no session read writes, and the
+    // badge read 0 for a page whose list was right there.
+    const store = await storeOf({ a: [row('a1', 'a')], b: [row('b1', 'b'), row('b2', 'b'), row('b3', 'b')] })
+    render(<DiffApprovalHeaderEntry t={(key: string) => key} {...faceFor(store)} useSessions={sessionsState({ current: null, byId: {} }) as never} />)
+    expect(button().disabled).toBe(true)
+    expect(button().dataset.diffApprovalHeaderEntry).toBe('3')
+  })
+
+  it('counts its own session when the shell hands one over, never the one that read last', async () => {
+    const store = await storeOf({ a: [row('a1', 'a')], b: [row('b1', 'b'), row('b2', 'b'), row('b3', 'b')] })
+    render(<DiffApprovalHeaderEntry t={(key: string) => key} {...faceFor(store)} sessionId={'a' as never} />)
+    // A was read (one file) while the page-wide newest is B (three): the count is A's, and it stays A's.
+    expect(button().dataset.diffApprovalHeaderEntry).toBe('1')
+  })
+
+  it('answers a session that has never been read with its own empty view, not the page-wide list', async () => {
+    const store = await storeOf({ a: [row('a1', 'a')], b: [row('b1', 'b'), row('b2', 'b'), row('b3', 'b')] })
+    render(<DiffApprovalHeaderEntry t={(key: string) => key} {...faceFor(store)} sessionId={'unread' as never} />)
+    expect(button().dataset.diffApprovalHeaderEntry).toBe('0')
+    expect(button().disabled).toBe(false)
+  })
+
+  it('keeps the badge on the page\u2019s list while the shell\u2019s blank session keeps the button inert', async () => {
+    // Two rules, two sources, and they must not be one: the count follows the session the seat named
+    // (none here, so the page's newest read), while the enabled state follows the shell's own blank
+    // session. The old cross-talk came from the count asking a session the blank check never named.
+    const store = await storeOf({ a: [row('a1', 'a')], b: [row('b1', 'b'), row('b2', 'b'), row('b3', 'b')] })
+    render(
+      <DiffApprovalHeaderEntry
+        t={(key: string) => key}
+        {...faceFor(store)}
+        useSessions={sessionsState({ current: 'blank-one', byId: { 'blank-one': { blank: true } } }) as never}
+      />,
+    )
+    expect(button().disabled).toBe(true)
+    expect(button().dataset.diffApprovalHeaderEntry).toBe('3')
+  })
+
+  it('publishes the session the shell composed, so a root-scoped seat follows that same one', async () => {
+    // The footer/dock seats handed no session id read what this seat published (`usePublishedSessionId`,
+    // see `session-seat.ts`), so what it publishes has to be the session it is about.
+    const store = await storeOf({ a: [row('a1', 'a'), row('a2', 'a')], b: [row('b1', 'b')] })
+    render(
+      <DiffApprovalHeaderEntry
+        t={(key: string) => key}
+        {...faceFor(store)}
+        sessionId={'b' as never}
+        useSessions={sessionsState({ current: 'b', byId: {} }) as never}
+      />,
+    )
+    expect(button().dataset.diffApprovalHeaderEntry).toBe('1')
+    // `publishedSessionId()` is the plain read of the same module state the hook subscribes to.
+    expect(publishedSessionId()).toBe('b')
+    expect(store.viewFor(publishedSessionId() as never).files).toHaveLength(1)
   })
 })

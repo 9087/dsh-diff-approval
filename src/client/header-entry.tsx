@@ -84,9 +84,14 @@ export type DiffApprovalHeaderEntryProps =
  * @returns the icon button, with the pending count while there is one.
  */
 export function DiffApprovalHeaderEntry({ usePending, useSessions, useDock, pendingView, sessionId, t }: DiffApprovalHeaderEntryProps): ReactNode {
-  // This session's own count, never another session's: the page-wide snapshot is only the fallback for a
-  // face with no per-session reader. The `usePending` call is also the subscription that re-renders this
-  // button whenever anything publishes, so the count tracks the list without a second store hook.
+  // This session's own count when the shell named one, else the page's. The page-wide snapshot is the
+  // fallback for a face with no per-session reader; `pendingView(undefined, …)` is the honest whole-page
+  // answer for a shell that names no session — the store resolves it to the newest read, the same thing
+  // `getSnapshot()` answers (see `newestView`) — so an unnamed seat counts the page's list rather than
+  // a permanent zero, which is what a slot no session read ever writes used to make of it.
+  //
+  // The `usePending` call is also the subscription that re-renders this button whenever anything
+  // publishes, so the count tracks the list without a second store hook.
   const pageWide = usePending(snapshot => snapshot) as PendingDiffSnapshot
   const count = pendingView === undefined
     ? pageWide.files.length

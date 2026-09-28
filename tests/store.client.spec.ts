@@ -244,6 +244,28 @@ describe('one view per session', () => {
     expect(untouched.files).toEqual([])
   })
 
+  it('answers the newest read for viewFor(undefined), exactly what getSnapshot answers', async () => {
+    // The two spellings of "no session of mine" are documented as one answer, and a seat whose shell
+    // names no session reads through this one: `viewFor(undefined)` used to return a module-level slot
+    // that a session read never writes, so the header entry rendered a DEAD badge (count 0) for a
+    // session whose list was right there, while `getSnapshot()` answered it correctly.
+    const seam = port({
+      list: vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>(async (sessionId) => (
+        sessionId === S1 ? listValue({ files: [FILE] }) : listValue({ files: [FILE_B] })
+      )),
+    })
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+    expect(store.viewFor(undefined)).toBe(store.getSnapshot())
+    expect(store.viewFor(undefined).files).toEqual([FILE])
+
+    await store.refresh(S2)
+    expect(store.viewFor(undefined)).toBe(store.getSnapshot())
+    expect(store.viewFor(undefined).files).toEqual([FILE_B])
+    // …and an unread session is still its own empty view, never the page-wide answer.
+    expect(store.viewFor('session-3' as SessionId).files).toEqual([])
+  })
+
   it('keeps a session\'s own list when its read fails', async () => {
     // A failed poll knows nothing new. It must not blank the session's list — neither as empty nor as a
     // fresh snapshot — so the reader keeps the files, and the reason, that this session already had.

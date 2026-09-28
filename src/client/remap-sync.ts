@@ -33,12 +33,19 @@ export interface ReferenceRemapOpts {
   /** Apply an edit mutation to one queued message's full content. */
   writeQueue: (itemId: string, content: readonly QueueBlock[]) => void
   /**
-   * The session whose list this sync follows, read per observation.
+   * The session whose list this sync follows and whose view supplies the workspace path, read per
+   * observation.
    *
-   * The pending list is per session now, and the draft and the queue this sync rewrites are the CURRENT
-   * session's: observing another session's files would remap one session's references inside another
-   * session's composer. The baselines are dropped whenever this answers a different session, so the
-   * arrival of a new session's list seeds fresh baselines instead of reading as "this file changed".
+   * The pending list is per session now, and the draft and the queue this sync rewrites belong to the
+   * session the page is SHOWING (see `shownSessionId`): observing another session's files would remap one
+   * session's references inside another session's composer. It must not be a pointer to whichever mount
+   * refreshed last either — with a dock tab on one session and the header on another, alternating polls
+   * moved that pointer about once a second and dropped these baselines with it, so a file that really
+   * changed was only ever re-seeded and never remapped. The baselines are still dropped when this answers
+   * a DIFFERENT session, so a session switch seeds fresh baselines instead of reading as "file changed".
+   *
+   * Absent, the page-wide view is observed instead — the same fallback a reader with no session gets
+   * (`viewFor(undefined)`, which answers the newest read).
    */
   sessionId?: (() => SessionId | undefined) | undefined
 }

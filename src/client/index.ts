@@ -17,6 +17,7 @@ import { createDiffApprovalPort } from './port.ts'
 import { createPendingDiffStore } from './store.ts'
 import { attachReferenceRemap } from './remap-sync.ts'
 import { conversationAccess } from './conversation-access.ts'
+import { shownSessionId, selectedSessionOf } from './session-seat.ts'
 import { CHIP_MENU_EVENT, startProducedChipMenu } from './produced-diff.ts'
 import type { PendingPanelFace } from './slots.ts'
 import { attachDiffDock, createDockState, DIFF_DOCK_ID, DiffDockBody, DiffDockTitle } from './dock.tsx'
@@ -150,16 +151,31 @@ export function apply(ctx: ClientContext): void {
   const connection = ctx.get('connection') as ConnectionHandle
   const store = createPendingDiffStore(createDiffApprovalPort(connection.rpc))
 
-  // The current session, latched from the panel's `onRefresh` so the reference
-  // remap can address the visible composer.
-  let currentSessionId: SessionId | undefined
+  // The sessions service, read only for the store's own selected session: the other half of "which
+  // session is the page showing" is what the Session header entry published (`session-seat.ts`). This is
+  // NOT "the session some mount refreshed last" — see `shownSession` below.
+  const sessions = ctx.get('sessions') as { current?(): unknown } | undefined
+  const selectedFromStore = (): SessionId | undefined => {
+    try {
+      return selectedSessionOf(sessions?.current?.())
+    } catch {
+      return undefined
+    }
+  }
 
-  // Rewrite stale references in the current composer when a pending file's
-  // content changes (agent edit, block revert, or an external adoption).
-  // `remapFile` is also called directly after a whole-file revert (whose entry
-  // leaves the list, so the observation loop cannot see its content change).
+  // Rewrite stale references in the composer the reader is looking at, and in its queued messages, when
+  // a pending file's content changes (agent edit, block revert, or an external adoption). `remapFile` is
+  // also called directly after a whole-file revert (whose entry leaves the list, so the observation loop
+  // cannot see its content change).
+  //
+  // Every reader below is addressed to the session the PAGE IS SHOWING (`shownSessionId`, resolved per
+  // call). It used to be one `currentSessionId` pointer written by whichever seat refreshed last
+  // (`onRefresh`): a dock tab left open on another session moved it on every one of that tab's polls, so
+  // the remap's baselines were dropped about once a second (a changed file was only ever re-seeded and
+  // never remapped), and the draft/queue edits could be aimed at a composer that was not on screen.
+  const shownSession = (): SessionId | undefined => shownSessionId(selectedFromStore)
   let remapFile: (sessionId: SessionId, path: string, oldText: string, newText: string) => void = () => {}
-  const access = conversationAccess(ctx, () => currentSessionId)
+  const access = conversationAccess(ctx, shownSession)
   ctx.effect(() => {
     const attached = attachReferenceRemap({
       store,
@@ -167,9 +183,9 @@ export function apply(ctx: ClientContext): void {
       writeDraft: access.writeDraft,
       readQueue: access.readQueue,
       writeQueue: access.writeQueue,
-      // The draft and the queue this rewrites are the CURRENT session's, so the list it follows is that
-      // session's own view: another session's files would remap its references inside this composer.
-      sessionId: () => currentSessionId,
+      // The draft and the queue this rewrites are the shown session's, so the list it follows is that
+      // session's own view. The stored baselines are dropped only when this answers a different session.
+      sessionId: shownSession,
     })
     remapFile = attached.remapFile
     return attached.unsubscribe
@@ -217,7 +233,10 @@ export function apply(ctx: ClientContext): void {
       onDockShowing: dock.face.setShowing,
       onDockClose: dock.face.setClose,
       closeDock: dock.face.close,
-      onRefresh: (sessionId) => { currentSessionId = sessionId; void store.refresh(sessionId) },
+      // The read itself, for the session the seat asked about. Nothing else is latched from it: what the
+      // page is showing is answered by `shownSession` above, and every reader that knows its own session
+      // passes it explicitly (the panel's seats all do).
+      onRefresh: (sessionId) => { void store.refresh(sessionId) },
       onMarkSeen: (sessionId, id) => { if (sessionId !== undefined) void store.markSeen(sessionId, id) },
       onKeep: (sessionId, path, keepListed) => store.keep(sessionId, path, keepListed),
       onRevert: (sessionId, path, keepListed) => {
@@ -344,11 +363,21 @@ export function apply(ctx: ClientContext): void {
   if (typeof window !== 'undefined') {
     ctx.effect(() => startProducedChipMenu({
       // The panel's list, read at press time: the press is prevented on this answer, so it cannot
-      // wait for a poll to settle. It is the CURRENT session's view — the chip belongs to that
-      // session's conversation, and the page-wide snapshot may be pointed at another seat's read.
+      // wait for a poll to settle. This press carries NO session (the chip is DSH's own DOM, not one
+      // of this plugin's seats), so there is no "the session this chip is in" to ask for. What CAN be
+      // answered honestly is the page-wide question: is this path pending in any session this page has
+      // read? That is the old page-wide behaviour, and it errs towards offering the review — a file
+      // pending in a session nobody has read yet simply misses the menu until a read reaches it.
       isPending: (path) => {
-        const view = store.viewFor(currentSessionId)
-        return view.files.some(file => diffPathsMatch(path, file.path, view.workspacePath))
+        // The sessions the page-wide view knows of (the newest read's rows carry theirs).
+        const seen = store.getSnapshot()
+        const known = new Set<SessionId>()
+        for (const file of seen.files) for (const id of file.sessionIds ?? [file.sessionId]) known.add(id)
+        for (const id of known) {
+          const view = store.viewFor(id)
+          if (view.files.some(file => diffPathsMatch(path, file.path, view.workspacePath))) return true
+        }
+        return seen.files.some(file => diffPathsMatch(path, file.path, seen.workspacePath))
       },
       onMenu: (detail) => {
         window.dispatchEvent(new CustomEvent(CHIP_MENU_EVENT, { detail }))

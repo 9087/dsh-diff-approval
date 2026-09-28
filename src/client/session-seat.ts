@@ -124,3 +124,24 @@ export function sessionIdFor(
 ): SessionId | undefined {
   return propSessionId ?? storeSelected ?? publishedSessionId()
 }
+
+/**
+ * The session the PAGE is showing, resolved the way a whole-page reader has to resolve it: the
+ * session-list store's own selection first, else what the Session header entry published.
+ *
+ * `readSessionsSelection` is supplied by the plugin body (it owns the `sessions` service), and may
+ * return `undefined` for a shell whose state names none — 0.1.7's store carries no selected session and
+ * hands the id to its own session-scoped seats instead, which is why the published id is read here too
+ * (`publishSessionId` runs from the header entry's effect). This is a plain read for non-React code: the
+ * component that publishes it reads the SUBSCRIBED value ({@link usePublishedSessionId}).
+ *
+ * It is deliberately NOT every session anyone has read: the page-wide readers here (the reference remap,
+ * which rewrites the visible composer's draft) mean the session the reader is looking at, and taking the
+ * newest session some other mount polled would address a composer that is not on screen.
+ *
+ * @param readSessionsSelection - the store's own selected session, when its shape names one.
+ * @returns the id, or `undefined` when nothing on this page names a session.
+ */
+export function shownSessionId(readSessionsSelection: () => SessionId | undefined): SessionId | undefined {
+  return readSessionsSelection() ?? publishedSessionId()
+}

@@ -3,14 +3,20 @@
 // the tab chip's count.
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { attachDiffDock, createDockState, DiffDockTitle, DIFF_DOCK_ID, DIFF_DOCK_KIND, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
 import type { DockHostContext } from '../src/client/dock.tsx'
 import { IconListPenOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PendingDiffSnapshot } from '../src/client/slots.ts'
+import { createPendingDiffStore } from '../src/client/store.ts'
+import { publishSessionId, publishedSessionId } from '../src/client/session-seat.ts'
+import type { DiffApprovalPort } from '../src/client/port.ts'
 
 afterEach(cleanup)
 afterEach(() => { localStorage.clear() })
+// The published session is module state the header entry would own in the app: a case that plants one
+// takes it back so the next file's chips start with nothing published.
+afterEach(() => { act(() => { publishSessionId(undefined) }) })
 // Real timers come back for EVERY case, not only at the end of the ones that fake them: an
 // assertion that throws before the case's own `vi.useRealTimers()` would otherwise leave the rest
 // of this file running on a clock that never advances.
@@ -262,6 +268,49 @@ describe('DiffDockTitle', () => {
     render(<DiffDockTitle {...chip} />)
     expect(screen.getByText('panel.title · 2')).not.toBeNull()
     expect(screen.queryByText('panel.title · 7')).toBeNull()
+  })
+
+  it('counts the page\u2019s newest list when it names no session, and follows a session publish at once', async () => {
+    // The 0.1.7 footer-style shape: the tab seat is handed no `sessionId` and the session-list store
+    // names no selection, so `here` falls through to the published session (what the Session header
+    // entry last showed). Two things have to hold:
+    //  1. with nothing published, the count is the page-wide newest view — `viewFor(undefined)`, the
+    //     same answer `getSnapshot()` gives — not a slot no session read ever writes (the store fix);
+    //  2. a later `publishSessionId('pane-one')` moves the chip on its own: it reads the published id
+    //     through the SUBSCRIBED hook, so no other publish or store poll is needed for it to catch up.
+    const store = createPendingDiffStore({
+      async list(sessionId: string): Promise<unknown> {
+        const files = sessionId === 'pane-one'
+          ? [{ id: 'a1', sessionId, sessionIds: [sessionId], path: '/repo/a.txt', oldText: '', newText: 'a\n', updatedAt: 1 }]
+          : [
+              { id: 'b1', sessionId, sessionIds: [sessionId], path: '/repo/b.txt', oldText: '', newText: 'b\n', updatedAt: 1 },
+              { id: 'b2', sessionId, sessionIds: [sessionId], path: '/repo/c.txt', oldText: '', newText: 'c\n', updatedAt: 1 },
+              { id: 'b3', sessionId, sessionIds: [sessionId], path: '/repo/d.txt', oldText: '', newText: 'd\n', updatedAt: 1 },
+            ]
+        return { files, comments: [], commentLines: {}, commentsRevision: 0, commentAnswers: {}, workspacePath: '/repo' }
+      },
+    } as unknown as DiffApprovalPort)
+    // The session the header names gets read first, so the page-wide pointer ends up on the OTHER one:
+    // `viewFor(undefined)` must answer that newest read, while a publish of the named session must move
+    // the chip to the named session's own view (one file, not three).
+    await store.refresh('pane-one' as never)
+    await store.refresh('page-wide' as never)
+    const chip = {
+      t: (key: string) => key,
+      usePending: ((select: (v: unknown) => unknown) => select(store.getSnapshot())) as never,
+      pendingView: ((sessionId: unknown, select: (v: unknown) => unknown) => select(store.viewFor(sessionId as never))) as never,
+      useSessions: ((select: (state: unknown) => unknown) => select({ byId: {} })) as never,
+      useTabInfo: () => ({ tab: { visible: true, actions: { close: () => {} } } }),
+    } as never
+    render(<DiffDockTitle {...chip} />)
+    // Nothing published yet: the page's newest read (three files), not zero.
+    expect(screen.getByText('panel.title · 3')).not.toBeNull()
+
+    // The header switches: the chip re-renders from the subscription alone and reads that session's view.
+    act(() => { publishSessionId('pane-one' as never) })
+    expect(screen.getByText('panel.title · 1')).not.toBeNull()
+    expect(screen.queryByText('panel.title · 3')).toBeNull()
+    act(() => { publishSessionId(undefined) })
   })
 
   it('carries the mode switch, and handing the panel back closes this tab', () => {

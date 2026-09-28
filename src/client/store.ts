@@ -25,8 +25,9 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
    * slot, and every consumer takes its own slot, by the session it is actually about.
    *
    * A session that has never been read answers an unread empty view — never another session's list.
-   * `sessionId === undefined` answers the most recently published view, which is what a caller with no
-   * session of its own (a whole-page concern) is asking for.
+   * `sessionId === undefined` answers the most recently published view — exactly what
+   * {@link PendingDiffStore.getSnapshot} answers — because that is what a caller with no session of its
+   * own (a whole-page concern) is asking for.
    * @param sessionId - the session whose view to read.
    * @returns that session's snapshot, identity-stable until it is next published.
    */
@@ -165,8 +166,10 @@ interface SessionView {
  */
 export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore {
   /**
-   * The most recently published view, for the readers that have no session of their own
-   * ({@link PendingDiffStore.viewFor} with no id, `getSnapshot`). It is NOT the shared state two
+   * The page-wide view published WITHOUT a session (`refresh(undefined)`, a page-wide failure marker or
+   * notice), and the answer for the whole-page readers only while nothing has been pointed at yet. The
+   * moment a session is read it becomes `pointed` and this is no longer what a page-wide read answers —
+   * see `newestView`, which is the one place the two are resolved. It is NOT the shared state two
    * sessions used to fight over: every session keeps its own slot in `views` below.
    */
   let snapshot: PendingDiffSnapshot = emptyView()
@@ -175,11 +178,13 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
   /**
    * The session the whole-page readers are pointed at: the newest session to be read or acted on.
    *
-   * `getSnapshot` and `viewFor(undefined)` answer this session's view. That is the honest reading for a
-   * caller with no session of its own — the produced-file chip's "is this file pending", the reference
-   * remap's "what does this session's draft refer to" — and it is the OLD page-wide behaviour, now
-   * scoped: the session's own slot follows the reads that name it, and no other session's read can move
-   * it. A seat that knows its session must use `viewFor(sessionId)` instead of relying on this.
+   * {@link PendingDiffStore.getSnapshot} and `viewFor(undefined)` answer this session's view — the two
+   * spellings are ONE answer (see `newestView`). That is the honest reading for a caller with no session
+   * of its own — the produced-file chip's "is this file pending", the reference remap's "what does this
+   * session's draft refer to", a seat whose shell names no session — and it is the OLD page-wide
+   * behaviour, now scoped: the session's own slot follows the reads that name it, and no other session's
+   * read can move it. A seat that knows its session must use `viewFor(sessionId)` instead of relying on
+   * this.
    */
   let pointed: SessionId | undefined
   const listeners = new Set<() => void>()
@@ -225,9 +230,19 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
     for (const listener of [...listeners]) listener()
   }
 
-  /** The view one action should act on: the session's own slot, or the reader's latest. */
+  /**
+   * The page-wide answer: the newest published view, for the readers with no session of their own.
+   *
+   * This is the ONE spelling of "no session of mine": `getSnapshot` and `viewFor(undefined)` both resolve
+   * here, so the two can never disagree — and neither is a slot that a session read never writes, which
+   * is what made a seat with no `sessionId` render a permanently empty badge. Before any session has
+   * been read it is the unread empty view, so nothing is invented for a page that has read nothing.
+   */
+  const newestView = (): PendingDiffSnapshot => pointed === undefined ? snapshot : slotOf(pointed).view
+
+  /** The view one action should act on: the session's own slot, or the page-wide newest view. */
   const viewOf = (sessionId: SessionId | undefined): PendingDiffSnapshot =>
-    sessionId === undefined ? snapshot : slotOf(sessionId).view
+    sessionId === undefined ? newestView() : slotOf(sessionId).view
 
   /** Record one entry's failed keep/revert with its message; auto-clears after a few seconds. */
   const markFailed = (sessionId: SessionId | undefined, id: string, message: string): void => {
