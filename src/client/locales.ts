@@ -107,6 +107,9 @@ export const zh = {
   'row.keepListed': '保留',
   'row.keepRemove': '保留并移出',
   'row.revertRemove': '回退并移出',
+  // The same whole-file action the row menu above names, for a row whose entry has no earlier
+  // version: there is nothing to write back, so the action DELETES the file.
+  'row.deleteRemove': '删除并移出',
   // The bulk actions ask before they run (see `data-diff-batch-confirm`), and the menu rows that start
   // them are deliberately the SAME short words a single row uses: the scope belongs in the dialog, which
   // names the count, not in a label that has to say 所有选中 every time.
@@ -160,6 +163,9 @@ export const zh = {
   'discussion.askMissing': '这条评论已经不存在了，你的评论没有发出去。',
   'action.revert': '回退',
   'action.delete': '删除',
+  // A decision made over a SET of rows: 回退 and 删除 are one action on the model (`earlierVersion`
+  // decides which), so a set that mixes both says so rather than naming one of the two.
+  'action.revertOrDelete': '回退或删除',
   'action.discussionEnd': '关闭评论',
   'action.keepAll': '全部保留',
   'action.revertAll': '全部回退',
@@ -378,6 +384,7 @@ export const en = {
   'row.keepListed': 'Keep',
   'row.keepRemove': 'Keep and remove',
   'row.revertRemove': 'Revert and remove',
+  'row.deleteRemove': 'Delete and remove',
   'panel.batchKeepAsk': 'Keep {count} file(s)?',
   'panel.batchKeepRemoveAsk': 'Keep and remove {count} file(s)?',
   'panel.batchRevertAsk': 'Revert {count} file(s)?',
@@ -416,6 +423,7 @@ export const en = {
   'discussion.askMissing': 'That comment is gone; yours was not sent.',
   'action.revert': 'Revert',
   'action.delete': 'Delete',
+  'action.revertOrDelete': 'Revert or delete',
   'action.discussionEnd': 'Close comment',
   'action.keepAll': 'Keep all',
   'action.revertAll': 'Revert all',

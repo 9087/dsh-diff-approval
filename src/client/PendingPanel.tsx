@@ -2172,6 +2172,42 @@ function fileHasNoDiff(file: PendingFileDiff): boolean {
   return changeBlocksOf(computeWholeFileDiff(file.oldText, file.newText)).length === 0
 }
 
+/**
+ * Whether a row offers 移出 and nothing else: its content already matches the baseline, or the file is
+ * gone from disk.
+ *
+ * 移出 is a keep — the host folds the content and drops the entry WITHOUT touching the file — so it is
+ * the one decision that is safe on either. Keeping a file that has nothing left to accept would fold
+ * nothing; putting a missing one back would WRITE THE BASELINE BACK, recreating a file the reader
+ * deleted outside the panel. The row menu and the bulk footer both decide their actions off this one
+ * answer, so a row and the set of rows can never disagree about what a file is for.
+ *
+ * It is deliberately not `oldText === ''`: an empty COMMITTED file still has an earlier version to
+ * restore.
+ * @param file - the pending file to classify.
+ * @returns true when the only decision left on it is whether it stays listed.
+ */
+function fileDismissOnly(file: PendingFileDiff): boolean {
+  return fileHasNoDiff(file) || file.missing
+}
+
+/**
+ * The whole-file action's label over a SET of files: 删除 when every one of them has no earlier version
+ * (the action DELETES the file), 回退 when every one of them does, and the both-at-once wording when the
+ * set mixes them — the action itself is one thing, and `earlierVersion` decides per file which of the two
+ * it does. Read off the model, never off `oldText`.
+ * @param files - the files the one action would act on, in list order.
+ * @param t - the panel's translator.
+ * @returns the label for that action.
+ */
+function wholeFileActionLabel(files: readonly PendingFileDiff[], t: Translator): string {
+  const allDelete = files.every(file => file.earlierVersion === 'none')
+  const allRevert = files.every(file => file.earlierVersion === 'file')
+  if (allDelete && files.length > 0) return t('action.delete')
+  if (allRevert) return t('action.revert')
+  return t('action.revertOrDelete')
+}
+
 /** Whether a block keep/revert range covers the file's entire change region, so
  *  applying it leaves the file with no pending diff — the "remove or keep in
  *  list" prompt applies. This generalises the single-block case to a selection
@@ -8105,7 +8141,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, sessionId, usePending, pendingView, showing = true, onRefresh, onMarkSeen, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onCommentAdd, onCommentRemove, onCommentRemoveMany, onCommentAsk, onCommentSeen, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onRevertAll, onKeepMany, onRevertMany, onAckRedoCleared, onAckUndoNotice, collapseSidebar, t,
+  wide, useSessions, sessionId, usePending, pendingView, showing = true, onRefresh, onMarkSeen, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onCommentAdd, onCommentRemove, onCommentRemoveMany, onCommentAsk, onCommentSeen, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onKeepMany, onRevertMany, onAckRedoCleared, onAckUndoNotice, collapseSidebar, t,
   docked = false, dockHost, onOpenDock, closeDock, useDock,
 }: PendingPanelProps) {
   const storeSelected = useSessions(state => selectedSessionOf(state))
@@ -8419,10 +8455,15 @@ export function PendingPanel({
     // A single row is NAMED: "保留并移出「a.txt」？" reads as the press the reader made, where "1 个文件"
     // reads like a report. The action word is the row's own label, so the dialog and the menu agree.
     if (kind === 'remove-one' || kind === 'keep-remove-one' || kind === 'revert-remove-one') {
+      const file = files.find(entry => entry.id === prompt.ids[0])
+      // 移出 and 保留并移出 are the same words their row menu uses. 回退并移出 is not: with no earlier
+      // version to write back, the whole-file action DELETES, so the dialog says 删除并移出 — the row's own
+      // label (see `rowMenuItems`), so the press and the question it opens agree.
       const action = kind === 'remove-one'
         ? t('row.dismiss')
-        : kind === 'keep-remove-one' ? t('row.keepRemove') : t('row.revertRemove')
-      const file = files.find(entry => entry.id === prompt.ids[0])
+        : kind === 'keep-remove-one'
+          ? t('row.keepRemove')
+          : file?.earlierVersion === 'none' ? t('row.deleteRemove') : t('row.revertRemove')
       return t('panel.removeOneAsk', { action, file: basenameOf(file?.path ?? '') })
     }
     return t(
@@ -9325,27 +9366,55 @@ export function PendingPanel({
     setRowMenu(null)
   }, [open])
 
+  /**
+   * The whole-list decisions, decided off the same rule a single row uses (`fileDismissOnly`), so the
+   * footer and the rows can never disagree about what a file is for.
+   */
+  const bulkDismissOnly = files.length > 0 && files.every(file => fileDismissOnly(file))
+  /** The rows a whole-list 回退 would act on: every row that is not dismiss-only. */
+  const bulkRevertFiles = files.filter(file => !fileDismissOnly(file))
+  /** The whole-list action's own label, three-way (see `wholeFileActionLabel`). */
+  const bulkRevertLabel = wholeFileActionLabel(bulkRevertFiles, t)
+
   /** Ask before running a session-wide bulk decision — the same dialog a pick's rows open. */
   const askBulk = (kind: 'keep' | 'revert'): void => {
     if (current === undefined) return
     // 回退 DELETES every file the agent created; the dialog names those, because that is the part with no
     // undo behind it.
     const doomed = kind === 'revert' ? files.filter(file => file.earlierVersion === 'none').map(file => file.id) : []
+    // A revert over the whole list still SKIPS the rows that are only ever 移出 (see `runBulk`), so those
+    // are not named as deleted — the dialog would otherwise promise to delete a file the action leaves
+    // alone. 保留 acts on every row: it is the one decision a dismiss-only row still has.
+    const acted = kind === 'revert' ? bulkRevertFiles : files
     setBatchPrompt({
       sessionId: current,
       kind: kind === 'keep' ? 'keep-all' : 'revert-all',
-      ids: files.map(file => file.id),
+      ids: acted.map(file => file.id),
       doomed,
     })
   }
 
-  /** Run the same decision over every current-session file, sequentially. */
+  /**
+   * Run the same decision over the current-session list.
+   *
+   * 保留 settles every row — including a dismiss-only one, where folding an identical change and dropping
+   * the entry is exactly what its own 移出 does.
+   *
+   * 回退 names the rows it may act on EXPLICITLY rather than asking the host for the whole session,
+   * because a dismiss-only row must be skipped: a missing file's revert writes the baseline back and
+   * RECREATES a file the reader deleted outside the panel (see `fileDismissOnly`), which is the opposite
+   * of what a bulk "put everything back" should do behind their back. The rows left alone stay listed and
+   * keep whatever decision they had. `keepListed` is the plain 回退: the rows that were reverted stay
+   * listed, as a single row's 回退 does.
+   */
   const runBulk = async (kind: 'keep' | 'revert') => {
     if (current === undefined) return
+    const ids = bulkRevertFiles.map(file => file.id)
+    if (kind === 'revert' && ids.length === 0) return
     setBulkBusy(kind)
     try {
       if (kind === 'keep') await onKeepAll(current)
-      else await onRevertAll(current)
+      else await onRevertMany(current, ids, true)
     } finally {
       setBulkBusy(null)
     }
@@ -9570,16 +9639,20 @@ export function PendingPanel({
       // The pick's own menu: the SAME four decisions the single row offers, in the same short words. The
       // scope is not in the label — 所有选中 made every row a sentence — it is in the confirmation each
       // row opens, which names the count and, for a revert, the files about to be deleted. 删除 vs 回退
-      // is the single row's own distinction, decided here by the pick: all of them created files, or not.
+      // is the single row's own distinction, and a pick can hold both: the label is read off the pick the
+      // same three ways a whole-list action is (see `wholeFileActionLabel`), so a mixed pick says so.
       const picked = files.filter(file => pickedFiles.has(file.id))
-      const revertLabel = picked.length > 0 && picked.every(file => file.earlierVersion === 'none')
-        ? t('action.delete')
-        : t('action.revert')
+      const revertLabel = wholeFileActionLabel(picked, t)
       return [
         { id: 'keep-picked', label: t('row.keepListed') },
         { id: 'keep-remove-picked', label: t('row.keepRemove') },
         { id: 'revert-picked', label: revertLabel },
-        { id: 'revert-remove-picked', label: t('row.revertRemove') },
+        // The same distinction on the dropping half: a pick with nothing to write back DELETES, so it
+        // says 删除并移出 unless every file it holds has an earlier version.
+        {
+          id: 'revert-remove-picked',
+          label: picked.some(file => file.earlierVersion === 'none') ? t('row.deleteRemove') : t('row.revertRemove'),
+        },
       ]
     }
     // The two ways out of the panel, behind a hairline: they act on the FILE, not on the review, so they
@@ -9598,7 +9671,7 @@ export function PendingPanel({
     //   • the file is GONE from disk (the row wears 缺失). Keeping would fold a change that is not there,
     //     and putting it back would WRITE THE BASELINE BACK — recreating a file the reader deleted outside
     //     the panel, which is the last thing a "put back" should do behind their back.
-    if (fileHasNoDiff(rowMenu.file) || rowMenu.file.missing) {
+    if (fileDismissOnly(rowMenu.file)) {
       return [{ id: 'remove', label: t('row.dismiss') }, ...openRows]
     }
     // Put back wins a second reading too: 回退 puts the file back and leaves it listed, so a file
@@ -9611,8 +9684,13 @@ export function PendingPanel({
       { id: 'keep-listed', label: t('row.keepListed') },
       { id: 'keep-remove', label: t('row.keepRemove') },
       { id: 'revert', label: revertLabel },
-      // 回退并移出  is the same pair on the other decision: put the file back and take the row out.
-      { id: 'revert-remove', label: t('row.revertRemove') },
+      // 回退并移出  is the same pair on the other decision — put the file back and take the row out — and
+      // it names the same action `revertLabel` just named: with no earlier version to write back the
+      // whole-file action DELETES the file, so the row says 删除并移出 rather than promising a revert.
+      {
+        id: 'revert-remove',
+        label: rowMenu.file.earlierVersion === 'none' ? t('row.deleteRemove') : t('row.revertRemove'),
+      },
       ...openRows,
     ]
   }, [rowMenu, pickedFiles, files, t])
@@ -10122,24 +10200,45 @@ export function PendingPanel({
           </div>
           {files.length > 0 && (
             <div className={css.bulkActions}>
-              <button
-                type="button"
-                className={`${css.action} ${css.actionPrimary}`}
-                data-diff-keep-all
-                disabled={bulkBusy !== null}
-                onClick={() => { askBulk('keep') }}
-              >
-                {bulkBusy === 'keep' ? t('action.busy') : t('action.keepAll')}
-              </button>
-              <button
-                type="button"
-                className={css.action}
-                data-diff-revert-all
-                disabled={bulkBusy !== null}
-                onClick={() => { askBulk('revert') }}
-              >
-                {bulkBusy === 'revert' ? t('action.busy') : t('action.revertAll')}
-              </button>
+              {/* Every row below is the whole of what its own menu offers: a row that has nothing left to
+                  accept and nothing to put back has 移出 as its one decision (see `fileDismissOnly`), so a
+                  list made only of those rows has exactly one decision to offer — and it is that one. */}
+              {bulkDismissOnly ? (
+                <button
+                  type="button"
+                  className={`${css.action} ${css.actionPrimary}`}
+                  data-diff-remove-all
+                  data-diff-keep-all
+                  disabled={bulkBusy !== null}
+                  onClick={() => { askBulk('keep') }}
+                >
+                  {bulkBusy === 'keep' ? t('action.busy') : t('row.dismiss')}
+                </button>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className={`${css.action} ${css.actionPrimary}`}
+                    data-diff-keep-all
+                    disabled={bulkBusy !== null}
+                    onClick={() => { askBulk('keep') }}
+                  >
+                    {bulkBusy === 'keep' ? t('action.busy') : t('action.keepAll')}
+                  </button>
+                  <button
+                    type="button"
+                    className={css.action}
+                    data-diff-revert-all
+                    disabled={bulkBusy !== null}
+                    onClick={() => { askBulk('revert') }}
+                  >
+                    {/* The list's own words, not a fixed 全部回退: the rows decide whether this DELETES
+                        their files, writes them back, or does both — the same three-way answer a single
+                        row's menu gives, read off `earlierVersion` (see `wholeFileActionLabel`). */}
+                    {bulkBusy === 'revert' ? t('action.busy') : bulkRevertLabel}
+                  </button>
+                </>
+              )}
               {/* Add goes last, past the decisions: it is how a path JOINS the list, and the two
                   decisions to its left are about the files already in it. Its own mark and label, so
                   a third button in the row is read as a way in rather than as another decision. */}

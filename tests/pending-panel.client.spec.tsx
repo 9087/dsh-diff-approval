@@ -251,6 +251,30 @@ function askedPrompts(props: PanelProps): string[] {
     .map(call => call[2])
 }
 
+/**
+ * One of the bulk footer's own buttons, by its mark.
+ *
+ * The footer's labels are the ROWS' words on purpose — a whole-list 回退 says 回退, not 全部回退, because
+ * `earlierVersion` decides per file whether the action deletes or writes back (see `wholeFileActionLabel`)
+ * — so the detail pane's own 回退 button can carry the same text at the same time. A query by text would
+ * have to disambiguate between two controls that say the same thing and mean different scopes; the mark
+ * says which one this is.
+ * @param mark - the button's `data-diff-*` attribute.
+ * @returns the footer's button.
+ */
+function bulkButton(mark: string): HTMLButtonElement {
+  const button = document.querySelector(`[data-diff-${mark}]`)
+  if (button === null) throw new Error(`the bulk footer has no [data-diff-${mark}] button`)
+  return button as HTMLButtonElement
+}
+
+/** The OPEN file's toolbar button, by its mark (`keep` / `revert` / `remove`). */
+function toolbarButton(mark: string): HTMLButtonElement {
+  const button = document.querySelector(`[data-diff-${mark}]`)
+  if (button === null) throw new Error(`the detail toolbar has no [data-diff-${mark}] button`)
+  return button as HTMLButtonElement
+}
+
 /** The drafts the panel has written down, in order: the second argument of every `onCommentAdd`. */
 function addedCommentTexts(props: PanelProps): string[] {
   return (props.onCommentAsk as unknown as { mock: { calls: unknown[][] } }).mock.calls.length === 0
@@ -1067,27 +1091,176 @@ describe('PendingPanel', () => {
     // The footer ASKS first: one press here settles the whole list, so the dialog says how many files it
     // covers and nothing is sent until the reader answers.
     const keepAllMock = props.onKeepAll as unknown as { mock: { calls: unknown[][] } }
-    fireEvent.click(screen.getByText('action.keepAll'))
+    fireEvent.click(bulkButton('keep-all'))
     expect(screen.getByText('panel.batchKeepAllAsk {"count":2}')).toBeDefined()
     expect(document.querySelector('[data-diff-batch-deletes]')).toBeNull()
     fireEvent.click(document.querySelector('[data-diff-batch-confirm-cancel]') as HTMLElement)
     expect(keepAllMock.mock.calls).toHaveLength(0)
 
-    fireEvent.click(screen.getByText('action.keepAll'))
+    fireEvent.click(bulkButton('keep-all'))
     fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
     await waitFor(() => { expect(keepAllMock.mock.calls).toHaveLength(1) })
     expect(keepAllMock.mock.calls[0]).toEqual([S1])
     expect(props.onKeep).not.toHaveBeenCalled()
 
-    // 回退 all DELETES the created file, and the dialog is where that is said — by name, since the file
-    // is the thing the reader cannot get back.
-    fireEvent.click(screen.getByText('action.revertAll'))
+    // The list MIXES an edit with a creation, so the footer's own label is the three-way one: the single
+    // action both writes a file back and deletes one, and 回退或删除 is how that reads (see
+    // `wholeFileActionLabel`). The dialog then names the file the action DELETES, because that is the part
+    // with no undo behind it.
+    expect(bulkButton('revert-all').textContent).toBe('action.revertOrDelete')
+    fireEvent.click(bulkButton('revert-all'))
     expect(screen.getByText('panel.batchRevertAllAsk {"count":2}')).toBeDefined()
     expect(screen.getByText('panel.batchDeletes {"count":1,"files":"b.txt"}')).toBeDefined()
     fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
-    const revertAllMock = props.onRevertAll as unknown as { mock: { calls: unknown[][] } }
-    await waitFor(() => { expect(revertAllMock.mock.calls).toHaveLength(1) })
-    expect(revertAllMock.mock.calls[0]).toEqual([S1])
+    // A whole-list revert names the rows it may act on rather than asking the host for the session: a
+    // dismiss-only row is skipped (see `runBulk`), and here neither row is one.
+    const revertManyMock = props.onRevertMany as unknown as { mock: { calls: unknown[][] } }
+    await waitFor(() => { expect(revertManyMock.mock.calls).toHaveLength(1) })
+    expect(revertManyMock.mock.calls[0]).toEqual([S1, [FILE.id, 'entry-2'], true])
+    expect(props.onRevert).not.toHaveBeenCalled()
+    expect(props.onRevertAll).not.toHaveBeenCalled()
+  })
+
+  it('labels the whole-list action three ways off `earlierVersion`, never off empty text', () => {
+    // The footer's revert is ONE action whose label has to say what it does to the list it is over:
+    // 删除 when every row was created (there is no earlier version to write back, so it removes the
+    // files), 回退 when every row is an edit, and both at once when the list mixes them — because the
+    // action itself is one press and `earlierVersion` decides per file which of the two it does.
+    //
+    // The second file is an EMPTY COMMITTED file (`earlierVersion: 'file'`, `oldText: ''`): it is the
+    // case `oldText === ''` would misread as a creation, and reading it off the text instead of the
+    // model would put 删除 on a file whose revert writes it back.
+    const edited = entry({ id: 'entry-edited', path: '/repo/edited.txt', earlierVersion: 'file', oldText: '', newText: 'x\n' })
+    const created = entry({ id: 'entry-created', path: '/repo/created.txt', earlierVersion: 'none', oldText: '', newText: 'y\n' })
+    const labelOf = (files: PendingFileDiff[]): string => {
+      const props = panelProps({ read: true, files, busy: new Set() })
+      const view = render(<PendingPanel {...props} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      const label = bulkButton('revert-all').textContent
+      view.unmount()
+      return label
+    }
+    expect(labelOf([edited])).toBe('action.revert')
+    expect(labelOf([created])).toBe('action.delete')
+    expect(labelOf([edited, created])).toBe('action.revertOrDelete')
+  })
+
+  it('offers the list 移出 alone, and no revert at all, when every row has nothing left to review', async () => {
+    // Two rows, two reasons, one menu: a file whose content already matches the baseline has nothing to
+    // accept and nothing to put back, and a missing file must not be written back at all (that would
+    // RECREATE a file the reader deleted outside the panel). Each row's own menu is 移出 and nothing else,
+    // so the list made only of them is too — the other decision is not offered, not merely disabled.
+    const settled = entry({ id: 'entry-settled', path: '/repo/settled.txt', oldText: 'same\n', newText: 'same\n' })
+    const gone = entry({ id: 'entry-gone', path: '/repo/gone.txt', missing: true, oldText: '', newText: 'gone\n' })
+    const props = panelProps({ read: true, files: [settled, gone], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const removeAll = bulkButton('remove-all')
+    expect(removeAll.textContent).toBe('row.dismiss')
+    expect(document.querySelector('[data-diff-revert-all]')).toBeNull()
+    // The one button IS the keep the row's own 移出 makes: fold the content, drop the entry, leave the
+    // file alone. It still asks first, like every other whole-list decision.
+    fireEvent.click(removeAll)
+    expect(screen.getByText('panel.batchKeepAllAsk {"count":2}')).toBeDefined()
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
+    await waitFor(() => { expect(props.onKeepAll as unknown as { mock: { calls: unknown[][] } }).toHaveBeenCalledTimes(1) })
+    expect(props.onRevertAll).not.toHaveBeenCalled()
+    expect(props.onRevertMany).not.toHaveBeenCalled()
+  })
+
+  it('names 删除并移出 on the row whose entry has no earlier version to write back', () => {
+    // The row menu's fourth decision is the same action its third is, plus taking the row out. With no
+    // earlier version that action DELETES, so the dropping row says 删除并移出 — the pair's own words,
+    // and the same distinction 回退/删除 makes one row above it.
+    const created = entry({ id: 'entry-created-row', path: '/repo/created.txt', earlierVersion: 'none', oldText: '', newText: 'made\n' })
+    const props = panelProps({ read: true, files: [created], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.contextMenu(document.querySelector('[data-diff-file="entry-created-row"]') as HTMLElement, { clientX: 40, clientY: 60 })
+
+    const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+    expect(items.map(item => item.textContent)).toEqual([
+      'row.keepListed',
+      'row.keepRemove',
+      'action.delete',
+      'row.deleteRemove',
+      'action.openFile',
+      'action.revealFile',
+    ])
+    // The press runs the same call the toolbar's 删除 does, and it asks the same question in the same
+    // word: the dialog is the row's own label, not a fixed 回退并移出.
+    fireEvent.click(items[3]!)
+    expect(props.onRevert).toHaveBeenLastCalledWith(created.sessionId, created.id)
+  })
+
+  it('reads the pick\'s own 回退 or 删除, and its 删除并移出, off the whole pick', () => {
+    // The pick's menu is the single row's four decisions over several files, so it reads `earlierVersion`
+    // the same three ways the footer does for the ordering half (see `wholeFileActionLabel`), and — because
+    // the dropping half would otherwise promise a revert on a file it DELETES — it flips to 删除并移出
+    // whenever any file it holds has no earlier version. The press is taken as a SHIFT span: an anchor
+    // press, then Shift on the far row, which is the pick gesture with no one-gesture guard in front of it.
+    const edited = entry({ id: 'entry-pick-edited', path: '/repo/aa-edited.txt', earlierVersion: 'file' })
+    const created = entry({ id: 'entry-pick-created', path: '/repo/zz-created.txt', earlierVersion: 'none', oldText: '', newText: 'made\n' })
+    const props = panelProps({ read: true, files: [edited, created], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const rowOf = (id: string): HTMLElement => document.querySelector(`[data-diff-file="${id}"]`) as HTMLElement
+    fireEvent.click(rowOf('entry-pick-created'))
+    fireEvent.click(rowOf('entry-pick-edited'), { shiftKey: true })
+    expect(rowOf('entry-pick-created').hasAttribute('data-picked')).toBe(true)
+    expect(rowOf('entry-pick-edited').hasAttribute('data-picked')).toBe(true)
+
+    fireEvent.contextMenu(rowOf('entry-pick-created'), { clientX: 40, clientY: 60 })
+    const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+    expect(items.map(item => item.textContent)).toEqual([
+      'row.keepListed',
+      'row.keepRemove',
+      'action.revertOrDelete',
+      'row.deleteRemove',
+    ])
+  })
+
+  it('asks 删除并移出 in the confirmation too, so the question and the press agree', () => {
+    const created = entry({ id: 'entry-created-ask', path: '/repo/created.txt', earlierVersion: 'none', oldText: '', newText: 'made\n' })
+    const props = panelProps({
+      read: true,
+      files: [created],
+      busy: new Set(),
+      comments: [comment({ id: 'c-on-created', entryId: created.id, text: '看看这个。' })],
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.contextMenu(document.querySelector('[data-diff-file="entry-created-ask"]') as HTMLElement, { clientX: 40, clientY: 60 })
+    // 删除并移出 DROPS the row, and a dropped entry takes its comments with it: that is the press the
+    // host is told about, so it is the one the dialog confirms. Same row as above, with a thread on it.
+    fireEvent.click(([...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[])[3]!)
+    expect(screen.getByText('panel.removeOneAsk {"action":"row.deleteRemove","file":"created.txt"}')).toBeDefined()
+  })
+
+  it('skips a missing row when the whole list is reverted', async () => {
+    // A whole-list revert names the rows it may act on rather than asking the host for the session: reverting
+    // a missing entry writes the baseline back and RECREATES a file the reader deleted outside the panel,
+    // which is the last thing "put everything back" should do behind their back. The rows that are acted on
+    // stay LISTED (the plain 回退, as a single row's is), and the missing one is simply left alone.
+    const edited = entry({ id: 'entry-live', path: '/repo/live.txt', earlierVersion: 'file' })
+    const gone = entry({ id: 'entry-gone-revert', path: '/repo/gone.txt', missing: true, earlierVersion: 'file' })
+    const props = panelProps({ read: true, files: [edited, gone], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    fireEvent.click(bulkButton('revert-all'))
+    // The dialog counts only what the action covers, and names no deletion: the missing row is not in it.
+    expect(screen.getByText('panel.batchRevertAllAsk {"count":1}')).toBeDefined()
+    expect(document.querySelector('[data-diff-batch-deletes]')).toBeNull()
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
+
+    const many = props.onRevertMany as unknown as { mock: { calls: unknown[][] } }
+    await waitFor(() => { expect(many.mock.calls).toHaveLength(1) })
+    expect(many.mock.calls[0]).toEqual([S1, ['entry-live'], true])
+    // The session-wide endpoint is not used at all any more: it walks every entry the session holds, so it
+    // has no way to leave the missing one out.
+    expect(props.onRevertAll).not.toHaveBeenCalled()
     expect(props.onRevert).not.toHaveBeenCalled()
   })
 
@@ -1565,7 +1738,7 @@ describe('PendingPanel', () => {
     expect(screen.queryByText('row.create')).toBeNull()
     fireEvent.click(screen.getByText('new.txt'))
     // With nothing to "revert" to, the whole-file action is a delete, not a revert. No explanatory hint.
-    expect(screen.getByText('action.delete')).toBeDefined()
+    expect(toolbarButton('revert').textContent).toBe('action.delete')
     expect(screen.queryByText('panel.createHint')).toBeNull()
   })
 
@@ -1593,7 +1766,7 @@ describe('PendingPanel', () => {
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
-    fireEvent.click(screen.getByText('action.revert'))
+    fireEvent.click(toolbarButton('revert'))
     fireEvent.click(document.querySelector('[data-diff-file-confirm-remove]') as HTMLButtonElement)
     expect(props.onRevert).toHaveBeenCalledWith(FILE.sessionId, FILE.id, false)
   })
@@ -1617,7 +1790,7 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
 
-    fireEvent.click(screen.getByText('action.revert'))
+    fireEvent.click(toolbarButton('revert'))
     expect(screen.getByText('panel.fileRevertedAsk {"file":"a.txt"}')).toBeDefined()
     fireEvent.click(document.querySelector('[data-diff-file-confirm-keep]') as HTMLButtonElement)
     expect(props.onRevert).toHaveBeenCalledWith(FILE.sessionId, FILE.id, true)
@@ -1722,7 +1895,7 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByText('a.txt'))
 
     expect(document.querySelector('[data-diff-remove]')).not.toBeNull()
-    expect(screen.getByText('row.dismiss')).toBeDefined()
+    expect(toolbarButton('remove').textContent).toBe('row.dismiss')
     expect(document.querySelector('[data-diff-keep]')).toBeNull()
     expect(document.querySelector('[data-diff-revert]')).toBeNull()
 
@@ -1742,11 +1915,11 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
     // Busy keeps the buttons' labels (no flash), but still drops the clicks.
-    expect(screen.getByText('action.keep')).toBeDefined()
-    expect(screen.getByText('action.revert')).toBeDefined()
-    fireEvent.click(screen.getByText('action.keep'))
+    expect(toolbarButton('keep').textContent).toBe('action.keep')
+    expect(toolbarButton('revert').textContent).toBe('action.revert')
+    fireEvent.click(toolbarButton('keep'))
     expect(props.onKeep).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByText('action.revert'))
+    fireEvent.click(toolbarButton('revert'))
     expect(props.onRevert).not.toHaveBeenCalled()
   })
 
