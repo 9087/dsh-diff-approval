@@ -172,7 +172,7 @@ describe.skipIf(!hasGit)('the git import, against a real checkout', () => {
     const change = changeFor(changes, 'a.txt')
     // The index holds "staged" and HEAD holds "base": the review item is the difference between
     // them, which is exactly what the reader has not committed yet.
-    expect(change).toMatchObject({ kind: 'edit', oldText: 'base\n', newText: 'staged\n' })
+    expect(change).toMatchObject({ earlierVersion: 'file', oldText: 'base\n', newText: 'staged\n' })
   })
 
   it('reads a change through 0.1.7\'s executor: resolve, execute, handle.result()', async () => {
@@ -192,7 +192,7 @@ describe.skipIf(!hasGit)('the git import, against a real checkout', () => {
 
     // The same answer the `run`-shaped executor gives: which era of the seam is loaded is not what the
     // scan is about, and this is the era the import button actually runs on.
-    expect(changeFor(changes, 'a.txt')).toMatchObject({ kind: 'edit', oldText: 'base\n', newText: 'modern\n' })
+    expect(changeFor(changes, 'a.txt')).toMatchObject({ earlierVersion: 'file', oldText: 'base\n', newText: 'modern\n' })
   })
 
   it('names the methods the shell service does offer when it offers neither entry point', async () => {
@@ -233,8 +233,8 @@ describe.skipIf(!hasGit)('the git import, against a real checkout', () => {
 
     const { changes } = await scan(root, false)
     // `A ` rather than `??`: the VCS knows this file, it is simply not committed yet. Its revert
-    // means "remove the file", which is why it lands as a create.
-    expect(changeFor(changes, 'new.txt')).toMatchObject({ kind: 'create', oldText: '', newText: 'fresh\n' })
+    // means "remove the file", which is why it lands with `earlierVersion: 'none'`.
+    expect(changeFor(changes, 'new.txt')).toMatchObject({ earlierVersion: 'none', oldText: '', newText: 'fresh\n' })
   })
 
   it('reads a staged deletion as an edit whose new side is empty', async () => {
@@ -242,7 +242,7 @@ describe.skipIf(!hasGit)('the git import, against a real checkout', () => {
     git(root, 'rm', '--quiet', 'a.txt')
 
     const { changes } = await scan(root, false)
-    expect(changeFor(changes, 'a.txt')).toMatchObject({ kind: 'edit', oldText: 'base\n', newText: '' })
+    expect(changeFor(changes, 'a.txt')).toMatchObject({ earlierVersion: 'file', oldText: 'base\n', newText: '' })
   })
 
   it('gates a file the VCS has never seen behind the untracked preference', async () => {
@@ -251,7 +251,7 @@ describe.skipIf(!hasGit)('the git import, against a real checkout', () => {
 
     expect(changeFor((await scan(root, false)).changes, 'u.txt')).toBeUndefined()
     expect(changeFor((await scan(root, true)).changes, 'u.txt'))
-      .toMatchObject({ kind: 'create', oldText: '', newText: 'untracked\n' })
+      .toMatchObject({ earlierVersion: 'none', oldText: '', newText: 'untracked\n' })
   })
 
   it('reports nothing once the work is committed', async () => {
@@ -295,7 +295,7 @@ describe.skipIf(!hasGit)('the git import, against a real checkout', () => {
     // The checkout the VCS root was found in is the link's target; the workspace the session
     // declared is the link. Both spell the same file, and only resolving them makes that visible.
     const { changes } = await scan(target, false, link.path)
-    expect(changeFor(changes, 'a.txt')).toMatchObject({ kind: 'edit', oldText: 'base\n', newText: 'via-link\n' })
+    expect(changeFor(changes, 'a.txt')).toMatchObject({ earlierVersion: 'file', oldText: 'base\n', newText: 'via-link\n' })
     // Exactly one row: the link and its target are one directory tree, not two.
     expect(changes.filter(change => change.path.endsWith('a.txt')).length).toBe(1)
 
@@ -370,5 +370,68 @@ describe.skipIf(!hasGit)('the git import, against a real checkout', () => {
     // are the scope rejecting an outside path and not a scan that found nothing at all.
     const { changes } = await scan(workspace, false)
     expect(changeFor(changes, 'a.txt')).toMatchObject({ newText: 'ws-changed\n' })
+  })
+})
+
+describe('the git import, and what HEAD has to say about a baseline', () => {
+  /**
+   * A shell whose `git status` answer is fixed and whose HEAD-blob read always fails the way given.
+   *
+   * The failure has to be injected, and that is the whole point: `git status` cannot express it. The
+   * status row says the file is tracked, so its baseline MUST come from HEAD, and what happened to that
+   * read is a separate question. Answering it with "no baseline" is what put 新增 — and the 删除 action
+   * that goes with it — on a committed file.
+   * @param failure - the stderr the baseline read fails with.
+   * @param status - the NUL-terminated porcelain row `git status` answers with.
+   * @returns the executor.
+   */
+  function baselineShell(failure: string, status: string): ShellExecutorLike {
+    return {
+      resolve: (request: unknown) => request,
+      run: async (spec: unknown) => {
+        const { command } = spec as { command: string }
+        if (command.includes('status --porcelain')) return { exitCode: 0, stdout: { text: status }, stderr: { text: '' } }
+        if (command.startsWith('git cat-file -s ')) return { exitCode: 128, stdout: { text: '' }, stderr: { text: failure } }
+        return { exitCode: 1, stdout: { text: '' }, stderr: { text: `unexpected command: ${command}` } }
+      },
+    }
+  }
+
+  /** One scan over that shell, with every worktree file reading as `work\n`. */
+  async function scanWithShell(shell: ShellExecutorLike): Promise<VcsChange[]> {
+    return await listVcsChanges({
+      kind: 'git',
+      root: '/repo',
+      workspaceRoot: '/repo',
+      includeUntracked: false,
+      shell,
+      readText: async () => 'work\n',
+      signal: undefined,
+    })
+  }
+
+  it('refuses to read an unreadable baseline as "no earlier version"', async () => {
+    // ` M a.txt` is tracked and modified. Measured before this was fixed: the failed read passed for
+    // absence, the row came out `earlierVersion: 'none'` with an empty old side, and its action deleted the file.
+    const shell = baselineShell('fatal: unable to read tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904', ' M a.txt\0')
+    await expect(scanWithShell(shell)).rejects.toThrow(/could not read a\.txt at HEAD/)
+  })
+
+  it('refuses the same way when the failure says nothing about HEAD', async () => {
+    // A refused spawn, a timeout, a denied read: none of them are git saying "that path is not here".
+    const shell = baselineShell('spawn EPERM', ' M a.txt\0')
+    await expect(scanWithShell(shell)).rejects.toThrow(/could not read a\.txt at HEAD/)
+  })
+
+  it('gives a path HEAD does not carry no earlier version, whatever the status column says', async () => {
+    // `earlierVersion` decides ONE thing now that the row carries no 新增 tag: whether there is an earlier
+    // version to restore, and so whether the whole-file action is 回退 or 删除. It must therefore follow the
+    // BASELINE and not the status column: ` M a.txt` is a tracked file the reader has changed, and HEAD
+    // carrying no version of it means there is nothing to write back — a revert would empty the file.
+    // (0.30.0 read this as 新增 and offered to delete a file that had sat uncommitted for days: the tag is
+    // gone, the delete stays, because "no earlier version" is exactly what a delete is for.)
+    const shell = baselineShell("fatal: path 'a.txt' does not exist in 'HEAD'", ' M a.txt\0')
+    const changes = await scanWithShell(shell)
+    expect(changeFor(changes, 'a.txt')).toMatchObject({ earlierVersion: 'none', oldText: '', newText: 'work\n' })
   })
 })

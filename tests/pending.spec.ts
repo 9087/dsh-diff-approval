@@ -12,7 +12,7 @@ const S2 = SessionId('session-2')
 function entry(overrides: Partial<PendingEntry> = {}): PendingEntry {
   const sessionId = overrides.sessionId ?? S1
   const base: PendingEntry = {
-    id: '/repo/a.txt', sessionId: S1, path: '/repo/a.txt', kind: 'edit',
+    id: '/repo/a.txt', sessionId: S1, path: '/repo/a.txt', earlierVersion: 'file',
     oldText: 'old', newText: 'new', updatedAt: 10, sessionIds: [S1],
   }
   const merged = { ...base, ...overrides }
@@ -27,7 +27,7 @@ describe('PendingDiffStore.fold', () => {
     const store = new PendingDiffStore()
     expect(store.fold(entry())).toBe(true)
     expect(store.get('/repo/a.txt')).toEqual(expect.objectContaining({
-      id: '/repo/a.txt', sessionId: S1, path: '/repo/a.txt', kind: 'edit',
+      id: '/repo/a.txt', sessionId: S1, path: '/repo/a.txt', earlierVersion: 'file',
       oldText: 'old', newText: 'new', updatedAt: 10, sessionIds: [S1],
     }))
     expect(store.size).toBe(1)
@@ -43,11 +43,49 @@ describe('PendingDiffStore.fold', () => {
     expect(store.size).toBe(1)
   })
 
-  it('keeps a create kind when later edits extend a created file', () => {
+  it('turns a created file that was edited again into a modification based on what it was created with', () => {
     const store = new PendingDiffStore()
-    store.fold(entry({ kind: 'create', oldText: '', newText: 'content', updatedAt: 10 }))
+    store.fold(entry({ earlierVersion: 'none', oldText: '', newText: 'content', updatedAt: 10 }))
     store.fold(entry({ oldText: 'content', newText: 'content2', updatedAt: 20 }))
-    expect(store.get('/repo/a.txt')).toEqual(expect.objectContaining({ kind: 'create', newText: 'content2' }))
+    // The reader is reviewing rounds of edits to a file that exists: the tag is 修改, the basis is the
+    // content it was created with, and 回退 writes that back instead of deleting the file.
+    expect(store.get('/repo/a.txt')).toEqual(expect.objectContaining({
+      earlierVersion: 'file', oldText: 'content', newText: 'content2',
+    }))
+  })
+
+  it('keeps a row that was already a modification a modification when an import calls its file new', () => {
+    const store = new PendingDiffStore()
+    // The row was admitted days ago as a modification of a file that exists…
+    store.fold(entry({ oldText: 'v1', newText: 'v2', updatedAt: 10 }))
+    // …and a later version-control import calls the same path new, because HEAD carries no version of it.
+    // (The import's baseline moved from the index to HEAD on 2026-09-24 and shipped in 0.30.0, so every
+    // file that is on disk but uncommitted came back as `create` from then on.)
+    store.fold(entry({ earlierVersion: 'none', oldText: '', newText: 'v3', updatedAt: 20 }))
+    // A creation cannot have an old side, so the row must not become 新增: it keeps its own basis. The old
+    // rule produced exactly `{ earlierVersion: 'none', oldText: 'v1' }` here — measured in a real store, which held
+    // three such rows (AGENTS.md 871 bytes of old side, and two documents) offering to DELETE the file.
+    expect(store.get('/repo/a.txt')).toEqual(expect.objectContaining({
+      earlierVersion: 'file', oldText: 'v1', newText: 'v3',
+    }))
+  })
+
+  it('keeps a create while creations are the whole change', () => {
+    const store = new PendingDiffStore()
+    store.fold(entry({ earlierVersion: 'none', oldText: '', newText: 'content', updatedAt: 10 }))
+    store.fold(entry({ earlierVersion: 'none', oldText: '', newText: 'content2', updatedAt: 20 }))
+    expect(store.get('/repo/a.txt')).toEqual(expect.objectContaining({ earlierVersion: 'none', oldText: '', newText: 'content2' }))
+  })
+
+  it('stops treating a creation as one once part of it has been kept', () => {
+    const store = new PendingDiffStore()
+    store.fold(entry({ earlierVersion: 'none', oldText: '', newText: 'a\nb\n', updatedAt: 10 }))
+    // A block keep accepts part of the file: the basis advances to what the reader kept, so there IS an
+    // earlier version to restore and the whole-file action must become 回退 — not 删除, which would throw
+    // away the part they just accepted. `earlierVersion` is the fact "this file did not exist before", and a
+    // kept block makes that fact false.
+    store.update('/repo/a.txt', { oldText: 'a\n' })
+    expect(store.get('/repo/a.txt')).toEqual(expect.objectContaining({ earlierVersion: 'file', oldText: 'a\n' }))
   })
 
   it('keeps the earliest basis and takes the latest content even when the chain breaks', () => {

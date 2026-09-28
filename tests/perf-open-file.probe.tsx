@@ -47,7 +47,7 @@ function time<T>(label: string, runs: number, fn: () => T): T {
 
 function entry(overrides: Partial<PendingFileDiff>): PendingFileDiff {
   return {
-    id: 'big-1', sessionId: S1, path: `/${TARGET}`, kind: 'edit',
+    id: 'big-1', sessionId: S1, path: `/${TARGET}`, earlierVersion: 'file',
     oldText, newText, updatedAt: 10, missing: false, diverged: false,
     sessionIds: [S1], ...overrides,
   }

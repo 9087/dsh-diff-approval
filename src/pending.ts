@@ -30,7 +30,7 @@ function sameEntry(left: PendingEntry, right: PendingEntry): boolean {
   const lIds = touchedBy(left)
   const rIds = touchedBy(right)
   return left.path === right.path
-    && left.kind === right.kind
+    && left.earlierVersion === right.earlierVersion
     && left.oldText === right.oldText
     && left.newText === right.newText
     && left.updatedAt === right.updatedAt
@@ -100,22 +100,31 @@ export class PendingDiffStore {
   }
 
   /**
-   * Combine a stored entry and a new capture. `oldText` comes from the earlier
-   * capture (the file's original basis), `newText` from the later (latest
-   * content), and the session set is the union — so the entry always spans the
-   * whole pending change regardless of which session contributed which part.
+   * Combine a stored entry and a new capture. `oldText` comes from the earlier capture (the file's
+   * original basis) — except where that capture was the file's creation and this one edits it, when
+   * the creation's own content becomes the basis — and `newText` from the later (latest content).
+   * The session set is the union, so the entry always spans the whole pending change regardless of
+   * which session contributed which part.
    */
   private mergeEntry(a: PendingEntry, b: PendingEntry): PendingEntry {
     const earlier = a.updatedAt <= b.updatedAt ? a : b
     const later = earlier === a ? b : a
     const sessionIds = [...new Set([...touchedBy(a), b.sessionId])]
+    // A creation is the whole change only while creations are all there is: the entry is anchored at a
+    // path that did not exist, and `earlierVersion: 'none'` is what makes a revert remove the file. As
+    // soon as a later capture EDITS that file, the reader is reviewing rounds of work on a file that
+    // exists, so the basis becomes the content it was created with and `回退` writes that back, keeping the
+    // file. Freezing the field at 'none' (the rule from 2026-08-31 until now) left a file that had been
+    // rewritten many times still tagged 新增 and still offering 删除.
+    const onlyCreations = earlier.earlierVersion === 'none' && later.earlierVersion === 'none'
     return {
       ...later,
       // The global identity is the path; `id` must always equal it.
       id: later.path,
-      oldText: earlier.oldText,
-      // A creation always keeps kind 'create', so a revert removes the file.
-      kind: earlier.kind === 'create' || later.kind === 'create' ? 'create' : 'edit',
+      // With no old side of the file's own to keep, the creation's content is the basis: `earlier.newText`
+      // is the file as it stood right after it was created.
+      oldText: onlyCreations ? '' : earlier.earlierVersion === 'none' ? earlier.newText : earlier.oldText,
+      earlierVersion: onlyCreations ? 'none' : 'file',
       sessionIds,
     }
   }
@@ -166,6 +175,12 @@ export class PendingDiffStore {
   /**
    * Advance one entry's tracked content after a block-level keep/revert. The
    * entry keeps its path; only the given side's text and capture time move.
+   *
+   * A keep that advances `oldText` also ends the entry's life as a creation. `earlierVersion` is the fact
+   * "this file did not exist before", and once part of the file has been accepted there IS an earlier
+   * version to restore — what the reader kept. The whole-file action must therefore become 回退, not 删除:
+   * deleting would throw away the part they just accepted. (Leaving the field alone kept a partly-kept new
+   * file offering to delete itself, which is what sent the reader here.)
    * @param path - the file path.
    * @param patch - the side to advance (`oldText` for keep, `newText` for revert).
    * @returns whether the entry changed.
@@ -173,7 +188,8 @@ export class PendingDiffStore {
   update(path: string, patch: { oldText?: string; newText?: string }): boolean {
     const entry = this.entries.get(pathKeyOf(path))
     if (entry === undefined) return false
-    const next: PendingEntry = { ...entry, ...patch, updatedAt: Date.now() }
+    const kept = patch.oldText !== undefined
+    const next: PendingEntry = { ...entry, ...patch, ...(kept ? { earlierVersion: 'file' as const } : {}), updatedAt: Date.now() }
     this.entries.set(pathKeyOf(path), next)
     if (next.newText !== entry.newText) this.bumpContent(path)
     return true

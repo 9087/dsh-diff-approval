@@ -39,13 +39,26 @@ interface GlobalFile {
   entries: PendingEntry[]
 }
 
+/** The pre-rename spelling of the entry's `earlierVersion`, or undefined for anything else. */
+function legacyEarlierVersion(kind: unknown): 'file' | 'none' | undefined {
+  if (kind === 'edit') return 'file'
+  if (kind === 'create') return 'none'
+  return undefined
+}
+
 /** Narrow one JSON value to a pending entry; malformed rows are skipped. */
 function pendingEntryOf(value: unknown): PendingEntry | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-  const { id, path, kind, oldText, newText, updatedAt, sessionId, sessionIds } = value as Record<string, unknown>
+  const record = value as Record<string, unknown>
+  const { id, path, oldText, newText, updatedAt, sessionId, sessionIds } = record
+  // A store written before the field was renamed spells it `kind: 'edit' | 'create'`. Both names are read,
+  // only the new one is written: rejecting the old name would drop every row of an existing list on the
+  // first start after an upgrade, silently — measured against a real 252-row store, where that is the
+  // difference between an empty panel and the reader's whole review.
+  const earlierVersion = record.earlierVersion ?? legacyEarlierVersion(record.kind)
   if (typeof id !== 'string' || id.length === 0) return undefined
   if (typeof path !== 'string' || path.length === 0) return undefined
-  if (kind !== 'edit' && kind !== 'create') return undefined
+  if (earlierVersion !== 'file' && earlierVersion !== 'none') return undefined
   if (typeof oldText !== 'string' || typeof newText !== 'string') return undefined
   if (typeof updatedAt !== 'number') return undefined
   if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
@@ -55,7 +68,7 @@ function pendingEntryOf(value: unknown): PendingEntry | undefined {
   return {
     // The global identity is the path, so `id` must equal it regardless of any
     // legacy uuid — the client uses `id` as the per-file action key.
-    id: path, path, kind, oldText, newText, updatedAt,
+    id: path, path, earlierVersion, oldText, newText, updatedAt,
     sessionId: sessionId as SessionId,
     sessionIds: ids.length > 0 ? ids as SessionId[] : [sessionId as SessionId],
   }

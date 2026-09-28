@@ -3643,7 +3643,6 @@ function PendingFileRow({ file, selected, picked, failedMessage, t, onSelect, on
           onClick={(event) => { onSelect(event, file.id) }}
         >
           <span className={css.rowPath}>{basenameOf(file.path)}</span>
-          {file.kind === 'create' && <span className={css.kindTag}>{t('row.create')}</span>}
           {file.missing && <span className={css.missing} title={t('panel.missingHint')}>{t('panel.missing')}</span>}
           {failedMessage !== undefined && <span className={css.rowFailed} title={failedMessage}>{t('row.failed')}</span>}
           {(stats.added !== 0 || stats.removed !== 0) && (
@@ -7407,7 +7406,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
               disabled={busy}
               onClick={() => { void onRevert(sessionId, file.id) }}
             >
-              {file.kind === 'create' ? t('action.delete') : t('action.revert')}
+              {file.earlierVersion === 'none' ? t('action.delete') : t('action.revert')}
             </button>
           </>
         )}
@@ -9116,7 +9115,7 @@ export function PendingPanel({
     if (current === undefined) return
     // 回退 DELETES every file the agent created; the dialog names those, because that is the part with no
     // undo behind it.
-    const doomed = kind === 'revert' ? files.filter(file => file.kind === 'create').map(file => file.id) : []
+    const doomed = kind === 'revert' ? files.filter(file => file.earlierVersion === 'none').map(file => file.id) : []
     setBatchPrompt({
       sessionId: current,
       kind: kind === 'keep' ? 'keep-all' : 'revert-all',
@@ -9353,7 +9352,7 @@ export function PendingPanel({
       // row opens, which names the count and, for a revert, the files about to be deleted. 删除 vs 回退
       // is the single row's own distinction, decided here by the pick: all of them created files, or not.
       const picked = files.filter(file => pickedFiles.has(file.id))
-      const revertLabel = picked.length > 0 && picked.every(file => file.kind === 'create')
+      const revertLabel = picked.length > 0 && picked.every(file => file.earlierVersion === 'none')
         ? t('action.delete')
         : t('action.revert')
       return [
@@ -9384,7 +9383,7 @@ export function PendingPanel({
     }
     // Put back wins a second reading too: 回退 puts the file back and leaves it listed, so a file
     // with more than one operation can be put back one at a time while staying in view.
-    const revertLabel = rowMenu.file.kind === 'create' ? t('action.delete') : t('action.revert')
+    const revertLabel = rowMenu.file.earlierVersion === 'none' ? t('action.delete') : t('action.revert')
     return [
       // Keeping is two decisions, not one, and the row menu names both: plain 保留 accepts the change
       // and leaves the file in the list, 保留并移出  does the same and takes the row out. The pair is
@@ -9421,7 +9420,7 @@ export function PendingPanel({
         && id !== 'revert-picked' && id !== 'revert-remove-picked') return
       // The pick stays until the dialog is answered, so cancelling leaves the reader where they were.
       const doomed = id.startsWith('revert')
-        ? picked.filter(file => file.kind === 'create').map(file => file.id)
+        ? picked.filter(file => file.earlierVersion === 'none').map(file => file.id)
         : []
       setBatchPrompt({ sessionId: current, kind: id, ids, doomed })
       return

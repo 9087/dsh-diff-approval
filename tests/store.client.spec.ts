@@ -8,7 +8,7 @@ import { createPendingDiffStore } from '../src/client/store.ts'
 
 const S1 = 'session-1' as SessionId
 const FILE: PendingFileDiff = {
-  id: 'entry-1', sessionId: S1, path: '/repo/a.txt', kind: 'edit',
+  id: 'entry-1', sessionId: S1, path: '/repo/a.txt', earlierVersion: 'file',
   oldText: 'a', newText: 'b', updatedAt: 10, missing: false, diverged: false,
 }
 

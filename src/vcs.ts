@@ -40,7 +40,8 @@ export interface VcsRoot {
 export interface VcsChange {
   /** Absolute path of the changed file (inside the workspace). */
   path: string
-  kind: 'edit' | 'create'
+  /** Whether an earlier version of the file exists: `'file'` restores it, `'none'` deletes the file. */
+  earlierVersion: 'file' | 'none'
   /** Baseline (pre-change) content; empty for a brand-new file. */
   oldText: string
   /** Working content; empty for a deleted file. */
@@ -316,9 +317,32 @@ function parseGitPorcelainZ(output: string): { xy: string; rel: string }[] {
  * express. */
 const GIT_STATUS_COMMAND = 'git -c status.renames=false status --porcelain=v1 -z --untracked-files=all'
 
+/** The message a failed command carries; `runShell` puts the command's own stderr into it. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 /**
- * Read one file's content at a revision (`<rev>:<path>`), or undefined when that revision has no
- * such path (a new file, or a repo whose HEAD is unborn).
+ * git's wording for a path a revision does not carry, and ONLY that.
+ *
+ * Measured against git 2.x: `path 'x' does not exist in 'HEAD'`, and `Not a valid object name
+ * HEAD:x` when HEAD is unborn (a repository with no commits yet — there every file is genuinely
+ * new). A failure that is none of these — a corrupt object, a refused spawn, a timeout — is not
+ * absence, and must never be read as one.
+ */
+const ABSENT_AT_REVISION = /does not exist in|exists on disk, but not in|not a valid object name|invalid object name|unknown revision|bad revision/i
+
+/** What a revision has to say about one path: its content, or that it does not carry the path. */
+type GitBaseline = { found: true; text: string } | { found: false }
+
+/**
+ * Read one file's content at a revision (`<rev>:<path>`), and say so when that revision has no such
+ * path.
+ *
+ * The two answers must stay distinguishable. Absence is what makes a file a creation, and a
+ * creation's revert DELETES the file — so reading a FAILED read as absence offers to delete a file
+ * that is committed and fine. Only git's own words decide (see {@link ABSENT_AT_REVISION}); anything
+ * else is thrown with the path named, because a reader can act on that and cannot act on a guess.
  *
  * The blob is read straight off `git show` with a per-call stdout budget raised to the blob's own
  * size the way `git cat-file -s` reports it, so the executor cannot truncate a large baseline.
@@ -329,7 +353,8 @@ const GIT_STATUS_COMMAND = 'git -c status.renames=false status --porcelain=v1 -z
  * @param rel - the repository-relative path.
  * @param shell - the deployment's shell executor.
  * @param signal - the caller's abort signal.
- * @returns the file's content at that revision, or undefined when it has none.
+ * @returns the file's content at that revision, or `{ found: false }` when it has none.
+ * @throws when the read failed for any reason other than absence.
  */
 async function readGitBlob(
   root: string,
@@ -337,13 +362,14 @@ async function readGitBlob(
   rel: string,
   shell: ShellExecutorLike,
   signal: AbortSignal | undefined,
-): Promise<string | undefined> {
+): Promise<GitBaseline> {
   try {
     const reported = Number.parseInt((await runShell(shell, `git cat-file -s ${revision}:${shq(rel)}`, root, signal)).trim(), 10)
     const size = Number.isFinite(reported) ? reported : 0
-    return await runShell(shell, `git show ${revision}:${shq(rel)}`, root, signal, size + GIT_BLOB_STDOUT_SLACK)
-  } catch {
-    return undefined
+    return { found: true, text: await runShell(shell, `git show ${revision}:${shq(rel)}`, root, signal, size + GIT_BLOB_STDOUT_SLACK) }
+  } catch (error) {
+    if (ABSENT_AT_REVISION.test(errorMessage(error))) return { found: false }
+    throw new Error(`could not read ${rel} at ${revision}: ${errorMessage(error)}`)
   }
 }
 
@@ -360,7 +386,7 @@ async function gitChanges(input: VcsImportInput): Promise<VcsChange[]> {
     if (xy === '??') {
       if (!includeUntracked) continue
       const newText = await readText(absolute) ?? ''
-      changes.push({ path: absolute, kind: 'create', oldText: '', newText })
+      changes.push({ path: absolute, earlierVersion: 'none', oldText: '', newText })
       continue
     }
     // The baseline is the LAST COMMIT, not the index. Both columns of the status row are read
@@ -370,12 +396,16 @@ async function gitChanges(input: VcsImportInput): Promise<VcsChange[]> {
     // every staged change from the review (see the module docs).
     const baseline = await readGitBlob(root, 'HEAD', rel, shell, signal)
     const worktree = xy[1] ?? ' '
-    const oldText = baseline ?? ''
+    const oldText = baseline.found ? baseline.text : ''
     const newText = worktree === 'D' ? '' : (await readText(absolute) ?? '')
     if (oldText === '' && newText === '') continue
-    // A path with no version at HEAD is a new file: its baseline is empty, and `create` is what a
-    // revert of it means (remove the file).
-    changes.push({ path: absolute, kind: baseline === undefined ? 'create' : 'edit', oldText, newText })
+    // `earlierVersion: 'none'` means ONE thing here: the last commit carries no version of this path, so
+    // there is nothing to restore and the row's action is a delete rather than a revert. It is not a
+    // reader-facing label — the panel shows no 新增 tag — so it must not be decided by the status column,
+    // which says how the reader filed the change, not whether an earlier version exists. A baseline that
+    // could not be READ never reaches this line: it threw (see readGitBlob), because a failed read is not
+    // "no earlier version", and reading it as one offers to delete a file that is committed and fine.
+    changes.push({ path: absolute, earlierVersion: baseline.found ? 'file' : 'none', oldText, newText })
   }
   return changes
 }
@@ -404,21 +434,25 @@ async function svnChanges(input: VcsImportInput): Promise<VcsChange[]> {
     const absolute = resolve(root, rel)
     if (!inScanScope(absolute, roots)) continue
     if (item === 'modified' || item === 'deleted') {
-      let oldText = ''
+      // BASE carries this path — it is versioned, and modified or deleted in the worktree — so a
+      // failure here is a failure, not a missing baseline. Reading it as one would hand the panel an
+      // empty old side, and a revert would then empty a file that is fine, or recreate a deleted one
+      // as empty: the same conflation the git side refuses above.
+      let oldText: string
       try {
         oldText = await runShell(shell, `svn cat -r BASE ${shq(rel)}`, root, signal)
-      } catch {
-        oldText = ''
+      } catch (error) {
+        throw new Error(`could not read ${rel} at BASE: ${errorMessage(error)}`)
       }
       const newText = item === 'deleted' ? '' : (await readText(absolute) ?? '')
       if (oldText === '' && newText === '') continue
-      changes.push({ path: absolute, kind: 'edit', oldText, newText })
+      changes.push({ path: absolute, earlierVersion: 'file', oldText, newText })
     } else if (item === 'added') {
       const newText = await readText(absolute) ?? ''
-      changes.push({ path: absolute, kind: 'create', oldText: '', newText })
+      changes.push({ path: absolute, earlierVersion: 'none', oldText: '', newText })
     } else if (item === 'unversioned' && includeUntracked) {
       const newText = await readText(absolute) ?? ''
-      changes.push({ path: absolute, kind: 'create', oldText: '', newText })
+      changes.push({ path: absolute, earlierVersion: 'none', oldText: '', newText })
     }
   }
   return changes
@@ -460,14 +494,18 @@ async function p4Changes(input: VcsImportInput): Promise<VcsChange[]> {
     const newText = deleted ? '' : (await readText(absolute) ?? '')
     let oldText = ''
     if (!created) {
+      // `#have` is the revision this workspace already carries, so a file that is open for edit (or
+      // delete) has one. A failure here is therefore a failure, not a missing baseline — and reading it
+      // as one would hand the panel an empty old side whose revert empties the file. Same conflation the
+      // git and svn branches above refuse.
       try {
         oldText = await runShell(shell, `p4 print -q ${shq(opened.depot)}#have`, root, signal)
-      } catch {
-        oldText = ''
+      } catch (error) {
+        throw new Error(`could not read ${opened.depot}#have: ${errorMessage(error)}`)
       }
     }
     if (oldText === '' && newText === '') continue
-    changes.push({ path: absolute, kind: created ? 'create' : 'edit', oldText, newText })
+    changes.push({ path: absolute, earlierVersion: created ? 'none' : 'file', oldText, newText })
   }
   return changes
 }

@@ -117,7 +117,7 @@ function stubCodeScroll(scrollHeight = 2000, clientHeight = 800): () => void {
 
 const S1 = 'session-1' as SessionId
 const FILE: PendingFileDiff = {
-  id: 'entry-1', sessionId: S1, path: '/repo/a.txt', kind: 'edit',
+  id: 'entry-1', sessionId: S1, path: '/repo/a.txt', earlierVersion: 'file',
   oldText: 'a\n', newText: 'b\n', updatedAt: 10, missing: false, diverged: false,
   sessionIds: [S1],
 }
@@ -267,7 +267,7 @@ function staleAnchorFile(id: string): PendingFileDiff {
   return entry({
     id,
     path: '/repo/stale.txt',
-    kind: 'edit',
+    earlierVersion: 'file',
     oldText: `${[...lines.slice(0, STALE_ANCHOR.contextAbove), ...removed, ...lines.slice(STALE_ANCHOR.contextAbove)].join('\n')}\n`,
     newText: `${lines.join('\n')}\n`,
   })
@@ -356,7 +356,7 @@ function lookalikeFile(id: string): PendingFileDiff {
   return entry({
     id,
     path: '/repo/lookalike.txt',
-    kind: 'create',
+    earlierVersion: 'none',
     oldText: '',
     newText: `${lines.join('\n')}\n`,
   })
@@ -859,7 +859,7 @@ describe('PendingPanel', () => {
   })
 
   it('keeps or reverts every current-session file in a single bulk call from the list footer', async () => {
-    const second = entry({ id: 'entry-2', path: '/repo/b.txt', kind: 'create', oldText: '', newText: 'b\n' })
+    const second = entry({ id: 'entry-2', path: '/repo/b.txt', earlierVersion: 'none', oldText: '', newText: 'b\n' })
     const props = panelProps({ read: true, files: [FILE, second], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
@@ -1036,16 +1036,17 @@ describe('PendingPanel', () => {
     expect(screen.queryByText(sibling.path)).toBeNull()
   })
 
-  it('tags a created file on its row and labels the whole-file button Delete, with no delete hint', () => {
-    const created = entry({ id: 'entry-new', kind: 'create', oldText: '', newText: 'content', path: '/repo/new.txt' })
+  it('labels the whole-file button Delete when there is no earlier version, and tags nothing on the row', () => {
+    const created = entry({ id: 'entry-new', earlierVersion: 'none', oldText: '', newText: 'content', path: '/repo/new.txt' })
     const props = panelProps({ read: true, files: [created], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
-    expect(screen.getByText('row.create')).toBeDefined()
+    // The row carries no tag: `earlierVersion` is not a reader-facing label any more. It says one thing only —
+    // whether there is an earlier version to restore.
+    expect(screen.queryByText('row.create')).toBeNull()
     fireEvent.click(screen.getByText('new.txt'))
-    // A newly-created file has nothing to "revert" to, so the whole-file action
-    // is a delete, not a revert. No explanatory hint text is shown.
+    // With nothing to "revert" to, the whole-file action is a delete, not a revert. No explanatory hint.
     expect(screen.getByText('action.delete')).toBeDefined()
     expect(screen.queryByText('panel.createHint')).toBeNull()
   })
@@ -1441,8 +1442,8 @@ describe('PendingPanel', () => {
   })
 
   it('picks files with Ctrl-click, and the row menu then speaks for the whole pick', () => {
-    const a = entry({ id: 'entry-a', path: '/repo/a.txt', kind: 'edit' })
-    const b = entry({ id: 'entry-b', path: '/repo/b.txt', kind: 'edit' })
+    const a = entry({ id: 'entry-a', path: '/repo/a.txt', earlierVersion: 'file' })
+    const b = entry({ id: 'entry-b', path: '/repo/b.txt', earlierVersion: 'file' })
     const props = panelProps({ read: true, files: [a, b], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
@@ -1602,7 +1603,7 @@ describe('PendingPanel', () => {
   })
 
   it('names the created files a batch-revert would delete, and only when it would delete any', () => {
-    const made = entry({ id: 'entry-made', path: '/repo/made.txt', kind: 'create', oldText: '', newText: 'made\n' })
+    const made = entry({ id: 'entry-made', path: '/repo/made.txt', earlierVersion: 'none', oldText: '', newText: 'made\n' })
     const props = panelProps({ read: true, files: [FILE, made], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
@@ -1897,7 +1898,7 @@ describe('PendingPanel', () => {
     // outdated. The item is a plain button rather than a selectable row: what it opens is the file,
     // with the comment landed on, so the item itself carries no selected state.
     act(() => { setCommentModeEnabled(true) })
-    const file = entry({ id: 'entry-rows', path: '/repo/rows.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    const file = entry({ id: 'entry-rows', path: '/repo/rows.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
     const props = panelProps({
       read: true,
       files: [file],
@@ -2053,8 +2054,8 @@ describe('PendingPanel', () => {
     act(() => { setCommentModeEnabled(true) })
     // The open file sorts first, because the panel opens on its first file: the other one is then
     // never shown, which is the whole point of the second half of this test.
-    const open = entry({ id: 'entry-resolved', path: '/repo/opened.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
-    const closed = entry({ id: 'entry-closed', path: '/repo/zzz-unopened.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    const open = entry({ id: 'entry-resolved', path: '/repo/opened.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    const closed = entry({ id: 'entry-closed', path: '/repo/zzz-unopened.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
     const props = panelProps({
       read: true,
       files: [open, closed],
@@ -2111,7 +2112,7 @@ describe('PendingPanel', () => {
     // moment the two rules differed — which is exactly how one comment came to read `[382]` in the
     // list and 378 in the code view.
     act(() => { setCommentModeEnabled(true) })
-    const file = entry({ id: 'entry-chip', path: '/repo/chip.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    const file = entry({ id: 'entry-chip', path: '/repo/chip.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
     render(<PendingPanel {...panelProps({
       read: true,
       files: [file],
@@ -2148,7 +2149,7 @@ describe('PendingPanel', () => {
     // row, so a jump that lands 382's row would leave the box four rows ABOVE the viewport top:
     // that is the "clipped off at the top" half of the report.
     act(() => { setCommentModeEnabled(true) })
-    const other = entry({ id: 'entry-other', path: '/repo/other.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\n' })
+    const other = entry({ id: 'entry-other', path: '/repo/other.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\n' })
     const file = staleAnchorFile('entry-stale')
     render(<PendingPanel {...panelProps({
       read: true,
@@ -2278,7 +2279,7 @@ describe('PendingPanel', () => {
     // the reader ever sees of it. A jump that means "here is the comment" draws no frame at all: the
     // box it lands on is the thing the reader asked for, and it is on screen already.
     act(() => { setCommentModeEnabled(true) })
-    const file = entry({ id: 'entry-quiet-jump', path: '/repo/quiet.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    const file = entry({ id: 'entry-quiet-jump', path: '/repo/quiet.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
     render(<PendingPanel {...panelProps({
       read: true,
       files: [file],
@@ -2312,7 +2313,7 @@ describe('PendingPanel', () => {
     // direction: it is the agent's explanation of those lines, and drawing it as something the reader
     // said would put words in their mouth. `record.author` is the one field that says which.
     act(() => { setCommentModeEnabled(true) })
-    const file = entry({ id: 'entry-agent', path: '/repo/agent.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\n' })
+    const file = entry({ id: 'entry-agent', path: '/repo/agent.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\n' })
     render(<PendingPanel {...panelProps({
       read: true,
       files: [file],
@@ -2359,7 +2360,7 @@ describe('PendingPanel', () => {
     // ARE the row's charge — the height table is not in the DOM), so the expectation is the panel's
     // own arithmetic rather than a figure copied from a run.
     act(() => { setCommentModeEnabled(true) })
-    const file = entry({ id: 'entry-stack', path: '/repo/stack.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    const file = entry({ id: 'entry-stack', path: '/repo/stack.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
     render(<PendingPanel {...panelProps({
       read: true,
       files: [file],
@@ -2418,7 +2419,7 @@ describe('PendingPanel', () => {
     // top edge is off-screen for exactly the same reason.
     localStorage.setItem('diff-approval:split-mode', '1')
     act(() => { setCommentModeEnabled(true) })
-    const file = entry({ id: 'entry-quiet-split', path: '/repo/quiet-split.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    const file = entry({ id: 'entry-quiet-split', path: '/repo/quiet-split.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
     render(<PendingPanel {...panelProps({
       read: true,
       files: [file],
@@ -2445,9 +2446,9 @@ describe('PendingPanel', () => {
     // that carries any, under the name the list knows that file by. Nothing folds — every group is open —
     // so the group is a heading and the comments under it, exactly as they were.
     act(() => { setCommentModeEnabled(true) })
-    const alpha = entry({ id: 'entry-grouped-a', path: '/repo/alpha.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
-    const beta = entry({ id: 'entry-grouped-b', path: '/repo/deep/beta.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
-    const quiet = entry({ id: 'entry-grouped-c', path: '/repo/gamma.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
+    const alpha = entry({ id: 'entry-grouped-a', path: '/repo/alpha.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\n' })
+    const beta = entry({ id: 'entry-grouped-b', path: '/repo/deep/beta.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\n' })
+    const quiet = entry({ id: 'entry-grouped-c', path: '/repo/gamma.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\n' })
     const thread = (entryId: string, id: string, line: number, text: string): CommentRecord =>
       comment({ id, entryId, text, anchor: { startLine: line, endLine: line } })
     // Handed over in the order beta, quiet, alpha: the groups follow the list's own order (by displayed
@@ -2500,8 +2501,8 @@ describe('PendingPanel', () => {
     // (file name, row number) say the opposite here, which is what makes this a test rather than a
     // restatement: zeta's lower line is written first, then zeta's upper line, and alpha.txt last.
     act(() => { setCommentModeEnabled(true) })
-    const zeta = entry({ id: 'entry-z', path: '/repo/zeta.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\n' })
-    const alpha = entry({ id: 'entry-a', path: '/repo/alpha.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
+    const zeta = entry({ id: 'entry-z', path: '/repo/zeta.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\ne\nf\n' })
+    const alpha = entry({ id: 'entry-a', path: '/repo/alpha.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\n' })
     const at = (id: string, entryId: string, line: number, createdAt: number) =>
       comment({ id, entryId, text: `第 ${line} 行`, anchor: { startLine: line, endLine: line }, createdAt })
     render(<PendingPanel {...panelProps({
@@ -2525,7 +2526,7 @@ describe('PendingPanel', () => {
     // file rows keep theirs. A comment belongs to the host, so the list asks the host to drop it — one
     // record, one action — and the read that follows is what takes the block out of the open file.
     act(() => { setCommentModeEnabled(true) })
-    const file = entry({ id: 'entry-end', path: '/repo/end.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\n' })
+    const file = entry({ id: 'entry-end', path: '/repo/end.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\n' })
     const props = panelProps({
       read: true,
       files: [file],
@@ -2563,8 +2564,8 @@ describe('PendingPanel', () => {
     // reader is picking from the list, and a jump would take them out of it. Any other click is the
     // ordinary one — it jumps, and it ends the pick — which is the same rule a file or tab switch follows.
     act(() => { setCommentModeEnabled(true) })
-    const open = entry({ id: 'entry-open', path: '/repo/open.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
-    const other = entry({ id: 'entry-pick', path: '/repo/pick.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\n' })
+    const open = entry({ id: 'entry-open', path: '/repo/open.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\n' })
+    const other = entry({ id: 'entry-pick', path: '/repo/pick.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\n' })
     render(<PendingPanel {...panelProps({
       read: true,
       files: [open, other],
@@ -2629,7 +2630,7 @@ describe('PendingPanel', () => {
     // The comments list has no "open" item — a press navigates away rather than selecting — so its anchor
     // is simply the comment the last non-Shift press landed on, which is why the same rule works here.
     act(() => { setCommentModeEnabled(true) })
-    const file = entry({ id: 'entry-many', path: '/repo/many.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\n' })
+    const file = entry({ id: 'entry-many', path: '/repo/many.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\n' })
     render(<PendingPanel {...panelProps({
       read: true,
       files: [file],
@@ -2677,7 +2678,7 @@ describe('PendingPanel', () => {
     // never outlives the request. A press anywhere else is an ordinary one: it ends the pick and offers
     // the single comment's action, which is what the reader is looking at again.
     act(() => { setCommentModeEnabled(true) })
-    const file = entry({ id: 'entry-picked', path: '/repo/picked.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\n' })
+    const file = entry({ id: 'entry-picked', path: '/repo/picked.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\n' })
     const props = panelProps({
       read: true,
       files: [file],
@@ -2739,7 +2740,7 @@ describe('PendingPanel', () => {
   })
 
   it('ends the pick on a press anywhere else, the way a blur ends a selection', () => {
-    const file = entry({ id: 'entry-blur', path: '/repo/blur.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\n' })
+    const file = entry({ id: 'entry-blur', path: '/repo/blur.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\n' })
     const props = panelProps({
       read: true,
       files: [file],
@@ -4330,10 +4331,10 @@ describe('PendingPanel', () => {
       const changed = [...lines]
       changed[0] = 'CHANGED'
       const deep = entry({
-        id: 'entry-deep', path: '/repo/deep.txt', kind: 'edit',
+        id: 'entry-deep', path: '/repo/deep.txt', earlierVersion: 'file',
         oldText: `${lines.join('\n')}\n`, newText: `${changed.join('\n')}\n`,
       })
-      const other = entry({ id: 'entry-other', path: '/repo/other.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
+      const other = entry({ id: 'entry-other', path: '/repo/other.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\n' })
       const note = comment({
         id: 'd-deep', entryId: 'entry-deep', text: '这一行。',
         anchor: { startLine: 301, endLine: 301 }, quote: 'line-301',
@@ -4390,10 +4391,10 @@ describe('PendingPanel', () => {
       const changed = [...lines]
       changed[0] = 'CHANGED'
       const deep = entry({
-        id: 'entry-deep', path: '/repo/deep.txt', kind: 'edit',
+        id: 'entry-deep', path: '/repo/deep.txt', earlierVersion: 'file',
         oldText: `${lines.join('\n')}\n`, newText: `${changed.join('\n')}\n`,
       })
-      const other = entry({ id: 'entry-other', path: '/repo/other.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
+      const other = entry({ id: 'entry-other', path: '/repo/other.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\n' })
       const note = comment({
         id: 'd-deep', entryId: 'entry-deep', text: '这一行。',
         anchor: { startLine: 301, endLine: 301 }, quote: 'line-301',
@@ -4450,10 +4451,10 @@ describe('PendingPanel', () => {
       const changed = [...lines]
       changed[300] = 'CHANGED'
       const deep = entry({
-        id: 'entry-deep', path: '/repo/deep.txt', kind: 'edit',
+        id: 'entry-deep', path: '/repo/deep.txt', earlierVersion: 'file',
         oldText: `${lines.join('\n')}\n`, newText: `${changed.join('\n')}\n`,
       })
-      const other = entry({ id: 'entry-other', path: '/repo/other.txt', kind: 'create', oldText: '', newText: 'a\nb\n' })
+      const other = entry({ id: 'entry-other', path: '/repo/other.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\n' })
       render(<PendingPanel {...panelProps({ read: true, files: [deep], busy: new Set() })} />)
       fireEvent.click(screen.getByLabelText('panel.aria'))
       expect(shownPath()).toBe('/repo/deep.txt')
@@ -4776,7 +4777,7 @@ describe('PendingPanel', () => {
     // The number names a line of the file as it reads NOW: the row carrying that new-file line is landed on,
     // with the configured lead rows above it and the block it sits in flashed. Nothing is done for a number
     // the current side does not have — the reader is told instead.
-    const file = entry({ id: 'entry-goto', path: '/repo/goto.txt', kind: 'create', oldText: '', newText: Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join('\n') })
+    const file = entry({ id: 'entry-goto', path: '/repo/goto.txt', earlierVersion: 'none', oldText: '', newText: Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join('\n') })
     render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('goto.txt'))
@@ -10433,7 +10434,7 @@ describe('PendingPanel', () => {
     // row at the pair that row is in, leaving the same lead rows above it as every other jump.
     localStorage.setItem('diff-approval:split-mode', '1')
     act(() => { setCommentModeEnabled(true) })
-    const file = entry({ id: 'entry-split-jump', path: '/repo/jump.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    const file = entry({ id: 'entry-split-jump', path: '/repo/jump.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
     render(<PendingPanel {...panelProps({
       read: true,
       files: [file],
@@ -10471,7 +10472,7 @@ describe('PendingPanel', () => {
     // case reads its row's.
     localStorage.setItem('diff-approval:split-mode', '1')
     act(() => { setCommentModeEnabled(true) })
-    const file = entry({ id: 'entry-split-stack', path: '/repo/split-stack.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    const file = entry({ id: 'entry-split-stack', path: '/repo/split-stack.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
     render(<PendingPanel {...panelProps({
       read: true,
       files: [file],
@@ -10531,7 +10532,7 @@ describe('PendingPanel', () => {
     // those lines are in — the state itself is the block's to say, not the list's.
     localStorage.setItem('diff-approval:split-mode', '1')
     act(() => { setCommentModeEnabled(true) })
-    const file = entry({ id: 'entry-split-card', path: '/repo/card.txt', kind: 'create', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
+    const file = entry({ id: 'entry-split-card', path: '/repo/card.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\ne\nf\ng\nh\n' })
     render(<PendingPanel {...panelProps({
       read: true,
       files: [file],

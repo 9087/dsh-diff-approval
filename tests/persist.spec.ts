@@ -12,8 +12,8 @@ import { removeTempDir } from './cleanup.ts'
 const S1 = SessionId('session-1')
 const S2 = SessionId('session-2')
 
-function entry(sessionId: SessionId, path: string, updatedAt = 1, kind: 'edit' | 'create' = 'edit'): PendingEntry {
-  return { id: path, sessionId, path, kind, oldText: 'old', newText: 'new', updatedAt, sessionIds: [sessionId] }
+function entry(sessionId: SessionId, path: string, updatedAt = 1, earlierVersion: 'file' | 'none' = 'file'): PendingEntry {
+  return { id: path, sessionId, path, earlierVersion, oldText: 'old', newText: 'new', updatedAt, sessionIds: [sessionId] }
 }
 
 let root = ''
@@ -55,12 +55,37 @@ describe('loadAll', () => {
     expect(migratedLegacy).toBe(false)
   })
 
-  it('round-trips a creation entry with its kind', async () => {
+  it('round-trips an entry with no earlier version', async () => {
     const store = await persistence()
-    await store.save([entry(S1, '/repo/new.txt', 1, 'create')])
+    await store.save([entry(S1, '/repo/new.txt', 1, 'none')])
     const { entries } = await store.loadAll()
     expect(entries).toHaveLength(1)
-    expect(entries[0]!.kind).toBe('create')
+    expect(entries[0]!.earlierVersion).toBe('none')
+  })
+
+  it('loads a store written before the field was renamed', async () => {
+    // Reading only the new spelling would drop every row of an existing list on the first start after an
+    // upgrade — silently, because a rejected row is skipped rather than reported. A real store on this
+    // machine held 252 rows in the old spelling, so this is the difference between the reader's whole
+    // review and an empty panel.
+    const store = await persistence()
+    await writeFile(join(root, 'pending.json'), JSON.stringify({
+      version: 3,
+      entries: [
+        {
+          id: '/repo/a.txt', sessionId: 'session-1', path: '/repo/a.txt', kind: 'edit',
+          oldText: 'old', newText: 'new', updatedAt: 1, sessionIds: ['session-1'],
+        },
+        {
+          id: '/repo/b.txt', sessionId: 'session-1', path: '/repo/b.txt', kind: 'create',
+          oldText: '', newText: 'fresh', updatedAt: 2, sessionIds: ['session-1'],
+        },
+      ],
+    }), 'utf8')
+
+    const { entries } = await store.loadAll()
+    expect(entries.map(saved => [saved.path, saved.earlierVersion]))
+      .toEqual([['/repo/a.txt', 'file'], ['/repo/b.txt', 'none']])
   })
 
   it('skips malformed rows inside an otherwise valid global file', async () => {

@@ -262,7 +262,7 @@ export interface DiffApprovalConfig {
 /** One tool result's fields this plugin consumes, narrowed from the tool's JSON value. */
 interface OperationOutcome {
   path: string
-  kind: PendingEntryKind
+  earlierVersion: PendingEntryKind
   oldText: string
   newText: string
 }
@@ -368,16 +368,17 @@ function editOutcomeOf(value: unknown): OperationOutcome | undefined {
   const { path, before, after } = value as Record<string, unknown>
   if (typeof path !== 'string' || path.length === 0) return undefined
   if (typeof before !== 'string' || typeof after !== 'string') return undefined
-  return { path, kind: 'edit', oldText: before, newText: after }
+  return { path, earlierVersion: 'file', oldText: before, newText: after }
 }
 
 /**
  * Narrow a successful `write` result value to an operation outcome. The write
  * tool's output schema declares `{ path, operation, before, after }`;
- * `operation: 'create'` becomes a `create` entry (revert removes the file),
- * `operation: 'update'` becomes an `edit` entry. An update whose `before` is
- * null carried no contextual basis, so it is skipped rather than tracked as
- * an un-revertable overwrite.
+ * `operation: 'create'` becomes an entry with `earlierVersion: 'none'` (there is
+ * no earlier version, so the whole-file action removes the file),
+ * `operation: 'update'` one with `earlierVersion: 'file'`. An update whose
+ * `before` is null carried no contextual basis, so it is skipped rather than
+ * tracked as an un-revertable overwrite.
  * @param value - the successful result's JSON value.
  * @returns the outcome, or `undefined` when the value is not a trackable write.
  */
@@ -387,9 +388,9 @@ function writeOutcomeOf(value: unknown): OperationOutcome | undefined {
   if (typeof path !== 'string' || path.length === 0) return undefined
   if (operation !== 'create' && operation !== 'update') return undefined
   if (typeof after !== 'string') return undefined
-  if (operation === 'create') return { path, kind: 'create', oldText: '', newText: after }
+  if (operation === 'create') return { path, earlierVersion: 'none', oldText: '', newText: after }
   if (typeof before !== 'string') return undefined
-  return { path, kind: 'edit', oldText: before, newText: after }
+  return { path, earlierVersion: 'file', oldText: before, newText: after }
 }
 
 /** Human-readable message from an arbitrary thrown value. */
@@ -750,7 +751,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       id: absolute,
       sessionId,
       path: absolute,
-      kind: 'edit',
+      earlierVersion: 'file',
       oldText: content,
       newText: content,
       updatedAt: now,
@@ -788,26 +789,27 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   const editorIntents = new Map<string, IntentBasis>()
 
   /**
-   * Snapshot one str_replace_editor mutation's basis at its intent seam. A
-   * `create` has an empty basis; an edit reads the pre-write content. Any
-   * failure tracks nothing — the settle-side pairing then sees no basis.
+   * Snapshot one str_replace_editor mutation's basis at its intent seam. A file
+   * creation has no earlier version, so its basis is empty; an edit reads the
+   * pre-write content. Any failure tracks nothing — the settle-side pairing then
+   * sees no basis.
    * @param target - the resolved target about to be written.
    * @param actor - the tool execution running the mutation.
-   * @param kind - whether the mutation creates or edits the file.
+   * @param earlierVersion - whether the mutation creates the file (`'none'`: no earlier version) or edits it (`'file'`).
    */
-  async function stashEditorIntent(target: FsTarget, actor: object | undefined, kind: PendingEntryKind): Promise<void> {
+  async function stashEditorIntent(target: FsTarget, actor: object | undefined, earlierVersion: PendingEntryKind): Promise<void> {
     const shaped = actorOf(actor)
     if (shaped === undefined || shaped.name !== 'str_replace_editor') return
     if (typeof shaped.callId !== 'string') return
     const sessionId = sessionOfAgent(shaped.agent)
     if (sessionId === undefined) return
-    if (kind === 'create') {
-      editorIntents.set(shaped.callId, { target, kind, before: '', sessionId })
+    if (earlierVersion === 'none') {
+      editorIntents.set(shaped.callId, { target, earlierVersion, before: '', sessionId })
       return
     }
     try {
       const before = await ctx.fs.readText(target, undefined) ?? ''
-      editorIntents.set(shaped.callId, { target, kind, before, sessionId })
+      editorIntents.set(shaped.callId, { target, earlierVersion, before, sessionId })
     } catch {
       // Unreadable at intent time: no trustworthy basis to revert to.
     }
@@ -827,7 +829,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     const argumentsValue = exec.arguments
     const command = typeof argumentsValue === 'object' && argumentsValue !== null
       ? (argumentsValue as Record<string, unknown>).command : undefined
-    const mutates = basis.kind === 'create'
+    const mutates = basis.earlierVersion === 'none'
       ? command === 'create'
       : command === 'str_replace' || command === 'insert'
     if (!mutates) return
@@ -837,14 +839,14 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     } catch {
       return
     }
-    if (basis.kind === 'edit' && after === basis.before) return
+    if (basis.earlierVersion === 'file' && after === basis.before) return
     const sessionId = basis.sessionId
     const path = basis.target.displayPath
     const entry: PendingEntry = {
       id: path,
       sessionId,
       path,
-      kind: basis.kind,
+      earlierVersion: basis.earlierVersion,
       oldText: basis.before,
       newText: after,
       updatedAt: Date.now(),
@@ -1205,9 +1207,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
 
   /**
    * Revert one entry's file back to its baseline (the shared per-entry logic
-   * behind both the single `revert` endpoint and the bulk `revert-all`). A
-   * created file's revert deletes it (not undoable: the file is gone), an edit
-   * writes the baseline back and yields the before/after undo snapshot.
+   * behind both the single `revert` endpoint and the bulk `revert-all`). An
+   * entry with no earlier version (`earlierVersion: 'none'`) has its file
+   * deleted (not undoable: the file is gone); one that has an earlier version
+   * (`'file'`) writes it back and yields the before/after undo snapshot.
    * @param entry - the entry to revert.
    * @param sessionId - the entry's session (for the per-session write policy).
    * @param signal - aborts before atomic publication takes effect.
@@ -1215,7 +1218,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    */
   async function revertEntryContent(entry: PendingEntry, sessionId: SessionId, signal: AbortSignal): Promise<{ before: DiffApprovalUndoState; after: DiffApprovalUndoState } | undefined> {
     const resolved = await ctx.fs.resolve(entry.path, { signal })
-    if (entry.kind === 'create') {
+    if (entry.earlierVersion === 'none') {
       await removeRevert(resolved, sessionId, signal)
       return undefined
     }
@@ -1972,7 +1975,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         let undo: { before: DiffApprovalUndoState; after: DiffApprovalUndoState } | undefined
         try {
           const target = await ctx.fs.resolve(entry.path, { signal })
-          if (entry.kind === 'create' && content === '') {
+          if (entry.earlierVersion === 'none' && content === '') {
             await removeRevert(target, blockTarget.sessionId, signal)
           } else {
             const preWrite = await ctx.fs.readText(target, undefined) ?? entry.newText
@@ -2078,7 +2081,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           id: change.path,
           sessionId,
           path: change.path,
-          kind: change.kind,
+          earlierVersion: change.earlierVersion,
           oldText: change.oldText,
           newText: change.newText,
           updatedAt: Date.now(),
@@ -2131,13 +2134,13 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           const value: DiffApprovalRefreshValue = { outcome: 'no-change' }
           return { ok: true, value }
         }
-        if (change.kind === entry.kind && change.oldText === entry.oldText && change.newText === entry.newText) {
+        if (change.earlierVersion === entry.earlierVersion && change.oldText === entry.oldText && change.newText === entry.newText) {
           const value: DiffApprovalRefreshValue = { outcome: 'unchanged' }
           return { ok: true, value }
         }
         const refreshed: PendingEntry = {
           ...entry,
-          kind: change.kind,
+          earlierVersion: change.earlierVersion,
           oldText: change.oldText,
           newText: change.newText,
           updatedAt: Date.now(),
@@ -2297,7 +2300,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             id: absolute,
             sessionId: target.sessionId,
             path: absolute,
-            kind: 'edit',
+            earlierVersion: 'file',
             oldText: content,
             newText: content,
             updatedAt: now,
@@ -2335,7 +2338,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           id: change.path,
           sessionId: target.sessionId,
           path: change.path,
-          kind: change.kind,
+          earlierVersion: change.earlierVersion,
           oldText: change.oldText,
           newText: change.newText,
           updatedAt: now,
@@ -2360,7 +2363,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
               id: file.path,
               sessionId: target.sessionId,
               path: file.path,
-              kind: 'edit',
+              earlierVersion: 'file',
               oldText: file.content,
               newText: file.content,
               updatedAt: now,
@@ -2453,11 +2456,11 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   // policy occupies these single-slot waterfalls and never calls `next()`, so
   // a later-registered listener would never run.
   ctx.effect(() => ctx.on('fs/edit-intent', async (target, actor, next) => {
-    await stashEditorIntent(target, actor, 'edit')
+    await stashEditorIntent(target, actor, 'file')
     return next()
   }, { prepend: true }), 'diff-approval: str_replace_editor edit basis')
   ctx.effect(() => ctx.on('fs/write-intent', async (target, actor, next) => {
-    await stashEditorIntent(target, actor, 'create')
+    await stashEditorIntent(target, actor, 'none')
     return next()
   }, { prepend: true }), 'diff-approval: str_replace_editor create basis')
 }
@@ -2465,7 +2468,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
 /** One mutation's basis captured at its intent seam. */
 interface IntentBasis {
   target: FsTarget
-  kind: PendingEntryKind
+  earlierVersion: PendingEntryKind
   before: string
   sessionId: SessionId | undefined
 }

@@ -191,14 +191,26 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
   }
 }
 
+/** The pre-rename spelling of a file row's `earlierVersion`, or undefined for anything else. */
+function legacyEarlierVersion(kind: unknown): 'file' | 'none' | undefined {
+  if (kind === 'edit') return 'file'
+  if (kind === 'create') return 'none'
+  return undefined
+}
+
 /** Narrow one pending entry from the wire; malformed rows are skipped. */
 function pendingFileOf(value: unknown): PendingFileDiff | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-  const { id, sessionId, sessionIds, path, kind, oldText, newText, updatedAt, missing, diverged } = value as Record<string, unknown>
+  const record = value as Record<string, unknown>
+  const { id, sessionId, sessionIds, path, oldText, newText, updatedAt, missing, diverged } = record
+  // A host built before the rename answers with `kind: 'edit' | 'create'`. Host and client ship together
+  // (the host serves this bundle), but a tab can hold the previous client for a moment: reading only the
+  // new name would blank the whole list for that moment instead of showing it.
+  const earlierVersion = record.earlierVersion ?? legacyEarlierVersion(record.kind)
   if (typeof id !== 'string' || id.length === 0) return undefined
   if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
   if (typeof path !== 'string' || path.length === 0) return undefined
-  if (kind !== 'edit' && kind !== 'create') return undefined
+  if (earlierVersion !== 'file' && earlierVersion !== 'none') return undefined
   if (typeof oldText !== 'string' || typeof newText !== 'string') return undefined
   if (typeof updatedAt !== 'number') return undefined
   const touched = Array.isArray(sessionIds)
@@ -208,7 +220,7 @@ function pendingFileOf(value: unknown): PendingFileDiff | undefined {
     id,
     sessionId: sessionId as SessionId,
     path,
-    kind,
+    earlierVersion,
     oldText,
     newText,
     updatedAt,

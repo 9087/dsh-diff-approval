@@ -11,7 +11,7 @@ const S1 = 'session-1' as SessionId
 
 function entry(newText: string): PendingFileDiff {
   return {
-    id: 'entry-1', sessionId: S1, path: '/repo/a.txt', kind: 'edit',
+    id: 'entry-1', sessionId: S1, path: '/repo/a.txt', earlierVersion: 'file',
     oldText: 'a\nb\n', newText, updatedAt: 10, missing: false, diverged: false,
   }
 }

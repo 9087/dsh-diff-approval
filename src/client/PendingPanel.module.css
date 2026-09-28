@@ -1905,17 +1905,6 @@
   line-height: 18px;
 }
 
-.kindTag {
-  flex: none;
-  padding: 1px 6px;
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 6px;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 11px;
-  line-height: 14px;
-  white-space: nowrap;
-}
-
 .kindHint {
   flex: none;
   color: var(--dsw-alias-label-tertiary);

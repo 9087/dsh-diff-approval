@@ -307,7 +307,7 @@ export function seedPending(
     entries.push({
       id: path,
       path,
-      kind: 'edit',
+      earlierVersion: 'file',
       oldText: file.oldText,
       newText: file.newText,
       updatedAt: Date.now(),

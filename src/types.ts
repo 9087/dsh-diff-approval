@@ -19,8 +19,12 @@ export interface PendingEntry {
   id: string
   /** Backend-resolved display path (the tool's output `path`). */
   path: string
-  /** What the operation did: an in-place change or a file creation. */
-  kind: PendingEntryKind
+  /**
+   * Whether there is an earlier version of the file to restore: `'file'` when
+   * the whole-file action writes the earlier text back, `'none'` when the file
+   * did not exist, so the whole-file action deletes it.
+   */
+  earlierVersion: PendingEntryKind
   /** File content before the first captured operation (empty for a creation). */
   oldText: string
   /** File content after the latest captured operation. */
@@ -33,8 +37,8 @@ export interface PendingEntry {
   sessionIds: SessionId[]
 }
 
-/** What one captured operation did to the file. */
-export type PendingEntryKind = 'edit' | 'create'
+/** Whether an entry has an earlier version of its file to restore. */
+export type PendingEntryKind = 'file' | 'none'
 
 /**
  * One listed pending entry: the stored operation plus the live file state the

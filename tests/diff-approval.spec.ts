@@ -1,5 +1,5 @@
 // The host half: capture, per-operation entries, channel serving, keep,
-// kind-aware revert, live file state, and persistence.
+// earlier-version-aware revert, live file state, and persistence.
 
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -150,8 +150,13 @@ async function listEntries(handle: ConnectionRpcHandler, sessionId: string): Pro
  * redirection writes the routed output to that file instead of returning it on
  * stdout; `git checkout-index --temp` writes the routed blob to a temp file in
  * the workdir and prints `TEMPNAME\tPATH` (as the real git does), so the import
- * reads it back with the uncapped file reader. */
-function fakeShell(routes: Record<string, string>): unknown {
+ * reads it back with the uncapped file reader. A route may also be an object, for
+ * a command that must FAIL: `git cat-file -s` on a path HEAD does not carry exits
+ * 128 with git's own wording, and a fake that answered "no route" instead was
+ * silently read as absence until the baseline read stopped swallowing failures. */
+function fakeShell(
+  routes: Record<string, string | { exitCode?: number; stdout?: string; stderr?: string }>,
+): unknown {
   return {
     resolve: (request: { command: string; workdir?: string; timeoutMs?: number }) => ({ ...request }),
     run: async (spec: { command: string; workdir?: string }) => {
@@ -163,7 +168,7 @@ function fakeShell(routes: Record<string, string>): unknown {
       if (co !== null) {
         const path = co[1]!
         for (const [needle, output] of Object.entries(routes)) {
-          if (command.includes(needle)) {
+          if (typeof output === 'string' && command.includes(needle)) {
             const name = '.merge_file_test'
             const file = resolve(workdir, name)
             const { writeFile } = await import('node:fs/promises')
@@ -180,6 +185,13 @@ function fakeShell(routes: Record<string, string>): unknown {
       const bare = (redir?.[1] ?? spec.command).replace(/'/g, '')
       for (const [needle, output] of Object.entries(routes)) {
         if (bare.includes(needle)) {
+          if (typeof output !== 'string') {
+            return {
+              exitCode: output.exitCode ?? 1,
+              stdout: { text: output.stdout ?? '' },
+              stderr: { text: output.stderr ?? '' },
+            }
+          }
           if (file !== undefined) {
             const { writeFile } = await import('node:fs/promises')
             await writeFile(file, output, 'utf8')
@@ -345,7 +357,7 @@ describe('the comment-answering skill', () => {
     // The file is in the list now, as the "no pending diff" shape a hand-added clean path takes…
     const entries = await listEntries(handle, 'session-1')
     expect(entries.map(entry => entry.path)).toEqual([join(root, 'src', 'a.ts')])
-    expect(entries[0]).toMatchObject({ kind: 'edit' })
+    expect(entries[0]).toMatchObject({ earlierVersion: 'file' })
     expect(entries[0]!.oldText).toBe(entries[0]!.newText)
     expect(entries[0]!.oldText).toContain('two')
 
@@ -429,10 +441,10 @@ describe('capturing operations', () => {
 
     const entries = await listEntries(handle, 'session-1')
     expect(entries).toHaveLength(1)
-    expect(entries[0]).toMatchObject({ kind: 'edit', oldText: 'v1\n', newText: 'v3\n' })
+    expect(entries[0]).toMatchObject({ earlierVersion: 'file', oldText: 'v1\n', newText: 'v3\n' })
   })
 
-  it('records a write create as a create entry and folds later edits into it', async () => {
+  it('turns a created file that was edited again into a modification, not a permanent 新增', async () => {
     const { ctx, handle } = await harness()
     emitResult(ctx, writeExec(), writeSuccess('/repo/new.txt', 'create', null, 'content'))
     emitResult(ctx, editExec(), editSuccess('/repo/new.txt', 'content', 'content2'))
@@ -440,8 +452,11 @@ describe('capturing operations', () => {
 
     const entries = await listEntries(handle, 'session-1')
     expect(entries).toHaveLength(2)
-    expect(entries[0]).toMatchObject({ path: '/repo/new.txt', kind: 'create', oldText: '', newText: 'content2' })
-    expect(entries[1]).toMatchObject({ path: '/repo/old.txt', kind: 'edit', oldText: 'before', newText: 'after' })
+    // Created and then edited: the row is a modification whose basis is the created content, so the
+    // reader is offered 修改 / 回退 for a file they have been working on — not 新增 / 删除, which the
+    // frozen-create rule produced for a file rewritten any number of times.
+    expect(entries[0]).toMatchObject({ path: '/repo/new.txt', earlierVersion: 'file', oldText: 'content', newText: 'content2' })
+    expect(entries[1]).toMatchObject({ path: '/repo/old.txt', earlierVersion: 'file', oldText: 'before', newText: 'after' })
   })
 
   it('ignores other tools, failures, malformed values, agent-less calls, and basis-less updates', async () => {
@@ -473,7 +488,7 @@ describe('live state', () => {
     fs.readText.mockResolvedValue('v2\nexternal\n')
     const [entry] = await listEntries(handle, 'session-1')
     expect(entry).toMatchObject({
-      kind: 'edit', oldText: 'v1\n', newText: 'v2\nexternal\n', missing: false, diverged: false,
+      earlierVersion: 'file', oldText: 'v1\n', newText: 'v2\nexternal\n', missing: false, diverged: false,
     })
 
     // A second listing sees the adopted content already tracked (no drift).
@@ -949,7 +964,7 @@ describe('str_replace_editor capture', () => {
     const files = await listEntries(handle, 'session-1')
     expect(files).toHaveLength(1)
     expect(files[0]).toMatchObject({
-      path: '/repo/a.txt', kind: 'edit', oldText: 'before\n', newText: 'after\n', missing: false, diverged: false,
+      path: '/repo/a.txt', earlierVersion: 'file', oldText: 'before\n', newText: 'after\n', missing: false, diverged: false,
     })
   })
 
@@ -967,7 +982,7 @@ describe('str_replace_editor capture', () => {
 
     const files = await listEntries(handle, 'session-1')
     expect(files).toHaveLength(1)
-    expect(files[0]).toMatchObject({ path: '/repo/new.txt', kind: 'create', oldText: '', newText: 'created\n' })
+    expect(files[0]).toMatchObject({ path: '/repo/new.txt', earlierVersion: 'none', oldText: '', newText: 'created\n' })
   })
 
   it('captures even when an earlier listener owns the decision slot', async () => {
@@ -991,7 +1006,7 @@ describe('str_replace_editor capture', () => {
 
     const files = await listEntries(handle, 'session-1')
     expect(files).toHaveLength(1)
-    expect(files[0]).toMatchObject({ path: '/repo/a.txt', kind: 'edit', oldText: 'before\n', newText: 'after\n' })
+    expect(files[0]).toMatchObject({ path: '/repo/a.txt', earlierVersion: 'file', oldText: 'before\n', newText: 'after\n' })
   })
 
   it('tracks nothing for view commands, failed mutations, or other tools on the same seams', async () => {
@@ -1015,7 +1030,7 @@ describe('str_replace_editor capture', () => {
 
     const files = await listEntries(handle, 'session-1')
     expect(files).toHaveLength(1)
-    expect(files[0]).toMatchObject({ path: '/repo/b.txt', kind: 'edit', oldText: 'x', newText: 'y' })
+    expect(files[0]).toMatchObject({ path: '/repo/b.txt', earlierVersion: 'file', oldText: 'x', newText: 'y' })
   })
 })
 
@@ -1149,7 +1164,7 @@ describe('persistence', () => {
     const entries = await listEntries(second.handle, 'session-1')
     expect(entries).toEqual([
       expect.objectContaining({
-        sessionId: 'session-1', path: '/repo/a.txt', kind: 'edit',
+        sessionId: 'session-1', path: '/repo/a.txt', earlierVersion: 'file',
         oldText: 'v1\n', newText: 'v2\n', missing: false, diverged: false,
       }) as object,
     ])
@@ -1170,7 +1185,7 @@ describe('persistence', () => {
     const same = await harness({ sessionIds: [SessionId('session-old')], storageDir })
     same.fs.readText.mockResolvedValue('v2\n')
     expect((await listEntries(same.handle, 'session-old'))[0]).toMatchObject({
-      sessionId: 'session-old', path: '/repo/a.txt', kind: 'edit',
+      sessionId: 'session-old', path: '/repo/a.txt', earlierVersion: 'file',
       oldText: 'v1\n', newText: 'v2\n', missing: false, diverged: false,
     })
 
@@ -1289,7 +1304,7 @@ describe('undo/redo', () => {
     await expect(handle('undo', { sessionId: 'session-1' }, signal()))
       .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: entry!.id } })
     const [restored] = await listEntries(handle, 'session-1')
-    expect(restored).toMatchObject({ id: entry!.id, path: '/repo/a.txt', kind: 'edit', oldText: 'a', newText: 'b' })
+    expect(restored).toMatchObject({ id: entry!.id, path: '/repo/a.txt', earlierVersion: 'file', oldText: 'a', newText: 'b' })
 
     await expect(handle('redo', { sessionId: 'session-1' }, signal()))
       .resolves.toEqual({ ok: true, value: { outcome: 'redone', id: entry!.id } })
@@ -1557,9 +1572,9 @@ describe('vcs detection and import', () => {
       join(workspace, 'gone.txt'),
       join(workspace, 'new.txt'),
     ])
-    expect(files[0]).toMatchObject({ kind: 'edit', oldText: 'old content\n', newText: 'new content\n' })
-    expect(files[1]).toMatchObject({ kind: 'edit', oldText: 'gone old\n', newText: '' })
-    expect(files[2]).toMatchObject({ kind: 'create', oldText: '', newText: 'fresh\n' })
+    expect(files[0]).toMatchObject({ earlierVersion: 'file', oldText: 'old content\n', newText: 'new content\n' })
+    expect(files[1]).toMatchObject({ earlierVersion: 'file', oldText: 'gone old\n', newText: '' })
+    expect(files[2]).toMatchObject({ earlierVersion: 'none', oldText: '', newText: 'fresh\n' })
   })
 
   it('imports a staged change too, because the baseline is the last commit and not the index', async () => {
@@ -1575,8 +1590,13 @@ describe('vcs detection and import', () => {
         'M  sub/staged.txt\u0000A  sub/added.txt\u0000',
       'git cat-file -s HEAD:sub/staged.txt': '18',
       'git show HEAD:sub/staged.txt': 'committed content\n',
-      // `added.txt` has no version at HEAD: its size lookup fails, no blob is read for it, and it
-      // lands as a `create` whose revert removes the file.
+      // `added.txt` has no version at HEAD: git says exactly that, no blob is read for it, and it
+      // lands as a `create` whose revert removes the file. The failure has to be git's OWN wording —
+      // a read that fails for any other reason is now refused rather than read as absence.
+      'git cat-file -s HEAD:sub/added.txt': {
+        exitCode: 128,
+        stderr: "fatal: path 'sub/added.txt' does not exist in 'HEAD'",
+      },
     })
     const { handle } = await harness({
       sessionIds: [SessionId('session-1')],
@@ -1593,9 +1613,9 @@ describe('vcs detection and import', () => {
       join(workspace, 'staged.txt'),
     ])
     const staged = files.find(file => file.path === join(workspace, 'staged.txt'))!
-    expect(staged).toMatchObject({ kind: 'edit', oldText: 'committed content\n', newText: 'staged content\n' })
+    expect(staged).toMatchObject({ earlierVersion: 'file', oldText: 'committed content\n', newText: 'staged content\n' })
     const added = files.find(file => file.path === join(workspace, 'added.txt'))!
-    expect(added).toMatchObject({ kind: 'create', oldText: '', newText: 'brand new\n' })
+    expect(added).toMatchObject({ earlierVersion: 'none', oldText: '', newText: 'brand new\n' })
   })
 
   it('reads a large baseline blob via git show with a raised stdout budget (no temp file)', async () => {
@@ -1629,7 +1649,7 @@ describe('vcs detection and import', () => {
     await handle('vcs-import', { sessionId: 'session-1', includeUntracked: true }, signal())
     const files = await listEntries(handle, 'session-1')
     expect(files).toHaveLength(1)
-    expect(files[0]).toMatchObject({ kind: 'edit', oldText: 'big old content\n', newText: 'big new content\n' })
+    expect(files[0]).toMatchObject({ earlierVersion: 'file', oldText: 'big old content\n', newText: 'big new content\n' })
     // The baseline came off `git show HEAD:` with a raised per-command stdout
     // budget, not a temp-file write to the repo root.
     const show = resolves.find(request => request.command.startsWith('git show HEAD:'))
@@ -1695,7 +1715,7 @@ describe('vcs detection and import', () => {
     const answer = await handle('vcs-import', { sessionId: 'session-1', includeUntracked: true }, signal())
     expect(answer).toEqual({ ok: true, value: { imported: 1, detected: true } })
     const [file] = await listEntries(handle, 'session-1')
-    expect(file).toMatchObject({ kind: 'create', oldText: '', newText: 'fresh\n' })
+    expect(file).toMatchObject({ earlierVersion: 'none', oldText: '', newText: 'fresh\n' })
   })
 
   it('imports only p4 opened files when the untracked preference is off (no full scan)', async () => {
@@ -1718,7 +1738,7 @@ describe('vcs detection and import', () => {
     const answer = await handle('vcs-import', { sessionId: 'session-1', includeUntracked: false }, signal())
     expect(answer).toEqual({ ok: true, value: { imported: 1, detected: true } })
     const [file] = await listEntries(handle, 'session-1')
-    expect(file).toMatchObject({ kind: 'edit', oldText: 'old content\n', newText: 'new content\n' })
+    expect(file).toMatchObject({ earlierVersion: 'file', oldText: 'old content\n', newText: 'new content\n' })
   })
 
   it('undoes a VCS import back to the pre-import list, then the earlier keep', async () => {
@@ -1767,7 +1787,7 @@ describe('vcs detection and import', () => {
     await handle('redo', { sessionId: 'session-1' }, signal())
     const files2 = await listEntries(handle, 'session-1')
     expect(files2).toHaveLength(1)
-    expect(files2[0]).toMatchObject({ kind: 'edit', oldText: 'old\n', newText: 'new\n' })
+    expect(files2[0]).toMatchObject({ earlierVersion: 'file', oldText: 'old\n', newText: 'new\n' })
   })
 })
 
@@ -1867,7 +1887,7 @@ describe('hand-adding paths to the review list', () => {
     // The add names the entry it landed as, which is what lets a caller that typed one path
     // select that file without waiting for the next list poll.
     expect((value as { value: { id?: string } }).value.id).toBe(files[0]!.id)
-    expect(files[0]).toMatchObject({ kind: 'edit', oldText: 'old content\n', newText: 'new content\n' })
+    expect(files[0]).toMatchObject({ earlierVersion: 'file', oldText: 'old content\n', newText: 'new content\n' })
 
     // Naming it again answers with the entry already listed, not a bare "duplicate" — and re-adds
     // nothing, which would push a review in progress back over its baseline.
@@ -1935,7 +1955,7 @@ describe('hand-adding paths to the review list', () => {
     expect(value).toMatchObject({ ok: true, value: { outcome: 'added', added: 1, duplicates: 0 } })
     const files = await listEntries(handle, 'session-1')
     expect(files).toHaveLength(1)
-    expect(files[0]).toMatchObject({ path: join(workspace, 'clean.txt'), kind: 'edit', oldText: 'same\n', newText: 'same\n' })
+    expect(files[0]).toMatchObject({ path: join(workspace, 'clean.txt'), earlierVersion: 'file', oldText: 'same\n', newText: 'same\n' })
     expect((value as { value: { id?: string } }).value.id).toBe(files[0]!.id)
     await handle('undo', { sessionId: 'session-1' }, signal())
     expect(await listEntries(handle, 'session-1')).toEqual([])
@@ -1995,7 +2015,7 @@ describe('hand-adding paths to the review list', () => {
       join(dir, 'nested', 'deep.txt'),
     ].sort())
     const clean = files.find(file => file.path === join(dir, 'clean.txt'))
-    expect(clean).toMatchObject({ kind: 'edit', oldText: 'clean\n', newText: 'clean\n' })
+    expect(clean).toMatchObject({ earlierVersion: 'file', oldText: 'clean\n', newText: 'clean\n' })
   })
 
   it('caps the no-change walk and reports the cut', async () => {
@@ -2040,7 +2060,7 @@ describe('hand-adding paths to the review list', () => {
     const value = await handle('add-path', { sessionId: 'session-1', path: 'fresh.txt' }, signal())
     expect(value).toMatchObject({ ok: true, value: { outcome: 'added', added: 1, duplicates: 0 } })
     const files = await listEntries(handle, 'session-1')
-    expect(files[0]).toMatchObject({ kind: 'create', oldText: '', newText: 'fresh\n' })
+    expect(files[0]).toMatchObject({ earlierVersion: 'none', oldText: '', newText: 'fresh\n' })
     expect((value as { value: { id?: string } }).value.id).toBe(files[0]!.id)
   })
 
@@ -2090,7 +2110,7 @@ describe('hand-adding paths to the review list', () => {
     const files = await listEntries(handle, 'session-1')
     expect(files).toHaveLength(1)
     expect(files[0]).toMatchObject({
-      path: join(dir, 'named.txt'), kind: 'edit', oldText: 'named content\n', newText: 'named content\n',
+      path: join(dir, 'named.txt'), earlierVersion: 'file', oldText: 'named content\n', newText: 'named content\n',
     })
     expect((value as { value: { id?: string } }).value.id).toBe(files[0]!.id)
 
@@ -2245,7 +2265,7 @@ describe('persistence throttling', () => {
     // The burst is not lost: the durable state is earliest basis -> latest content.
     const second = await harness({ sessionIds: [SessionId('session-1')], storageDir })
     const [entry] = await listEntries(second.handle, 'session-1')
-    expect(entry).toMatchObject({ oldText: 'v0\n', newText: 'v6\n', kind: 'edit' })
+    expect(entry).toMatchObject({ oldText: 'v0\n', newText: 'v6\n', earlierVersion: 'file' })
   })
 })
 

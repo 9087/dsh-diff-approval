@@ -21,7 +21,7 @@ function entry(overrides: Partial<PendingEntry> = {}): PendingEntry {
     id: 'C:\\repo\\a.ts',
     sessionId: S1,
     path: 'C:\\repo\\a.ts',
-    kind: 'edit',
+    earlierVersion: 'file',
     oldText: '',
     newText: NEW_TEXT,
     updatedAt: 1,

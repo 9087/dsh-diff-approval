@@ -44,13 +44,20 @@ describe('list', () => {
           },
           files: [
             {
-              id: 'e1', sessionId: 'session-1', path: '/repo/a.txt', kind: 'edit',
+              id: 'e1', sessionId: 'session-1', path: '/repo/a.txt', earlierVersion: 'file',
               oldText: 'a', newText: 'b', updatedAt: 10, missing: true, diverged: false,
             },
             { sessionId: 'session-1', path: 42 },
             {
-              id: 'e2', sessionId: 'session-1', path: '/repo/c.txt', kind: 'create',
+              id: 'e2', sessionId: 'session-1', path: '/repo/c.txt', earlierVersion: 'none',
               oldText: '', newText: 'c', updatedAt: 20,
+            },
+            {
+              // A host built before the rename still answers with `kind`. Host and client ship together,
+              // but a tab can hold the previous client bundle for a moment, and reading only the new name
+              // would blank the list for that moment.
+              id: 'e3', sessionId: 'session-1', path: '/repo/d.txt', kind: 'create',
+              oldText: '', newText: 'd', updatedAt: 30,
             },
           ],
         },
@@ -72,13 +79,18 @@ describe('list', () => {
       commentLines: { c1: { start: 4, end: 5 } },
       files: [
         {
-          id: 'e1', sessionId: 'session-1', path: '/repo/a.txt', kind: 'edit',
+          id: 'e1', sessionId: 'session-1', path: '/repo/a.txt', earlierVersion: 'file',
           oldText: 'a', newText: 'b', updatedAt: 10, missing: true, diverged: false,
           sessionIds: ['session-1'],
         },
         {
-          id: 'e2', sessionId: 'session-1', path: '/repo/c.txt', kind: 'create',
+          id: 'e2', sessionId: 'session-1', path: '/repo/c.txt', earlierVersion: 'none',
           oldText: '', newText: 'c', updatedAt: 20, missing: false, diverged: false,
+          sessionIds: ['session-1'],
+        },
+        {
+          id: 'e3', sessionId: 'session-1', path: '/repo/d.txt', earlierVersion: 'none',
+          oldText: '', newText: 'd', updatedAt: 30, missing: false, diverged: false,
           sessionIds: ['session-1'],
         },
       ],
