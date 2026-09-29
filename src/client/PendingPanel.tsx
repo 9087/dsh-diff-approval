@@ -8466,6 +8466,10 @@ export function PendingPanel({
           : file?.earlierVersion === 'none' ? t('row.deleteRemove') : t('row.revertRemove')
       return t('panel.removeOneAsk', { action, file: basenameOf(file?.path ?? '') })
     }
+    // The two WHOLE-LIST asks name 移出 in their own text (`panel.batchKeepAllAsk` / `panel.batchRevertAllAsk`),
+    // even though the buttons that open them stay 全部保留 / 全部回退: a footer button has no room for it, and
+    // both presses DO take their rows out of the list (see `runBulk`). The pick's asks keep a pick's own
+    // words, because a pick acts on a subset the dialog counts rather than on the whole list.
     return t(
       kind === 'keep-picked' ? 'panel.batchKeepAsk'
         : kind === 'keep-remove-picked' ? 'panel.batchKeepRemoveAsk'
@@ -9397,15 +9401,20 @@ export function PendingPanel({
   /**
    * Run the same decision over the current-session list.
    *
-   * 保留 settles every row — including a dismiss-only one, where folding an identical change and dropping
-   * the entry is exactly what its own 移出 does.
+   * Both presses SETTLE the list: the rows they decided leave it, which is what the reader asked a
+   * whole-list button to mean (and what its own confirmation now spells out — see `batchAskOf`). The
+   * two differ only in what they do to the files on the way out.
+   *
+   * 保留 is one call: `keep-all` folds every entry and drops it (the host's own handler walks the
+   * session and `dropEntry`s each one — `src/index.ts` `case 'keep-all'`, pinned by the host suite's
+   * "keeps every session entry in one call"), so nothing here has to name the rows.
    *
    * 回退 names the rows it may act on EXPLICITLY rather than asking the host for the whole session,
-   * because a dismiss-only row must be skipped: a missing file's revert writes the baseline back and
-   * RECREATES a file the reader deleted outside the panel (see `fileDismissOnly`), which is the opposite
-   * of what a bulk "put everything back" should do behind their back. The rows left alone stay listed and
-   * keep whatever decision they had. `keepListed` is the plain 回退: the rows that were reverted stay
-   * listed, as a single row's 回退 does.
+   * for two reasons. A dismiss-only row must be skipped: a missing file's revert writes the baseline
+   * back and RECREATES a file the reader deleted outside the panel (see `fileDismissOnly`). And the
+   * rows it does act on must LEAVE the list, like 保留's do and like a single row's 「回退并移出」 —
+   * so `keepListed` is left off (the host drops the row unless it is `true`, which is the plain
+   * single-row 回退 and NOT what a whole-list button means).
    */
   const runBulk = async (kind: 'keep' | 'revert') => {
     if (current === undefined) return
@@ -9414,7 +9423,9 @@ export function PendingPanel({
     setBulkBusy(kind)
     try {
       if (kind === 'keep') await onKeepAll(current)
-      else await onRevertMany(current, ids, true)
+      // `undefined` is the REMOVE variant (`keepListed` is only honoured when it is `true`), which is the
+      // shape the single row's 「回退并移出」 and the pick's own 回退并移出 both use.
+      else await onRevertMany(current, ids, undefined)
     } finally {
       setBulkBusy(null)
     }

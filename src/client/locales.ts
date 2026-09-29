@@ -117,8 +117,12 @@ export const zh = {
   'panel.batchKeepRemoveAsk': '保留并移出 {count} 个文件？',
   'panel.batchRevertAsk': '回退 {count} 个文件？',
   'panel.batchRevertRemoveAsk': '回退并移出 {count} 个文件？',
-  'panel.batchKeepAllAsk': '保留全部 {count} 个文件？',
-  'panel.batchRevertAllAsk': '回退全部 {count} 个文件？',
+  // The whole-LIST pair. Both of them also take their rows out of the list — that is the reader's
+  // decision for a footer button, whose own label has no room to say 并移出 (the buttons stay 全部保留 /
+  // 全部回退). So the dialog is where 移出 is named, in the SAME words the single row's own 保留并移出 /
+  // 回退并移出 use, one scope bigger.
+  'panel.batchKeepAllAsk': '保留并移出全部 {count} 个文件？',
+  'panel.batchRevertAllAsk': '回退并移出全部 {count} 个文件？',
   'panel.batchCloseAsk': '关闭 {count} 条评论？',
   // The one thing here that cannot be undone: a revert DELETES every file the agent created, and the
   // host records no undo for that. The files are named — a bare count is what the reader already knew.
@@ -389,8 +393,8 @@ export const en = {
   'panel.batchKeepRemoveAsk': 'Keep and remove {count} file(s)?',
   'panel.batchRevertAsk': 'Revert {count} file(s)?',
   'panel.batchRevertRemoveAsk': 'Revert and remove {count} file(s)?',
-  'panel.batchKeepAllAsk': 'Keep all {count} file(s)?',
-  'panel.batchRevertAllAsk': 'Revert all {count} file(s)?',
+  'panel.batchKeepAllAsk': 'Keep and remove all {count} file(s)?',
+  'panel.batchRevertAllAsk': 'Revert and remove all {count} file(s)?',
   'panel.batchCloseAsk': 'Close {count} comment(s)?',
   'panel.batchDeletes': 'Reverting deletes {count} created file(s), with no undo: {files}',
   'panel.batchAndMore': 'and {count} more',

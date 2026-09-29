@@ -15,7 +15,7 @@ import { startProducedChipMenu } from '../src/client/produced-diff.ts'
 import { computeWholeFileDiff } from '../src/client/whole-file-diff.ts'
 import panelCss from '../src/client/PendingPanel.module.css'
 import { codeFontCss } from '../src/client/code-font.ts'
-import { zh } from '../src/client/locales.ts'
+import { zh, en } from '../src/client/locales.ts'
 import { lastPanelFile, panelFileOffset, rememberedPlacedThreads, rememberedThreads, removalAskQuiet, resetPanelMemory } from '../src/client/panel-memory.ts'
 import { diffLineHeight, navLeadRows, setCommentModeEnabled, setConfirmFileRemoveEnabled } from '../src/client/settings.ts'
 import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
@@ -1113,10 +1113,12 @@ describe('PendingPanel', () => {
     expect(screen.getByText('panel.batchDeletes {"count":1,"files":"b.txt"}')).toBeDefined()
     fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
     // A whole-list revert names the rows it may act on rather than asking the host for the session: a
-    // dismiss-only row is skipped (see `runBulk`), and here neither row is one.
+    // dismiss-only row is skipped (see `runBulk`), and here neither row is one. The third argument is the
+    // REMOVE variant — `undefined`, the shape a single row's 「回退并移出」 uses — because the reader asked
+    // a footer button to settle the list, not to leave every reverted row standing.
     const revertManyMock = props.onRevertMany as unknown as { mock: { calls: unknown[][] } }
     await waitFor(() => { expect(revertManyMock.mock.calls).toHaveLength(1) })
-    expect(revertManyMock.mock.calls[0]).toEqual([S1, [FILE.id, 'entry-2'], true])
+    expect(revertManyMock.mock.calls[0]).toEqual([S1, [FILE.id, 'entry-2'], undefined])
     expect(props.onRevert).not.toHaveBeenCalled()
     expect(props.onRevertAll).not.toHaveBeenCalled()
   })
@@ -1241,8 +1243,8 @@ describe('PendingPanel', () => {
   it('skips a missing row when the whole list is reverted', async () => {
     // A whole-list revert names the rows it may act on rather than asking the host for the session: reverting
     // a missing entry writes the baseline back and RECREATES a file the reader deleted outside the panel,
-    // which is the last thing "put everything back" should do behind their back. The rows that are acted on
-    // stay LISTED (the plain 回退, as a single row's is), and the missing one is simply left alone.
+    // which is the last thing "put everything back" should do behind their back. The row it does act on
+    // LEAVES the list (the footer's 回退并移出 — see `runBulk`), and the missing one is simply left alone.
     const edited = entry({ id: 'entry-live', path: '/repo/live.txt', earlierVersion: 'file' })
     const gone = entry({ id: 'entry-gone-revert', path: '/repo/gone.txt', missing: true, earlierVersion: 'file' })
     const props = panelProps({ read: true, files: [edited, gone], busy: new Set() })
@@ -1257,11 +1259,112 @@ describe('PendingPanel', () => {
 
     const many = props.onRevertMany as unknown as { mock: { calls: unknown[][] } }
     await waitFor(() => { expect(many.mock.calls).toHaveLength(1) })
-    expect(many.mock.calls[0]).toEqual([S1, ['entry-live'], true])
+    // `undefined` and not `true`: the row leaves the list.
+    expect(many.mock.calls[0]).toEqual([S1, ['entry-live'], undefined])
     // The session-wide endpoint is not used at all any more: it walks every entry the session holds, so it
     // has no way to leave the missing one out.
     expect(props.onRevertAll).not.toHaveBeenCalled()
     expect(props.onRevert).not.toHaveBeenCalled()
+  })
+
+  it('settles every KEPT row out of the list, and asks with 保留并移出 before it runs', async () => {
+    // The reader's decision for the footer: 全部保留 also takes its rows out of the list (移出 is a keep —
+    // the host folds the accepted content and drops the entry). The BUTTON keeps the footer's own short
+    // words and does NOT gain 移出; the DIALOG is where 移出 is named, in the same words a single row's
+    // 保留并移出 uses. The one session-wide keep drops every entry it folded — pinned host-side by
+    // "keeps every session entry in one call and returns the affected count" (tests/diff-approval.spec.ts),
+    // which asserts the session's list is empty afterwards.
+    const second = entry({ id: 'entry-keep-all-2', path: '/repo/kb.txt' })
+    const props = panelProps({ read: true, files: [FILE, second], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const keepAllMock = props.onKeepAll as unknown as { mock: { calls: unknown[][] } }
+
+    expect(bulkButton('keep-all').textContent).toBe('action.keepAll')
+    expect(zh['action.keepAll']).not.toContain('移出')
+    fireEvent.click(bulkButton('keep-all'))
+    expect(screen.getByText('panel.batchKeepAllAsk {"count":2}')).toBeDefined()
+    expect(zh['panel.batchKeepAllAsk']).toContain('移出')
+    expect(en['panel.batchKeepAllAsk']).toContain('remove')
+    // A cancel sends nothing: this one press settles the whole list, so the dialog is what decides.
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-cancel]') as HTMLElement)
+    expect(keepAllMock.mock.calls).toHaveLength(0)
+
+    fireEvent.click(bulkButton('keep-all'))
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
+    await waitFor(() => { expect(keepAllMock.mock.calls).toHaveLength(1) })
+    expect(keepAllMock.mock.calls[0]).toEqual([S1])
+    // One session-wide call, not a list this pane walked itself.
+    expect(props.onKeepMany).not.toHaveBeenCalled()
+    expect(props.onRevertMany).not.toHaveBeenCalled()
+  })
+
+  it('settles every REVERTED row out of the list, and asks with 回退并移出 before it runs', async () => {
+    // The other half of the same decision: a footer 回退 leaves no reverted row standing either. The call
+    // is the REMOVE variant — `keepListed` left off, the shape a single row's 「回退并移出」 uses — and the
+    // dialog names 移出 while the button keeps the three-way label.
+    const edited = entry({ id: 'entry-revert-all-1', path: '/repo/ra.txt', earlierVersion: 'file' })
+    const created = entry({ id: 'entry-revert-all-2', path: '/repo/rc.txt', earlierVersion: 'none', oldText: '', newText: 'c\n' })
+    const props = panelProps({ read: true, files: [edited, created], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const revertManyMock = props.onRevertMany as unknown as { mock: { calls: unknown[][] } }
+
+    // The list mixes an edit with a creation, so the button says 回退或删除 — and never 移出.
+    expect(bulkButton('revert-all').textContent).toBe('action.revertOrDelete')
+    fireEvent.click(bulkButton('revert-all'))
+    expect(screen.getByText('panel.batchRevertAllAsk {"count":2}')).toBeDefined()
+    expect(zh['panel.batchRevertAllAsk']).toContain('移出')
+    expect(en['panel.batchRevertAllAsk']).toContain('remove')
+    // The dialog still names the part with no undo: the created file this is about to delete.
+    expect(screen.getByText('panel.batchDeletes {"count":1,"files":"rc.txt"}')).toBeDefined()
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-cancel]') as HTMLElement)
+    expect(revertManyMock.mock.calls).toHaveLength(0)
+
+    fireEvent.click(bulkButton('revert-all'))
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
+    await waitFor(() => { expect(revertManyMock.mock.calls).toHaveLength(1) })
+    expect(revertManyMock.mock.calls[0]).toEqual([S1, ['entry-revert-all-1', 'entry-revert-all-2'], undefined])
+    expect(props.onRevertAll).not.toHaveBeenCalled()
+    expect(props.onRevert).not.toHaveBeenCalled()
+  })
+
+  it('never puts 移出 on the footer\'s own buttons, in any of the three label states', () => {
+    // The reader asked for the confirmation to carry 移出 rather than the buttons, so this pins the labels
+    // as they are: the keep button, and the three-way revert label — with the one exception the panel
+    // already had, a list whose every row has nothing left to review, whose single decision IS 移出.
+    const edited = entry({ id: 'entry-labels-edit', path: '/repo/e.txt', earlierVersion: 'file' })
+    const created = entry({ id: 'entry-labels-created', path: '/repo/c.txt', earlierVersion: 'none', oldText: '', newText: 'c\n' })
+    const settled = entry({ id: 'entry-labels-settled', path: '/repo/s.txt', oldText: 'same\n', newText: 'same\n' })
+    const labelOf = (files: PendingFileDiff[]): { keep: string; revert: string | null } => {
+      const view = render(<PendingPanel {...panelProps({ read: true, files, busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      const keep = bulkButton('keep-all').textContent ?? ''
+      const revertButton = document.querySelector('[data-diff-revert-all]')
+      const revert = revertButton === null ? null : revertButton.textContent ?? ''
+      view.unmount()
+      return { keep, revert }
+    }
+    // Every row an edit: plain 回退. Every row a creation: 删除 (there is nothing to write back).
+    expect(labelOf([edited])).toEqual({ keep: 'action.keepAll', revert: 'action.revert' })
+    expect(labelOf([created])).toEqual({ keep: 'action.keepAll', revert: 'action.delete' })
+    // Both kinds at once: the one action does both, and says so.
+    expect(labelOf([edited, created])).toEqual({ keep: 'action.keepAll', revert: 'action.revertOrDelete' })
+    // No row left to review: the revert button is not offered at all, and 移出 is the list's one decision.
+    expect(labelOf([settled])).toEqual({ keep: 'row.dismiss', revert: null })
+
+    // …and the words behind those keys carry no 移出 either (both locales), while the two DIALOG keys do.
+    for (const key of ['action.keepAll', 'action.revert', 'action.delete', 'action.revertOrDelete'] as const) {
+      expect(zh[key], key).not.toContain('移出')
+      expect(en[key], key).not.toContain('remove')
+    }
+    for (const key of ['panel.batchKeepAllAsk', 'panel.batchRevertAllAsk'] as const) {
+      expect(zh[key], key).toContain('移出')
+      expect(en[key], key).toContain('remove')
+    }
+    // The one button that DOES say it is the dismiss-only variant, which is its own decision and not a
+    // 保留 or a 回退 at all.
+    expect(zh['row.dismiss']).toContain('移出')
   })
 
   it('shows a keep/revert failure inline on the row and detail instead of hiding the list', () => {
