@@ -2191,23 +2191,6 @@ function fileDismissOnly(file: PendingFileDiff): boolean {
   return fileHasNoDiff(file) || file.missing
 }
 
-/**
- * The whole-file action's label over a SET of files: 删除 when every one of them has no earlier version
- * (the action DELETES the file), 回退 when every one of them does, and the both-at-once wording when the
- * set mixes them — the action itself is one thing, and `earlierVersion` decides per file which of the two
- * it does. Read off the model, never off `oldText`.
- * @param files - the files the one action would act on, in list order.
- * @param t - the panel's translator.
- * @returns the label for that action.
- */
-function wholeFileActionLabel(files: readonly PendingFileDiff[], t: Translator): string {
-  const allDelete = files.every(file => file.earlierVersion === 'none')
-  const allRevert = files.every(file => file.earlierVersion === 'file')
-  if (allDelete && files.length > 0) return t('action.delete')
-  if (allRevert) return t('action.revert')
-  return t('action.revertOrDelete')
-}
-
 /** Whether a block keep/revert range covers the file's entire change region, so
  *  applying it leaves the file with no pending diff — the "remove or keep in
  *  list" prompt applies. This generalises the single-block case to a selection
@@ -8470,14 +8453,25 @@ export function PendingPanel({
     // even though the buttons that open them stay 全部保留 / 全部回退: a footer button has no room for it, and
     // both presses DO take their rows out of the list (see `runBulk`). The pick's asks keep a pick's own
     // words, because a pick acts on a subset the dialog counts rather than on the whole list.
+    //
+    // The whole-list REVERT is the one ask whose own text depends on what the press will do: reverting a row
+    // with no earlier version DELETES its file, so a batch holding any of those says 删除 and counts them,
+    // while a batch where every row has something to write back uses the plain ask and claims no deletion.
+    // The button says 全部回退 either way — the reader asked for the deed in the box, not on the button.
+    // (`data-diff-batch-deletes` below names the same files, which is where the reader recognises them.)
+    if (kind === 'revert-all') {
+      const doomed = prompt.doomed.length
+      return doomed > 0
+        ? t('panel.batchRevertAllDeletedAsk', { count: prompt.ids.length, doomed })
+        : t('panel.batchRevertAllAsk', { count: prompt.ids.length })
+    }
     return t(
       kind === 'keep-picked' ? 'panel.batchKeepAsk'
         : kind === 'keep-remove-picked' ? 'panel.batchKeepRemoveAsk'
           : kind === 'revert-picked' ? 'panel.batchRevertAsk'
             : kind === 'revert-remove-picked' ? 'panel.batchRevertRemoveAsk'
               : kind === 'keep-all' ? 'panel.batchKeepAllAsk'
-                : kind === 'revert-all' ? 'panel.batchRevertAllAsk'
-                  : 'panel.batchCloseAsk',
+                : 'panel.batchCloseAsk',
       { count: prompt.ids.length },
     )
   }
@@ -9377,19 +9371,20 @@ export function PendingPanel({
   const bulkDismissOnly = files.length > 0 && files.every(file => fileDismissOnly(file))
   /** The rows a whole-list 回退 would act on: every row that is not dismiss-only. */
   const bulkRevertFiles = files.filter(file => !fileDismissOnly(file))
-  /** The whole-list action's own label, three-way (see `wholeFileActionLabel`). */
-  const bulkRevertLabel = wholeFileActionLabel(bulkRevertFiles, t)
 
   /** Ask before running a session-wide bulk decision — the same dialog a pick's rows open. */
   const askBulk = (kind: 'keep' | 'revert'): void => {
     if (current === undefined) return
-    // 回退 DELETES every file the agent created; the dialog names those, because that is the part with no
-    // undo behind it.
-    const doomed = kind === 'revert' ? files.filter(file => file.earlierVersion === 'none').map(file => file.id) : []
-    // A revert over the whole list still SKIPS the rows that are only ever 移出 (see `runBulk`), so those
-    // are not named as deleted — the dialog would otherwise promise to delete a file the action leaves
-    // alone. 保留 acts on every row: it is the one decision a dismiss-only row still has.
+    // 保留 acts on every row: it is the one decision a dismiss-only row still has. A 回退 SKIPS the rows that
+    // are only ever 移出 (see `runBulk`), so it acts on `bulkRevertFiles` alone.
     const acted = kind === 'revert' ? bulkRevertFiles : files
+    // 回退 DELETES every file the agent created; the dialog names those, because that is the part with no undo
+    // behind it. Read off the rows this press ACTS on, not off the whole list: a created file that is also
+    // dismiss-only (an empty one, or one gone from disk) is skipped, so nothing of its is deleted and the
+    // dialog must not say otherwise.
+    const doomed = kind === 'revert'
+      ? acted.filter(file => file.earlierVersion === 'none').map(file => file.id)
+      : []
     setBatchPrompt({
       sessionId: current,
       kind: kind === 'keep' ? 'keep-all' : 'revert-all',
@@ -9649,21 +9644,15 @@ export function PendingPanel({
     if (rowMenu.picked) {
       // The pick's own menu: the SAME four decisions the single row offers, in the same short words. The
       // scope is not in the label — 所有选中 made every row a sentence — it is in the confirmation each
-      // row opens, which names the count and, for a revert, the files about to be deleted. 删除 vs 回退
-      // is the single row's own distinction, and a pick can hold both: the label is read off the pick the
-      // same three ways a whole-list action is (see `wholeFileActionLabel`), so a mixed pick says so.
-      const picked = files.filter(file => pickedFiles.has(file.id))
-      const revertLabel = wholeFileActionLabel(picked, t)
+      // row opens, which counts the files, and (for a revert over a row with no earlier version) NAMES the
+      // ones about to be deleted via `data-diff-batch-deletes`. So a pick across both kinds says the single
+      // row's 回退 / 回退并移出, exactly as the footer says 全部回退: the reader asked for the deed — and the
+      // word 删除 — to live in the box, not on a button whose text changes with the selection.
       return [
         { id: 'keep-picked', label: t('row.keepListed') },
         { id: 'keep-remove-picked', label: t('row.keepRemove') },
-        { id: 'revert-picked', label: revertLabel },
-        // The same distinction on the dropping half: a pick with nothing to write back DELETES, so it
-        // says 删除并移出 unless every file it holds has an earlier version.
-        {
-          id: 'revert-remove-picked',
-          label: picked.some(file => file.earlierVersion === 'none') ? t('row.deleteRemove') : t('row.revertRemove'),
-        },
+        { id: 'revert-picked', label: t('action.revert') },
+        { id: 'revert-remove-picked', label: t('row.revertRemove') },
       ]
     }
     // The two ways out of the panel, behind a hairline: they act on the FILE, not on the review, so they
@@ -9989,20 +9978,29 @@ export function PendingPanel({
   const promptFile = blockPrompt === null ? undefined : files.find(file => file.id === blockPrompt.id)
   /** The file whose removal is being confirmed (a whole-file action), if any. */
   const promptEntry = filePrompt === null ? undefined : files.find(file => file.id === filePrompt.id)
-  /** The comments a set of files carries: how many files, how many comments, and how they read per file. */
-  const commentsOn = (ids: readonly string[]): { files: number; count: number; list: string } => {
+  /**
+   * The comments a set of files carries: how many files, how many comments, and one ITEM per file for the
+   * confirmation's list. Every file bearing a comment is in `items` — the run used to be cut off at three
+   * here ("… 等 4 个文件", the `panel.removeCommentsMore` path, now gone), which hid exactly the files the
+   * reader opens this box to check; the box's own height is what gives instead (see `.confirmList`).
+   */
+  const commentsOn = (ids: readonly string[]): {
+    files: number
+    count: number
+    items: readonly { id: string; path: string; name: string; count: number }[]
+  } => {
     const perFile = new Map<string, number>()
     for (const record of snapshot.comments) {
       if (!ids.includes(record.entryId)) continue
       perFile.set(record.entryId, (perFile.get(record.entryId) ?? 0) + 1)
     }
-    const named = files.filter(file => perFile.has(file.id))
-    const shown = named.slice(0, 3).map(file => `${basenameOf(file.path)} (${perFile.get(file.id) ?? 0})`)
-    if (named.length > 3) shown.push(t('panel.removeCommentsMore', { count: named.length - 3 }))
+    const items = files
+      .filter(file => perFile.has(file.id))
+      .map(file => ({ id: file.id, path: file.path, name: basenameOf(file.path), count: perFile.get(file.id) ?? 0 }))
     return {
-      files: named.length,
-      count: [...perFile.values()].reduce((sum, one) => sum + one, 0),
-      list: shown.join(', '),
+      files: items.length,
+      count: items.reduce((sum, item) => sum + item.count, 0),
+      items,
     }
   }
   /** What the dialog says about the comments a removal would take with it (empty when there are none). */
@@ -10014,18 +10012,29 @@ export function PendingPanel({
       const file = files.find(entry => entry.id === batchPrompt.ids[0])
       return t('panel.removeCommentsOne', { file: basenameOf(file?.path ?? ''), count: on.count })
     }
-    return t('panel.removeCommentsMany', { files: on.files, count: on.count, list: on.list })
+    // `list` is emptied the way the delete sentence's `files` is (see `batchDoomed`): the wording and its
+    // closing colon stay byte-identical, and the names follow as the list block below instead of a run
+    // cut short inside the sentence.
+    return t('panel.removeCommentsMany', { files: on.files, count: on.count, list: '' })
   }
-  /** The files a held batch-revert would delete, named for the confirmation. Up to three names, because
-   *  the reader needs to recognise WHICH files are about to go — a bare count is what they already knew. */
+  /**
+   * The files whose comments a held batch would close: one item per file, for the list under the sentence.
+   * Empty for the single-file press, which names its one file inside the sentence itself
+   * (`panel.removeCommentsOne`) and has no run to cut short.
+   */
+  const batchCommentFiles = batchPrompt === null || batchPrompt.ids.length === 1
+    ? []
+    : commentsOn(batchPrompt.ids).items
+  /** The files a held batch-revert would delete, in the order the list holds them. EVERY one of them is
+   *  drawn — the reader asked for the names, and a run of names cut off at three ("…等 9 个") is exactly
+   *  what they asked to stop: the dialog is where they recognise what is about to go, and a name that is
+   *  not there is one they cannot check. The list's height is what gives, not the list (see
+   *  `.confirmDeleteList`). */
   const batchDoomed = batchPrompt === null
     ? []
     : batchPrompt.doomed
         .map(id => files.find(file => file.id === id))
         .filter((file): file is PendingFileDiff => file !== undefined)
-  const batchDoomedNames = batchDoomed.length <= 3
-    ? batchDoomed.map(file => basenameOf(file.path)).join(', ')
-    : `${batchDoomed.slice(0, 3).map(file => basenameOf(file.path)).join(', ')} ${t('panel.batchAndMore', { count: batchDoomed.length - 3 })}`
 
   // The list pane's header (its tabs, and the fold-away toggle), its scrollable rows, and the pinned
   // bulk footer, shared by the in-flow left pane and the floating (collapsed) overlay. Only the rows
@@ -10243,10 +10252,11 @@ export function PendingPanel({
                     disabled={bulkBusy !== null}
                     onClick={() => { askBulk('revert') }}
                   >
-                    {/* The list's own words, not a fixed 全部回退: the rows decide whether this DELETES
-                        their files, writes them back, or does both — the same three-way answer a single
-                        row's menu gives, read off `earlierVersion` (see `wholeFileActionLabel`). */}
-                    {bulkBusy === 'revert' ? t('action.busy') : bulkRevertLabel}
+                    {/* 全部回退, whatever the list holds: the rows decide whether this DELETES their files,
+                        writes them back, or does both, and the reader asked for that deed to be named in the
+                        CONFIRMATION rather than on the button (see `batchAskOf`). A button that changed its
+                        word with the selection was the thing they were correcting. */}
+                    {bulkBusy === 'revert' ? t('action.busy') : t('action.revertAll')}
                   </button>
                 </>
               )}
@@ -10963,17 +10973,53 @@ export function PendingPanel({
                     threads back with the row — the two drops that record no pair at all are the ones
                     that really lose them: a revert that deletes a created file, and a file the host
                     finds unavailable. */}
+                {/* The files whose comments this press would close, every one of them, in the same list block
+                    the deletion warning below uses (see `.confirmList`) — the reader asked for the
+                    comment-closing line to read like the line beside it. Every file appears: the run used to
+                    stop at three with a 等 "more" tail, which hid the very files this box is opened to check.
+                    `list: ''` is the sentence's own template with the names moved out of it. The single-file
+                    press keeps its sentence alone: one name in a sentence is not a run to cut short. */}
                 {batchCommentsText() !== '' && (
-                  <p className={css.confirmText} data-diff-batch-comments>
-                    {batchCommentsText()}
-                  </p>
+                  <div className={css.confirmBlock}>
+                    <p className={css.confirmText} data-diff-batch-comments>
+                      {batchCommentsText()}
+                    </p>
+                    {batchCommentFiles.length > 0 && (
+                      <ul
+                        className={css.confirmList}
+                        data-diff-batch-comments-list
+                        aria-label={t('panel.batchCommentsList')}
+                      >
+                        {batchCommentFiles.map(item => (
+                          <li key={item.id} title={item.path}>{`${item.name} (${item.count})`}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
                 )}
-                {/* The part with no undo behind it. Named, not counted: the reader has to recognise the
-                    files this is about to delete, and a number is what they already knew. */}
+                {/* The part with no undo behind it. The sentence counts them and keeps its colon; the names
+                    it used to run inline (cut off at three) are EVERY one of them here, in the shared list
+                    block — see `.confirmList`, which the comment-closing list above also carries.
+                    `files: ''` is the sentence's own template with the names moved out of it, not a rewrite
+                    of the copy. */}
                 {batchDoomed.length > 0 && (
-                  <p className={css.confirmText} data-diff-batch-deletes>
-                    {t('panel.batchDeletes', { count: batchDoomed.length, files: batchDoomedNames })}
-                  </p>
+                  <div className={css.confirmBlock} data-diff-batch-deletes>
+                    <p className={css.confirmText}>
+                      {t('panel.batchDeletes', { count: batchDoomed.length, files: '' })}
+                    </p>
+                    <ul
+                      className={css.confirmList}
+                      data-diff-batch-delete-list
+                      aria-label={t('panel.batchDeletesList')}
+                    >
+                      {/* The row shows the basename — a list of files is scanned by name — and its `title`
+                          carries the entry's FULL path, exactly as the entry holds it, so one file can be told
+                          from its namesake in another directory without opening either. */}
+                      {batchDoomed.map(file => (
+                        <li key={file.id} title={file.path}>{basenameOf(file.path)}</li>
+                      ))}
+                    </ul>
+                  </div>
                 )}
                 {/* 确定 on the LEFT of 取消: this is a desktop panel, and it is what the two dialogs above
                     already do (移除 before 保留在列表) — the primary press first, not the iOS order. */}

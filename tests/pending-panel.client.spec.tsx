@@ -254,11 +254,9 @@ function askedPrompts(props: PanelProps): string[] {
 /**
  * One of the bulk footer's own buttons, by its mark.
  *
- * The footer's labels are the ROWS' words on purpose — a whole-list 回退 says 回退, not 全部回退, because
- * `earlierVersion` decides per file whether the action deletes or writes back (see `wholeFileActionLabel`)
- * — so the detail pane's own 回退 button can carry the same text at the same time. A query by text would
- * have to disambiguate between two controls that say the same thing and mean different scopes; the mark
- * says which one this is.
+ * The mark is how the footer's buttons are named here (and how the E2E clicks them): the footer offers
+ * 全部保留 / 全部回退, and the detail pane's own pair says 保留 / 回退 about the open file, so a text query
+ * can pick the wrong control as soon as the two vocabularies overlap. The mark says which one this is.
  * @param mark - the button's `data-diff-*` attribute.
  * @returns the footer's button.
  */
@@ -273,6 +271,24 @@ function toolbarButton(mark: string): HTMLButtonElement {
   const button = document.querySelector(`[data-diff-${mark}]`)
   if (button === null) throw new Error(`the detail toolbar has no [data-diff-${mark}] button`)
   return button as HTMLButtonElement
+}
+
+/**
+ * The confirmation's "this will be DELETED" part, as the reader gets it: the count sentence it leads with,
+ * and the names listed under it.
+ *
+ * The two are separate elements on purpose (see `.confirmList`): the sentence keeps the count and the
+ * colon, and the names follow as a list that scrolls rather than a run that gets cut off. Reading both here
+ * means a case can assert the sentence AND that every name is on screen, which is what the whole warning is
+ * for.
+ * @returns the sentence and the names, in the order they are listed.
+ */
+function deleteWarning(): { sentence: string; names: string[] } {
+  const sentence = document.querySelector('[data-diff-batch-deletes] p')?.textContent
+  if (sentence === null || sentence === undefined) throw new Error('the dialog is not naming a deletion')
+  const names = [...document.querySelectorAll('[data-diff-batch-delete-list] li')]
+    .map(item => item.textContent ?? '')
+  return { sentence, names }
 }
 
 /** The drafts the panel has written down, in order: the second argument of every `onCommentAdd`. */
@@ -1103,14 +1119,14 @@ describe('PendingPanel', () => {
     expect(keepAllMock.mock.calls[0]).toEqual([S1])
     expect(props.onKeep).not.toHaveBeenCalled()
 
-    // The list MIXES an edit with a creation, so the footer's own label is the three-way one: the single
-    // action both writes a file back and deletes one, and 回退或删除 is how that reads (see
-    // `wholeFileActionLabel`). The dialog then names the file the action DELETES, because that is the part
-    // with no undo behind it.
-    expect(bulkButton('revert-all').textContent).toBe('action.revertOrDelete')
+    // The list MIXES an edit with a creation, and the footer's own label does NOT change for it: the
+    // reader corrected the three-way button back to 全部回退, and asked for the deletion to be named in the
+    // CONFIRMATION instead. So the button says 全部回退, and the dialog — because one row has no earlier
+    // version and reverting it deletes its file — says so and counts it.
+    expect(bulkButton('revert-all').textContent).toBe('action.revertAll')
     fireEvent.click(bulkButton('revert-all'))
-    expect(screen.getByText('panel.batchRevertAllAsk {"count":2}')).toBeDefined()
-    expect(screen.getByText('panel.batchDeletes {"count":1,"files":"b.txt"}')).toBeDefined()
+    expect(screen.getByText('panel.batchRevertAllDeletedAsk {"count":2,"doomed":1}')).toBeDefined()
+    expect(deleteWarning()).toEqual({ sentence: 'panel.batchDeletes {"count":1,"files":""}', names: ['b.txt'] })
     fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
     // A whole-list revert names the rows it may act on rather than asking the host for the session: a
     // dismiss-only row is skipped (see `runBulk`), and here neither row is one. The third argument is the
@@ -1123,28 +1139,56 @@ describe('PendingPanel', () => {
     expect(props.onRevertAll).not.toHaveBeenCalled()
   })
 
-  it('labels the whole-list action three ways off `earlierVersion`, never off empty text', () => {
-    // The footer's revert is ONE action whose label has to say what it does to the list it is over:
-    // 删除 when every row was created (there is no earlier version to write back, so it removes the
-    // files), 回退 when every row is an edit, and both at once when the list mixes them — because the
-    // action itself is one press and `earlierVersion` decides per file which of the two it does.
+  it('keeps 全部回退 on the footer in every label state, and names the delete only in the dialog that will do it', () => {
+    // The reader corrected the footer's THREE-WAY label back to a fixed 全部回退: how the press behaves per
+    // file is the confirmation's job to say, not a button's. So the button is the same word over an all-edit
+    // list, an all-creation one and a mix of both — and the dialog is where 删除 appears, and only when a row
+    // with no earlier version is actually in the batch (reverting one of those removes its file).
     //
-    // The second file is an EMPTY COMMITTED file (`earlierVersion: 'file'`, `oldText: ''`): it is the
-    // case `oldText === ''` would misread as a creation, and reading it off the text instead of the
-    // model would put 删除 on a file whose revert writes it back.
+    // `edited` is an EMPTY COMMITTED file (`earlierVersion: 'file'`, `oldText: ''`): reading the action off
+    // `oldText === ''` rather than off the model would call its revert a delete. It must not.
     const edited = entry({ id: 'entry-edited', path: '/repo/edited.txt', earlierVersion: 'file', oldText: '', newText: 'x\n' })
     const created = entry({ id: 'entry-created', path: '/repo/created.txt', earlierVersion: 'none', oldText: '', newText: 'y\n' })
-    const labelOf = (files: PendingFileDiff[]): string => {
-      const props = panelProps({ read: true, files, busy: new Set() })
-      const view = render(<PendingPanel {...props} />)
+
+    const askOf = (files: PendingFileDiff[]): { label: string; ask: string; deletes: boolean } => {
+      const view = render(<PendingPanel {...panelProps({ read: true, files, busy: new Set() })} />)
       fireEvent.click(screen.getByLabelText('panel.aria'))
-      const label = bulkButton('revert-all').textContent
+      const label = bulkButton('revert-all').textContent ?? ''
+      fireEvent.click(bulkButton('revert-all'))
+      // The ask is whichever text the dialog renders; read it off the element so a renamed key still fails
+      // loudly rather than silently matching nothing.
+      const ask = (document.querySelector('[data-diff-batch-confirm] p') as HTMLElement).textContent ?? ''
+      const deletes = document.querySelector('[data-diff-batch-deletes]') !== null
       view.unmount()
-      return label
+      return { label, ask, deletes }
     }
-    expect(labelOf([edited])).toBe('action.revert')
-    expect(labelOf([created])).toBe('action.delete')
-    expect(labelOf([edited, created])).toBe('action.revertOrDelete')
+
+    // All edits, all creations, mixed: one button word every time.
+    expect(askOf([edited]).label).toBe('action.revertAll')
+    expect(askOf([created]).label).toBe('action.revertAll')
+    expect(askOf([edited, created]).label).toBe('action.revertAll')
+
+    // Every row has something to write back — INCLUDING the empty committed one — so the dialog asks the
+    // plain question and claims nothing is deleted.
+    expect(askOf([edited]).ask).toBe('panel.batchRevertAllAsk {"count":1}')
+    expect(askOf([edited]).deletes).toBe(false)
+    // A row with no earlier version is in the batch, so the dialog says 删除 and counts it, and the warning
+    // below it still names the file.
+    expect(askOf([created]).ask).toBe('panel.batchRevertAllDeletedAsk {"count":1,"doomed":1}')
+    expect(askOf([created]).deletes).toBe(true)
+    expect(askOf([edited, created]).ask).toBe('panel.batchRevertAllDeletedAsk {"count":2,"doomed":1}')
+    expect(askOf([edited, created]).deletes).toBe(true)
+
+    // …and the words behind those two keys: 移出 in both (both presses take their rows out of the list),
+    // 删除 only in the one that will delete.
+    expect(zh['panel.batchRevertAllAsk']).toContain('移出')
+    expect(zh['panel.batchRevertAllAsk']).not.toContain('删除')
+    expect(zh['panel.batchRevertAllDeletedAsk']).toContain('移出')
+    expect(zh['panel.batchRevertAllDeletedAsk']).toContain('删除')
+    expect(en['panel.batchRevertAllAsk']).toContain('remove')
+    expect(en['panel.batchRevertAllAsk']).not.toContain('delet')
+    expect(en['panel.batchRevertAllDeletedAsk']).toContain('remove')
+    expect(en['panel.batchRevertAllDeletedAsk']).toContain('delet')
   })
 
   it('offers the list 移出 alone, and no revert at all, when every row has nothing left to review', async () => {
@@ -1196,12 +1240,14 @@ describe('PendingPanel', () => {
     expect(props.onRevert).toHaveBeenLastCalledWith(created.sessionId, created.id)
   })
 
-  it('reads the pick\'s own 回退 or 删除, and its 删除并移出, off the whole pick', () => {
-    // The pick's menu is the single row's four decisions over several files, so it reads `earlierVersion`
-    // the same three ways the footer does for the ordering half (see `wholeFileActionLabel`), and — because
-    // the dropping half would otherwise promise a revert on a file it DELETES — it flips to 删除并移出
-    // whenever any file it holds has no earlier version. The press is taken as a SHIFT span: an anchor
-    // press, then Shift on the far row, which is the pick gesture with no one-gesture guard in front of it.
+  it('gives a pick across both kinds the single row\'s own words, and names the delete in its dialog', () => {
+    // The pick's menu is the single row's four decisions over several files. It used to read `earlierVersion`
+    // the way the FOOTER did (删除 / 回退 / 回退或删除, and a 删除并移出 for the dropping half). The reader
+    // corrected that on the footer — the button keeps its word and the CONFIRMATION names the delete — and a
+    // pick is several rows at once too, with the same dialog, so the same correction applies here: the words
+    // are the single row's 回退 / 回退并移出, and the deletion is named where the pick is confirmed.
+    // The press is taken as a SHIFT span: an anchor press, then Shift on the far row, which is the pick
+    // gesture with no one-gesture guard in front of it.
     const edited = entry({ id: 'entry-pick-edited', path: '/repo/aa-edited.txt', earlierVersion: 'file' })
     const created = entry({ id: 'entry-pick-created', path: '/repo/zz-created.txt', earlierVersion: 'none', oldText: '', newText: 'made\n' })
     const props = panelProps({ read: true, files: [edited, created], busy: new Set() })
@@ -1218,9 +1264,15 @@ describe('PendingPanel', () => {
     expect(items.map(item => item.textContent)).toEqual([
       'row.keepListed',
       'row.keepRemove',
-      'action.revertOrDelete',
-      'row.deleteRemove',
+      'action.revert',
+      'row.revertRemove',
     ])
+
+    // The press that DROPS the pick goes through the same confirmation the footer's press does, and it is
+    // that dialog — not the label — which names the file this deletes.
+    fireEvent.click(items[3]!)
+    expect(screen.getByText('panel.batchRevertRemoveAsk {"count":2}')).toBeDefined()
+    expect(deleteWarning()).toEqual({ sentence: 'panel.batchDeletes {"count":1,"files":""}', names: ['zz-created.txt'] })
   })
 
   it('asks 删除并移出 in the confirmation too, so the question and the press agree', () => {
@@ -1302,7 +1354,7 @@ describe('PendingPanel', () => {
   it('settles every REVERTED row out of the list, and asks with 回退并移出 before it runs', async () => {
     // The other half of the same decision: a footer 回退 leaves no reverted row standing either. The call
     // is the REMOVE variant — `keepListed` left off, the shape a single row's 「回退并移出」 uses — and the
-    // dialog names 移出 while the button keeps the three-way label.
+    // dialog names 移出, and 删除 (the batch holds a creation), while the button stays 全部回退.
     const edited = entry({ id: 'entry-revert-all-1', path: '/repo/ra.txt', earlierVersion: 'file' })
     const created = entry({ id: 'entry-revert-all-2', path: '/repo/rc.txt', earlierVersion: 'none', oldText: '', newText: 'c\n' })
     const props = panelProps({ read: true, files: [edited, created], busy: new Set() })
@@ -1310,14 +1362,14 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     const revertManyMock = props.onRevertMany as unknown as { mock: { calls: unknown[][] } }
 
-    // The list mixes an edit with a creation, so the button says 回退或删除 — and never 移出.
-    expect(bulkButton('revert-all').textContent).toBe('action.revertOrDelete')
+    // One button word over a mixed list, and never 移出 on the button.
+    expect(bulkButton('revert-all').textContent).toBe('action.revertAll')
     fireEvent.click(bulkButton('revert-all'))
-    expect(screen.getByText('panel.batchRevertAllAsk {"count":2}')).toBeDefined()
-    expect(zh['panel.batchRevertAllAsk']).toContain('移出')
-    expect(en['panel.batchRevertAllAsk']).toContain('remove')
-    // The dialog still names the part with no undo: the created file this is about to delete.
-    expect(screen.getByText('panel.batchDeletes {"count":1,"files":"rc.txt"}')).toBeDefined()
+    expect(screen.getByText('panel.batchRevertAllDeletedAsk {"count":2,"doomed":1}')).toBeDefined()
+    expect(zh['panel.batchRevertAllDeletedAsk']).toContain('移出')
+    expect(en['panel.batchRevertAllDeletedAsk']).toContain('remove')
+    // The dialog also names the part with no undo: the created file this is about to delete.
+    expect(deleteWarning()).toEqual({ sentence: 'panel.batchDeletes {"count":1,"files":""}', names: ['rc.txt'] })
     fireEvent.click(document.querySelector('[data-diff-batch-confirm-cancel]') as HTMLElement)
     expect(revertManyMock.mock.calls).toHaveLength(0)
 
@@ -1329,10 +1381,11 @@ describe('PendingPanel', () => {
     expect(props.onRevert).not.toHaveBeenCalled()
   })
 
-  it('never puts 移出 on the footer\'s own buttons, in any of the three label states', () => {
-    // The reader asked for the confirmation to carry 移出 rather than the buttons, so this pins the labels
-    // as they are: the keep button, and the three-way revert label — with the one exception the panel
-    // already had, a list whose every row has nothing left to review, whose single decision IS 移出.
+  it('never puts 移出 on the footer\'s own buttons, whatever the list holds', () => {
+    // The reader asked for the CONFIRMATION to carry 移出 rather than the buttons, and for the revert button
+    // to be a fixed 全部回退 rather than one that renames itself with the selection. So the labels are the
+    // same two words over every list — with the one exception the panel already had, a list whose every row
+    // has nothing left to review, whose single decision IS 移出 (and no revert button at all).
     const edited = entry({ id: 'entry-labels-edit', path: '/repo/e.txt', earlierVersion: 'file' })
     const created = entry({ id: 'entry-labels-created', path: '/repo/c.txt', earlierVersion: 'none', oldText: '', newText: 'c\n' })
     const settled = entry({ id: 'entry-labels-settled', path: '/repo/s.txt', oldText: 'same\n', newText: 'same\n' })
@@ -1345,26 +1398,225 @@ describe('PendingPanel', () => {
       view.unmount()
       return { keep, revert }
     }
-    // Every row an edit: plain 回退. Every row a creation: 删除 (there is nothing to write back).
-    expect(labelOf([edited])).toEqual({ keep: 'action.keepAll', revert: 'action.revert' })
-    expect(labelOf([created])).toEqual({ keep: 'action.keepAll', revert: 'action.delete' })
-    // Both kinds at once: the one action does both, and says so.
-    expect(labelOf([edited, created])).toEqual({ keep: 'action.keepAll', revert: 'action.revertOrDelete' })
+    // Every row an edit, every row a creation, both at once: one word each time.
+    expect(labelOf([edited])).toEqual({ keep: 'action.keepAll', revert: 'action.revertAll' })
+    expect(labelOf([created])).toEqual({ keep: 'action.keepAll', revert: 'action.revertAll' })
+    expect(labelOf([edited, created])).toEqual({ keep: 'action.keepAll', revert: 'action.revertAll' })
     // No row left to review: the revert button is not offered at all, and 移出 is the list's one decision.
     expect(labelOf([settled])).toEqual({ keep: 'row.dismiss', revert: null })
 
-    // …and the words behind those keys carry no 移出 either (both locales), while the two DIALOG keys do.
-    for (const key of ['action.keepAll', 'action.revert', 'action.delete', 'action.revertOrDelete'] as const) {
+    // …and the words behind those keys carry no 移出 — nor any 删除, which now lives only in the dialog.
+    for (const key of ['action.keepAll', 'action.revertAll'] as const) {
       expect(zh[key], key).not.toContain('移出')
+      expect(zh[key], key).not.toContain('删除')
       expect(en[key], key).not.toContain('remove')
+      expect(en[key], key).not.toContain('delet')
     }
-    for (const key of ['panel.batchKeepAllAsk', 'panel.batchRevertAllAsk'] as const) {
+    // Both whole-list asks say 移出, and the revert's second form is the one that says 删除.
+    for (const key of ['panel.batchKeepAllAsk', 'panel.batchRevertAllAsk', 'panel.batchRevertAllDeletedAsk'] as const) {
       expect(zh[key], key).toContain('移出')
       expect(en[key], key).toContain('remove')
     }
+    expect(zh['panel.batchRevertAllAsk']).not.toContain('删除')
+    expect(zh['panel.batchRevertAllDeletedAsk']).toContain('删除')
     // The one button that DOES say it is the dismiss-only variant, which is its own decision and not a
     // 保留 or a 回退 at all.
     expect(zh['row.dismiss']).toContain('移出')
+  })
+
+  it('never names a deletion for a row the press will leave alone', () => {
+    // The dialog counts what THIS press will do, and a whole-list 回退 skips the dismiss-only rows — an empty
+    // CREATED file (`earlierVersion: 'none'`, nothing left to review) is one of those, so its file is not
+    // deleted and the dialog must not say it will be. Reading `doomed` off the whole list instead of off the
+    // rows the press acts on is what this pins: it named the skipped row as a deletion before.
+    const edited = entry({ id: 'entry-acc-edit', path: '/repo/e.txt', earlierVersion: 'file' })
+    const liveCreated = entry({ id: 'entry-acc-live', path: '/repo/live.txt', earlierVersion: 'none', oldText: '', newText: 'c\n' })
+    const emptyCreated = entry({ id: 'entry-acc-empty', path: '/repo/empty.txt', earlierVersion: 'none', oldText: '', newText: '' })
+
+    const askOf = (files: PendingFileDiff[]): { ask: string; names: string[] } => {
+      const view = render(<PendingPanel {...panelProps({ read: true, files, busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      fireEvent.click(bulkButton('revert-all'))
+      const ask = (document.querySelector('[data-diff-batch-confirm] p') as HTMLElement).textContent ?? ''
+      const named = document.querySelector('[data-diff-batch-deletes]') === null ? [] : deleteWarning().names
+      view.unmount()
+      return { ask, names: named }
+    }
+
+    // A live creation is named — and the empty one beside it is not, because the press skips it.
+    expect(askOf([edited, liveCreated, emptyCreated])).toEqual({
+      ask: 'panel.batchRevertAllDeletedAsk {"count":2,"doomed":1}',
+      names: ['live.txt'],
+    })
+    // …and when the ONLY creation is the one it skips, the dialog claims no deletion at all: every row it
+    // will act on has something to write back.
+    expect(askOf([edited, emptyCreated])).toEqual({
+      ask: 'panel.batchRevertAllAsk {"count":1}',
+      names: [],
+    })
+  })
+
+  it('lists every file a batch would delete, in a box that scrolls rather than names cut short', () => {
+    // The reader's requirement: this warning names the files an action will DELETE, and EVERY one of them
+    // has to be on screen. It used to run them inline and stop at three ("… 等 9 个"), which hides exactly
+    // the files the reader opened the box to check. The count sentence is unchanged (it still counts them);
+    // the names are a list under it, and the LIST is what has a height ceiling — see `.confirmList`,
+    // whose rule the next case pins.
+    const many = Array.from({ length: 12 }, (_, index) => {
+      const n = String(index + 1).padStart(2, '0')
+      return entry({
+        id: `entry-big-${n}`,
+        path: `/repo/f${n}.txt`,
+        earlierVersion: 'none',
+        oldText: '',
+        newText: `body ${n}\n`,
+      })
+    })
+    const props = panelProps({ read: true, files: many, busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(bulkButton('revert-all'))
+
+    // The sentence keeps the count, and no longer carries the names itself.
+    expect(deleteWarning().sentence).toBe('panel.batchDeletes {"count":12,"files":""}')
+    // All twelve, each its own row, in the order the list is walked.
+    expect(deleteWarning().names).toEqual(
+      Array.from({ length: 12 }, (_, index) => `f${String(index + 1).padStart(2, '0')}.txt`),
+    )
+    const list = document.querySelector('[data-diff-batch-delete-list]') as HTMLElement
+    expect(list.tagName).toBe('UL')
+    expect(list.querySelectorAll('li')).toHaveLength(12)
+    // Every row carries its FULL path as its tooltip — all twelve, not just the first — because the row
+    // itself can only show a basename and a namesake in another directory is exactly what that hides.
+    expect([...list.querySelectorAll('li')].map(item => item.getAttribute('title')))
+      .toEqual(many.map(file => file.path))
+    // …and the tooltip is genuinely extra: nothing shows its own title as its text.
+    expect([...list.querySelectorAll('li')]
+      .every(item => item.textContent !== item.getAttribute('title'))).toBe(true)
+    // The box names itself for a screen reader, and it is the marked scroll container (not some other box).
+    expect(list.getAttribute('aria-label')).toBe('panel.batchDeletesList')
+    expect(list.closest('[data-diff-batch-deletes]')).not.toBeNull()
+    // Nothing anywhere in the dialog cuts the list short: no 等, no ellipsis, no "and N more", and the
+    // truncating key is not reached at all.
+    const dialog = document.querySelector('[data-diff-batch-confirm]') as HTMLElement
+    expect(dialog.textContent).not.toMatch(/等|…|etc|batchAndMore|and \d+ more/)
+    // The press still runs, and still over all twelve.
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
+    expect((props.onRevertMany as unknown as { mock: { calls: unknown[][] } }).mock.calls)
+      .toEqual([[S1, many.map(file => file.id), undefined]])
+  })
+
+  it('lists every file whose comments a close would take, with its count and its full path', () => {
+    // The reader asked for the comment-closing line to read like the deletion warning beside it, so it is the
+    // SAME block (see `.confirmList`). Every file bearing a comment is an item, with the count it carries in
+    // the text and its full path in `title`; the run used to stop at three files with a 等 "and N more" tail.
+    const annotated = Array.from({ length: 4 }, (_, index) => {
+      const n = String(index + 1).padStart(2, '0')
+      return entry({ id: `entry-c${n}`, path: `/repo/c${n}.txt` })
+    })
+    // A created file this press also DELETES, so the dialog carries BOTH lists at once and the shared class
+    // can be asserted across the two elements rather than one at a time.
+    const created = entry({
+      id: 'entry-c-made',
+      path: '/repo/made-c.txt',
+      earlierVersion: 'none',
+      oldText: '',
+      newText: 'made\n',
+    })
+    const props = panelProps({
+      read: true,
+      files: [...annotated, created],
+      busy: new Set(),
+      comments: [
+        comment({ id: 'cm-1', entryId: 'entry-c01', text: '一', anchor: { startLine: 1, endLine: 1 } }),
+        comment({ id: 'cm-2', entryId: 'entry-c01', text: '二', anchor: { startLine: 2, endLine: 2 } }),
+        comment({ id: 'cm-3', entryId: 'entry-c02', text: '三', anchor: { startLine: 1, endLine: 1 } }),
+        comment({ id: 'cm-4', entryId: 'entry-c03', text: '四', anchor: { startLine: 1, endLine: 1 } }),
+        comment({ id: 'cm-5', entryId: 'entry-c04', text: '五', anchor: { startLine: 1, endLine: 1 } }),
+      ],
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(bulkButton('revert-all'))
+
+    // The sentence keeps the count (four files, five comments) and no longer carries the names itself.
+    expect(screen.getByText('panel.removeCommentsMany {"files":4,"count":5,"list":""}')).toBeDefined()
+    const commentsList = document.querySelector('[data-diff-batch-comments-list]') as HTMLElement
+    expect(commentsList.tagName).toBe('UL')
+    // Every one of the four, in the list's order, each with its own comment count.
+    expect([...commentsList.querySelectorAll('li')].map(item => item.textContent))
+      .toEqual(['c01.txt (2)', 'c02.txt (1)', 'c03.txt (1)', 'c04.txt (1)'])
+    // …and each carrying its FULL path, not the basename it shows.
+    expect([...commentsList.querySelectorAll('li')].map(item => item.getAttribute('title')))
+      .toEqual(['/repo/c01.txt', '/repo/c02.txt', '/repo/c03.txt', '/repo/c04.txt'])
+    expect(commentsList.getAttribute('aria-label')).toBe('panel.batchCommentsList')
+    // THE SHARED BLOCK: the two lists in this dialog are the same class, so a future edit that gives the
+    // comment list its own style (and lets the two drift) fails here.
+    const deleteList = document.querySelector('[data-diff-batch-delete-list]') as HTMLElement
+    expect(deleteList).not.toBeNull()
+    expect(commentsList.className).toBe(deleteList.className)
+    expect(commentsList.className).toContain('confirmList')
+    // Nothing in the dialog cuts either run short: no 等, no ellipsis, and the truncating key is unreachable.
+    const dialog = document.querySelector('[data-diff-batch-confirm]') as HTMLElement
+    expect(dialog.textContent).not.toMatch(/等|…|removeCommentsMore|and \d+ more/)
+  })
+
+  it('leaves a single-file press naming its one file in the sentence, with no list under it', () => {
+    // The boundary of the shared block: one file is not a run to cut short, so the sentence keeps naming it
+    // (`panel.removeCommentsOne`) and no list — and no empty styled box — appears under it.
+    const annotated = entry({ id: 'entry-one', path: '/repo/one.txt' })
+    const props = panelProps({
+      read: true,
+      files: [annotated],
+      busy: new Set(),
+      comments: [comment({ id: 'cm-one', entryId: 'entry-one', text: '一', anchor: { startLine: 1, endLine: 1 } })],
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.contextMenu(document.querySelector('[data-diff-file="entry-one"]') as HTMLElement, { clientX: 10, clientY: 12 })
+    fireEvent.click(([...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[])[1]!)
+
+    expect(screen.getByText('panel.removeCommentsOne {"file":"one.txt","count":1}')).toBeDefined()
+    expect(document.querySelector('[data-diff-batch-comments-list]')).toBeNull()
+  })
+
+  it('gives the shared list block an inset surface, a smaller type step, and a ceiling that cuts a row', () => {
+    // jsdom lays nothing out, so all of this is answered by the stylesheet. Read by name the way the
+    // neighbouring CSS cases do, so an edit that drops one of the four fails here rather than in the browser.
+    // The rule is SHARED — the deletion warning and the comment-closing list both carry this one class (the
+    // DOM case below asserts that on the two elements) — so there is one rule to keep honest, not two.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const block = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
+    const rule = block('confirmList')
+    const px = (property: string): number => {
+      const found = new RegExp(`${property}:\\s*(\\d+)px`).exec(rule)
+      if (found === null) throw new Error(`the shared list block declares no ${property}`)
+      return Number(found[1])
+    }
+    const fontSize = px('font-size')
+    const lineHeight = px('line-height')
+    const maxHeight = px('max-height')
+
+    // One step under the dialog's own caption — 12px, the size this panel pins on `.rowPath` — and the rows
+    // keep the caption's ~1.45 proportion rather than going cramped. The family is the caption's too: the
+    // longhands below the `font:` shorthand are what make the size smaller without changing the family.
+    expect(fontSize).toBeLessThan(12)
+    expect(lineHeight / fontSize).toBeGreaterThanOrEqual(1.4)
+    expect(lineHeight / fontSize).toBeLessThanOrEqual(1.6)
+    expect(rule).toContain('font: var(--dsw-font-caption)')
+    // A surface of the panel's OWN (its nested-block token, the one the colour picker's field and the code
+    // blocks use), declared on the list's class rather than the card's, so the block reads as inset.
+    expect(rule).toMatch(/background:\s*var\(--dsw-alias-bg-module-platform\)/)
+    // The ceiling is deliberately NOT a whole number of rows: about six and a half, so the seventh row is
+    // painted eight pixels deep and then cut by the box's edge — the clipped row is the affordance. Both
+    // numbers are derived from the rule above, so this asserts the RELATIONSHIP, not a third copy of 104px.
+    expect(maxHeight / lineHeight).toBeCloseTo(6.5)
+    expect(maxHeight % lineHeight).not.toBe(0)
+    // …and it scrolls, with the crop kept from leaking a wheel into the pane behind the backdrop.
+    expect(rule).toContain('overflow-y: auto')
+    expect(rule).toContain('overscroll-behavior: contain')
+    // It is the LIST's own rule, not the dialog card's: the card still grows with its contents.
+    expect(block('confirmCard')).not.toContain('max-height')
   })
 
   it('shows a keep/revert failure inline on the row and detail instead of hiding the list', () => {
@@ -2421,7 +2673,7 @@ describe('PendingPanel', () => {
     fireEvent.click(rowOf('entry-made'), { ctrlKey: true })
     fireEvent.contextMenu(rowOf(FILE.id), { clientX: 10, clientY: 12 })
     fireEvent.click(menu()[2]!)
-    expect(screen.getByText('panel.batchDeletes {"count":1,"files":"made.txt"}')).toBeDefined()
+    expect(deleteWarning()).toEqual({ sentence: 'panel.batchDeletes {"count":1,"files":""}', names: ['made.txt'] })
     expect(props.onRevertMany).toHaveBeenCalledTimes(1)
 
     // The press that confirms is inside the dialog, which is not the reader walking away from the pick:

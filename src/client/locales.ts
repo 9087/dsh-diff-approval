@@ -123,10 +123,19 @@ export const zh = {
   // 回退并移出 use, one scope bigger.
   'panel.batchKeepAllAsk': '保留并移出全部 {count} 个文件？',
   'panel.batchRevertAllAsk': '回退并移出全部 {count} 个文件？',
+  // …and the DELETE is named there too, but only where it is real: reverting a file that had no earlier
+  // version removes it, so a batch holding any of those says so and counts them. A batch where every row
+  // has something to write back uses the plain ask above and claims nothing is deleted. The footer button
+  // stays 全部回退 either way — the reader asked for the deed in the box, not on the button.
+  'panel.batchRevertAllDeletedAsk': '回退并移出全部 {count} 个文件？其中 {doomed} 个没有旧版本，将被删除。',
   'panel.batchCloseAsk': '关闭 {count} 条评论？',
   // The one thing here that cannot be undone: a revert DELETES every file the agent created, and the
-  // host records no undo for that. The files are named — a bare count is what the reader already knew.
+  // host records no undo for that. The sentence keeps the count and ends on its colon; `{files}` is empty
+  // now and the names follow it as a list (see `panel.batchDeletesList`) — EVERY one of them, in a box
+  // that scrolls rather than a run cut short with 等.
   'panel.batchDeletes': '回退将删除 {count} 个新建文件，且无法撤销：{files}',
+  // The names themselves, and the accessible name of the box that holds them.
+  'panel.batchDeletesList': '将要删除的文件',
   'panel.batchAndMore': '等 {count} 个',
   'panel.batchGo': '确定',
   // Taking a file out of the list DELETES its comments on the host (see `dropEntry`), so every press that
@@ -141,6 +150,9 @@ export const zh = {
   'panel.removeCommentsOne': '「{file}」上的 {count} 条评论会一起关闭',
   'panel.removeCommentsMany': '{files} 个文件上的 {count} 条评论会一起关闭：{list}',
   'panel.removeCommentsMore': '等 {count} 个文件',
+  // The names themselves, and the accessible name of the box that holds them (the list block the names
+  // moved into, shared with the deletion warning's own list).
+  'panel.batchCommentsList': '评论将被一起关闭的文件',
   'row.added': '+{added}',
   'row.removed': '-{removed}',
   'action.keep': '保留',
@@ -395,14 +407,17 @@ export const en = {
   'panel.batchRevertRemoveAsk': 'Revert and remove {count} file(s)?',
   'panel.batchKeepAllAsk': 'Keep and remove all {count} file(s)?',
   'panel.batchRevertAllAsk': 'Revert and remove all {count} file(s)?',
+  'panel.batchRevertAllDeletedAsk': 'Revert and remove all {count} file(s)? {doomed} have no earlier version and will be deleted.',
   'panel.batchCloseAsk': 'Close {count} comment(s)?',
   'panel.batchDeletes': 'Reverting deletes {count} created file(s), with no undo: {files}',
+  'panel.batchDeletesList': 'Files to be deleted',
   'panel.batchAndMore': 'and {count} more',
   'panel.batchGo': 'Confirm',
   'panel.removeOneAsk': '{action} "{file}"?',
   'panel.removeCommentsOne': 'The {count} comment(s) on "{file}" will be closed too',
   'panel.removeCommentsMany': 'The {count} comment(s) on {files} file(s) will be closed too: {list}',
   'panel.removeCommentsMore': 'and {count} more file(s)',
+  'panel.batchCommentsList': 'Files whose comments will be closed too',
   'row.added': '+{added}',
   'row.removed': '-{removed}',
   'action.keep': 'Keep',

@@ -1382,6 +1382,56 @@
   overflow-wrap: anywhere;
 }
 
+/* The confirmation dialog's list block: the files a batch press would DELETE, and the files whose comments
+   it would close. ONE class carries both, deliberately — the reader asked for the comment-closing line to
+   read like the delete line beside it, and a second copy of these declarations is exactly how two lists
+   drift apart. What is NOT shared is the mark on the element, which is how a test (and the panel) tells the
+   two apart: `data-diff-batch-delete-list` and `data-diff-batch-comments-list`.
+   `.confirmBlock` is the sentence-plus-list pair: the sentence above ends in a colon and the list is what
+   follows it, so the block is one tight 6px under its own lead-in and the card's own 12px gap stays between
+   it and the buttons.
+   It is an INSET SURFACE, not text floating in the dialog: `--dsw-alias-bg-module-platform` is the panel's
+   own token for a nested block on the card's surface (the colour picker's field and the code blocks use it),
+   so the list reads as a box set into the confirmation. 6px of radius matches the panel's small blocks
+   (`.row`, `.treeRow`) and 6px of side padding keeps a name off the fill's edge — top and bottom padding stay
+   0, which is what keeps the height arithmetic below exact.
+   The TYPE is one step under the dialog's caption: 11px, which this panel already uses for its smaller
+   notes, against 16px rows (11 × ~1.45 — the same proportion the caption keeps at 12 × 1.5). A name is a
+   short label; the sentence above it is the sentence.
+   THE HEIGHT IS DELIBERATELY NOT A ROW COUNT. Six and a half rows: 6.5 × 16px = 104px, and 104 ÷ 16 = 6.5,
+   so the seventh row is painted eight pixels deep and then cut by the box's edge. That half-row IS the
+   affordance — a box that ends flush on a row boundary reads as a list that happens to be short, and the
+   reader asked for a list that shows it can scroll. No fade, no arrow, no `overflow` trick: the crop is the
+   whole signal. Past it the box scrolls; the list's height gives, not the list (cutting the run off at three
+   names, what this replaced, hides the very files the reader opens this box to check).
+   `overscroll-behavior: contain` keeps a wheel over the names from scrolling the list pane behind the
+   backdrop. `scrollbar-gutter: stable` is the same reservation `.listScroll` makes, for the same reason: the
+   names do not shift sideways when a long batch makes the bar appear, so a name stays where the eye left it.
+   Each row carries its full path in `title`, since the row itself shows only the basename (see the panel). */
+.confirmBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.confirmList {
+  max-height: 104px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  margin: 0;
+  padding: 0 6px;
+  list-style: none;
+  background: var(--dsw-alias-bg-module-platform);
+  border-radius: 6px;
+  font: var(--dsw-font-caption);
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-primary);
+  overflow-wrap: anywhere;
+}
+
 /* The dialog's answers, right-aligned. They wrap: the third answer ("keep it listed and stop
    asking") is long enough that it and the two it joins do not share one 340px line, and a row
    that overflowed the card would put a button outside the dialog. */
