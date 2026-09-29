@@ -2070,26 +2070,6 @@
   line-height: 16px;
 }
 
-.divergedHint,
-.missingHint {
-  margin: 0;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--dsw-alias-border-l2);
-  font-size: 12px;
-  line-height: 18px;
-}
-
-.missing {
-  flex: none;
-  padding: 1px 6px;
-  border: 1px solid var(--dsw-alias-state-warn-primary);
-  border-radius: 6px;
-  color: var(--dsw-alias-state-warn-label, var(--dsw-alias-state-warn-primary));
-  font-size: 11px;
-  line-height: 14px;
-  white-space: nowrap;
-}
-
 /* A file whose keep/revert just failed: error-red tag on the list row, with
    the message as its hover title. Auto-clears after a few seconds. */
 .rowFailed {
@@ -2113,10 +2093,6 @@
   font-size: 12px;
   line-height: 18px;
   overflow-wrap: anywhere;
-}
-
-.missingHint {
-  color: var(--dsw-alias-state-warn-label, var(--dsw-alias-state-warn-primary));
 }
 
 .rowMeta {

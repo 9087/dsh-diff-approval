@@ -1192,13 +1192,12 @@ describe('PendingPanel', () => {
   })
 
   it('offers the list 移出 alone, and no revert at all, when every row has nothing left to review', async () => {
-    // Two rows, two reasons, one menu: a file whose content already matches the baseline has nothing to
-    // accept and nothing to put back, and a missing file must not be written back at all (that would
-    // RECREATE a file the reader deleted outside the panel). Each row's own menu is 移出 and nothing else,
-    // so the list made only of them is too — the other decision is not offered, not merely disabled.
+    // A file whose content already matches the baseline has nothing to accept and nothing to put back, so
+    // its own menu is 移出 and nothing else — and a list made only of those rows offers exactly the one
+    // decision: the other is not offered, not merely disabled.
     const settled = entry({ id: 'entry-settled', path: '/repo/settled.txt', oldText: 'same\n', newText: 'same\n' })
-    const gone = entry({ id: 'entry-gone', path: '/repo/gone.txt', missing: true, oldText: '', newText: 'gone\n' })
-    const props = panelProps({ read: true, files: [settled, gone], busy: new Set() })
+    const alsoSettled = entry({ id: 'entry-settled-two', path: '/repo/settled-two.txt', oldText: 'same\n', newText: 'same\n' })
+    const props = panelProps({ read: true, files: [settled, alsoSettled], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
@@ -1292,19 +1291,18 @@ describe('PendingPanel', () => {
     expect(screen.getByText('panel.removeOneAsk {"action":"row.deleteRemove","file":"created.txt"}')).toBeDefined()
   })
 
-  it('skips a missing row when the whole list is reverted', async () => {
-    // A whole-list revert names the rows it may act on rather than asking the host for the session: reverting
-    // a missing entry writes the baseline back and RECREATES a file the reader deleted outside the panel,
-    // which is the last thing "put everything back" should do behind their back. The row it does act on
-    // LEAVES the list (the footer's 回退并移出 — see `runBulk`), and the missing one is simply left alone.
+  it('skips a row with nothing left to review when the whole list is reverted', async () => {
+    // A whole-list revert names the rows it may act on rather than asking the host for the session: a row
+    // whose content already matches the baseline has nothing to put back, so reverting it would only churn
+    // the list. The row it does act on LEAVES the list (the footer's 回退并移出 — see `runBulk`).
     const edited = entry({ id: 'entry-live', path: '/repo/live.txt', earlierVersion: 'file' })
-    const gone = entry({ id: 'entry-gone-revert', path: '/repo/gone.txt', missing: true, earlierVersion: 'file' })
-    const props = panelProps({ read: true, files: [edited, gone], busy: new Set() })
+    const settled = entry({ id: 'entry-settled-revert', path: '/repo/settled.txt', oldText: 'same\n', newText: 'same\n' })
+    const props = panelProps({ read: true, files: [edited, settled], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
     fireEvent.click(bulkButton('revert-all'))
-    // The dialog counts only what the action covers, and names no deletion: the missing row is not in it.
+    // The dialog counts only what the action covers, and names no deletion: the settled row is not in it.
     expect(screen.getByText('panel.batchRevertAllAsk {"count":1}')).toBeDefined()
     expect(document.querySelector('[data-diff-batch-deletes]')).toBeNull()
     fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
@@ -1314,7 +1312,7 @@ describe('PendingPanel', () => {
     // `undefined` and not `true`: the row leaves the list.
     expect(many.mock.calls[0]).toEqual([S1, ['entry-live'], undefined])
     // The session-wide endpoint is not used at all any more: it walks every entry the session holds, so it
-    // has no way to leave the missing one out.
+    // has no way to leave the settled row out.
     expect(props.onRevertAll).not.toHaveBeenCalled()
     expect(props.onRevert).not.toHaveBeenCalled()
   })
@@ -1422,6 +1420,24 @@ describe('PendingPanel', () => {
     // The one button that DOES say it is the dismiss-only variant, which is its own decision and not a
     // 保留 or a 回退 at all.
     expect(zh['row.dismiss']).toContain('移出')
+  })
+
+  it('has dropped the three dead batch keys from both locale blocks', () => {
+    // Each was left behind by the list work, and each was re-checked before deleting: nothing in `src/`
+    // reaches them any more (`panel.batchAndMore` and `panel.removeCommentsMore` were the two 等 truncation
+    // tails, and `action.revertOrDelete` was the three-way label the footer no longer shows). Gone from
+    // BOTH blocks, so the zh/en key sets still match — the parity test in `settings.client.spec.ts` asserts
+    // that too; this pins the specific removals where the panel's own keys live.
+    for (const key of ['action.revertOrDelete', 'panel.batchAndMore', 'panel.removeCommentsMore']) {
+      expect(key in zh, `zh ${key}`).toBe(false)
+      expect(key in en, `en ${key}`).toBe(false)
+    }
+    // …and the two keys the deletion must NOT have taken with it: the lists' accessible names.
+    for (const key of ['panel.batchDeletesList', 'panel.batchCommentsList'] as const) {
+      expect(zh[key], key).toBeDefined()
+      expect(en[key], key).toBeDefined()
+    }
+    expect(Object.keys(zh).sort()).toEqual(Object.keys(en).sort())
   })
 
   it('never names a deletion for a row the press will leave alone', () => {
@@ -2264,6 +2280,19 @@ describe('PendingPanel', () => {
     expect(props.onRevert).not.toHaveBeenCalled()
   })
 
+  it('still offers a row that has a pending diff its keep and revert pair', () => {
+    // The other half of the same rule, pinned so the collapse above cannot creep: a row that still
+    // differs from the baseline is not a dismiss-only row, so the pair stands.
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+
+    expect(toolbarButton('keep').textContent).toBe('action.keep')
+    expect(toolbarButton('revert').textContent).toBe('action.revert')
+    expect(document.querySelector('[data-diff-remove]')).toBeNull()
+  })
+
   it('disables the actions while an entry is busy', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set([FILE.id]) })
     render(<PendingPanel {...props} />)
@@ -2699,29 +2728,6 @@ describe('PendingPanel', () => {
       .toEqual([[S1, [FILE.id], true], [S1, [FILE.id, 'entry-made'], true]])
     expect(document.querySelector('[data-diff-batch-confirm]')).toBeNull()
     expect(rowOf('entry-made').hasAttribute('data-picked')).toBe(false)
-  })
-
-  it('drops the keep and revert rows for a file that is gone, keeping 移出', () => {
-    // The file was deleted outside the panel: there is no change to accept, and putting it back would
-    // WRITE THE BASELINE BACK — recreating a file the reader deleted. 移出 is the only decision left, and
-    // the two ways out of the panel still apply to whatever is at that path.
-    const gone = entry({ id: 'entry-gone', path: '/repo/gone.txt', missing: true })
-    const props = panelProps({ read: true, files: [gone], busy: new Set() })
-    render(<PendingPanel {...props} />)
-    fireEvent.click(screen.getByLabelText('panel.aria'))
-    const rowOf = (id: string): HTMLElement => document.querySelector(`[data-diff-file="${id}"]`) as HTMLElement
-    expect(screen.getByText('panel.missing')).toBeDefined()
-
-    fireEvent.contextMenu(rowOf('entry-gone'), { clientX: 10, clientY: 12 })
-    const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
-    expect(items.map(item => item.textContent))
-      .toEqual(['row.dismiss', 'action.openFile', 'action.revealFile'])
-
-    // 移出 is a keep with no decision behind it: the host folds the content and drops the entry, so the
-    // file itself is not touched — which is the only safe thing to do to a file that is not there.
-    fireEvent.click(items[0]!)
-    expect(props.onKeep).toHaveBeenLastCalledWith(S1, 'entry-gone')
-    expect(props.onRevert).not.toHaveBeenCalled()
   })
 
   it('warns that a file\'s comments go with it before a removal, and only when it has any', () => {
@@ -7651,17 +7657,6 @@ describe('PendingPanel', () => {
     fireEvent.scroll(body)
     await new Promise(resolve => setTimeout(resolve, 200))
     expect(tail().length).toBe(before)
-  })
-
-  it('warns on the row when a tracked file is gone and explains when expanded', () => {
-    const gone = entry({ missing: true })
-    const props = panelProps({ read: true, files: [gone], busy: new Set() })
-    render(<PendingPanel {...props} />)
-    fireEvent.click(screen.getByLabelText('panel.aria'))
-
-    expect(screen.getByText('panel.missing')).toBeDefined()
-    fireEvent.click(screen.getByText('a.txt'))
-    expect(screen.getByText('panel.missingHint')).toBeDefined()
   })
 
   it('defers a redo-cleared notice until the panel is open, then dismisses it', () => {

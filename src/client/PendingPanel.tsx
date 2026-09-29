@@ -2164,31 +2164,22 @@ interface RowRange {
   side?: 'old' | 'new'
 }
 
-/** Whether a pending file has nothing left to review: its content already matches the tracked
- *  baseline. The file list's context menu offers its actions off this answer, and the detail
- *  toolbar derives the same answer from the diff it already holds (its `model.blocks`), so a row
- *  and the file it opens can never disagree about which actions they are. */
-function fileHasNoDiff(file: PendingFileDiff): boolean {
-  return changeBlocksOf(computeWholeFileDiff(file.oldText, file.newText)).length === 0
-}
-
 /**
- * Whether a row offers 移出 and nothing else: its content already matches the baseline, or the file is
- * gone from disk.
+ * Whether a pending file has nothing left to review: its content already matches the tracked baseline.
  *
- * 移出 is a keep — the host folds the content and drops the entry WITHOUT touching the file — so it is
- * the one decision that is safe on either. Keeping a file that has nothing left to accept would fold
- * nothing; putting a missing one back would WRITE THE BASELINE BACK, recreating a file the reader
- * deleted outside the panel. The row menu and the bulk footer both decide their actions off this one
- * answer, so a row and the set of rows can never disagree about what a file is for.
+ * Such a row has nothing left to accept and nothing to put back, so its only remaining decision is
+ * whether it stays in the list (移出 — a keep that folds the content and drops the entry, leaving the file
+ * itself alone). The row menu, the bulk footer and the detail toolbar all decide their actions off this
+ * ONE answer, so a row, the set of rows, and the file that row opens cannot disagree about which actions
+ * they are.
  *
  * It is deliberately not `oldText === ''`: an empty COMMITTED file still has an earlier version to
  * restore.
  * @param file - the pending file to classify.
  * @returns true when the only decision left on it is whether it stays listed.
  */
-function fileDismissOnly(file: PendingFileDiff): boolean {
-  return fileHasNoDiff(file) || file.missing
+function fileHasNoDiff(file: PendingFileDiff): boolean {
+  return changeBlocksOf(computeWholeFileDiff(file.oldText, file.newText)).length === 0
 }
 
 /** Whether a block keep/revert range covers the file's entire change region, so
@@ -3851,7 +3842,6 @@ function PendingFileRow({ file, selected, picked, failedMessage, t, onSelect, on
             </svg>
           )}
           <span className={css.rowPath}>{basenameOf(file.path)}</span>
-          {file.missing && <span className={css.missing} title={t('panel.missingHint')}>{t('panel.missing')}</span>}
           {failedMessage !== undefined && <span className={css.rowFailed} title={failedMessage}>{t('row.failed')}</span>}
           {(stats.added !== 0 || stats.removed !== 0) && (
             <span className={css.rowMeta}>
@@ -7588,11 +7578,12 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
           )}
         </div>
         <div className={css.diffActionDecisions}>
-        {/* A file that no longer differs from the baseline has nothing left to accept or put
-            back, so the pair collapses into the one decision still open on it: whether it stays
-            in the list. 移出 is a keep — the host folds the (identical) content and drops the
-            entry — which leaves the file itself exactly as it is. */}
-        {model.blocks.length === 0 ? (
+        {/* A row whose content already matches the baseline has nothing left to accept or put back, so the
+            pair collapses into the one decision still open on it: whether it stays in the list. 移出 is a
+            keep — the host folds the (identical) content and drops the entry — which leaves the file itself
+            exactly as it is. The row menu and the bulk footer ask the same question of the same helper
+            (`fileHasNoDiff`), so the three surfaces cannot disagree. */}
+        {fileHasNoDiff(file) ? (
           <button
             type="button"
             className={`${css.action} ${css.actionPrimary} ${css.actionQuietDisabled}`}
@@ -7627,7 +7618,6 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
         </div>
       </div>
       {failedMessage !== undefined && <p className={css.actionError} data-diff-action-error>{failedMessage}</p>}
-      {file.missing && <p className={css.missingHint}>{t('panel.missingHint')}</p>}
       {previewActive ? (
         <MarkdownPreviewBoundary fallback={<div className={css.mdPreviewFallback} data-diff-md-preview-fallback>{t('panel.mdPreviewFailed')}</div>}>
           <div className={css.mdPreviewWrap} onMouseLeave={() => { setHoveredBlock(undefined) }}>
@@ -9365,12 +9355,12 @@ export function PendingPanel({
   }, [open])
 
   /**
-   * The whole-list decisions, decided off the same rule a single row uses (`fileDismissOnly`), so the
+   * The whole-list decisions, decided off the same rule a single row uses (`fileHasNoDiff`), so the
    * footer and the rows can never disagree about what a file is for.
    */
-  const bulkDismissOnly = files.length > 0 && files.every(file => fileDismissOnly(file))
-  /** The rows a whole-list 回退 would act on: every row that is not dismiss-only. */
-  const bulkRevertFiles = files.filter(file => !fileDismissOnly(file))
+  const bulkDismissOnly = files.length > 0 && files.every(file => fileHasNoDiff(file))
+  /** The rows a whole-list 回退 would act on: every row that still has something to put back. */
+  const bulkRevertFiles = files.filter(file => !fileHasNoDiff(file))
 
   /** Ask before running a session-wide bulk decision — the same dialog a pick's rows open. */
   const askBulk = (kind: 'keep' | 'revert'): void => {
@@ -9405,8 +9395,8 @@ export function PendingPanel({
    * "keeps every session entry in one call"), so nothing here has to name the rows.
    *
    * 回退 names the rows it may act on EXPLICITLY rather than asking the host for the whole session,
-   * for two reasons. A dismiss-only row must be skipped: a missing file's revert writes the baseline
-   * back and RECREATES a file the reader deleted outside the panel (see `fileDismissOnly`). And the
+   * for two reasons. A row with nothing left to review must be skipped: putting it back would fold
+   * nothing and only churn the list (see `fileHasNoDiff`). And the
    * rows it does act on must LEAVE the list, like 保留's do and like a single row's 「回退并移出」 —
    * so `keepListed` is left off (the host drops the row unless it is `true`, which is the plain
    * single-row 回退 and NOT what a whole-list button means).
@@ -9664,14 +9654,9 @@ export function PendingPanel({
       { id: 'open-folder', label: t('action.revealFile') },
     ]
     // Nothing left to KEEP or to PUT BACK: 移出 is the only decision, and the two ways out still apply to
-    // the file. Two reasons a row gets here, and both mean the same menu:
-    //
-    //   • its content already matches the baseline (`fileHasNoDiff`) — it was kept or put back and left
-    //     listed, so there is nothing to accept and nothing to restore;
-    //   • the file is GONE from disk (the row wears 缺失). Keeping would fold a change that is not there,
-    //     and putting it back would WRITE THE BASELINE BACK — recreating a file the reader deleted outside
-    //     the panel, which is the last thing a "put back" should do behind their back.
-    if (fileDismissOnly(rowMenu.file)) {
+    // the file. A row gets here when its content already matches the baseline (`fileHasNoDiff`) — it was
+    // kept or put back and left listed, so there is nothing to accept and nothing to restore.
+    if (fileHasNoDiff(rowMenu.file)) {
       return [{ id: 'remove', label: t('row.dismiss') }, ...openRows]
     }
     // Put back wins a second reading too: 回退 puts the file back and leaves it listed, so a file
@@ -9981,7 +9966,7 @@ export function PendingPanel({
   /**
    * The comments a set of files carries: how many files, how many comments, and one ITEM per file for the
    * confirmation's list. Every file bearing a comment is in `items` — the run used to be cut off at three
-   * here ("… 等 4 个文件", the `panel.removeCommentsMore` path, now gone), which hid exactly the files the
+   * here ("… 等 4 个文件", a truncation path since deleted), which hid exactly the files the
    * reader opens this box to check; the box's own height is what gives instead (see `.confirmList`).
    */
   const commentsOn = (ids: readonly string[]): {
@@ -10221,7 +10206,7 @@ export function PendingPanel({
           {files.length > 0 && (
             <div className={css.bulkActions}>
               {/* Every row below is the whole of what its own menu offers: a row that has nothing left to
-                  accept and nothing to put back has 移出 as its one decision (see `fileDismissOnly`), so a
+                  accept and nothing to put back has 移出 as its one decision (see `fileHasNoDiff`), so a
                   list made only of those rows has exactly one decision to offer — and it is that one. */}
               {bulkDismissOnly ? (
                 <button

@@ -30,8 +30,6 @@ export const zh = {
   'panel.fileNotPending': '该文件不在待处理差异列表中',
   'panel.selectHint': '点击文件列表项目查看差异',
   'panel.searchPlaceholder': '搜索',
-  'panel.missing': '文件已不存在',
-  'panel.missingHint': '该文件已不存在，回退会恢复该文件。',
   'panel.externalChanged': '检测到文件在外部被修改，已更新对比并新建撤销点；重做历史已被重置。',
   'panel.dismiss': '知道了',
   'panel.pasteOnCopy': '复制引用后自动粘贴到消息输入框',
@@ -136,7 +134,6 @@ export const zh = {
   'panel.batchDeletes': '回退将删除 {count} 个新建文件，且无法撤销：{files}',
   // The names themselves, and the accessible name of the box that holds them.
   'panel.batchDeletesList': '将要删除的文件',
-  'panel.batchAndMore': '等 {count} 个',
   'panel.batchGo': '确定',
   // Taking a file out of the list DELETES its comments on the host (see `dropEntry`), so every press that
   // drops an entry says so first: in the dialog it already has, or in one raised only for this. Per-file
@@ -149,7 +146,6 @@ export const zh = {
   'panel.removeOneAsk': '{action}「{file}」？',
   'panel.removeCommentsOne': '「{file}」上的 {count} 条评论会一起关闭',
   'panel.removeCommentsMany': '{files} 个文件上的 {count} 条评论会一起关闭：{list}',
-  'panel.removeCommentsMore': '等 {count} 个文件',
   // The names themselves, and the accessible name of the box that holds them (the list block the names
   // moved into, shared with the deletion warning's own list).
   'panel.batchCommentsList': '评论将被一起关闭的文件',
@@ -179,9 +175,6 @@ export const zh = {
   'discussion.askMissing': '这条评论已经不存在了，你的评论没有发出去。',
   'action.revert': '回退',
   'action.delete': '删除',
-  // A decision made over a SET of rows: 回退 and 删除 are one action on the model (`earlierVersion`
-  // decides which), so a set that mixes both says so rather than naming one of the two.
-  'action.revertOrDelete': '回退或删除',
   'action.discussionEnd': '关闭评论',
   'action.keepAll': '全部保留',
   'action.revertAll': '全部回退',
@@ -323,8 +316,6 @@ export const en = {
   'panel.fileNotPending': 'This file is not in the pending diff list',
   'panel.selectHint': 'Click a file in the list to review its diff',
   'panel.searchPlaceholder': 'Search',
-  'panel.missing': 'File is gone',
-  'panel.missingHint': 'This file no longer exists; reverting restores it.',
   'panel.externalChanged': 'A file changed outside the review. The comparison was updated and a new undo point created; the redo history was reset.',
   'panel.dismiss': 'Got it',
   'panel.pasteOnCopy': 'Paste the copied reference into the composer',
@@ -411,12 +402,10 @@ export const en = {
   'panel.batchCloseAsk': 'Close {count} comment(s)?',
   'panel.batchDeletes': 'Reverting deletes {count} created file(s), with no undo: {files}',
   'panel.batchDeletesList': 'Files to be deleted',
-  'panel.batchAndMore': 'and {count} more',
   'panel.batchGo': 'Confirm',
   'panel.removeOneAsk': '{action} "{file}"?',
   'panel.removeCommentsOne': 'The {count} comment(s) on "{file}" will be closed too',
   'panel.removeCommentsMany': 'The {count} comment(s) on {files} file(s) will be closed too: {list}',
-  'panel.removeCommentsMore': 'and {count} more file(s)',
   'panel.batchCommentsList': 'Files whose comments will be closed too',
   'row.added': '+{added}',
   'row.removed': '-{removed}',
@@ -442,7 +431,6 @@ export const en = {
   'discussion.askMissing': 'That comment is gone; yours was not sent.',
   'action.revert': 'Revert',
   'action.delete': 'Delete',
-  'action.revertOrDelete': 'Revert or delete',
   'action.discussionEnd': 'Close comment',
   'action.keepAll': 'Keep all',
   'action.revertAll': 'Revert all',
