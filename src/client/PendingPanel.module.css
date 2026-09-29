@@ -496,6 +496,13 @@
   color: var(--dsw-alias-label-secondary);
 }
 
+/* The chevron beside the recorded value: the same one declaration `.colorPickerChevron` carries, and for
+   the same reason — the pill is a flex row, so without it a long value would shrink the icon instead of
+   the text. It is not decoration: the icon keeps its own size and colour from the button. */
+.settingsSelectorChevron {
+  flex: none;
+}
+
 .settingsReset {
   display: inline-flex;
   align-items: center;
@@ -1659,8 +1666,7 @@
 }
 
 .note,
-.readError,
-.hint {
+.readError {
   margin: 4px 0;
   font-size: 12px;
   line-height: 18px;
@@ -1718,26 +1724,6 @@
   color: var(--dsw-alias-state-error-primary);
 }
 
-.group {
-  margin: 8px 0 4px;
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 16px;
-  color: var(--dsw-alias-label-tertiary);
-}
-
-/* The list's heading row: the group title with the add buttons at its right.
-   The heading sits outside the scroller, so it carries its own right inset — the
-   same 8px the bulk footer uses, which lands its buttons on the rows' 16px line
-   (frame right padding + scroll strip) rather than 4px short of it. */
-.groupHead {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin: 8px 0 4px;
-  padding-right: 8px;
-}
-
 /* The heading's add button: a step smaller than the toolbar's icon action, which
    it would otherwise inherit, and square (a fixed 20px box around the 12px
    glyph). Two classes so it wins wherever `.action` is declared. */
@@ -1756,10 +1742,6 @@
   border-radius: 6px;
 }
 
-.groupHead > .group {
-  margin: 0;
-}
-
 /* The list pane's header: its tabs (when the panel is commenting) with the fold-away toggle at the
    right. Its edges are the list's own — the rows' cards start at the pane's edge — with a pixel of
    clearance at each side of the row's two controls: the strip's fill is the list's first painted
@@ -1771,6 +1753,9 @@
   align-items: center;
   gap: 4px;
   margin: 8px 1px 2px 1px;
+  /* The heading sits outside the scroller, so it carries its own right inset — the same 8px the bulk
+     footer uses, which lands its buttons on the rows' 16px line (frame right padding + scroll strip)
+     rather than 4px short of it. */
   padding-right: 8px;
 }
 
@@ -2063,13 +2048,6 @@
   overflow: visible;
 }
 
-.kindHint {
-  flex: none;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 12px;
-  line-height: 16px;
-}
-
 /* A file whose keep/revert just failed: error-red tag on the list row, with
    the message as its hover title. Auto-clears after a few seconds. */
 .rowFailed {
@@ -2228,10 +2206,6 @@
    or `.splitRoot`) — and its parts are the search bar's recipe: the same border, tracking surface, radius,
    level-1 shadow and 4px inset row, over the same input box (see `.searchBar` / `.searchInput`), so the
    two popups read as one family. */
-.gotoHost {
-  display: inline-flex;
-}
-
 .gotoLayer {
   position: absolute;
   inset: 0;
@@ -2428,10 +2402,6 @@
 .expand:hover {
   background: var(--dsw-alias-interactive-bg-hover);
   color: var(--dsw-alias-label-primary);
-}
-
-.expandExpanded svg {
-  transform: rotate(180deg);
 }
 
 /* Scroll wrapper keeps the overview ruler fixed in place while the diff body
@@ -4074,8 +4044,6 @@
 /* One side of a split pair: tinted by its own semantics (left deletion red,
    right addition green), independent of the other column. */
 .splitLdel { background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 20%, transparent); }
-.splitLadd { background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 18%, transparent); }
-.splitRdel { background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 20%, transparent); }
 .splitRadd { background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 18%, transparent); }
 
 /* Intra-line (inline) diff chips: the removed characters of a del line and the

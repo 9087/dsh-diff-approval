@@ -842,7 +842,7 @@ class MarkdownPreviewBoundary extends Component<{ children: ReactNode; fallback:
  * handlers, reaching the same state transitions a user gesture would.
  * @param sectionLabel - the nav label of this plugin's settings section.
  */
-export function openSettingsSection(sectionLabel: string): void {
+function openSettingsSection(sectionLabel: string): void {
   const trigger = document.querySelector<HTMLButtonElement>('button[aria-haspopup="dialog"]')
   if (trigger === null) return
   trigger.click()
@@ -1452,7 +1452,7 @@ function DiscussionQuote({ quote, lines, lang, wrap, split }: {
           <div className={css.quoteSplitSide} data-diff-quote-side={which} key={which}>
             <div className={css.quoteSplitTable}>
               {pairs.map((pair, index) => (
-                <div className={`${css.quoteLine} ${css.quotePair}`} data-diff-quote-pair key={index}>
+                <div className={css.quoteLine} data-diff-quote-pair key={index}>
                   <span className={css.gutter} data-diff-quote-gutter>{pair[which]?.line ?? ''}</span>
                   <span className={`${css.quoteCode}${pairWash(which, pair.kind)}`}>
                     <span
@@ -9135,6 +9135,13 @@ export function PendingPanel({
         // Nothing came in and the list stays empty: a transient banner is all
         // the feedback needed.
         setImportToast(t('panel.importNone'))
+      } else {
+        // What came in, as the same transient banner: the rows themselves are behind the modal's
+        // dismissal, so the count is the one thing that says the press did something. It counts the
+        // entries the import actually took in (see `foldBatch`): a change folding into an existing
+        // entry counts too, a no-op one does not — so the sentence says 改动 / changes, which is what
+        // it counts, not files and not new rows.
+        setImportToast(t('panel.importDone', { count: value.imported }))
       }
     } catch (error: unknown) {
       setImportFailed(true)
@@ -9887,7 +9894,7 @@ export function PendingPanel({
   )
   /**
    * The chip menu's rows: the two ways a produced file can be opened now that this plugin is holding
-   * it. The first is DSH's own open — the press the reader made, replayed by `replayChipClick`, which
+   * it. The first is DSH's own open — the press the reader made, replayed by `replayFilePress`, which
    * is the only way to run it faithfully (what the harness does with that press is its business) — and
    * the second is this panel, which is the whole reason the press was taken over. The third is not a
    * way to open it at all: it hands back the path the shell itself gave the menu.
@@ -11088,7 +11095,7 @@ export function PendingPanel({
         <Tooltip label={summonHint(t)} side="top" delayMs={500}>
           <button
             type="button"
-            className={noSession ? `${css.badge} ${css.badgeDisabled}` : css.badge}
+            className={css.badge}
             data-diff-approval-badge={files.length}
             data-active={open || dockShowing ? '' : undefined}
             aria-label={t('panel.aria')}

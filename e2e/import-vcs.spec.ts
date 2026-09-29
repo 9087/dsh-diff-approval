@@ -79,7 +79,7 @@ test.describe('导入版本控制：空的待审列表里，按钮把工作区�
     await importButton.click({ timeout: 20_000 })
 
     // What the button says afterwards, whatever it is: the note is the panel's own report of the import
-    // (`panel.importDone` / `importNone` / `importNoVcs` / `importFailed`), and it is what the reader
+    // (`importNone` / `importNoVcs` / `importFailed`), and it is what the reader
     // sees, so a failure has to be printed rather than turned into a timeout with no explanation.
     let note = ''
     await expect

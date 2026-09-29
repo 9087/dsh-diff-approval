@@ -3,7 +3,7 @@
 // navigation, live-state warnings, and the line-selection copy toolbar.
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { Component, useSyncExternalStore } from 'react'
@@ -733,6 +733,63 @@ describe('PendingPanel', () => {
     const view = render(<PendingPanel {...props} />)
     const badge = document.querySelector('[data-diff-approval-badge]') as HTMLButtonElement
     expect(badge.disabled).toBe(true)
+  })
+
+  it('wears one badge class in both session states, with no undefined token', () => {
+    // The disabled look is `.badge:disabled`'s job, not a second class: the composition used to append
+    // `css.badgeDisabled`, which no rule ever defined, so the element carried a literal "undefined" token
+    // — and its class list differed between the two states for no reason at all. The STATE is the
+    // `disabled` attribute; the class is the same either way.
+    const withSession = render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+    const enabled = document.querySelector('[data-diff-approval-badge]') as HTMLButtonElement
+    expect(enabled.disabled).toBe(false)
+    expect(enabled.className).not.toContain('undefined')
+    expect(enabled.className).toMatch(/badge/)
+    expect(enabled.className).toBe(enabled.className.trim())
+    withSession.unmount()
+
+    const noSession = panelProps({ read: true, files: [FILE], busy: new Set() })
+    noSession.useSessions = ((select: (state: { current: SessionId | undefined; byId: Record<string, { blank?: boolean }> }) => SessionId | undefined) =>
+      select({ current: undefined, byId: {} })) as unknown as typeof noSession.useSessions
+    render(<PendingPanel {...noSession} />)
+    const disabled = document.querySelector('[data-diff-approval-badge]') as HTMLButtonElement
+    expect(disabled.disabled).toBe(true)
+    expect(disabled.className).not.toContain('undefined')
+    expect(disabled.className).toBe(enabled.className)
+  })
+
+  it('resolves every css class the client names to a rule, and pins the chevron\'s own', () => {
+    // The defect class this pins: a className composed from `css.X` where X has no rule. CSS modules answer
+    // `undefined` for a missing class, so the element renders the literal token "undefined" and its real
+    // class list is silently wrong — the badge, the split quote's pair row and the settings chevron all had
+    // one. The sweep is what found them, so it stays as a test rather than a one-off.
+    const dir = join(process.cwd(), 'src', 'client')
+    const sheet = readFileSync(join(dir, 'PendingPanel.module.css'), 'utf8')
+    // Comments stripped: a class NAMED in a comment is not a rule, and counting one is how a dead
+    // reference survives a sweep.
+    const rules = new Set([...sheet.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/\.([A-Za-z_][A-Za-z0-9_-]*)/g)]
+      .map(found => found[1]!))
+    const files: string[] = []
+    const walk = (at: string): void => {
+      for (const dirent of readdirSync(at, { withFileTypes: true })) {
+        if (dirent.isDirectory()) walk(join(at, dirent.name))
+        else if (/\.tsx?$/.test(dirent.name) && !dirent.name.endsWith('.d.ts')) files.push(join(at, dirent.name))
+      }
+    }
+    walk(dir)
+
+    const unresolved: string[] = []
+    for (const file of files) {
+      for (const found of readFileSync(file, 'utf8').matchAll(/css\.([A-Za-z_][A-Za-z0-9_]*)/g)) {
+        if (!rules.has(found[1]!)) unresolved.push(`${file.slice(process.cwd().length + 1)}: css.${found[1]}`)
+      }
+    }
+    expect(unresolved).toEqual([])
+    // …and the one the sweep turned up, pinned by its declarations: the same single declaration its sibling
+    // chevrons carry, so the icon keeps its size when the pill's recorded value is long.
+    const block = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(sheet)?.[1] ?? ''
+    expect(block('settingsSelectorChevron')).toContain('flex: none')
+    expect(block('colorPickerChevron')).toContain('flex: none')
   })
 
   it('reads the page\u2019s newest view through pendingView when the seat names no session', async () => {
@@ -2354,8 +2411,28 @@ describe('PendingPanel', () => {
       expect(importMock.mock.calls).toEqual([[S1, false]])
       expect(props.onRefresh).toHaveBeenCalled()
     })
-    // Imported entries repopulate the list; no banner is needed.
+    // Imported entries repopulate the list, and the press reports what came in (asserted in the next
+    // case); what it must NOT say is that there was nothing to bring in.
     expect(screen.queryByText('panel.importNone')).toBeNull()
+  })
+
+  it('shows the imported count after a successful import', async () => {
+    // The rows this brought in are behind a list the reader is about to reopen, so the count is the
+    // feedback that the press did something. `imported` counts the entries the import TOOK IN (see
+    // `foldBatch` in `src/index.ts`): a change folding into an existing entry counts, a no-op one does
+    // not — which is why the sentence says 改动 / changes, not files and not new rows.
+    const props = panelProps({ read: true, files: [], busy: new Set() })
+    ;(props.onImportVcs as unknown as { mockResolvedValueOnce: (v: unknown) => void })
+      .mockResolvedValueOnce({ imported: 3, detected: true })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    fireEvent.click(document.querySelector('[data-diff-import-vcs]') as HTMLElement)
+    await waitFor(() => { expect(screen.getByText('panel.importDone {"count":3}')).toBeDefined() })
+    // One banner, not two: a detected import that brought something in never also says "nothing to
+    // bring in", and it is not the no-VCS note either.
+    expect(screen.queryByText('panel.importNone')).toBeNull()
+    expect(screen.queryByText('panel.importNoVcs')).toBeNull()
   })
 
   it('shows a toast when an import finds no changes to bring in', async () => {
@@ -4501,14 +4578,15 @@ describe('PendingPanel', () => {
     // margin-right on top of the shared padding. A platform that overlays its bars and reserves no
     // gutter drops that strip in the files list and the comments list together, which is the point of
     // the shared rule. The heading and the footer sit outside the scroller and keep their own 8px, or
-    // they would come out flush against the border.
+    // they would come out flush against the border. The heading's rule is `.listHead` — the live tab
+    // row — which is where the old `.groupHead` declaration went; only the name moved.
     const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const block = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
     const rightPadding = (name: string): string => /padding:\s*([^;]*);/.exec(block(name))?.[1]?.trim().split(/\s+/)[1] ?? ''
     expect(rightPadding('fileList')).toBe('0')
     expect(rightPadding('fileListFloat')).toBe('0')
     expect(/padding:\s*8px 8px 0 0;/.test(block('bulkActions'))).toBe(true)
-    expect(/padding-right:\s*8px;/.test(block('groupHead'))).toBe(true)
+    expect(/padding-right:\s*8px;/.test(block('listHead'))).toBe(true)
     // The rows' band is the scroller's reserved strip, declared once on the shared rule (see the
     // test below). The one padding the scroller itself carries is the deliberate 2px of air the
     // reader asked for between the rows and the bar — a fixed value, never the old 8px band.
@@ -11500,6 +11578,11 @@ describe('PendingPanel', () => {
     expect(right).not.toBeNull()
     expect(left.querySelectorAll('[data-diff-quote-pair]').length).toBe(1)
     expect(right.querySelectorAll('[data-diff-quote-pair]').length).toBe(1)
+    // The pair row is the quote's line row and nothing else: its class list used to carry a second token
+    // (`quotePair`) that no rule ever defined, so it rendered a literal "undefined" beside the real class.
+    const pairRow = left.querySelector('[data-diff-quote-pair]') as HTMLElement
+    expect(pairRow.className).not.toContain('undefined')
+    expect(pairRow.className).toMatch(/quoteLine/)
     expect(right.textContent).toContain('const gone = 1')
     expect(left.textContent).not.toContain('const gone = 1')
     expect(left.querySelector('[data-diff-quote-gutter]')?.textContent).toBe('')

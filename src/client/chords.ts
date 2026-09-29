@@ -21,7 +21,7 @@ const CHORD_KEY_GLYPHS: Record<string, string> = { ArrowUp: 'â†‘', ArrowDown: 'â
  * @param chord - the stored chord.
  * @returns the hint text; `''` for an unbound action.
  */
-export function chordHint(chord: string): string {
+function chordHint(chord: string): string {
   return chord.split('+').map(part => CHORD_KEY_GLYPHS[part] ?? part).join('+')
 }
 

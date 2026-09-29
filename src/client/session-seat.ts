@@ -112,20 +112,6 @@ export function sessionIsBlank(state: unknown, id: SessionId | undefined): boole
 }
 
 /**
- * The session this mount is about: the slot prop the shell composed, else the store's own selected
- * session, else what the header entry published (see the module doc).
- * @param propSessionId - `sessionId` from the composed slot props, when the shell sends one.
- * @param storeSelected - the store's selected session, when its shape names one.
- * @returns the id, or `undefined` when nothing here knows one.
- */
-export function sessionIdFor(
-  propSessionId: SessionId | undefined,
-  storeSelected: SessionId | undefined,
-): SessionId | undefined {
-  return propSessionId ?? storeSelected ?? publishedSessionId()
-}
-
-/**
  * The session the PAGE is showing, resolved the way a whole-page reader has to resolve it: the
  * session-list store's own selection first, else what the Session header entry published.
  *

@@ -194,7 +194,7 @@ export interface PendingPanelFace extends PendingViewHooks {
   /**
    * Drop several annotations in one host call. Ending a pick of comments is one action the reader
    * asked for, so it goes to the host as one request and comes back as one read — see
-   * `DiffApprovalStore.commentRemoveMany`.
+   * `PendingDiffStore.commentRemoveMany`.
    */
   onCommentRemoveMany: (sessionId: SessionId, ids: readonly string[]) => Promise<DiffApprovalCommentRemoveManyValue>
   /**

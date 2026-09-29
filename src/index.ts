@@ -1503,9 +1503,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     } catch (error: unknown) {
       const message = errorMessage(error)
       // Not a detail to file away. This file is what makes the list survive a restart, and a filesystem
-      // that refuses the write — no permission, no space, a path this host cannot create (issue #6:
-      // `dirName` answered `.` on Windows, so every write threw ENOENT) — leaves the reader with a list
-      // that silently disappears, which is the one failure nobody can diagnose from the outside. At
+      // that refuses the write — no permission, no space, a directory this host cannot create (issue #6:
+      // a hand-rolled split of the path answered `.` for a Windows path, so the write threw ENOENT; the
+      // atomic write's `dirname(file)` is what fixed it) — leaves the reader with a list that silently
+      // disappears, which is the one failure nobody can diagnose from the outside. At
       // error level, once per distinct message, so a writer retrying every second cannot bury it.
       if (persistFailureReported !== message) {
         persistFailureReported = message

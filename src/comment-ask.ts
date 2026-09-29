@@ -264,7 +264,7 @@ function readTurn(events: readonly LogEvent[], askedAt: number, turn: number | u
  * @param requestIds - the questions' request ids.
  * @returns the read per request id; a question the log holds nothing for reads as nothing.
  */
-export function answersIn(events: readonly LogEvent[], requestIds: readonly string[]): Record<string, AskRead> {
+function answersIn(events: readonly LogEvent[], requestIds: readonly string[]): Record<string, AskRead> {
   const reads: Record<string, AskRead> = {}
   for (const requestId of requestIds) reads[requestId] = answerForRequest(events, requestId)
   return reads

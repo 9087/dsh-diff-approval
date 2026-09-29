@@ -9,7 +9,7 @@
 import { computeWholeFileDiff } from './whole-file-diff.ts'
 
 /** The marker that replaces a reference's line number when its lines are gone. */
-export const LINE_MISSING_LABEL = 'LINE_MISSING'
+const LINE_MISSING_LABEL = 'LINE_MISSING'
 
 /**
  * Last path segment of a file path, any separator style.
