@@ -21,7 +21,7 @@ import { PresentationMenu } from './presentation-menu.tsx'
 import { CoverageControl, CoverageNotice, COVER_NOTICE_MS } from './coverage-control.tsx'
 // The chord vocabulary is shared: the header entry advertises the same summon
 // hint this panel's close button spells, so both hint builders live in chords.ts.
-import { chordLabel, closeHint, summonHint, withChord } from './chords.ts'
+import { actionTooltip, chordLabel, closeTooltip, escapeTooltip, summonTooltip, withChord } from './chords.ts'
 import { blockRangesOf, changeBlocksOf, computeIntraLineDiff, computeWholeFileDiff } from './whole-file-diff.ts'
 import {
   DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, discussionOverlapping,
@@ -2386,6 +2386,14 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   /** The go-to popup, which this view centres on its own box (see `gotoDialog`). */
   gotoDialog?: ReactNode
 }>(function SplitDiff({ file, sessionId, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert, onWrapToast, onVisibleLines, discussions, renderDiscussion, selectionComment, rulerRuns, gotoDialog }, ref) {
+  // The search bar's tooltips, decided once (see `chords.ts`): this host's keycaps where it can draw
+  // them, the pre-0.1.7-rc.2 glued label where it cannot. One entry per control, so the five controls
+  // cannot spell a chord differently from the bar in the unified view.
+  const hintCase = actionTooltip(t('action.matchCase'), 'matchCase')
+  const hintWords = actionTooltip(t('action.matchWholeWord'), 'matchWholeWord')
+  const hintPrev = actionTooltip(t('action.prevDiff'), 'searchPrev')
+  const hintNext = actionTooltip(t('action.nextDiff'), 'searchNext')
+  const hintClose = escapeTooltip(t)
   // Use the configured line height for the split virtual window and jump math
   // (the rendered split rows already size to the same value).
   // eslint-disable-next-line @typescript-eslint/no-shadow
@@ -3452,44 +3460,46 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
               ? '0/0'
               : `${(searchIndex % searchMatches.length) + 1}/${searchMatches.length}`}
           </span>
-          <Tooltip label={withChord(t('action.matchCase'), 'matchCase')} side="bottom" delayMs={500}>
+          <Tooltip label={hintCase.label} shortcutKeys={hintCase.shortcutKeys} side="bottom" delayMs={500}>
             <button
               type="button"
               className={search.caseSensitive ? `${css.searchToggle} ${css.searchToggleOn}` : css.searchToggle}
               data-diff-search-case
               data-on={search.caseSensitive ? '' : undefined}
               aria-label={t('action.matchCase')}
+              aria-keyshortcuts={hintCase.aria}
               aria-pressed={search.caseSensitive}
               onClick={() => { andRefocus(() => { search.toggleCase() }) }}
             >
               <SearchOptionIcon kind="case" />
             </button>
           </Tooltip>
-          <Tooltip label={withChord(t('action.matchWholeWord'), 'matchWholeWord')} side="bottom" delayMs={500}>
+          <Tooltip label={hintWords.label} shortcutKeys={hintWords.shortcutKeys} side="bottom" delayMs={500}>
             <button
               type="button"
               className={search.wholeWord ? `${css.searchToggle} ${css.searchToggleOn}` : css.searchToggle}
               data-diff-search-word
               data-on={search.wholeWord ? '' : undefined}
               aria-label={t('action.matchWholeWord')}
+              aria-keyshortcuts={hintWords.aria}
               aria-pressed={search.wholeWord}
               onClick={() => { andRefocus(() => { search.toggleWord() }) }}
             >
               <SearchOptionIcon kind="word" />
             </button>
           </Tooltip>
-          <Tooltip label={withChord(t('action.prevDiff'), 'searchPrev')} side="bottom" delayMs={500}>
-            <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-prev aria-label={t('action.prevDiff')} disabled={searchMatches.length === 0} onClick={() => { andRefocus(() => { goSearch(-1) }) }}>
+          <Tooltip label={hintPrev.label} shortcutKeys={hintPrev.shortcutKeys} side="bottom" delayMs={500}>
+            <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-prev aria-label={t('action.prevDiff')} aria-keyshortcuts={hintPrev.aria} disabled={searchMatches.length === 0} onClick={() => { andRefocus(() => { goSearch(-1) }) }}>
               <IconChevronUpOutline14 size={14} />
             </button>
           </Tooltip>
-          <Tooltip label={withChord(t('action.nextDiff'), 'searchNext')} side="bottom" delayMs={500}>
-            <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-next aria-label={t('action.nextDiff')} disabled={searchMatches.length === 0} onClick={() => { andRefocus(() => { goSearch(1) }) }}>
+          <Tooltip label={hintNext.label} shortcutKeys={hintNext.shortcutKeys} side="bottom" delayMs={500}>
+            <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-next aria-label={t('action.nextDiff')} aria-keyshortcuts={hintNext.aria} disabled={searchMatches.length === 0} onClick={() => { andRefocus(() => { goSearch(1) }) }}>
               <IconChevronDownOutline14 size={14} />
             </button>
           </Tooltip>
-          <Tooltip label={t('action.closeHintEsc')} side="bottom" delayMs={500}>
-            <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-close aria-label={t('action.close')} onClick={closeSearch}>
+          <Tooltip label={hintClose.label} shortcutKeys={hintClose.shortcutKeys} side="bottom" delayMs={500}>
+            <button type="button" className={`${css.action} ${css.iconAction}`} data-diff-search-close aria-label={t('action.close')} aria-keyshortcuts={hintClose.aria} onClick={closeSearch}>
               <IconCloseOutline16 size={14} />
             </button>
           </Tooltip>
@@ -3875,6 +3885,9 @@ type DiffToolbarItem =
        *  menu titles its row with this, so a control that has moved into the menu still says
        *  everything its own tooltip said. */
       hint?: string
+      /** The keybinding action whose chord the tooltip renders as keycaps (see `shortcutOf`). The
+       *  menu is a list of text rows and has no keycap row, which is why `hint` stays flat. */
+      shortcut?: string
       icon: ReactNode
       /** The `data-*` marker the panel's tests and hosts find this control by. */
       data: Record<string, string>
@@ -3927,6 +3940,15 @@ export function inlineItemCount(widths: readonly number[], available: number, ga
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
 function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, landingLine, landingOld, landingComment, landingCard, onLanded, failedMessage, commentSkill, comments, commentAnswers, commentsRevision, commentLines, onCommentAdd, onCommentRemove, onCommentAsk, onCommentSeen, onPasteReference, onToast, t, onAddTypedPath, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
+  // The same five search-bar tooltips as the split view, plus the copy-reference button, decided once
+  // (see `chords.ts`): this host's keycaps where it can draw them, the pre-0.1.7-rc.2 glued label
+  // where it cannot. The toolbar's own items decide per item, in their map below.
+  const hintCase = actionTooltip(t('action.matchCase'), 'matchCase')
+  const hintWords = actionTooltip(t('action.matchWholeWord'), 'matchWholeWord')
+  const hintPrev = actionTooltip(t('action.prevDiff'), 'searchPrev')
+  const hintNext = actionTooltip(t('action.nextDiff'), 'searchNext')
+  const hintClose = escapeTooltip(t)
+  const hintCopy = actionTooltip(t('action.copyHint'), 'copyRef')
   // A manual highlight-language override; undefined means auto-detect from the
   // file extension. The picker is DSH's own Menu dropdown, portaled so the
   // list escapes the diff's overflow clip.
@@ -7224,62 +7246,67 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
           ? '0/0'
           : `${(searchIndex % searchMatchCount) + 1}/${searchMatchCount}`}
       </span>
-      <Tooltip label={withChord(t('action.matchCase'), 'matchCase')} side="bottom" delayMs={500}>
+      <Tooltip label={hintCase.label} shortcutKeys={hintCase.shortcutKeys} side="bottom" delayMs={500}>
         <button
           type="button"
           className={search.caseSensitive ? `${css.searchToggle} ${css.searchToggleOn}` : css.searchToggle}
           data-diff-search-case
           data-on={search.caseSensitive ? '' : undefined}
           aria-label={t('action.matchCase')}
+          aria-keyshortcuts={hintCase.aria}
           aria-pressed={search.caseSensitive}
           onClick={() => { andRefocus(() => { search.toggleCase() }) }}
         >
           <SearchOptionIcon kind="case" />
         </button>
       </Tooltip>
-      <Tooltip label={withChord(t('action.matchWholeWord'), 'matchWholeWord')} side="bottom" delayMs={500}>
+      <Tooltip label={hintWords.label} shortcutKeys={hintWords.shortcutKeys} side="bottom" delayMs={500}>
         <button
           type="button"
           className={search.wholeWord ? `${css.searchToggle} ${css.searchToggleOn}` : css.searchToggle}
           data-diff-search-word
           data-on={search.wholeWord ? '' : undefined}
           aria-label={t('action.matchWholeWord')}
+          aria-keyshortcuts={hintWords.aria}
           aria-pressed={search.wholeWord}
           onClick={() => { andRefocus(() => { search.toggleWord() }) }}
         >
           <SearchOptionIcon kind="word" />
         </button>
       </Tooltip>
-      <Tooltip label={withChord(t('action.prevDiff'), 'searchPrev')} side="bottom" delayMs={500}>
+      <Tooltip label={hintPrev.label} shortcutKeys={hintPrev.shortcutKeys} side="bottom" delayMs={500}>
         <button
           type="button"
           className={`${css.action} ${css.iconAction}`}
           data-diff-search-prev
           aria-label={t('action.prevDiff')}
+          aria-keyshortcuts={hintPrev.aria}
           disabled={searchMatchCount === 0}
           onClick={() => { andRefocus(() => { goSearch(-1) }) }}
         >
           <IconChevronUpOutline14 size={14} />
         </button>
       </Tooltip>
-      <Tooltip label={withChord(t('action.nextDiff'), 'searchNext')} side="bottom" delayMs={500}>
+      <Tooltip label={hintNext.label} shortcutKeys={hintNext.shortcutKeys} side="bottom" delayMs={500}>
         <button
           type="button"
           className={`${css.action} ${css.iconAction}`}
           data-diff-search-next
           aria-label={t('action.nextDiff')}
+          aria-keyshortcuts={hintNext.aria}
           disabled={searchMatchCount === 0}
           onClick={() => { andRefocus(() => { goSearch(1) }) }}
         >
           <IconChevronDownOutline14 size={14} />
         </button>
       </Tooltip>
-      <Tooltip label={t('action.closeHintEsc')} side="bottom" delayMs={500}>
+      <Tooltip label={hintClose.label} shortcutKeys={hintClose.shortcutKeys} side="bottom" delayMs={500}>
         <button
           type="button"
           className={`${css.action} ${css.iconAction}`}
           data-diff-search-close
           aria-label={t('action.close')}
+          aria-keyshortcuts={hintClose.aria}
           onClick={closeSearch}
         >
           <IconCloseOutline16 size={14} />
@@ -7349,19 +7376,19 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     toolbarItems.push(
       {
         kind: 'button', key: 'prev', data: { 'data-diff-prev': '' }, disabled: busy,
-        label: t('action.prevDiff'), hint: withChord(t('action.prevDiff'), 'jumpUp'), icon: <IconChevronUpOutline14 size={14} />,
+        label: t('action.prevDiff'), hint: withChord(t('action.prevDiff'), 'jumpUp'), shortcut: 'jumpUp', icon: <IconChevronUpOutline14 size={14} />,
         onSelect: () => { jumpBlock(-1, true) },
       },
       {
         kind: 'button', key: 'next', data: { 'data-diff-next': '' }, disabled: busy,
-        label: t('action.nextDiff'), hint: withChord(t('action.nextDiff'), 'jumpDown'), icon: <IconChevronDownOutline14 size={14} />,
+        label: t('action.nextDiff'), hint: withChord(t('action.nextDiff'), 'jumpDown'), shortcut: 'jumpDown', icon: <IconChevronDownOutline14 size={14} />,
         onSelect: () => { jumpBlock(1, true) },
       },
     )
   }
   toolbarItems.push({
     kind: 'button', key: 'search', data: { 'data-diff-search-toggle': '' },
-    label: t('action.search'), hint: withChord(t('action.search'), 'openSearch'), icon: <IconSearchOutline16 size={14} />,
+    label: t('action.search'), hint: withChord(t('action.search'), 'openSearch'), shortcut: 'openSearch', icon: <IconSearchOutline16 size={14} />,
     onSelect: toggleSearch,
   })
   if (!previewActive) {
@@ -7369,7 +7396,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     // `gotoDialog`), so it can be centred on that view's own box.
     toolbarItems.push({
       kind: 'button', key: 'goto', data: { 'data-diff-goto': '' },
-      label: t('action.goto'), hint: withChord(t('action.goto'), 'goto'), icon: <GotoLineIcon />,
+      label: t('action.goto'), hint: withChord(t('action.goto'), 'goto'), shortcut: 'goto', icon: <GotoLineIcon />,
       onSelect: () => { setGotoDraft(''); setGotoOpen(true) },
     })
   }
@@ -7525,27 +7552,36 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
           )}
           {/* Drawn while they fit; the rest are the overflow menu below. The stats above are the
               group's fixed prefix — the summary of the diff is not something to hide behind `⋯`. */}
-          {inlineToolbarItems.map(item => (
-            <Fragment key={item.key}>
-              {item.kind === 'divider' ? (
-                <span className={css.divider} ref={(element) => { rememberActionWidth(item.key, element) }} />
-              ) : (
-                <Tooltip label={item.hint ?? item.label} side="bottom" delayMs={500}>
+          {inlineToolbarItems.map(item => {
+            if (item.kind === 'divider') {
+              return (
+                <Fragment key={item.key}>
+                  <span className={css.divider} ref={(element) => { rememberActionWidth(item.key, element) }} />
+                </Fragment>
+              )
+            }
+            // One decision per item (see `chords.ts`): this host's keycaps where it can draw them, the
+            // pre-0.1.7-rc.2 glued label where it cannot, and the same chord in aria either way.
+            const tip = actionTooltip(item.label, item.shortcut)
+            return (
+              <Fragment key={item.key}>
+                <Tooltip label={tip.label} shortcutKeys={tip.shortcutKeys} side="bottom" delayMs={500}>
                   <button
                     type="button"
                     ref={(element) => { rememberActionWidth(item.key, element) }}
                     className={`${css.action} ${css.iconAction}`}
                     {...item.data}
                     aria-label={item.label}
+                    aria-keyshortcuts={tip.aria}
                     disabled={item.disabled}
                     onClick={item.onSelect}
                   >
                     {item.icon}
                   </button>
                 </Tooltip>
-              )}
-            </Fragment>
-          ))}
+              </Fragment>
+            )
+          })}
           {/* What did not fit, in the order it would have been drawn. Portaled like the language
               picker, so the list is not cropped by the group it hangs off. */}
           {hiddenToolbarItems.length > 0 && (
@@ -8020,7 +8056,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       )}
       <div className={css.statusBar} data-diff-status-bar>
         {selectionReference === undefined ? null : (
-          <Tooltip label={copied ? t('action.copied') : withChord(t('action.copyHint'), 'copyRef')} side="top" delayMs={300}>
+          <Tooltip label={copied ? t('action.copied') : hintCopy.label} shortcutKeys={copied ? undefined : hintCopy.shortcutKeys} side="top" delayMs={300}>
             {/*
              * Deliberately NOT a native <button>/<a>: the "dsh-pocket" mobile
              * bridge hijacks any button/link whose text *looks like a file path*
@@ -8044,6 +8080,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
               className={css.statusAction}
               data-diff-copy
               data-mobile-nav-copy="1"
+              aria-keyshortcuts={copied ? undefined : hintCopy.aria}
               // Keep the native selection alive across the click so the
               // reference stays in the status bar after copying.
               onMouseDown={(event) => { event.preventDefault() }}
@@ -8117,6 +8154,10 @@ export function PendingPanel({
   wide, useSessions, sessionId, usePending, pendingView, showing = true, onRefresh, onMarkSeen, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onCommentAdd, onCommentRemove, onCommentRemoveMany, onCommentAsk, onCommentSeen, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onKeepMany, onRevertMany, onAckRedoCleared, onAckUndoNotice, collapseSidebar, t,
   docked = false, dockHost, onOpenDock, closeDock, useDock,
 }: PendingPanelProps) {
+  // The two tooltips that name a way out of the panel, decided once (see `chords.ts`): this host's
+  // keycaps where it can draw them, the pre-0.1.7-rc.2 glued label where it cannot.
+  const closeTip = closeTooltip(t)
+  const summonTip = summonTooltip(t)
   const storeSelected = useSessions(state => selectedSessionOf(state))
   // The session this panel is about: what the shell composed (session-scoped seats), else the store's
   // own selection (shells that keep it there), else what the header entry published — 0.1.7 hands the
@@ -10656,12 +10697,13 @@ export function PendingPanel({
                   the right sidebar's tab. The current one is checked, so the two
                   are named rather than cycled. */}
               <PresentationMenu t={t} current={presentation} onChoose={choosePresentation} />
-              <Tooltip label={closeHint(t)} side="bottom" delayMs={500}>
+              <Tooltip label={closeTip.label} shortcutKeys={closeTip.shortcutKeys} side="bottom" delayMs={500}>
                 <button
                   type="button"
                   className={css.close}
                   data-diff-approval-close
                   aria-label={t('action.close')}
+                  aria-keyshortcuts={closeTip.aria}
                   onClick={closePanel}
                 >
                   <IconCloseOutline16 size={14} />
@@ -11092,13 +11134,14 @@ export function PendingPanel({
         docked && dockHost !== undefined ? dockHost : document.body,
       )}
       {!docked && <div className={css.footerButtons}>
-        <Tooltip label={summonHint(t)} side="top" delayMs={500}>
+        <Tooltip label={summonTip.label} shortcutKeys={summonTip.shortcutKeys} side="top" delayMs={500}>
           <button
             type="button"
             className={css.badge}
             data-diff-approval-badge={files.length}
             data-active={open || dockShowing ? '' : undefined}
             aria-label={t('panel.aria')}
+            aria-keyshortcuts={summonTip.aria}
             aria-expanded={open || dockShowing}
             disabled={noSession}
             onClick={toggleOpen}

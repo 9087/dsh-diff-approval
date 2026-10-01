@@ -83,9 +83,13 @@ describe('DiffApprovalHeaderEntry', () => {
     localStorage.setItem('diff-approval:quick-summon-key', 'Ctrl+ArrowUp')
     render(<DiffApprovalHeaderEntry {...entryProps({ count: 1 })} />)
     fireEvent.focus(button())
-    // The same hint the footer entry shows, chord spelled as bound (arrows are
-    // glyphs), read at render time rather than baked into the copy.
-    expect(screen.getByText('action.summonHint {"chord":"Ctrl+↑"}')).not.toBeNull()
+    // The bubble names what it opens and carries the chord. jsdom runs against primitives 0.1.0-rc.6 —
+    // older than 0.1.7-rc.2, where the shell learned to draw a shortcut as keycaps — so the bubble takes
+    // `chords.ts`'s fallback and spells the chord the way this plugin did before that release (arrows as
+    // glyphs). The chord is on the anchor as `aria-keyshortcuts` on every host; the keycap rendering is
+    // covered by `e2e/tooltip-shortcuts.spec.ts`, against the real host.
+    expect(screen.getByRole('tooltip').textContent).toBe('action.summonHint {"chord":"Ctrl+↑"}')
+    expect(button().getAttribute('aria-keyshortcuts')).toBe('Control+ArrowUp')
   })
 
   it('asks the panel to toggle when it is pressed, rather than holding a copy of its state', () => {

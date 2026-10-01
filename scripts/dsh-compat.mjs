@@ -234,6 +234,57 @@ async function probe(version, dir) {
   }
 }
 
+/** One name as regex source text, so a `$` in an identifier cannot become an anchor. */
+const asPattern = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * Whether ONE access to a package name is a CAPABILITY PROBE rather than an unconditional use.
+ *
+ * `dsh-icons.ts` asks `typeof primitives.ShortcutKeys === 'function'` to learn whether the running shell
+ * can draw a shortcut as keycaps. That name is EXPECTED to be missing on hosts older than the primitives'
+ * 0.1.7-rc.2, and the bundle works there by falling back to a glued label — but the extractor could not
+ * see the guard, so the probe became a hard requirement and every earlier release failed for a name the
+ * plugin only ever asks ABOUT. A probe is therefore collected separately and reported as satisfied or
+ * absent, never demanded.
+ *
+ * The recognised shapes are the ones that mean "this may be missing": `typeof P.X` (how the bundle spells
+ * it), a POSITIVE truthiness test (`if (P.X)`, `P.X && …`, `P.X || …`, `P.X ? …`), and `'X' in P` — that
+ * last one collected in {@link clientNeeds}, since it has no property access to look at. A NEGATED test is
+ * deliberately NOT recognised: `if (!P.X) throw …` asserts the name must be there, and treating it as
+ * optional would let a genuinely required name through the gate.
+ *
+ * @param source - the text of `lib/client.js`.
+ * @param at - the index the access starts at.
+ * @param length - the access's length.
+ * @returns whether this access is a probe.
+ */
+function isCapabilityProbe(source, at, length) {
+  const before = source.slice(Math.max(0, at - 24), at)
+  const after = source.slice(at + length, at + length + 8)
+  if (/typeof\s*\(?\s*$/.test(before)) return true
+  if (/(?:if|while)\s*\(\s*$/.test(before)) return true
+  return /^\s*\)?\s*(?:&&|\|\||\?)/.test(after)
+}
+
+/**
+ * Whether EVERY time the bundle touches `alias.<name>` is a probe.
+ *
+ * "Every", not "any": a name that is probed AND also used unconditionally stays required, because the
+ * unconditional use is the one that has to exist in the shell.
+ *
+ * @param source - the text of `lib/client.js`.
+ * @param alias - the local name the bundle requires the package into.
+ * @param name - the property name.
+ * @returns whether every access is a probe.
+ */
+function everyAccessIsProbe(source, alias, name) {
+  const access = new RegExp(`${asPattern(alias)}\\.${asPattern(name)}\\b`, 'g')
+  const found = [...source.matchAll(access)]
+  // No property access at all: a name the bundle only ever names as a string is not probed this way.
+  if (found.length === 0) return false
+  return found.every(match => isCapabilityProbe(source, match.index, match[0].length))
+}
+
 /**
  * What the built client asks the primitives package for, read off `lib/client.js` itself.
  *
@@ -245,17 +296,26 @@ async function probe(version, dir) {
  * Glyphs are separated from the rest because the client treats them differently: `dsh-icons.ts`
  * resolves a glyph at run time from a list of names and draws nothing when a shell offers none, so a
  * glyph needs at least ONE of its candidate names — not a specific one. Everything else is used
- * unconditionally, so it must be there exactly.
+ * unconditionally, so it must be there exactly — UNLESS every access to it is a capability probe
+ * (`typeof P.X`, a positive truthiness test, or `'X' in P`), in which case it is reported as present or
+ * absent and never demanded (see {@link isCapabilityProbe}).
  *
  * @param source - the text of `lib/client.js`.
- * @returns `{ required, glyphs }`: names that must all exist, and glyph stems with their candidates.
+ * @returns `{ required, glyphs, optional }`: names that must all exist, glyph stems with their
+ *   candidates, and the names the bundle only ever asks about.
  */
 function clientNeeds(source) {
   const required = new Set()
+  const optional = new Set()
   const shellNames = new Set()
   const alias = /([A-Za-z_$][\w$]*)\s*=\s*require\("@deepseek-ai\/dsh-client-ui-primitives"\)/.exec(source)
   if (alias !== null) {
     for (const match of source.matchAll(new RegExp(`${alias[1]}\\.([A-Za-z_$][\\w$]*)`, 'g'))) shellNames.add(match[1])
+    // `'Name' in alias` asks the same capability question with a string, so it never shows up as a
+    // property access: collected here, as the probe it is.
+    for (const match of source.matchAll(new RegExp(`['"]([A-Za-z_$][\\w$]*)['"]\\s+in\\s+${alias[1]}\\b`, 'g'))) {
+      optional.add(match[1])
+    }
   }
   // Names the shim asks for at RUN time are string literals, not property accesses. Only these two
   // sources count, because the bundle also contains names of the plugin's own: the shim re-exports
@@ -265,6 +325,12 @@ function clientNeeds(source) {
   for (const match of source.matchAll(/['"](Icon[A-Za-z0-9_]*)['"]/g)) shellNames.add(match[1])
   const glyphs = new Map()
   for (const name of shellNames) {
+    if (optional.has(name)) continue
+    // Probed everywhere it is touched: an optional capability, reported but never required.
+    if (alias !== null && everyAccessIsProbe(source, alias[1], name)) {
+      optional.add(name)
+      continue
+    }
     const size = ICON_SIZE_WORDS.find(word => name.endsWith(word))
     // A name with no size word is not a glyph candidate: it is used unconditionally and must exist.
     if (size === undefined) {
@@ -275,20 +341,26 @@ function clientNeeds(source) {
     if (!glyphs.has(stem)) glyphs.set(stem, new Set())
     glyphs.get(stem).add(name)
   }
-  return { required: [...required], glyphs: [...glyphs].map(([stem, names]) => ({ stem, names: [...names] })) }
+  return {
+    required: [...required],
+    glyphs: [...glyphs].map(([stem, names]) => ({ stem, names: [...names] })),
+    optional: [...optional],
+  }
 }
 
 /**
  * A self-check of {@link clientNeeds}, run before the matrix.
  *
- * The extractor is the one part of this gate that can be wrong quietly, and it was: reading every
- * `Icon…` word in the bundle made a glyph out of the plugin's OWN alias — `dsh-icons.ts` re-exports
- * `IconFolderOpen16 = IconFolderOpenOutline16` for PathPicker — so the gate demanded a name no shell
- * has ever had and failed 0.1.7 for the wrong reason. This pins the three shapes the bundle really
- * contains (a property access on the package, a quoted run-time name, and a local alias) and refuses
- * to run the matrix when the reading of them changes.
+ * The extractor is the one part of this gate that can be wrong quietly, and it has been twice: reading
+ * every `Icon…` word in the bundle made a glyph out of the plugin's OWN alias (`dsh-icons.ts` re-exports
+ * `IconFolderOpen16 = IconFolderOpenOutline16` for PathPicker), so the gate demanded a name no shell has
+ * ever had; and reading a capability probe as an unconditional use turned `typeof primitives.ShortcutKeys`
+ * into a hard requirement, failing every release before 0.1.7-rc.2 for a name the plugin only asks ABOUT.
+ * This pins the shapes the bundle really contains — a property access on the package, a quoted run-time
+ * name, a local alias, a `typeof` probe, a positive truthiness test, an `'X' in P` test, and a name that
+ * is probed AND used — and refuses to run the matrix when the reading of any of them changes.
  *
- * @throws when the extractor reads a name the bundle never asks a shell for.
+ * @throws when the extractor reads a name the bundle never asks a shell for, or demands one it only probes.
  */
 function selfCheckClientNeeds() {
   const source = [
@@ -297,18 +369,30 @@ function selfCheckClientNeeds() {
     'let IconFolderOpen16 = LegacyFolderOpen;',
     'let Menu = primitives.Menu;',
     'const asked = "IconFolderOpenOutlineMedium";',
+    // A capability probe is expected to be missing on older shells, so it must NOT become a requirement…
+    'const canDraw = typeof primitives.ShortcutKeys === "function";',
+    // …and neither must the same question asked as a truthiness test or with a string. Each shape gets
+    // its OWN name: sharing one would let a rule that stopped working hide behind another that still did.
+    'if (primitives.Tooltip) { use(); }',
+    'const hasPopover = "Popover" in primitives;',
+    // …while a name that is probed AND also used unconditionally stays required: the use is what must exist.
+    'const hasMenu = typeof primitives.Menu === "function";',
   ].join('\n')
   const read = clientNeeds(source)
   const stems = read.glyphs.map(entry => entry.stem)
   const names = read.glyphs.find(entry => entry.stem === 'IconFolderOpenOutline')?.names.slice().sort() ?? []
+  const optional = read.optional.slice().sort().join(',')
   const ok = read.required.length === 1 && read.required[0] === 'Menu'
     && stems.length === 1 && stems[0] === 'IconFolderOpenOutline'
     && names.join(',') === 'IconFolderOpenOutline16,IconFolderOpenOutlineMedium'
+    && optional === 'Popover,ShortcutKeys,Tooltip'
   if (!ok) {
     throw new Error(
-      `client-needs self-check failed: read glyphs ${JSON.stringify(read.glyphs)} and required `
-      + `${JSON.stringify(read.required)} from a bundle that asks for IconFolderOpenOutline16, `
-      + 'IconFolderOpenOutlineMedium and Menu — a name the plugin defines itself is not a name to ask a shell for.',
+      `client-needs self-check failed: read glyphs ${JSON.stringify(read.glyphs)}, required `
+      + `${JSON.stringify(read.required)} and probes ${JSON.stringify(read.optional)} from a bundle that asks `
+      + 'for IconFolderOpenOutline16, IconFolderOpenOutlineMedium and Menu, probes ShortcutKeys (typeof), '
+      + 'Tooltip (truthiness) and Popover (`in`), and probes but also USES Menu — a name the plugin defines '
+      + 'itself is not a name to ask a shell for, and a name it only probes about is not one to demand.',
     )
   }
 }
@@ -458,11 +542,16 @@ async function checkClient(version, dir, needs) {
     undrawable.length > 0 ? `no name at all for ${undrawable.map(glyph => glyph.stem).join(', ')}` : '',
   ].filter(Boolean).join('; ')
   if (names !== '') return { ok: false, detail: names, missing: [...missing, ...undrawable.map(glyph => glyph.stem)] }
+  // A probed name is reported, never demanded: it is absent by design on the hosts this plugin supports
+  // both sides of (see `isCapabilityProbe`), so the run says which way each probe answered and moves on.
+  const probes = needs.optional.length === 0 ? '' : `, probes: ${needs.optional
+    .map(name => `${name} ${exports.has(name) ? 'present' : 'absent (fallback)'}`)
+    .join(', ')}`
   const contracts = checkContracts(await shellSourcesOf(dir), version)
   if (!contracts.ok) return { ok: false, detail: `contract: ${contracts.detail}` }
   return {
     ok: true,
-    detail: `${needs.glyphs.length} glyph(s), ${needs.required.length} name(s), ${contracts.detail}`,
+    detail: `${needs.glyphs.length} glyph(s), ${needs.required.length} name(s)${probes}, ${contracts.detail}`,
   }
 }
 
@@ -510,6 +599,9 @@ const skipped = options.all ? [] : all.filter(version => compareVersions(version
 
 console.log(`compat: ${targets.length} release(s) in scope, plugin build ${pluginLib}`)
 console.log(`compat: client needs ${needs.glyphs.length} glyph(s) and ${needs.required.length} unconditional name(s) from ${CLIENT_PACKAGE} (reader self-checked)`)
+if (needs.optional.length > 0) {
+  console.log(`compat: plus ${needs.optional.length} probed name(s) — optional by design, reported per release: ${needs.optional.join(', ')}`)
+}
 console.log(`compat: peer floor ${PEER_FLOOR}${skipped.length > 0 ? `, ${skipped.length} older release(s) skipped (use --all)` : ''}`)
 console.log('')
 

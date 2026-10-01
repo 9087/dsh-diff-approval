@@ -15,6 +15,7 @@ import { startProducedChipMenu } from '../src/client/produced-diff.ts'
 import { computeWholeFileDiff } from '../src/client/whole-file-diff.ts'
 import panelCss from '../src/client/PendingPanel.module.css'
 import { codeFontCss } from '../src/client/code-font.ts'
+import { actionTooltip, closeShortcut, shortcutOf, withChord } from '../src/client/chords.ts'
 import { zh, en } from '../src/client/locales.ts'
 import { lastPanelFile, panelFileOffset, rememberedPlacedThreads, rememberedThreads, removalAskQuiet, resetPanelMemory } from '../src/client/panel-memory.ts'
 import { diffLineHeight, navLeadRows, setCommentModeEnabled, setConfirmFileRemoveEnabled } from '../src/client/settings.ts'
@@ -271,6 +272,20 @@ function toolbarButton(mark: string): HTMLButtonElement {
   const button = document.querySelector(`[data-diff-${mark}]`)
   if (button === null) throw new Error(`the detail toolbar has no [data-diff-${mark}] button`)
   return button as HTMLButtonElement
+}
+
+/**
+ * The chord one control advertises, in the aria spelling (`Control+F`, `Escape Control+D`).
+ *
+ * A tooltip's shortcut now travels as keycaps rather than as text in its label, and the caps are the
+ * HOST component's render (this repo compiles against a primitives release that predates the prop, so
+ * jsdom shows the label alone). `aria-keyshortcuts` is the same read of the same helper, so it is what
+ * a test can hold onto — and it is the value the shell mirrors into the bubble's own aria-label.
+ * @param selector - the control to read.
+ * @returns the attribute, or null when the control advertises no chord.
+ */
+function chordOf(selector: string): string | null {
+  return document.querySelector(selector)?.getAttribute('aria-keyshortcuts') ?? null
 }
 
 /**
@@ -792,6 +807,87 @@ describe('PendingPanel', () => {
     expect(block('colorPickerChevron')).toContain('flex: none')
   })
 
+  it('reads one chord into the shell\'s keycaps and into aria from the same setting', () => {
+    // One helper is the only place a chord becomes the two forms the tooltip needs, so the keycaps and
+    // `aria-keyshortcuts` cannot drift apart.
+    // A combination is one grouped keycap: the parts, with the separator the shell groups them by.
+    expect(shortcutOf('redo')).toEqual({ keys: ['Ctrl', '+', 'Shift', '+', 'Z'], aria: 'Control+Shift+Z' })
+    // A single key is one cap and no separator at all.
+    expect(shortcutOf('searchNext')).toEqual({ keys: ['F3'], aria: 'F3' })
+    // Arrow chords keep their DOM key name in aria; the GLYPH is what the cap shows.
+    expect(shortcutOf('jumpUp')).toEqual({ keys: ['Ctrl', '+', '↑'], aria: 'Control+ArrowUp' })
+    // The close button's two ways out are two caps, not one grouped sequence.
+    expect(closeShortcut()).toEqual({ keys: ['Esc', 'Ctrl+D'], aria: 'Escape Control+D' })
+    // An unbound action (or one with the chord cleared) advertises nothing at all.
+    localStorage.setItem('diff-approval:key:redo', '')
+    expect(shortcutOf('redo')).toBeUndefined()
+    localStorage.setItem('diff-approval:quick-summon-key', '')
+    expect(closeShortcut()).toEqual({ keys: ['Esc'], aria: 'Escape' })
+  })
+
+  it('pins the fallback label verbatim, so the pre-keycap look stays contractual', () => {
+    // The unit suite runs against primitives 0.1.0-rc.6, older than 0.1.7-rc.2 where the shell learned to
+    // draw a tooltip's shortcut as keycaps — so EVERY site here takes `chords.ts`'s fallback: the chord
+    // glued into the label, which is exactly the text this plugin showed before that release. Pinned with
+    // the shipped Chinese copy, so a later cleanup cannot quietly drop the fallback and lose the shortcut.
+    expect(withChord(zh['action.copyHint'], 'copyRef')).toBe('复制引用 (Ctrl+L)')
+    // The fallback's whole answer for a site: the glued label, NO keycap prop, and the chord kept in aria.
+    // (`shortcutKeys: undefined` is the point — an old host ignores an unknown prop, so sending one would
+    // silently lose the shortcut there.)
+    expect(actionTooltip(zh['action.copyHint'], 'copyRef')).toEqual({
+      label: '复制引用 (Ctrl+L)',
+      shortcutKeys: undefined,
+      aria: 'Control+L',
+    })
+    // A chord with an arrow keeps the glyph in the label and the DOM key name in aria, as it always did.
+    expect(actionTooltip(zh['action.prevDiff'], 'jumpUp')).toEqual({
+      label: `${zh['action.prevDiff']} (Ctrl+↑)`,
+      shortcutKeys: undefined,
+      aria: 'Control+ArrowUp',
+    })
+  })
+
+  it('glues a chord into a label only through the fallback in chords.ts, never at a call site', () => {
+    // The reader's style where the shell can draw keycaps: a tooltip's label is the action's NAME and its
+    // shortcut travels as keycaps (`shortcutKeys`) AFTER it. Where the shell cannot, the chord IS glued
+    // into the label — deliberately, so an old host does not lose the shortcut — but that glue belongs to
+    // exactly one place. A call site that builds its own label with `withChord`/`closeHint`/`summonHint`,
+    // or that spells a key in its own text, is the defect this sweep catches. It walks our sources rather
+    // than listing the sites, so a new tooltip cannot reintroduce the glue.
+    const dir = join(process.cwd(), 'src', 'client')
+    const files: string[] = []
+    const walk = (at: string): void => {
+      for (const dirent of readdirSync(at, { withFileTypes: true })) {
+        if (dirent.isDirectory()) walk(join(at, dirent.name))
+        else if (/\.tsx?$/.test(dirent.name) && !dirent.name.endsWith('.d.ts')) files.push(join(at, dirent.name))
+      }
+    }
+    walk(dir)
+
+    const glued: string[] = []
+    for (const file of files) {
+      // `chords.ts` is the ONE permitted gluer — the fallback branch — and is asserted below.
+      if (file === join(dir, 'chords.ts')) continue
+      readFileSync(file, 'utf8').split('\n').forEach((line, index) => {
+        // `aria-label={withChord(...)}` is deliberately KEPT (the chord stays in the accessible name),
+        // so this looks at the bubble's own `label` prop only.
+        if (!/(?<!aria-)label=\{/.test(line)) return
+        const byHelper = /(?<!aria-)label=\{(withChord|closeHint|summonHint|chordLabel)\(/.test(line)
+        const inText = /(?<!aria-)label=\{[^}]*\((Ctrl|Alt|Shift|Esc|F\d)/.test(line)
+        if (byHelper || inText) glued.push(`${file.slice(process.cwd().length + 1)}:${index + 1} ${line.trim()}`)
+      })
+    }
+    expect(glued).toEqual([])
+
+    // …and the fallback must still exist there: if the glue left `chords.ts` too, an old host would lose
+    // the shortcut silently and the sweep above would still pass. Both of the old spellings are asserted,
+    // so neither the action form nor the panel's own close/summon copy can be dropped by accident.
+    const chords = readFileSync(join(dir, 'chords.ts'), 'utf8')
+    expect(chords).toContain('withChord(label, action)')
+    expect(chords).toContain('action.summonHint')
+    expect(chords).toContain('action.closeHint')
+  })
+
   it('reads the page\u2019s newest view through pendingView when the seat names no session', async () => {
     // The panel's own reader, as the plugin builds it: `pendingView(current, …)` straight onto the real
     // store. With no session of its own (`current === undefined`) that call must REACH
@@ -1110,10 +1206,15 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     expect(document.querySelector('[data-diff-approval-panel]')).toBeTruthy()
 
-    // The close button's name stays the action; its tooltip carries the two
-    // chords (Escape, quick-summon). Focus shows the bubble without the hover delay.
-    fireEvent.focus(document.querySelector('[data-diff-approval-close]') as HTMLElement)
-    expect(screen.getByText('action.closeHint {"chord":"Ctrl+D"}')).toBeDefined()
+    // The close button's name stays the action; the two ways out (Escape, quick-summon) travel as
+    // aria-keyshortcuts, and the bubble carries the chord. THIS suite runs against primitives
+    // 0.1.0-rc.6 — older than 0.1.7-rc.2, where the shell learned to draw keycaps — so the bubble
+    // takes `chords.ts`'s fallback and spells the chord the way this plugin did before that release.
+    // The keycap path is `e2e/tooltip-shortcuts.spec.ts`, on the real host.
+    const close = document.querySelector('[data-diff-approval-close]') as HTMLElement
+    fireEvent.focus(close)
+    expect(screen.getByRole('tooltip').textContent).toBe('action.closeHint {"chord":"Ctrl+D"}')
+    expect(close.getAttribute('aria-keyshortcuts')).toBe('Escape Control+D')
     fireEvent.click(screen.getByLabelText('action.close'))
     expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
   })
@@ -7094,8 +7195,11 @@ describe('PendingPanel', () => {
     // on an empty search.
     fireEvent.change(document.querySelector('[data-diff-search-input]') as HTMLInputElement, { target: { value: 'foo' } })
 
-    // An icon-only control is read by focusing it; the chord is appended from the
-    // binding the user has (Alt+C / Alt+W are VS Code's find-widget chords).
+    // An icon-only control is read by focusing it. These are the labels THIS suite sees: jsdom runs
+    // against primitives 0.1.0-rc.6, older than 0.1.7-rc.2, so `chords.ts` takes its fallback and the
+    // bubble carries the pre-that-release text with the chord glued in — the look this plugin had
+    // before the shell could draw keycaps. The chords are still read from the binding the user has
+    // (Alt+C / Alt+W are VS Code's find-widget chords) and are pinned through their aria mirror.
     const hintOf = (selector: string): string => {
       act(() => { (document.querySelector(selector) as HTMLElement).focus() })
       return screen.getByRole('tooltip').textContent ?? ''
@@ -7104,8 +7208,14 @@ describe('PendingPanel', () => {
     expect(hintOf('[data-diff-search-word]')).toBe('action.matchWholeWord (Alt+W)')
     expect(hintOf('[data-diff-search-next]')).toBe('action.nextDiff (F3)')
     expect(hintOf('[data-diff-search-toggle]')).toBe('action.search (Ctrl+F)')
-    // Arrow chords render as arrows, not as the stored `Ctrl+ArrowUp`.
+    // Arrow chords keep their DOM key name in aria; the glued label shows the arrow glyph.
     expect(hintOf('[data-diff-prev]')).toBe('action.prevDiff (Ctrl+↑)')
+    expect(chordOf('[data-diff-search-case]')).toBe('Alt+C')
+    expect(chordOf('[data-diff-search-word]')).toBe('Alt+W')
+    expect(chordOf('[data-diff-search-next]')).toBe('F3')
+    expect(chordOf('[data-diff-search-toggle]')).toBe('Control+F')
+    // Arrow chords keep their DOM key name in aria; it is the KEYCAP that shows the arrow glyph.
+    expect(chordOf('[data-diff-prev]')).toBe('Control+ArrowUp')
   })
 
   it('follows a rebound chord in the tooltip', () => {
@@ -7118,6 +7228,7 @@ describe('PendingPanel', () => {
 
     act(() => { (document.querySelector('[data-diff-search-case]') as HTMLElement).focus() })
     expect(screen.getByRole('tooltip').textContent).toBe('action.matchCase (Ctrl+Shift+K)')
+    expect(chordOf('[data-diff-search-case]')).toBe('Control+Shift+K')
   })
 
   it('starts the first search from the current scroll position, wrapping to the top', () => {
@@ -7866,13 +7977,15 @@ describe('PendingPanel', () => {
   })
 
   it('names both ways out on the close button, with the chord the user bound', () => {
-    // The panel closes with Escape and with the quick-summon chord, so the tooltip
-    // names both — and names the chord as bound, arrow keys as glyphs.
+    // The panel closes with Escape and with the quick-summon chord, so the button advertises both: the
+    // chord as bound, in aria's spelling, and (on this host, which cannot draw keycaps) glued into the
+    // bubble exactly as this plugin spelled it before that release — arrow keys as glyphs.
     localStorage.setItem('diff-approval:quick-summon-key', 'Ctrl+ArrowUp')
     render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.focus(document.querySelector('[data-diff-approval-close]') as HTMLElement)
-    expect(screen.getByText('action.closeHint {"chord":"Ctrl+↑"}')).toBeDefined()
+    expect(screen.getByRole('tooltip').textContent).toBe('action.closeHint {"chord":"Ctrl+↑"}')
+    expect(chordOf('[data-diff-approval-close]')).toBe('Escape Control+ArrowUp')
   })
 
   it('falls back to Escape alone when the summon chord is unbound', () => {
@@ -7882,15 +7995,19 @@ describe('PendingPanel', () => {
     render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
     const tooltips = (): string[] => screen.getAllByRole('tooltip').map(node => node.textContent ?? '')
 
-    // The footer entry names itself rather than showing an empty parenthetical.
+    // The footer entry names itself, and carries no chord at all rather than an empty parenthetical.
     fireEvent.focus(screen.getByLabelText('panel.aria'))
     expect(tooltips()).toContain('panel.aria')
+    expect(chordOf('[data-diff-approval-badge]')).toBeNull()
     expect(tooltips().some(text => text.includes('summonHint'))).toBe(false)
 
-    // The close button names Escape and nothing else: no chord is advertised.
+    // The close button says Escape alone — the Escape-only copy, never the one that names a chord —
+    // and advertises aria's Escape with nothing beside it.
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.focus(document.querySelector('[data-diff-approval-close]') as HTMLElement)
     expect(tooltips()).toContain('action.closeHintEsc')
+    expect(chordOf('[data-diff-approval-close]')).toBe('Escape')
+    // The with-chord copy takes a `{chord}` parameter, so it never appears as the bare key.
     expect(tooltips().some(text => text.startsWith('action.closeHint '))).toBe(false)
   })
 
@@ -7898,10 +8015,11 @@ describe('PendingPanel', () => {
     localStorage.setItem('diff-approval:quick-summon-key', 'Alt+P')
     render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
 
-    // The footer entry: what it opens, plus the chord that does the same — read
-    // from the stored binding, so a rebind in Settings shows up here.
+    // The footer entry: what it opens, and the chord that does the same — read from the stored binding,
+    // so a rebind in Settings shows up here (as glyphs, on a host that cannot draw keycaps).
     fireEvent.focus(screen.getByLabelText('panel.aria'))
-    expect(screen.getByText('action.summonHint {"chord":"Alt+P"}')).toBeDefined()
+    expect(screen.getByRole('tooltip').textContent).toBe('action.summonHint {"chord":"Alt+P"}')
+    expect(chordOf('[data-diff-approval-badge]')).toBe('Alt+P')
   })
 
   it('toggles each coverage edge from its own chord, and yields inside text fields', () => {
@@ -8135,9 +8253,11 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(document.querySelector('[data-diff-search-toggle]') as HTMLElement)
 
-    // The bar is the innermost dismissible, so Esc closes it rather than the panel.
+    // The bar is the innermost dismissible, so Esc closes it rather than the panel: the bubble says the
+    // Escape-only copy — never the one that names the panel's summon chord — and aria is Escape alone.
     fireEvent.focus(document.querySelector('[data-diff-search-close]') as HTMLElement)
-    expect(screen.getAllByText('action.closeHintEsc').length).toBeGreaterThan(0)
+    expect(screen.getAllByRole('tooltip').map(node => node.textContent)).toContain('action.closeHintEsc')
+    expect(chordOf('[data-diff-search-close]')).toBe('Escape')
   })
 
   it('lays a sidebar-colored backdrop over the seam only when everything is covered', () => {
@@ -12010,9 +12130,11 @@ describe('PendingPanel', () => {
         'data-diff-prev', 'data-diff-next', 'data-diff-search-toggle',
         'data-diff-goto', 'data-diff-toggle-view', 'data-diff-refresh-vcs',
       ])
-      // The button's accessible name stays the action itself; only its tooltip carries the chord.
+      // The button's accessible name stays the action itself; its bubble names the action and the chord,
+      // glued on this host (which cannot draw keycaps) and mirrored in aria on every host.
       expect(names.get('data-diff-search-toggle')).toBe('action.search')
       expect(hints.get('data-diff-search-toggle')).toBe('action.search (Ctrl+F)')
+      expect(chordOf('[data-diff-search-toggle]')).toBe('Control+F')
 
       // The panel is dragged narrow and the observer it listens to says so: a 120px group holding a
       // 40px `+N -M` leaves 72px — one 28px chip, and the overflow button's own room beside it.
@@ -12034,14 +12156,18 @@ describe('PendingPanel', () => {
       expect(more).not.toBeNull()
       expect(more.getAttribute('aria-label')).toBe('action.more')
 
-      // The menu holds what left the row, in the row's own order, each row titled with the tooltip
-      // its button would have shown.
+      // The menu holds what left the row, in the row's own order. A MENU ROW IS TEXT — it has no keycap
+      // row — so it keeps the chord in its title, which is the flat `hint` the toolbar item carries for
+      // exactly this: the inline button advertises the same chord as keycaps instead.
       fireEvent.click(more)
       const rows = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
       expect(rows.map(row => row.textContent)).toEqual([
-        'data-diff-next', 'data-diff-search-toggle', 'data-diff-goto',
-        'data-diff-toggle-view', 'data-diff-refresh-vcs',
-      ].map(marker => hints.get(marker)))
+        'action.nextDiff (Ctrl+↓)',
+        'action.search (Ctrl+F)',
+        'action.goto (Ctrl+G)',
+        hints.get('data-diff-toggle-view'),
+        hints.get('data-diff-refresh-vcs'),
+      ])
 
       // A row does what its button did: the split view turns on from the menu, and the menu closes.
       fireEvent.click(rows[rows.length - 2]!)

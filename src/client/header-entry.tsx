@@ -27,7 +27,7 @@ import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingDiffSnapshot, PendingViewHooks } from './slots.ts'
 import type { DockSnapshot, PanelStateDetail } from './dock.tsx'
 import { PANEL_STATE_EVENT, TOGGLE_PANEL_EVENT } from './dock.tsx'
-import { summonHint } from './chords.ts'
+import { summonTooltip } from './chords.ts'
 import css from './PendingPanel.module.css'
 
 /** What the header entry reads from this plugin's own face: the two observables, and the per-session
@@ -127,15 +127,19 @@ export function DiffApprovalHeaderEntry({ usePending, useSessions, useDock, pend
   // depended on whether the other had already rendered), which is what put one session's list under
   // another's badge.
   useEffect(() => { publishSessionId(sessionId) }, [sessionId])
+  // What the tooltip says, decided once (see `chords.ts`): keycaps where this host draws them, the
+  // pre-0.1.7-rc.2 glued label where it cannot. The accessible name keeps the chord on every host.
+  const tip = summonTooltip(t)
   const active = open || dockShowing
   return (
-    <Tooltip label={summonHint(t)} side="bottom" delayMs={500}>
+    <Tooltip label={tip.label} shortcutKeys={tip.shortcutKeys} side="bottom" delayMs={500}>
       <button
         type="button"
         className={css.headerEntry}
         data-diff-approval-header-entry={count}
         data-active={active ? '' : undefined}
         aria-label={t('panel.aria')}
+        aria-keyshortcuts={tip.aria}
         aria-expanded={active}
         disabled={noSession}
         onClick={() => { window.dispatchEvent(new CustomEvent(TOGGLE_PANEL_EVENT)) }}

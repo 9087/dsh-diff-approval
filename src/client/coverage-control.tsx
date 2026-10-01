@@ -18,7 +18,7 @@ import { createPortal } from 'react-dom'
 import type { ReactElement, ReactNode } from 'react'
 import { Tooltip } from './dsh-icons.ts'
 import css from './PendingPanel.module.css'
-import { withChord } from './chords.ts'
+import { actionTooltip, withChord } from './chords.ts'
 import type { DiffApprovalCover } from './settings.ts'
 import type { Translator } from './locales.ts'
 
@@ -197,21 +197,27 @@ export function CoverageControl({ t, cover, onToggle }: CoverageControlProps): R
       </Tooltip>
       {open && (
         <div className={`${css.coverCard} ${css.coverPopover}`} data-diff-approval-cover-popover role="group" aria-label={t('action.cover')}>
-          {COVER_ROWS.map(({ key, action, label }) => (
-            <Tooltip key={key} label={withChord(t(label), action)} side="bottom" delayMs={0}>
-              <button
-                type="button"
-                className={css.coverButton}
-                data-diff-approval-cover-switch={key}
-                data-on={cover[key] ? '' : undefined}
-                aria-label={withChord(t(label), action)}
-                aria-pressed={cover[key]}
-                onClick={() => { onToggle(key) }}
-              >
-                <CoverEdgeIcon side={key} on={cover[key]} size={20} />
-              </button>
-            </Tooltip>
-          ))}
+          {COVER_ROWS.map(({ key, action, label }) => {
+            // One decision per switch (see `chords.ts`): this host's keycaps where it can draw them, the
+            // pre-0.1.7-rc.2 glued label where it cannot. The accessible name keeps the chord either way.
+            const tip = actionTooltip(t(label), action)
+            return (
+              <Tooltip key={key} label={tip.label} shortcutKeys={tip.shortcutKeys} side="bottom" delayMs={0}>
+                <button
+                  type="button"
+                  className={css.coverButton}
+                  data-diff-approval-cover-switch={key}
+                  data-on={cover[key] ? '' : undefined}
+                  aria-label={withChord(t(label), action)}
+                  aria-keyshortcuts={tip.aria}
+                  aria-pressed={cover[key]}
+                  onClick={() => { onToggle(key) }}
+                >
+                  <CoverEdgeIcon side={key} on={cover[key]} size={20} />
+                </button>
+              </Tooltip>
+            )
+          })}
         </div>
       )}
     </span>

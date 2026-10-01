@@ -42,6 +42,7 @@ import {
   IconSettingsOutline16 as LegacySettings,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
+import type { ReactElement } from 'react'
 
 /** One glyph in the shell's set: exactly the type the package's own icons carry, so a caller's
  *  props (including a `className` that may be `undefined`) typecheck here as they did there. */
@@ -98,5 +99,46 @@ export const IconSettingsOutline16 = shellIcon(LegacySettings, 'IconSettingsOutl
  * Re-exported so one module names everything this plugin takes from the shell's primitives: these
  * names have survived both releases, and a caller has no reason to reach past this file.
  */
-export { Menu, Toast, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
+export { Menu, Toast, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 export type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
+
+/** The tooltip props this plugin uses, including the one the installed types do not know yet. */
+export interface ShellTooltipProps {
+  label: string
+  side?: 'right' | 'bottom' | 'top' | undefined
+  delayMs?: number | undefined
+  maxWidth?: number | undefined
+  disabled?: boolean | undefined
+  /**
+   * The keycaps the bubble renders AFTER its label, one `<kbd>` per entry, with a literal `'+'`
+   * between the parts so the shell groups a combination into a single keycap. `undefined` (or an
+   * empty array) renders no keycaps at all — which is what an unbound action passes.
+   */
+  shortcutKeys?: readonly string[] | undefined
+  children: ReactElement
+}
+
+/**
+ * The primitives' `Tooltip`, typed with the props above.
+ *
+ * `shortcutKeys` arrived in the primitives' 0.1.7-rc.2 — the release the host runs — while what this
+ * repo COMPILES against is 0.1.0-rc.6, whose `Tooltip.d.ts` predates it. Passing the prop at a call
+ * site is therefore a type error even though the running component accepts it (and an older one simply
+ * ignores an unknown prop). The cast lives here, once, at the same boundary this module already uses
+ * to bridge shell versions, rather than at every call site.
+ */
+export const Tooltip = primitives.Tooltip as unknown as (props: ShellTooltipProps) => ReactElement
+
+/**
+ * Whether the running shell can draw a shortcut beside a tooltip's label.
+ *
+ * `ShortcutKeys` and the `Tooltip.shortcutKeys` prop shipped together in the primitives'
+ * **0.1.7-rc.2**: across all 24 installed versions this plugin is tested against, the component is
+ * absent from every release up to and including 0.1.7-rc.1 (`lib/index.js` does not contain the name
+ * at all, and `Tooltip.d.ts` takes no `shortcutKeys`) and present from 0.1.7-rc.2 on (`function
+ * ShortcutKeys(...)`, exported, and `shortcutKeys?: readonly string[]` on `Tooltip`) — the same
+ * release the prop arrived in, so the two can never disagree. An older host ignores an unknown prop
+ * silently, which is why a caller must not rely on the prop alone (see `chords.ts`).
+ */
+export const SHELL_DRAWS_SHORTCUTS
+  = typeof (primitives as unknown as { ShortcutKeys?: unknown }).ShortcutKeys === 'function'
