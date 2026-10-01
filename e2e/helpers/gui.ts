@@ -128,6 +128,84 @@ async function sessionViewUp(page: Page, timeout = 2_000): Promise<boolean> {
     .catch(() => false)
 }
 
+/**
+ * Whether the shell's session view is DRAWN, read through the DOM rather than through Playwright.
+ *
+ * `focusComposer` already walks every shadow root by hand to find the composer, because part of this
+ * shell lives where `document.querySelectorAll` does not go; the same walk is used here so that
+ * readiness does not depend on the accessibility tree the locator engine reads. That distinction is
+ * measured, not theoretical: on the page that failed twice, Playwright's own `error-context.md` held a
+ * single node (the plugin's badge) while the shell's chrome — sidebar, session list, the composer host
+ * — was outside that tree, and every text lookup into it found nothing.
+ *
+ * A node counts only when it has a box: the residence composer host is rendered inert
+ * (`contenteditable="false"`) whenever no session is bound, and this asks whether the shell has DREW
+ * that view, not whether a session is current.
+ *
+ * @param page - the GUI page.
+ * @returns whether a laid-out composer host could be found by walking the DOM and its shadow roots.
+ */
+async function shellDrewSessionView(page: Page): Promise<boolean> {
+  return await page.evaluate(() => {
+    const selectors = ['[data-composer-input]', '[contenteditable]']
+    const walk = (root: Document | ShadowRoot): boolean => {
+      for (const selector of selectors) {
+        for (const node of root.querySelectorAll(selector)) {
+          const box = (node as HTMLElement).getBoundingClientRect()
+          if (box.width > 0 && box.height > 0) return true
+        }
+      }
+      for (const node of root.querySelectorAll('*')) {
+        const shadow = (node as HTMLElement).shadowRoot
+        if (shadow !== null && walk(shadow)) return true
+      }
+      return false
+    }
+    return walk(document)
+  })
+}
+
+/**
+ * Wait until the shell has drawn its session view, BEFORE anything is pressed into the page.
+ *
+ * A fresh page used to be pressed the moment `goto` and the notice sweep returned. On a loaded machine the
+ * shell had not drawn by then, so the press landed on nothing and a retry loop spent its whole budget
+ * "clicking" a page that was not there yet — the failure this suite recorded twice, as a badge-disabled
+ * `openPanel` with no page error and no hint of which step had really failed.
+ *
+ * This is the shell's own evidence, not a pause: the composer host the file already uses to mean "a
+ * session view is up" (`sessionViewUp`), asked twice over — through Playwright's locator engine, and by
+ * walking the DOM and its shadow roots (`shellDrewSessionView`) — so a shell whose chrome is outside the
+ * accessibility tree cannot read as "not ready" either. Polling, not one look: this is the same shape
+ * `composerOf` uses for the same reason.
+ *
+ * The deadline fails BY NAME and carries what the sidebar was offering, so a shell that never draws says
+ * so here instead of handing the cost to the next locator timeout.
+ *
+ * @param page - the GUI page.
+ * @param timeoutMs - how long the shell may take to draw, in ms.
+ * @throws when no session view is on screen within `timeoutMs`.
+ */
+export async function waitForShellReady(page: Page, timeoutMs = 30_000): Promise<void> {
+  const startedAt = Date.now()
+  const deadline = startedAt + timeoutMs
+  for (;;) {
+    const drawn = await sessionViewUp(page, 1_000) || await shellDrewSessionView(page)
+    if (drawn) {
+      // How long the shell took to draw is what a slow future run needs to see (see `timing`).
+      timing('shell-ready', startedAt)
+      return
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `the shell drew no session view within ${timeoutMs} ms, so nothing could be pressed into it.`
+        + `\n${await describeSidebar(page)}`,
+      )
+    }
+    await sleep(300)
+  }
+}
+
 /** How long a session id may take to appear on disk. */
 const SESSION_ID_TIMEOUT_MS = 10_000
 /** How long one accepted prompt may take to come back as an accepted turn. */
@@ -375,14 +453,49 @@ export async function sendMessage(page: Page, sessionId: string | undefined, tex
   await accepted
 }
 
-/** Open the session whose sidebar title carries this text. */
+/**
+ * Open the session whose sidebar title carries this text.
+ *
+ * A title that is not on screen is NOT automatically an error. The shell may have opened a session ITSELF:
+ * after a restart it names that session 未命名 (or from its first message), so the title this call was
+ * given is nowhere on screen while the session is perfectly current — and the old silent return was
+ * load-bearing for exactly that, measured as two specs that went red the moment a miss started throwing
+ * (`panel-comments` c1 and `panel-settings` p2, whose sidebar dump showed a drawn shell, the plugin's own
+ * pending rows on screen, and the badge reading 3 and 2). So a miss asks first whether the page already has
+ * what it came for, and only a page with NEITHER the session nor the title is an error.
+ *
+ * Two signals, because they answer different questions and only the pair is right:
+ *
+ *   * a session view is DRAWN — `sessionViewUp` or `shellDrewSessionView`, the same predicate
+ *     `waitForShellReady` waits on: the shell is up at all;
+ *   * the panel's own footer badge is ENABLED — a session is CURRENT. It renders `disabled={noSession}`, and
+ *     it is the signal `openFreshPage`'s own loop already reads for exactly this question.
+ *
+ * The drawn-view test ALONE would swallow the failure this check exists for: a page whose chrome is drawn
+ * with no session bound also has a laid-out composer host (the resident one is rendered inert, not absent),
+ * so it would read as "ready" while the badge is disabled and no caller's next step can work. Requiring
+ * both keeps the old tolerance and the throw's teeth.
+ *
+ * The success path is unchanged: the same substring locator, the same `.last()` (the sidebar may carry the
+ * title in more than one row), the same 20 s click budget and the same settle afterwards.
+ *
+ * @param page - the GUI page.
+ * @param title - text the session's sidebar row carries.
+ * @throws when no row carries the title AND no session is current either.
+ */
 export async function openSession(page: Page, title: string): Promise<void> {
   const row = page.getByText(title, { exact: false })
   const count = await row.count()
-  if (count > 0) {
-    await row.last().click({ timeout: 20_000 })
-    await sleep(3000)
+  if (count === 0) {
+    const drawn = await sessionViewUp(page, 1_000) || await shellDrewSessionView(page)
+    if (drawn && await footerBadge(page).isEnabled().catch(() => false)) return
+    throw new Error(
+      `no session on screen carries "${title}" and no session is current, so nothing could be opened.`
+      + `\n${await describeSidebar(page)}`,
+    )
   }
+  await row.last().click({ timeout: 20_000 })
+  await sleep(3000)
 }
 
 /** Whether the plugin's footer badge is present and enabled (a blank session disables it). */

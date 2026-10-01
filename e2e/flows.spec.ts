@@ -24,7 +24,7 @@ import {
 } from './helpers/host.ts'
 import {
   beginSession, CLOSE_COMMENT, dismissNotices, ensurePanelList, footerBadge, newGuiPage, openPanel, openSession,
-  panelState, pressUndo, row,
+  panelState, pressUndo, row, waitForShellReady,
 } from './helpers/gui.ts'
 import { openFloatList, noticesText, writeComment } from './helpers/panel.ts'
 
@@ -82,6 +82,11 @@ async function openFreshPage(tag: string): Promise<void> {
   await page.goto(host.url, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('text=/工作区|Workspaces/', { timeout: 60_000 })
   await dismissNotices(page)
+  // Nothing is pressed into the page until the shell has DRAWN: a press made into a page that is still
+  // mounting has nothing to land on, and a retry loop then spends its whole budget clicking nothing. The
+  // wait is the shell's own evidence, not a pause, and its deadline fails by name — see
+  // `waitForShellReady`.
+  await waitForShellReady(page)
   // Which session the GUI opens is its own decision, and a reload is a fresh one: the press below can
   // land while the sidebar is still drawing, and then the panel's badge stays disabled and `openPanel`
   // waits out its whole 30s on a session that never arrives (measured: two consecutive runs failed
@@ -95,7 +100,12 @@ async function openFreshPage(tag: string): Promise<void> {
       await new Promise(resolve => setTimeout(resolve, 4000))
       continue
     }
-    await openSession(page, SEED_MESSAGE).catch(() => {})
+    // A miss is now VISIBLE: `openSession` throws when no row carries the title, and the attempt says so
+    // with what the sidebar was offering, so the log can tell "found no such text" from "clicked but the
+    // session did not open" — the distinction two failed runs could not make.
+    await openSession(page, SEED_MESSAGE).catch((error: unknown) => {
+      console.log(`[openFreshPage:${tag}] attempt ${attempt + 1}/4 found no session row:`, String(error).split('\n')[0])
+    })
     await new Promise(resolve => setTimeout(resolve, 2000))
   }
   // A session that never opens is worth one line of the page itself: the badge says only that the
