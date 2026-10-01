@@ -9405,16 +9405,18 @@ export function PendingPanel({
   /**
    * The whole-list decisions, decided off the same rule a single row uses (`fileHasNoDiff`), so the
    * footer and the rows can never disagree about what a file is for.
+   *
+   * `bulkRevertFiles` is also what makes the footer's 全部回退 inert: the rows it names are the whole of
+   * what that press would act on, so when it is empty the button is DISABLED (see the footer) rather
+   * than left to open a confirmation that names nothing.
    */
-  const bulkDismissOnly = files.length > 0 && files.every(file => fileHasNoDiff(file))
-  /** The rows a whole-list 回退 would act on: every row that still has something to put back. */
   const bulkRevertFiles = files.filter(file => !fileHasNoDiff(file))
 
   /** Ask before running a session-wide bulk decision — the same dialog a pick's rows open. */
   const askBulk = (kind: 'keep' | 'revert'): void => {
     if (current === undefined) return
-    // 保留 acts on every row: it is the one decision a dismiss-only row still has. A 回退 SKIPS the rows that
-    // are only ever 移出 (see `runBulk`), so it acts on `bulkRevertFiles` alone.
+    // 保留 acts on every row: folding and dropping it is the one decision a row with nothing left to
+    // review still has. A 回退 SKIPS those rows (see `runBulk`), so it acts on `bulkRevertFiles` alone.
     const acted = kind === 'revert' ? bulkRevertFiles : files
     // 回退 DELETES every file the agent created; the dialog names those, because that is the part with no undo
     // behind it. Read off the rows this press ACTS on, not off the whole list: a created file that is also
@@ -10253,46 +10255,35 @@ export function PendingPanel({
           </div>
           {files.length > 0 && (
             <div className={css.bulkActions}>
-              {/* Every row below is the whole of what its own menu offers: a row that has nothing left to
-                  accept and nothing to put back has 移出 as its one decision (see `fileHasNoDiff`), so a
-                  list made only of those rows has exactly one decision to offer — and it is that one. */}
-              {bulkDismissOnly ? (
-                <button
-                  type="button"
-                  className={`${css.action} ${css.actionPrimary}`}
-                  data-diff-remove-all
-                  data-diff-keep-all
-                  disabled={bulkBusy !== null}
-                  onClick={() => { askBulk('keep') }}
-                >
-                  {bulkBusy === 'keep' ? t('action.busy') : t('row.dismiss')}
-                </button>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    className={`${css.action} ${css.actionPrimary}`}
-                    data-diff-keep-all
-                    disabled={bulkBusy !== null}
-                    onClick={() => { askBulk('keep') }}
-                  >
-                    {bulkBusy === 'keep' ? t('action.busy') : t('action.keepAll')}
-                  </button>
-                  <button
-                    type="button"
-                    className={css.action}
-                    data-diff-revert-all
-                    disabled={bulkBusy !== null}
-                    onClick={() => { askBulk('revert') }}
-                  >
-                    {/* 全部回退, whatever the list holds: the rows decide whether this DELETES their files,
-                        writes them back, or does both, and the reader asked for that deed to be named in the
-                        CONFIRMATION rather than on the button (see `batchAskOf`). A button that changed its
-                        word with the selection was the thing they were correcting. */}
-                    {bulkBusy === 'revert' ? t('action.busy') : t('action.revertAll')}
-                  </button>
-                </>
-              )}
+              {/* The list's two decisions, in EVERY state it can be in: a button that changed shape — or
+                  word — with the selection is what the reader was correcting. 全部保留 always has every row
+                  to act on: it folds each entry and drops it, which is the one decision a row with nothing
+                  left to review still has. 全部回退 acts on the rows that still have something to put back
+                  (`bulkRevertFiles`), so it is DISABLED when that set is empty rather than left armed to
+                  open a confirmation that names nothing and then changes nothing — the words stay put
+                  either way, and the dimming is the shape's (see `.bulkActions .action:disabled`). */}
+              <button
+                type="button"
+                className={`${css.action} ${css.actionPrimary}`}
+                data-diff-keep-all
+                disabled={bulkBusy !== null}
+                onClick={() => { askBulk('keep') }}
+              >
+                {bulkBusy === 'keep' ? t('action.busy') : t('action.keepAll')}
+              </button>
+              <button
+                type="button"
+                className={css.action}
+                data-diff-revert-all
+                disabled={bulkBusy !== null || bulkRevertFiles.length === 0}
+                onClick={() => { askBulk('revert') }}
+              >
+                {/* 全部回退, whatever the list holds: the rows decide whether this DELETES their files,
+                    writes them back, or does both, and the reader asked for that deed to be named in the
+                    CONFIRMATION rather than on the button (see `batchAskOf`). A button that changed its
+                    word with the selection was the thing they were correcting. */}
+                {bulkBusy === 'revert' ? t('action.busy') : t('action.revertAll')}
+              </button>
               {/* Add goes last, past the decisions: it is how a path JOINS the list, and the two
                   decisions to its left are about the files already in it. Its own mark and label, so
                   a third button in the row is read as a way in rather than as another decision. */}

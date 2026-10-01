@@ -1279,6 +1279,14 @@
   text-align: center;
 }
 
+/* A footer decision with nothing to act on is DISABLED rather than reworded — the reader asked for the
+   buttons to be permanent and their words constant, so the inert state has to show in the shape. Same
+   dimming `.settingsReset:disabled` uses for the same reason; the words are untouched. */
+.bulkActions .action:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* Add carries a mark beside its label, so its content is laid out as one unit: centred, with the
    glyph a hair away from the word rather than on its own baseline. */
 .addPath {

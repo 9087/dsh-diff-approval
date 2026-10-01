@@ -1349,22 +1349,35 @@ describe('PendingPanel', () => {
     expect(en['panel.batchRevertAllDeletedAsk']).toContain('delet')
   })
 
-  it('offers the list 移出 alone, and no revert at all, when every row has nothing left to review', async () => {
+  it('keeps both whole-list buttons on a list with nothing left to review, and the revert one inert', async () => {
     // A file whose content already matches the baseline has nothing to accept and nothing to put back, so
-    // its own menu is 移出 and nothing else — and a list made only of those rows offers exactly the one
-    // decision: the other is not offered, not merely disabled.
+    // its own menu is 移出 and nothing else. The reader wants the FOOTER to look the same whatever the list
+    // holds, though — a button that changed shape with the selection hurt the interaction — so both
+    // decisions stay: 全部保留 still has every row to act on (folding and dropping each one is exactly what
+    // a settled row's own 移出 does), while 全部回退 has none and is DISABLED rather than left armed to
+    // open a confirmation that names nothing and then changes nothing.
     const settled = entry({ id: 'entry-settled', path: '/repo/settled.txt', oldText: 'same\n', newText: 'same\n' })
     const alsoSettled = entry({ id: 'entry-settled-two', path: '/repo/settled-two.txt', oldText: 'same\n', newText: 'same\n' })
     const props = panelProps({ read: true, files: [settled, alsoSettled], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
 
-    const removeAll = bulkButton('remove-all')
-    expect(removeAll.textContent).toBe('row.dismiss')
-    expect(document.querySelector('[data-diff-revert-all]')).toBeNull()
-    // The one button IS the keep the row's own 移出 makes: fold the content, drop the entry, leave the
-    // file alone. It still asks first, like every other whole-list decision.
-    fireEvent.click(removeAll)
+    // The removed 移出 variant is gone, and neither button renames itself.
+    expect(document.querySelector('[data-diff-remove-all]')).toBeNull()
+    expect(bulkButton('keep-all').textContent).toBe('action.keepAll')
+    const revert = bulkButton('revert-all')
+    expect(revert.textContent).toBe('action.revertAll')
+    expect(revert.disabled).toBe(true)
+
+    // An inert press really is inert: no dialog is raised and no handler runs.
+    fireEvent.click(revert)
+    expect(screen.queryByText(/^panel\.batch/)).toBeNull()
+    expect(props.onRevertAll).not.toHaveBeenCalled()
+    expect(props.onRevertMany).not.toHaveBeenCalled()
+
+    // …and the button that IS the keep a row's own 移出 makes still asks first, like every whole-list
+    // decision: fold the content, drop the entry, leave the file alone.
+    fireEvent.click(bulkButton('keep-all'))
     expect(screen.getByText('panel.batchKeepAllAsk {"count":2}')).toBeDefined()
     fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
     await waitFor(() => { expect(props.onKeepAll as unknown as { mock: { calls: unknown[][] } }).toHaveBeenCalledTimes(1) })
@@ -1538,10 +1551,9 @@ describe('PendingPanel', () => {
   })
 
   it('never puts 移出 on the footer\'s own buttons, whatever the list holds', () => {
-    // The reader asked for the CONFIRMATION to carry 移出 rather than the buttons, and for the revert button
-    // to be a fixed 全部回退 rather than one that renames itself with the selection. So the labels are the
-    // same two words over every list — with the one exception the panel already had, a list whose every row
-    // has nothing left to review, whose single decision IS 移出 (and no revert button at all).
+    // The reader asked for the CONFIRMATION to carry 移出 rather than the buttons, and for both buttons to
+    // keep their words whatever the list holds — so the same two words are on the footer over every list,
+    // settled rows included. (What a press DOES with no rows to act on is its own case below.)
     const edited = entry({ id: 'entry-labels-edit', path: '/repo/e.txt', earlierVersion: 'file' })
     const created = entry({ id: 'entry-labels-created', path: '/repo/c.txt', earlierVersion: 'none', oldText: '', newText: 'c\n' })
     const settled = entry({ id: 'entry-labels-settled', path: '/repo/s.txt', oldText: 'same\n', newText: 'same\n' })
@@ -1554,12 +1566,12 @@ describe('PendingPanel', () => {
       view.unmount()
       return { keep, revert }
     }
-    // Every row an edit, every row a creation, both at once: one word each time.
+    // Every row an edit, every row a creation, both at once: one word each time — and the same pair when
+    // there is nothing left to review, where the revert button stays and is merely disabled.
     expect(labelOf([edited])).toEqual({ keep: 'action.keepAll', revert: 'action.revertAll' })
     expect(labelOf([created])).toEqual({ keep: 'action.keepAll', revert: 'action.revertAll' })
     expect(labelOf([edited, created])).toEqual({ keep: 'action.keepAll', revert: 'action.revertAll' })
-    // No row left to review: the revert button is not offered at all, and 移出 is the list's one decision.
-    expect(labelOf([settled])).toEqual({ keep: 'row.dismiss', revert: null })
+    expect(labelOf([settled])).toEqual({ keep: 'action.keepAll', revert: 'action.revertAll' })
 
     // …and the words behind those keys carry no 移出 — nor any 删除, which now lives only in the dialog.
     for (const key of ['action.keepAll', 'action.revertAll'] as const) {
@@ -1575,9 +1587,39 @@ describe('PendingPanel', () => {
     }
     expect(zh['panel.batchRevertAllAsk']).not.toContain('删除')
     expect(zh['panel.batchRevertAllDeletedAsk']).toContain('删除')
-    // The one button that DOES say it is the dismiss-only variant, which is its own decision and not a
-    // 保留 or a 回退 at all.
+    // The only 移出 left is the ROW menu's own decision — the footer has no variant that says it.
     expect(zh['row.dismiss']).toContain('移出')
+    expect(document.querySelector('[data-diff-remove-all]')).toBeNull()
+  })
+
+  it('renders the same footer buttons, with the same words, in both list states', () => {
+    // The reader's requirement, pinned directly: the footer is CONSTANT. Its button set and their labels do
+    // not depend on what the list holds — the one thing the state changes is whether 全部回退 is armed, and
+    // that is the `disabled` attribute, not a different button with a different word.
+    const edited = entry({ id: 'entry-const-edit', path: '/repo/e.txt', earlierVersion: 'file' })
+    const settled = entry({ id: 'entry-const-settled', path: '/repo/s.txt', oldText: 'same\n', newText: 'same\n' })
+    /** The footer's buttons as the reader sees them: mark, word, and whether the press is armed. */
+    const footerOf = (files: PendingFileDiff[]): string[] => {
+      const view = render(<PendingPanel {...panelProps({ read: true, files, busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      const add = document.querySelector('[data-diff-add]') as HTMLElement
+      const row = [...(add.closest('div') as HTMLElement).querySelectorAll('button')]
+      const seen = row.map(button => {
+        const mark = button.hasAttribute('data-diff-keep-all') ? 'keep-all'
+          : button.hasAttribute('data-diff-revert-all') ? 'revert-all'
+            : button.hasAttribute('data-diff-remove-all') ? 'remove-all' : 'add'
+        return `${mark} "${button.textContent ?? ''}"${(button as HTMLButtonElement).disabled ? ' disabled' : ''}`
+      })
+      view.unmount()
+      return seen
+    }
+    // Both buttons are the SAME two decisions with the SAME words in both states; only the revert one's
+    // armed-ness differs, which is what makes an inert press visibly inert rather than quietly useless.
+    expect(footerOf([edited])).toEqual(['keep-all "action.keepAll"', 'revert-all "action.revertAll"', 'add "panel.addPathGo"'])
+    expect(footerOf([settled])).toEqual(['keep-all "action.keepAll"', 'revert-all "action.revertAll" disabled', 'add "panel.addPathGo"'])
+    // …so the marks and the words line up one for one, and no third decision ever appears.
+    const armed = footerOf([edited]).map(entry => entry.replace(' disabled', ''))
+    expect(footerOf([settled]).map(entry => entry.replace(' disabled', ''))).toEqual(armed)
   })
 
   it('has dropped the three dead batch keys from both locale blocks', () => {
