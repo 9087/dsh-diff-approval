@@ -209,12 +209,19 @@ export function diffPathsMatch(chipPath: string, filePath: string, workspacePath
  * session should not be there at all; this is the second line of that defence, and the one that still
  * holds for a legacy row carrying only a single `sessionId`.
  *
+ * ONE exception, and it is the host's answer rather than the browser's: a row carrying `viaLineage` was
+ * scoped into this session's view by the host's lineage MERGE, which is the only side that can walk a
+ * lineage. It belongs to this view without this session having touched it, so it is taken as given — a
+ * lineage walk here would need every hop the client has no data for.
+ *
  * @param file - the pending row.
  * @param sessionId - the session this panel is showing.
- * @returns true only when that session is one of the row's own.
+ * @returns true only when that session is one of the row's own, or the host merged the row in.
  */
 function belongsToSession(file: PendingFileDiff, sessionId: SessionId | undefined): boolean {
-  return sessionId !== undefined && (file.sessionIds ?? [file.sessionId]).includes(sessionId)
+  if (sessionId === undefined) return false
+  if (file.viaLineage === true) return true
+  return touchedBy(file).includes(sessionId)
 }
 
 /**
@@ -860,6 +867,12 @@ interface PendingFileRowProps {
   selected: boolean
   /** Picked for a decision over several files (Ctrl/Cmd-click). Not the same as `selected`. */
   picked: boolean
+  /**
+   * Whether this row arrived through the MERGED view: the host scoped it into this session's list because
+   * the row's owning session is a child in this session's lineage (see `PendingFileDiff.viaLineage`),
+   * NOT because this session touched it. Marked, never moved, and still actionable exactly like its own.
+   */
+  fromChild: boolean
   /** The last keep/revert failure for this file, shown as an inline tag. */
   failedMessage?: string | undefined
   t: Translator
@@ -867,6 +880,19 @@ interface PendingFileRowProps {
   onSelect: (event: ReactMouseEvent<HTMLElement>, id: string) => void
   /** A right-click on the row: the panel opens the row's action menu at the press. */
   onMenu: (event: ReactMouseEvent<HTMLElement>) => void
+}
+
+/**
+ * The sessions that touched one listed row.
+ *
+ * The host sends every one of them (`sessionId` and `sessionIds`), and a row written by an older build
+ * carries only the single id — the same tolerance `belongsToSession` keeps.
+ * @param file - the listed row.
+ * @returns the owning sessions, never empty.
+ */
+function touchedBy(file: PendingFileDiff): readonly SessionId[] {
+  const ids = file.sessionIds
+  return Array.isArray(ids) && ids.length > 0 ? ids : [file.sessionId]
 }
 
 /**
@@ -3810,7 +3836,7 @@ function markdownPreviewMarkers(container: HTMLElement): PreviewRulerMarker[] {
 }
 
 /** One row of the file list: the clickable head in the left pane. */
-function PendingFileRow({ file, selected, picked, failedMessage, t, onSelect, onMenu }: PendingFileRowProps) {
+function PendingFileRow({ file, selected, picked, fromChild, failedMessage, t, onSelect, onMenu }: PendingFileRowProps) {
   const stats = useMemo(
     () => computeWholeFileDiff(file.oldText, file.newText),
     [file.oldText, file.newText],
@@ -3852,6 +3878,22 @@ function PendingFileRow({ file, selected, picked, failedMessage, t, onSelect, on
             </svg>
           )}
           <span className={css.rowPath}>{basenameOf(file.path)}</span>
+          {fromChild && (
+            // A row that came in through the merged view: a child session owns it (see `touchedBy`), so it
+            // is MARKED rather than moved, and it stays actionable exactly like this session's own rows —
+            // the host resolves the owner for a keep or a revert. The copy says CHILD SESSION and never
+            // 队友/teammate, because a child's own header cannot tell a teammate from any other subagent
+            // child (see the host's `lineageView`), and never claims the comments or the undo history are
+            // merged either: those stay per-session.
+            <Tooltip label={t('row.fromChild')} delayMs={500}>
+              <span className={css.rowChild} data-diff-child role="img" aria-label={t('row.fromChild')}>
+                <svg width="9" height="9" viewBox="0 0 9 9" aria-hidden="true">
+                  <path d="M1.5 1 V5.2 A1.3 1.3 0 0 0 2.8 6.5 H6.6" fill="none" stroke="currentColor" strokeWidth="1.1" />
+                  <path d="M5.1 4.7 L6.9 6.5 L5.1 8.3" fill="none" stroke="currentColor" strokeWidth="1.1" />
+                </svg>
+              </span>
+            </Tooltip>
+          )}
           {failedMessage !== undefined && <span className={css.rowFailed} title={failedMessage}>{t('row.failed')}</span>}
           {(stats.added !== 0 || stats.removed !== 0) && (
             <span className={css.rowMeta}>
@@ -9639,6 +9681,10 @@ export function PendingPanel({
     <PendingFileRow
       key={entry.id}
       file={entry}
+      // A row the HOST scoped into this list through the lineage merge (its owner is a child session in this
+      // session's lineage). It is marked, not moved: the row keeps its owner and every decision on it works
+      // exactly as it does on one of this session's own — the host resolves the owner for those.
+      fromChild={entry.viaLineage === true}
       selected={selected === entry.id}
       picked={pickedFiles.has(entry.id)}
       failedMessage={failed.get(entry.id)}

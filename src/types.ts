@@ -8,6 +8,27 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { CommentLineRange } from './comment-lines.ts'
 
 /**
+ * Where a session sits in the lineage a merged view groups by.
+ *
+ * Read off the session's own header when an entry is CAPTURED (`SessionHeader.parentSession`, `.origin`,
+ * `.delegationDepth`, `.cwd`) and carried on the entry, so a client can group without a second wire
+ * field. Every part is optional and absent when the header — or that one field of it — was not
+ * available: an ordinary root session has no parent by design, and a host older than these header
+ * fields reports none of them. An unknown lineage is recorded as unknown; guessing a root would file a
+ * session under the wrong one. Nothing reads this yet: the record is written for the merged view to use.
+ */
+export interface SessionLineage {
+  /** The session this one was forked from, or absent for an ordinary root. */
+  parentSessionId?: SessionId | undefined
+  /** The header's coarse product classification — `'subagent'` for a subagent child. */
+  origin?: string | undefined
+  /** How deep below its root the session was delegated, when the shell reports it. */
+  delegationDepth?: number | undefined
+  /** The session's own working directory, when its header names one. */
+  cwd?: string | undefined
+}
+
+/**
  * One file's pending entry, global and unique per `path`: the complete set of
  * unhandled changes folded into a single cumulative span across every session
  * and workspace that touched the file. `oldText` is the earliest captured basis
@@ -36,6 +57,14 @@ export interface PendingEntry {
   /** Every session that touched the file (drives the per-session list filter). */
   sessionIds: SessionId[]
   /**
+   * Where this entry's session sits in its lineage, as the shell reported it when the entry was
+   * CAPTURED — display-only data for a merged view. The entry keeps its real `sessionId`/`sessionIds`
+   * either way: grouping by lineage never rewrites who did the work. Absent on a record written before
+   * this field existed, on a session whose header carried none of it, and on an ordinary root (which
+   * has no parent by design) — so a reader must treat absent as "not known", never as "a root".
+   */
+  lineage?: SessionLineage | undefined
+  /**
    * Whether a change the reader has not looked at yet arrived on this path — the dot beside its row. Set
    * when an agent operation (or an agent-side admission) changes the entry, cleared when the reader opens
    * the file or acts on the row, and deliberately NOT part of an undo snapshot: a snapshot restores
@@ -52,6 +81,14 @@ export type PendingEntryKind = 'file' | 'none'
  * list endpoint computes by reading the file's current content.
  */
 export interface PendingFileDiff extends PendingEntry {
+  /**
+   * Whether this row reached the list through the LINEAGE MERGE rather than because the LISTING session
+   * itself touched it. The HOST computes it per read (`listWithState`), because only the host can walk a
+   * lineage — the client cannot, and must not try: it is what lets the panel show a child session's row
+   * without re-deriving the merge in the browser. Absent on a host older than the merge and absent on a
+   * row this session touched, so a client that does not know the field behaves exactly as it did before.
+   */
+  viaLineage?: boolean | undefined
   /**
    * Whether the file no longer exists (or cannot be resolved). Reverting a
    * missing entry restores its old content, which recreates the file.

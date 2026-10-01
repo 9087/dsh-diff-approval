@@ -41,7 +41,7 @@ import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { expandHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
-import { SessionId, type Session } from '@deepseek-ai/dsh-session'
+import { SessionId, type Session, type SessionHeader } from '@deepseek-ai/dsh-session'
 import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 // Type-only: brings the `ctx.fs` Context merge into this program.
@@ -68,14 +68,14 @@ import type {
   DiffApprovalActionValue, DiffApprovalAddOutcome, DiffApprovalAddValue, DiffApprovalBlockTarget, DiffApprovalBrowseEntry, DiffApprovalBrowseValue,
   DiffApprovalBulkValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue,
   CommentAnchor, CommentQuoteLine, CommentRecord, DiffApprovalCommentAddValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue,
-  PendingEntry, PendingEntryKind, PendingFileDiff, VcsImportValue,
+  PendingEntry, PendingEntryKind, PendingFileDiff, SessionLineage, VcsImportValue,
 } from './types.ts'
 
 export type {
   DiffApprovalActionOutcome, DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalBlockTarget,
   DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalRefreshOutcome, DiffApprovalRefreshValue,
   CommentAnchor, CommentQuoteLine, CommentRecord, DiffApprovalCommentAddValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue,
-  PendingEntry, PendingEntryKind, PendingFileDiff,
+  PendingEntry, PendingEntryKind, PendingFileDiff, SessionLineage,
 } from './types.ts'
 export { PendingDiffStore } from './pending.ts'
 export { PendingPersistence, defaultStorageDir } from './persist.ts'
@@ -857,6 +857,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       newText: after,
       updatedAt: Date.now(),
       sessionIds: [sessionId],
+      // Where this session sits in its lineage, for the merged view — read here, where the mutation is
+      // captured, and off the execution that carried it (see `lineageOf`).
+      lineage: lineageOf(sessionId, exec.agent),
       // An agent changed the file: the reader has not seen this yet, so its row wears the dot.
       unseen: true,
     }
@@ -943,7 +946,17 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   ): Promise<{ files: PendingFileDiff[]; redoCleared: boolean }> {
     const listed: PendingFileDiff[] = []
     let redoCleared = false
-    for (const entry of store.list(sessionId)) {
+    // The MERGED view: the entries this session sees today plus those of the sessions it shares a lineage
+    // root with (see `lineageView`). The entries keep their real owner — nothing is rewritten — and the
+    // settling below runs for a merged row exactly as it does for one of this session's own, so a
+    // teammate's vanished file leaves the list on the lead's read too.
+    const view = lineageView()
+    for (const entry of store.all()) {
+      if (!view.sees(sessionId, entry)) continue
+      // Session-scoped work names the OWNER, not the reader: the undo pair this read produces belongs to
+      // the row's session (so it cannot be popped from the lead's view — see `lineageView`), and the same
+      // The undo pair a READ produces belongs to the session that read — whoever pressed, exactly as
+      // before — while only the sandbox a revert writes under is the row's owner's (see `ownerOf`).
       const live = await liveStateOf(entry.path)
       if (live.kind === 'deleted') {
         // The file is gone: remove it from the list, keeping an undoable
@@ -989,7 +1002,12 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         if (redoWasPresent) redoCleared = true
       }
       const state = { missing: false, diverged: hasContent ? content !== adopted : true }
-      listed.push({ ...entry, newText: adopted, ...state })
+      // The one thing the client cannot work out for itself: that this row is in the listing session's view
+      // through the MERGE rather than because the session touched it (see `PendingFileDiff.viaLineage`).
+      // Absent — never `false` — for a row the session did touch, so an older client reads it as it always
+      // did, and the wire stays tolerant of a host that does not know the field at all.
+      const viaLineage = ownersOf(entry).includes(sessionId) ? undefined : true
+      listed.push({ ...entry, newText: adopted, ...state, viaLineage })
     }
     return { files: listed, redoCleared }
   }
@@ -1140,6 +1158,212 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     return workspace === undefined
       ? policy.resolve({})
       : { mode: policy.defaultMode, workspaceRoot: workspace.path }
+  }
+
+  /**
+   * The session header entry lineage is read from.
+   *
+   * Two routes, in the order a capture can answer them. The live one is the tool execution's own agent:
+   * `Agent` is AUGMENTED at run time with `session` (dsh-agent's `runtime-types`), and the DSH's own
+   * bundled plugins read exactly that on a `tools/*` execution — `dsh-tool-present` uses
+   * `exec.agent.session.header.cwd` and `dsh-experimental-agent-team` reads
+   * `agent.session.header.parentSession` for precisely the lineage question this records. `Agent` is typed
+   * `{ id }` in the types this package compiles against (the augmentation is not among them), so the field
+   * is read structurally — the same way `sessionOfAgent` reads `id` off the same object.
+   *
+   * The fallback is this plugin's own session registry, which `sandboxPolicyOf` already consults
+   * (`ctx.sessions.get(id)`); it is what answers when the agent carries no `session`, and it is also the
+   * only route at a capture site that has no execution in hand (the editor-intent seam, version control,
+   * a hand-added path). It is read through `ctx.get`, the way this file reads every optional service
+   * (`sandboxPolicy`, `shell`): the capture must never fail because the lineage could not be asked for,
+   * and a context that was never handed a session service throws on the plain property instead.
+   * @param sessionId - the session whose header is wanted.
+   * @param agent - the live agent of a tool execution, when the caller has one.
+   * @returns the header, or `undefined` when neither route has one.
+   */
+  function headerOf(sessionId: SessionId, agent?: unknown): SessionHeader | undefined {
+    if (typeof agent === 'object' && agent !== null) {
+      const session = (agent as Record<string, unknown>).session
+      if (typeof session === 'object' && session !== null) {
+        const header = (session as Record<string, unknown>).header
+        if (typeof header === 'object' && header !== null) return header as SessionHeader
+      }
+    }
+    const sessions = sessionRegistry()
+    return sessions?.get(sessionId)?.header
+  }
+
+  /**
+   * The lineage one entry records for its session, read off that session's own header.
+   *
+   * Every part is taken on its own and only when it is there, and NO lineage is recorded when the header
+   * held none of it. Absence is the honest value: an ordinary root session has no parent by design, and a
+   * host older than these header fields reports none of them — while a merged view has to be able to tell
+   * "this session is a root" from "this host could not say", and guessing a root would file a session
+   * under the wrong one.
+   * @param sessionId - the session the entry belongs to.
+   * @param agent - the live agent, when the capture has one (see `headerOf`).
+   * @returns the lineage to store, or `undefined` when the header named none of it.
+   */
+  function lineageOf(sessionId: SessionId, agent?: unknown): SessionLineage | undefined {
+    const header = headerOf(sessionId, agent)
+    if (header === undefined) return undefined
+    const parent = header.parentSession
+    const depth = header.delegationDepth
+    const lineage: SessionLineage = {
+      parentSessionId: typeof parent === 'string' && parent.length > 0 ? SessionId(parent) : undefined,
+      origin: typeof header.origin === 'string' && header.origin.length > 0 ? header.origin : undefined,
+      delegationDepth: typeof depth === 'number' && Number.isFinite(depth) ? depth : undefined,
+      cwd: typeof header.cwd === 'string' && header.cwd.length > 0 ? header.cwd : undefined,
+    }
+    const known = lineage.parentSessionId !== undefined || lineage.origin !== undefined
+      || lineage.delegationDepth !== undefined || lineage.cwd !== undefined
+    return known ? lineage : undefined
+  }
+
+  /** The session registry, read the way this file reads every optional service (see `headerOf`). */
+  function sessionRegistry(): { get(id: SessionId): Session | undefined } | undefined {
+    return ctx.get('sessions') as { get(id: SessionId): Session | undefined } | undefined
+  }
+
+  /** The most lineage hops one walk will take: a bound, not a depth anyone should reach. */
+  const MAX_LINEAGE_DEPTH = 16
+
+  /** Every session that touched an entry (its own fallback, the way the store reads an old row). */
+  function ownersOf(entry: PendingEntry): SessionId[] {
+    return Array.isArray(entry.sessionIds) && entry.sessionIds.length > 0 ? entry.sessionIds : [entry.sessionId]
+  }
+
+  /**
+   * The session an ACTION on this entry belongs to.
+   *
+   * The entry's `sessionId` is "the most recent session whose agent touched the file", which is the one
+   * whose workspace and sandbox policy apply to the file as it now stands. Actions name it for the
+   * session-scoped halves of their work — the sandbox policy a revert writes under, and the undo stack a
+   * pair is pushed onto — so a row recorded by a teammate is acted on as THE TEAMMATE'S row even when the
+   * press came from the lead's view.
+   * @param entry - the entry being acted on.
+   * @returns the owning session.
+   */
+  function ownerOf(entry: PendingEntry): SessionId {
+    return entry.sessionId
+  }
+
+  /**
+   * What one session is known by when a lineage is walked: the lineage STEP 1 recorded for it, and
+   * otherwise the live header.
+   *
+   * Recorded first is deliberate: it is what the row itself says, it survives a session that is no longer
+   * live, and it is the same answer the entry carries — so the walk and the row cannot disagree. The
+   * registry is the fallback for a session that recorded nothing (a row written before this step, or a
+   * session whose entries have all been settled away).
+   *
+   * `subagent` is the only field the walk trusts for a LINK: `parentSession` alone is not one. The header
+   * documents it as "the session this one was forked from (seed lineage)", so a host fork or a seeded
+   * continuation carries it while being an INDEPENDENT ROOT — the Team package reads exactly that
+   * distinction (`dsh-experimental-agent-team/lib/types/roster.js:76-81`: "Ordinary host forks are
+   * independent roots"). `origin: 'subagent'` is the header's own marker for a session "created as a
+   * subagent child", and the one function that builds a child's meta sets it together with `parentSession`
+   * and `delegationDepth` (`dsh-subagent/lib/types/child-agent.js:111-125`).
+   * @param sessionId - the session being asked about.
+   * @param recorded - the lineages step 1 recorded, read once per request.
+   * @returns whether the session is a subagent child, and the parent it names when it is.
+   */
+  function knownLineageOf(
+    sessionId: SessionId,
+    recorded: ReadonlyMap<SessionId, SessionLineage>,
+  ): { parent: SessionId | undefined; subagent: boolean } {
+    const entry = recorded.get(sessionId)
+    if (entry !== undefined) return { parent: entry.parentSessionId, subagent: entry.origin === 'subagent' }
+    const header = sessionRegistry()?.get(sessionId)?.header
+    const parent = header?.parentSession
+    return {
+      parent: typeof parent === 'string' && parent.length > 0 ? SessionId(parent) : undefined,
+      subagent: header?.origin === 'subagent',
+    }
+  }
+
+  /**
+   * The lineage view one request is answered from — which sessions' entries the requester may SEE, and
+   * therefore act on.
+   *
+   * The rule is ROOT-EQUAL: an entry is visible when any session that touched it walks to the same
+   * lineage root as the requester. Walking is `knownLineageOf` links only, so a teammate's rows appear in
+   * the lead's list (both walk to the lead) and the lead's appear in the teammate's — while a host fork,
+   * which names a parent but is not a subagent child, stays an independent root and shares nothing.
+   *
+   * UNKNOWN DEGRADES TO SELF, never to a guess: with no recorded lineage and no header facts every
+   * session is its own root, so only the requester matches — byte-for-byte today's behaviour. A cycle
+   * (which no shell should produce) stops at the first repeat, and the walk is bounded by
+   * {@link MAX_LINEAGE_DEPTH}.
+   *
+   * TWO THINGS A MERGED VIEW DOES NOT MERGE, so the next reader does not expect them:
+   * comments stay per-session (`comments` is read with the requester's id, so a merged list shows the
+   * requester's threads only), and undo stacks stay per-session — every action records its pair under the
+   * session that PRESSED it, exactly as before, so a teammate's own action cannot be undone from the
+   * lead's view (`undoStackOf`/`popOwnPair` are keyed by session). The one session-scoped thing a merged
+   * press takes from the ROW is the WRITE: a revert runs under `ownerOf(entry)`, whose workspace and
+   * sandbox the file belongs to.
+   *
+   * KNOWN LIMIT: a teammate child cannot be told from ANY OTHER subagent child by its header. Both are
+   * built by the one `childSessionMeta` above, and the Team spawner adds nothing to the child — it passes
+   * only `childId`/`provider`/`label` into `ctx.subagents.startContinuable`
+   * (`dsh-experimental-agent-team/lib/types/roster.js:253-262`) and records membership in the LEAD's own
+   * journal (`:249`), which this plugin cannot read. So this view merges every subagent child, not only
+   * teammates; narrowing it to the roster would need a service the plugin does not inject.
+   * @returns the view, whose `sees` answers the visibility question for one entry.
+   */
+  function lineageView(): { sees: (sessionId: SessionId, entry: PendingEntry) => boolean } {
+    const recorded = new Map<SessionId, SessionLineage>()
+    for (const entry of store.all()) {
+      if (entry.lineage !== undefined && !recorded.has(entry.sessionId)) recorded.set(entry.sessionId, entry.lineage)
+    }
+    const facts = new Map<SessionId, { parent: SessionId | undefined; subagent: boolean }>()
+    const roots = new Map<SessionId, SessionId>()
+    const rootOf = (sessionId: SessionId): SessionId => {
+      const known = roots.get(sessionId)
+      if (known !== undefined) return known
+      let current = sessionId
+      const walked = new Set<SessionId>([sessionId])
+      for (let depth = 0; depth < MAX_LINEAGE_DEPTH; depth += 1) {
+        let fact = facts.get(current)
+        if (fact === undefined) {
+          fact = knownLineageOf(current, recorded)
+          facts.set(current, fact)
+        }
+        if (!fact.subagent || fact.parent === undefined || walked.has(fact.parent)) break
+        walked.add(fact.parent)
+        current = fact.parent
+      }
+      roots.set(sessionId, current)
+      return current
+    }
+    return {
+      sees: (sessionId, entry) => {
+        const root = rootOf(sessionId)
+        return ownersOf(entry).some(owner => rootOf(owner) === root)
+      },
+    }
+  }
+
+  /**
+   * The entry one id names, when the requesting session may act on it; `undefined` otherwise.
+   *
+   * Every action path resolves its entry through this, so an id outside the requester's lineage is
+   * answered exactly like an id that names nothing — `missing` — and no action can reach a row the
+   * requester cannot see.
+   * @param view - the request's lineage view.
+   * @param sessionId - the requesting session.
+   * @param id - the entry id (its path).
+   * @returns the entry, or `undefined` when it is absent or outside the view.
+   */
+  function actionableEntryOf(
+    view: { sees: (sessionId: SessionId, entry: PendingEntry) => boolean },
+    sessionId: SessionId,
+    id: string,
+  ): PendingEntry | undefined {
+    const entry = store.get(id)
+    return entry !== undefined && view.sees(sessionId, entry) ? entry : undefined
   }
 
   /**
@@ -1548,7 +1772,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     const outcome = exec.name === 'edit' ? editOutcomeOf(result.value) : exec.name === 'write' ? writeOutcomeOf(result.value) : undefined
     if (outcome === undefined || outcome.oldText === outcome.newText) return
     const sessionId = exec.agent.id
-    const entry: PendingEntry = { id: outcome.path, sessionId, ...outcome, updatedAt: Date.now(), sessionIds: [sessionId], unseen: true }
+    const entry: PendingEntry = { id: outcome.path, sessionId, ...outcome, updatedAt: Date.now(), sessionIds: [sessionId], lineage: lineageOf(sessionId, exec.agent), unseen: true }
     // Fold synchronously so the very next list sees the capture; persistence
     // (hydration + save) rides the same turn asynchronously.
     if (store.fold(entry)) persistSession()
@@ -1736,10 +1960,13 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // Remove synchronously: once the user acts, the entry must be gone for
         // any concurrent list. (The store is hydrated by the time an action
         // runs, since the panel lists first.)
-        let entry = store.get(target.id)
+        // Resolved through the request's merged view, so a row the reader can see is actionable and a row
+        // outside its lineage answers `missing` — the same answer an id that names nothing gets.
+        const lineage = lineageView()
+        let entry = actionableEntryOf(lineage, target.sessionId, target.id)
         if (entry === undefined) {
           await ensureLoaded()
-          entry = store.get(target.id)
+          entry = actionableEntryOf(lineage, target.sessionId, target.id)
           if (entry === undefined) {
             const value: DiffApprovalActionValue = { outcome: 'missing' }
             return { ok: true, value }
@@ -1770,20 +1997,26 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       case 'revert': {
         const target = targetOf(payload)
         if (target === undefined) return rpcError('sessionId and id must be non-empty strings')
-        let entry = store.get(target.id)
+        // Resolved through the request's merged view, so a row the reader can see is actionable and a row
+        // outside its lineage answers `missing` — the same answer an id that names nothing gets.
+        const lineage = lineageView()
+        let entry = actionableEntryOf(lineage, target.sessionId, target.id)
         if (entry === undefined) {
           await ensureLoaded()
-          entry = store.get(target.id)
+          entry = actionableEntryOf(lineage, target.sessionId, target.id)
           if (entry === undefined) {
             const value: DiffApprovalActionValue = { outcome: 'missing' }
             return { ok: true, value }
           }
         }
+        // The row's OWNER, not the reader: the sandbox a revert writes under and the stack an undo pair
+        // lands on are the recording session's (see `ownerOf` and `lineageView`).
+        const owner = ownerOf(entry)
         // A revert that deletes a created file is not undoable (the file is
         // gone); a revert that writes keeps a snapshot for Ctrl+Z.
         let undo: { before: DiffApprovalUndoState; after: DiffApprovalUndoState } | undefined
         try {
-          undo = await revertEntryContent(entry, target.sessionId, signal)
+          undo = await revertEntryContent(entry, owner, signal)
         } catch (error: unknown) {
           return rpcError(`revert failed: ${errorMessage(error)}`)
         }
@@ -1810,7 +2043,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // same "this action is not undoable" the file itself already is.
         const pair = undo === undefined ? undefined : { before: droppingComments(undo.before), after: undo.after }
         dropEntry(target.id)
-        if (pair !== undefined) pushUndo(target.sessionId, pair.before, pair.after)
+        if (pair !== undefined) pushUndo(owner, pair.before, pair.after)
         persistSession(true)
         const value: DiffApprovalActionValue = { outcome: 'reverted' }
         return { ok: true, value }
@@ -1819,7 +2052,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const sessionId = sessionOf(payload)
         if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
         await ensureLoaded()
-        const entries = store.list(sessionId)
+        // A whole-list press acts on every row this session can SEE — its own plus those of the sessions it
+        // shares a lineage root with (see `lineageView`). The pairs belong to the session that PRESSED.
+        const lineage = lineageView()
+        const entries = store.all().filter(entry => lineage.sees(sessionId, entry))
         const before: DiffApprovalUndoState[] = []
         const after: DiffApprovalUndoState[] = []
         for (const entry of entries) {
@@ -1827,9 +2063,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           after.push({ id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
           dropEntry(entry.id)
         }
-        if (before.length > 0) {
-          pushBatchUndo(sessionId, before, after)
-        }
+        if (before.length > 0) pushBatchUndo(sessionId, before, after)
         persistSession(true)
         const value: DiffApprovalBulkValue = { affected: before.length }
         return { ok: true, value }
@@ -1838,13 +2072,18 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const sessionId = sessionOf(payload)
         if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
         await ensureLoaded()
-        const entries = store.list(sessionId)
+        const lineage = lineageView()
+        const entries = store.all().filter(entry => lineage.sees(sessionId, entry))
         const batchBefore: DiffApprovalUndoState[] = []
         const batchAfter: DiffApprovalUndoState[] = []
         for (const entry of entries) {
+          // The row's own session for the WRITE: the sandbox and workspace a revert runs under are the
+          // ones the file was recorded in, not the reader's (see `ownerOf`). The undo pair, like every
+          // other, stays on the stack of the session that pressed.
+          const owner = ownerOf(entry)
           let undo: { before: DiffApprovalUndoState; after: DiffApprovalUndoState } | undefined
           try {
-            undo = await revertEntryContent(entry, sessionId, signal)
+            undo = await revertEntryContent(entry, owner, signal)
           } catch {
             // An unreadable file is left listed (the caller sees it as a failed
             // entry) rather than silently dropped; stop the bulk here.
@@ -1856,9 +2095,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           }
           dropEntry(entry.id)
         }
-        if (batchBefore.length > 0) {
-          pushBatchUndo(sessionId, batchBefore, batchAfter)
-        }
+        if (batchBefore.length > 0) pushBatchUndo(sessionId, batchBefore, batchAfter)
         persistSession(true)
         const value: DiffApprovalBulkValue = { affected: entries.length }
         return { ok: true, value }
@@ -1867,10 +2104,13 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const request = manyTargetsOf(payload)
         if (request === undefined) return rpcError('sessionId and a non-empty ids array of strings must be given')
         await ensureLoaded()
+        // A pick acts only on rows this session can SEE (see `lineageView`); an id outside the lineage is
+        // skipped exactly like an id that names nothing.
+        const lineage = lineageView()
         const before: DiffApprovalUndoState[] = []
         const after: DiffApprovalUndoState[] = []
         for (const id of request.ids) {
-          const entry = store.get(id)
+          const entry = actionableEntryOf(lineage, request.sessionId, id)
           // An id that is already gone is not an error: the file left the list between the reader's pick
           // and this request, which is exactly what keeping it means.
           if (entry === undefined) continue
@@ -1901,16 +2141,19 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const request = manyTargetsOf(payload)
         if (request === undefined) return rpcError('sessionId and a non-empty ids array of strings must be given')
         await ensureLoaded()
+        const lineage = lineageView()
         const before: DiffApprovalUndoState[] = []
         const after: DiffApprovalUndoState[] = []
         let affected = 0
         for (const id of request.ids) {
-          const entry = store.get(id)
+          const entry = actionableEntryOf(lineage, request.sessionId, id)
           if (entry === undefined) continue
           affected += 1
+          // The row's own session for the WRITE; the pair below stays on the pressing session's stack.
+          const owner = ownerOf(entry)
           let undo: { before: DiffApprovalUndoState; after: DiffApprovalUndoState } | undefined
           try {
-            undo = await revertEntryContent(entry, request.sessionId, signal)
+            undo = await revertEntryContent(entry, owner, signal)
           } catch {
             // An unreadable file is left listed (the caller sees it as a failed entry) rather than
             // silently dropped; stop the pick here, the way the session-wide revert does — what the
@@ -1951,7 +2194,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const blockTarget = blockTargetOf(payload)
         if (blockTarget === undefined) return rpcError('sessionId, id, and block must be valid')
         await ensureLoaded()
-        const entry = store.get(blockTarget.id)
+        // Guarded by the same merged view `list` reads through: a row outside the requester's lineage
+        // answers `missing`, exactly like an id that names nothing.
+        const lineage = lineageView()
+        const entry = actionableEntryOf(lineage, blockTarget.sessionId, blockTarget.id)
         if (entry === undefined) {
           const value: DiffApprovalActionValue = { outcome: 'missing' }
           return { ok: true, value }
@@ -1987,7 +2233,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const blockTarget = blockTargetOf(payload)
         if (blockTarget === undefined) return rpcError('sessionId, id, and block must be valid')
         await ensureLoaded()
-        const entry = store.get(blockTarget.id)
+        // Guarded by the same merged view `list` reads through: a row outside the requester's lineage
+        // answers `missing`, exactly like an id that names nothing.
+        const lineage = lineageView()
+        const entry = actionableEntryOf(lineage, blockTarget.sessionId, blockTarget.id)
         if (entry === undefined) {
           const value: DiffApprovalActionValue = { outcome: 'missing' }
           return { ok: true, value }
@@ -2021,7 +2270,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         } catch (error: unknown) {
           return rpcError(`block revert failed: ${errorMessage(error)}`)
         }
-        if (undo !== undefined) pushUndo(blockTarget.sessionId, undo.before, undo.after)
+        if (undo !== undefined) pushUndo(ownerOf(entry), undo.before, undo.after)
         persistSession()
         const fullyResolved = contentEqual(updatedNew, entry.oldText)
         if (fullyResolved && blockTarget.removeWhenResolved === true) {
@@ -2119,6 +2368,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           newText: change.newText,
           updatedAt: Date.now(),
           sessionIds: [sessionId],
+          lineage: lineageOf(sessionId),
         })))
         const value: VcsImportValue = { imported, detected: true }
         return { ok: true, value }
@@ -2127,7 +2377,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const target = targetOf(payload)
         if (target === undefined) return rpcError('sessionId and id must be non-empty strings')
         await ensureLoaded()
-        const entry = store.get(target.id)
+        const lineage = lineageView()
+        const entry = actionableEntryOf(lineage, target.sessionId, target.id)
         if (entry === undefined) {
           const value: DiffApprovalRefreshValue = { outcome: 'missing' }
           return { ok: true, value }
@@ -2182,7 +2433,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // The reader asked for this refresh, so the row's dot goes out with it.
         store.markSeen(entry.path)
         // The refresh is undoable as one action: the entry's tracked diff moves
-        // from what the review captured to what the VCS reports now.
+        // from what the review captured to what the VCS reports now. The pair belongs to the session
+        // that pressed, like every other.
         pushUndo(target.sessionId,
           { id: entry.path, path: entry.path, entry, fileText: undefined },
           { id: entry.path, path: entry.path, entry: refreshed, fileText: undefined })
@@ -2340,6 +2592,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             newText: content,
             updatedAt: now,
             sessionIds: [target.sessionId],
+            lineage: lineageOf(target.sessionId),
           }]
           return await admitNamed(named, false, false)
         }
@@ -2378,6 +2631,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           newText: change.newText,
           updatedAt: now,
           sessionIds: [target.sessionId],
+          lineage: lineageOf(target.sessionId),
         }))
         // Ticking "include paths with no change" asks for the paths the scan did
         // not report: the named file itself, or every regular file under the named
@@ -2403,6 +2657,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
               newText: file.content,
               updatedAt: now,
               sessionIds: [target.sessionId],
+              lineage: lineageOf(target.sessionId),
             })
           }
         }

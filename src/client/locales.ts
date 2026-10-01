@@ -99,6 +99,12 @@ export const zh = {
   'panel.key.coverTop': '浮窗：覆盖上方标题栏',
   'settings.tabLabel': '改动审批',
   'row.failed': '失败',
+  /**
+   * The mark on a row that arrived through the MERGED view: its owning session is in this session's
+   * lineage. Deliberately "child session", never 队友/teammate — a child's own header cannot tell a
+   * teammate from any other subagent child, so the copy must not claim more than the header knows.
+   */
+  'row.fromChild': '来自子会话的改动',
   'panel.unseen': '有新的改动还没看',
   'row.dismiss': '移出',
   'row.keepListed': '保留',
@@ -384,6 +390,8 @@ export const en = {
   'panel.key.coverTop': 'Float: cover the header above',
   'settings.tabLabel': 'Diff Approval',
   'row.failed': 'Failed',
+  /** See the Chinese block: "child session", never "teammate" — the header cannot tell them apart. */
+  'row.fromChild': 'Changed in a child session',
   'panel.unseen': 'Changes you have not looked at yet',
   'row.dismiss': 'Remove',
   'row.keepListed': 'Keep',

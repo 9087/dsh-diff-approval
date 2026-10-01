@@ -9,6 +9,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { Component, useSyncExternalStore } from 'react'
 import type { ComponentProps, ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
+import { createDiffApprovalPort } from '../src/client/port.ts'
 import type { CommentRecord, PendingFileDiff } from '../src/types.ts'
 import { OPEN_PANEL_FILE_EVENT, PendingPanel, fittingItems, frameInsets, inlineItemCount, makeMeasurer, rowOfLine, wrapChipRows, MIN_LIST_WIDTH_PX } from '../src/client/PendingPanel.tsx'
 import { startProducedChipMenu } from '../src/client/produced-diff.ts'
@@ -13658,6 +13659,94 @@ describe('PendingPanel: the rows a comment covers', () => {
     // The removed line was old-file line 2, and the file's line 2 is now `C`.
     expect(lastDraft(props)?.anchor).toEqual({ startLine: 2, endLine: 2 })
     expect(lastDraft(props)?.quote).toBe('B')
+  })
+
+  it('marks a row that arrived through the merged view, and not one of its own', () => {
+    // The panel is session-1's. A row this session did not itself touch reached it through the host's
+    // lineage merge (its owner is a child session), so it wears the mark; session-1's own row does not.
+    const own = entry({ id: 'entry-own', path: '/repo/own.txt', oldText: 'a\n', newText: 'b\n' })
+    const child = entry({
+      id: 'entry-child', path: '/repo/child.txt', oldText: 'a\n', newText: 'b\n',
+      sessionId: 'session-child' as SessionId, sessionIds: ['session-child' as SessionId],
+      lineage: { parentSessionId: S1, origin: 'subagent', delegationDepth: 1, cwd: '/repo' },
+      // What the host computes for a row it scoped in through the merge: this session did not touch it.
+      viaLineage: true,
+    })
+    render(<PendingPanel {...panelProps({ read: true, files: [own, child], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const ownRow = document.querySelector('[data-diff-file="entry-own"]') as HTMLElement
+    const childRow = document.querySelector('[data-diff-file="entry-child"]') as HTMLElement
+    expect(ownRow).not.toBeNull()
+    expect(childRow).not.toBeNull()
+    // Exactly one row wears it, and it is the child-owned one.
+    expect(childRow.querySelector('[data-diff-child]')).not.toBeNull()
+    expect(ownRow.querySelector('[data-diff-child]')).toBeNull()
+    expect(document.querySelectorAll('[data-diff-child]')).toHaveLength(1)
+    // The mark names itself, so colour is never its only cue.
+    expect(childRow.querySelector('[data-diff-child]')?.getAttribute('aria-label')).toBe('row.fromChild')
+    // …and the row is otherwise an ordinary row: same file name, same list (not a section of its own).
+    expect(childRow.textContent).toContain('child.txt')
+    expect(document.querySelectorAll('[data-diff-file]')).toHaveLength(2)
+  })
+
+  it('says "child session" in both blocks, and never claims a teammate', () => {
+    expect(zh['row.fromChild']).toBe('来自子会话的改动')
+    expect(en['row.fromChild']).toBe('Changed in a child session')
+    // The honest limit, pinned in the copy itself: a child's own header cannot tell a teammate from any
+    // other subagent child, so neither block may say it does.
+    expect(zh['row.fromChild']).not.toContain('队友')
+    expect(en['row.fromChild']).not.toContain('teammate')
+  })
+
+  it('renders no mark at all when every row is the requester\'s own', () => {
+    const first = entry({ id: 'entry-a', path: '/repo/a.txt' })
+    // An older host sends a row with no `sessionIds` at all: the single id is then the whole answer, and
+    // the row is still the requester's own — the tolerant read must not invent a child from it.
+    const older = { ...entry({ id: 'entry-b', path: '/repo/b.txt' }), sessionIds: undefined } as unknown as PendingFileDiff
+    render(<PendingPanel {...panelProps({ read: true, files: [first, older], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    expect(document.querySelectorAll('[data-diff-file]')).toHaveLength(2)
+    expect(document.querySelectorAll('[data-diff-child]')).toHaveLength(0)
+    // The list itself is unchanged: both rows, in order, each starting with its own file name.
+    expect([...document.querySelectorAll('[data-diff-file]')].map(row => (row.textContent ?? '').slice(0, 5)))
+      .toEqual(['a.txt', 'b.txt'])
+  })
+
+  it('renders the merged row from a payload that really came through the port', async () => {
+    // The blind spot this bug exposed: every other case in this file hands the panel rows it built itself, so
+    // the PORT's narrowing — the boundary where the flag was actually lost — was never in the path. Here the
+    // rows come out of `createDiffApprovalPort(...).list(...)`, wire fields and all, and `list` is what the
+    // panel really reads. Without the flag surviving `pendingFileOf`, the child row is not merely unmarked:
+    // `belongsToSession` hides it and the list is one row shorter.
+    const seam = {
+      call: async (_channel: string, _endpoint: string, _payload: unknown) => ({
+        ok: true,
+        value: {
+          files: [
+            {
+              id: 'entry-own', sessionId: 'session-1', sessionIds: ['session-1'], path: '/repo/own.txt',
+              earlierVersion: 'file', oldText: 'a\n', newText: 'b\n', updatedAt: 10, missing: false, diverged: false,
+            },
+            {
+              id: 'entry-child', sessionId: 'session-child', sessionIds: ['session-child'], path: '/repo/child.txt',
+              earlierVersion: 'file', oldText: 'a\n', newText: 'b\n', updatedAt: 11, missing: false, diverged: false,
+              viaLineage: true,
+            },
+          ],
+        },
+      }),
+    }
+    const { files } = await createDiffApprovalPort(seam as never).list(S1)
+    render(<PendingPanel {...panelProps({ read: true, files, busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // Both rows are drawn, and the mark is on the child-owned one — the assertion that failed in the browser
+    // while every hand-built-row case here stayed green.
+    expect(document.querySelectorAll('[data-diff-file]')).toHaveLength(2)
+    expect(document.querySelector('[data-diff-file="entry-child"] [data-diff-child]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-file="entry-own"] [data-diff-child]')).toBeNull()
   })
 
 })

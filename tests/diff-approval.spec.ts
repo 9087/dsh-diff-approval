@@ -3150,5 +3150,229 @@ describe('comments over the channel', () => {
         .resolves.toEqual({ ok: true, value: { outcome: 'nothing' } })
     })
   })
+
+  describe('the lineage an entry records', () => {
+    /** A tool execution whose agent carries the live session the shell augments it with. */
+    const childExec = (header: Record<string, unknown>): unknown => ({
+      name: 'edit',
+      agent: { id: SessionId('session-child'), session: { header } },
+    })
+
+    it('records the lineage off the live session the execution carries', async () => {
+      // The route the DSH's own bundled plugins use on a tools/* execution: `exec.agent.session.header`
+      // (`dsh-tool-present` reads `.header.cwd` there; `dsh-experimental-agent-team` reads
+      // `.header.parentSession` for this very question). The registry double answers NOTHING here, so a
+      // lineage can only have come from the execution itself.
+      const { ctx, handle } = await harness({
+        prepare: (context) => { context.provide('sessions', { get: () => undefined } as never) },
+      })
+      emitResult(ctx, childExec({
+        id: 'session-child', parentSession: 'session-root', origin: 'subagent', delegationDepth: 1, cwd: '/repo',
+      }), editSuccess('/repo/a.txt', 'a', 'b'))
+
+      const [entry] = await listEntries(handle, 'session-child')
+      expect(entry!.lineage).toEqual({
+        parentSessionId: 'session-root', origin: 'subagent', delegationDepth: 1, cwd: '/repo',
+      })
+    })
+
+    it('falls back to the session registry when the agent carries no live session', async () => {
+      // An older host leaves the agent augmentation off entirely; `ctx.sessions.get` is the plugin's own
+      // route (already used for the sandbox policy) and answers the same question.
+      const { ctx, handle } = await harness({
+        prepare: (context) => {
+          context.provide('sessions', {
+            get: (id: SessionId) => ({ id, header: { id: String(id), parentSession: 'session-root', origin: 'subagent', delegationDepth: 2 } }),
+          } as never)
+        },
+      })
+      emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+
+      const [entry] = await listEntries(handle, 'session-1')
+      expect(entry!.lineage?.parentSessionId).toBe('session-root')
+      expect(entry!.lineage?.origin).toBe('subagent')
+      expect(entry!.lineage?.delegationDepth).toBe(2)
+      // The header named no working directory, so the record has none: absence, not a default.
+      expect(entry!.lineage?.cwd).toBeUndefined()
+    })
+
+    it('records no parent for an ordinary root session, and still records what its header does carry', async () => {
+      // A root has no parent BY DESIGN — the field is absent, not empty — and a record that invented one
+      // would file the session under a root it never had.
+      const { ctx, handle } = await harness({
+        prepare: (context) => {
+          context.provide('sessions', { get: (id: SessionId) => ({ id, header: { id: String(id), cwd: '/repo' } }) } as never)
+        },
+      })
+      emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+
+      const [entry] = await listEntries(handle, 'session-1')
+      expect(entry!.lineage?.parentSessionId).toBeUndefined()
+      expect(entry!.lineage?.origin).toBeUndefined()
+      expect(entry!.lineage?.delegationDepth).toBeUndefined()
+      expect(entry!.lineage?.cwd).toBe('/repo')
+    })
+
+    it('records no lineage at all when neither route can say', async () => {
+      // A session that is no longer live, on a shell that does not augment the agent: the absence is
+      // recorded as absence, and the entry itself is exactly what it was before this field existed.
+      const { ctx, handle } = await harness({
+        prepare: (context) => { context.provide('sessions', { get: () => undefined } as never) },
+      })
+      emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+
+      const [entry] = await listEntries(handle, 'session-1')
+      expect(entry!.lineage).toBeUndefined()
+      expect(entry!.path).toBe('/repo/a.txt')
+      expect(entry!.oldText).toBe('a')
+      expect(entry!.newText).toBe('b')
+    })
+
+    it('records no lineage when the header carries none of the fields', async () => {
+      const { ctx, handle } = await harness({
+        prepare: (context) => {
+          context.provide('sessions', { get: (id: SessionId) => ({ id, header: { id: String(id) } }) } as never)
+        },
+      })
+      emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+
+      const [entry] = await listEntries(handle, 'session-1')
+      expect(entry!.lineage).toBeUndefined()
+    })
+
+    it('keeps the lineage when a second capture folds into the same entry', async () => {
+      // Folding merges content; what a session IS does not change with it, so the merged entry keeps the
+      // lineage of the capture it merged in — the value a merged view reads after any number of operations.
+      const { ctx, handle } = await harness({
+        prepare: (context) => {
+          context.provide('sessions', {
+            get: (id: SessionId) => ({ id, header: { id: String(id), parentSession: 'session-root', origin: 'subagent' } }),
+          } as never)
+        },
+      })
+      emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+      emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'b', 'c'))
+
+      const [entry] = await listEntries(handle, 'session-1')
+      expect(entry!.oldText).toBe('a')
+      expect(entry!.newText).toBe('c')
+      expect(entry!.lineage?.parentSessionId).toBe('session-root')
+      expect(entry!.lineage?.origin).toBe('subagent')
+    })
+  })
+
+  describe('the merged view one request is answered from', () => {
+    /** A tool execution for one session. */
+    const execFor = (id: string): unknown => ({ name: 'edit', agent: { id: SessionId(id) } })
+
+    /**
+     * A registry where `child` is a subagent child of `parent` and `parent` is a root — the header facts
+     * step 1 records from, and the only thing the view walks.
+     */
+    const registry = (parent: string, child: string): { get: (id: SessionId) => unknown } => ({
+      get: (id: SessionId) => {
+        if (String(id) === child) {
+          return { id, header: { id: child, parentSession: parent, origin: 'subagent', delegationDepth: 1, cwd: '/repo' } }
+        }
+        if (String(id) === parent) return { id, header: { id: parent, cwd: '/repo' } }
+        return undefined
+      },
+    })
+
+    it("shows a subagent child's entries in its parent's list, and the parent's in the child's", async () => {
+      const { ctx, handle } = await harness({
+        prepare: (context) => { context.provide('sessions', registry('session-parent', 'session-child') as never) },
+      })
+      emitResult(ctx, execFor('session-child'), editSuccess('/repo/a.txt', 'a', 'b'))
+
+      // The child keeps seeing its own row…
+      expect((await listEntries(handle, 'session-child')).map(row => row.path)).toEqual(['/repo/a.txt'])
+      // …and the parent sees it too: both walk to the parent as their lineage root. The row keeps its REAL
+      // owner — the merge widens the view, never the attribution.
+      const parentRows = await listEntries(handle, 'session-parent')
+      expect(parentRows.map(row => row.path)).toEqual(['/repo/a.txt'])
+      expect(parentRows[0]!.sessionId).toBe('session-child')
+      expect(parentRows[0]!.sessionIds).toEqual(['session-child'])
+    })
+
+    it('leaves a root that has no children seeing exactly its own rows', async () => {
+      const { ctx, handle } = await harness({
+        prepare: (context) => {
+          context.provide('sessions', { get: (id: SessionId) => ({ id, header: { id: String(id) } }) } as never)
+        },
+      })
+      emitResult(ctx, execFor('session-1'), editSuccess('/repo/a.txt', 'a', 'b'))
+      expect((await listEntries(handle, 'session-1')).map(row => row.path)).toEqual(['/repo/a.txt'])
+      // Another root of the same shape is another view.
+      expect(await listEntries(handle, 'session-2')).toEqual([])
+    })
+
+    it("never shows an unrelated session's entries", async () => {
+      const { ctx, handle } = await harness({
+        prepare: (context) => {
+          context.provide('sessions', { get: (id: SessionId) => ({ id, header: { id: String(id) } }) } as never)
+        },
+      })
+      emitResult(ctx, execFor('session-other'), editSuccess('/repo/other.txt', 'a', 'b'))
+      expect(await listEntries(handle, 'session-1')).toEqual([])
+      expect((await listEntries(handle, 'session-other')).map(row => row.path)).toEqual(['/repo/other.txt'])
+    })
+
+    it('degrades to self-only when the lineage is unknown', async () => {
+      // No header facts anywhere (a host older than these fields) and nothing recorded either: every
+      // session is its own root, so a request sees exactly what it saw before this step — never a guess.
+      const { ctx, handle } = await harness({
+        prepare: (context) => { context.provide('sessions', { get: () => undefined } as never) },
+      })
+      emitResult(ctx, execFor('session-1'), editSuccess('/repo/a.txt', 'a', 'b'))
+      const own = await listEntries(handle, 'session-1')
+      expect(own.map(row => row.path)).toEqual(['/repo/a.txt'])
+      expect(own[0]!.lineage).toBeUndefined()
+      expect(await listEntries(handle, 'session-2')).toEqual([])
+    })
+
+    it("acts on a child-owned entry from the parent's view, and the revert writes as the owner", async () => {
+      const { ctx, handle, fs } = await harness({
+        prepare: (context) => { context.provide('sessions', registry('session-parent', 'session-child') as never) },
+      })
+      fs.readText.mockImplementation(async () => 'b')
+      emitResult(ctx, execFor('session-child'), editSuccess('/repo/a.txt', 'a', 'b'))
+
+      // Keep writes nothing, and the row leaves the list for BOTH views: it is one entry.
+      await expect(handle('keep', { sessionId: 'session-parent', id: '/repo/a.txt' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'kept' } })
+      expect(await listEntries(handle, 'session-child')).toEqual([])
+
+      // Revert resolves the entry's OWNER for the write, so the sandbox and workspace a revert runs under
+      // are the ones the file was recorded in rather than the reader's.
+      emitResult(ctx, execFor('session-child'), editSuccess('/repo/b.txt', 'a', 'b'))
+      await expect(handle('revert', { sessionId: 'session-parent', id: '/repo/b.txt' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'reverted' } })
+      expect(await listEntries(handle, 'session-parent')).toEqual([])
+    })
+
+    it("refuses an action on an entry outside the requester's lineage", async () => {
+      const { ctx, handle } = await harness({
+        prepare: (context) => {
+          context.provide('sessions', { get: (id: SessionId) => ({ id, header: { id: String(id) } }) } as never)
+        },
+      })
+      emitResult(ctx, execFor('session-1'), editSuccess('/repo/a.txt', 'a', 'b'))
+
+      // The id is real and the row is on session-1's screen. Session-2 answers exactly like an id that
+      // names nothing, so a refusal discloses nothing about what it cannot see.
+      const block = { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 }
+      await expect(handle('keep', { sessionId: 'session-2', id: '/repo/a.txt' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+      await expect(handle('revert', { sessionId: 'session-2', id: '/repo/a.txt' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+      await expect(handle('block-keep', { sessionId: 'session-2', id: '/repo/a.txt', block }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+      await expect(handle('block-revert', { sessionId: 'session-2', id: '/repo/a.txt', block }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+      // The row is untouched for the session that owns it.
+      expect((await listEntries(handle, 'session-1')).map(row => row.path)).toEqual(['/repo/a.txt'])
+    })
+  })
 })
 

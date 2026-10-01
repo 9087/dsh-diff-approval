@@ -21,7 +21,7 @@ import { join } from 'node:path'
 import { writeJsonAtomic } from './atomic-write.ts'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import type { PendingEntry } from './types.ts'
+import type { PendingEntry, SessionLineage } from './types.ts'
 
 /** Default persistence root: this plugin's own directory under the harness home. */
 export function defaultStorageDir(): string {
@@ -44,6 +44,32 @@ function legacyEarlierVersion(kind: unknown): 'file' | 'none' | undefined {
   if (kind === 'edit') return 'file'
   if (kind === 'create') return 'none'
   return undefined
+}
+
+/**
+ * The lineage one persisted row carries, or `undefined` when it carries none worth keeping.
+ *
+ * Every part is read independently and dropped when it is not the shape this record writes: a row from
+ * an older build has no `lineage` key at all (that is the `undefined` value here, not an error), and a
+ * hand-edited or truncated one may carry anything. A row whose parts are all missing is stored WITHOUT
+ * a lineage rather than as an empty object, so "not known" has exactly one spelling on disk.
+ * @param value - the row's `lineage` field, as parsed JSON.
+ * @returns the lineage to keep, or `undefined`.
+ */
+function lineageOfRow(value: unknown): SessionLineage | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const parent = record.parentSessionId
+  const depth = record.delegationDepth
+  const lineage: SessionLineage = {
+    parentSessionId: typeof parent === 'string' && parent.length > 0 ? parent as SessionId : undefined,
+    origin: typeof record.origin === 'string' && record.origin.length > 0 ? record.origin : undefined,
+    delegationDepth: typeof depth === 'number' && Number.isFinite(depth) ? depth : undefined,
+    cwd: typeof record.cwd === 'string' && record.cwd.length > 0 ? record.cwd : undefined,
+  }
+  const known = lineage.parentSessionId !== undefined || lineage.origin !== undefined
+    || lineage.delegationDepth !== undefined || lineage.cwd !== undefined
+  return known ? lineage : undefined
 }
 
 /** Narrow one JSON value to a pending entry; malformed rows are skipped. */
@@ -72,6 +98,9 @@ function pendingEntryOf(value: unknown): PendingEntry | undefined {
     unseen: record.unseen === true ? true : undefined,
     sessionId: sessionId as SessionId,
     sessionIds: ids.length > 0 ? ids as SessionId[] : [sessionId as SessionId],
+    // A row written before this field existed has no `lineage` key: it loads as `undefined`, which is
+    // exactly what a session whose header named nothing gets, and the entry behaves as it always did.
+    lineage: lineageOfRow(record.lineage),
   }
 }
 

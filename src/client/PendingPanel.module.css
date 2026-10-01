@@ -2036,6 +2036,17 @@
   line-height: 18px;
 }
 
+/* The merged-view mark: a row whose owning session is a CHILD of this one (see `PendingFileRow`). A small
+   branch glyph beside the file name, in the muted label colour, `flex: none` so the flex row can never
+   stretch it; the words live in the tooltip and in `aria-label`, so colour is never the only cue. */
+.rowChild {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
 /* The unread dot: a change arrived on this row that the reader has not looked at. It takes NO room in the row
    (it sits in the gap between the button's left edge and the file name, and the name never moves because a dot
    came or went), and the mark is an SVG CIRCLE rather than a styled box: a styled box came out an oval once the

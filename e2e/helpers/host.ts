@@ -290,6 +290,23 @@ export interface SeededFile {
   name: string
   oldText: string
   newText: string
+  /**
+   * Owner and lineage for THIS row, when it is not the seeding session's own — a row recorded by a CHILD
+   * session whose `parentSessionId` is the session the panel will show, which is what the host's merged
+   * view is for. The host reads the lineage an entry RECORDED before it asks the session registry, so a
+   * seeded link is enough: no live child session has to exist for its row to reach the parent's list.
+   * Absent — the default — writes today's flat row, exactly as a build before the lineage field did.
+   */
+  owner?: {
+    /** The child session the row is recorded under. */
+    sessionId: string
+    /** The session in that child's lineage that should see the row — the fixture's own session. */
+    parentSessionId: string
+    /** The header's own classification; `'subagent'` is what makes the link walkable. */
+    origin?: string
+    /** How deep below its root the child was delegated. */
+    delegationDepth?: number
+  } | undefined
 }
 
 /** Write the files, the pending store and (optionally) one comment per named file. */
@@ -304,6 +321,7 @@ export function seedPending(
   for (const file of files) {
     const path = join(fixture.workspace, file.name)
     writeFileSync(path, file.newText)
+    const owner = file.owner?.sessionId ?? sessionId
     entries.push({
       id: path,
       path,
@@ -311,8 +329,17 @@ export function seedPending(
       oldText: file.oldText,
       newText: file.newText,
       updatedAt: Date.now(),
-      sessionId,
-      sessionIds: [sessionId],
+      sessionId: owner,
+      sessionIds: [owner],
+      // No `lineage` key at all for an ordinary row: that is what a store written before the field looks
+      // like, and the loader's tolerance for it is worth keeping exercised by every other spec here.
+      ...(file.owner === undefined ? {} : {
+        lineage: {
+          parentSessionId: file.owner.parentSessionId,
+          origin: file.owner.origin ?? 'subagent',
+          delegationDepth: file.owner.delegationDepth ?? 1,
+        },
+      }),
     })
     if (!commentOn.includes(file.name)) continue
     // The quote is the file's own last line, which is what makes the comment placeable

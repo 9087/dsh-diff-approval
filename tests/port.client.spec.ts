@@ -84,17 +84,20 @@ describe('list', () => {
           // The dot must survive this narrowing: dropping it here lights everything upstream and shows
           // nothing on screen, which is exactly how the first build of it behaved.
           unseen: true,
+          // Carried for every row, and `false` here: the host did not mark this one as merged, and the
+          // narrowing is the boundary where the flag used to die (see `viaLineage` below).
+          viaLineage: false,
           sessionIds: ['session-1'],
         },
         {
           id: 'e2', sessionId: 'session-1', path: '/repo/c.txt', earlierVersion: 'none',
           oldText: '', newText: 'c', updatedAt: 20, missing: false, diverged: false,
-          sessionIds: ['session-1'],
+          sessionIds: ['session-1'], viaLineage: false,
         },
         {
           id: 'e3', sessionId: 'session-1', path: '/repo/d.txt', earlierVersion: 'none',
           oldText: '', newText: 'd', updatedAt: 30, missing: false, diverged: false,
-          sessionIds: ['session-1'],
+          sessionIds: ['session-1'], viaLineage: false,
         },
       ],
     })
@@ -379,5 +382,41 @@ describe('comments', () => {
     const seam = fakeRpc({ 'comment-seen': { ok: true, value: { outcome: 'seen' } } })
     await expect(createDiffApprovalPort(seam.rpc).commentSeen(S1, 'c1')).resolves.toBe(undefined)
     expect(seam.call).toHaveBeenCalledWith('/diff-approval', 'comment-seen', { sessionId: 'session-1', id: 'c1' })
+  })
+})
+
+describe('the merged-row flag', () => {
+  it('carries viaLineage through the narrowing, and reads a missing one as "not merged"', async () => {
+    // The boundary THIS file guards, and the defect it did not know about: `pendingFileOf` rebuilds each row
+    // field by field, so a field it does not name is DROPPED rather than passed through. `viaLineage` was
+    // dropped exactly that way, and the panel then hid the legitimately merged row — it draws a row whose
+    // owner is not this session only when this flag says so. No host test crosses this line, and the client
+    // tests build their rows by hand, so this is the only place the loss could have been caught.
+    const seam = fakeRpc({
+      list: {
+        ok: true,
+        value: {
+          files: [
+            {
+              id: '/repo/child.txt', sessionId: 'session-child', sessionIds: ['session-child'],
+              path: '/repo/child.txt', earlierVersion: 'file', oldText: 'a', newText: 'b',
+              updatedAt: 10, missing: false, diverged: false, viaLineage: true,
+            },
+            {
+              id: '/repo/own.txt', sessionId: 'session-1', sessionIds: ['session-1'],
+              path: '/repo/own.txt', earlierVersion: 'file', oldText: 'a', newText: 'b',
+              updatedAt: 11, missing: false, diverged: false,
+            },
+          ],
+        },
+      },
+    })
+    const { files } = await createDiffApprovalPort(seam.rpc).list(S1)
+    // The host said this row reached the list through the lineage merge: that answer has to survive the
+    // narrowing, or the row is not merely unmarked — it is gone from the panel.
+    expect(files[0]?.viaLineage).toBe(true)
+    // A host that never sends the field — one older than the merge — reads as "not merged", which is exactly
+    // how the client behaved before the field existed. Never a merge the host did not ask for.
+    expect(files[1]?.viaLineage).toBe(false)
   })
 })
