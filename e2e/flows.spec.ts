@@ -23,8 +23,8 @@ import {
   type DshCommand, type Fixture, type Host, type SeededFile,
 } from './helpers/host.ts'
 import {
-  beginSession, CLOSE_COMMENT, dismissNotices, ensurePanelList, footerBadge, newGuiPage, openPanel, openSession,
-  panelState, pressUndo, row, waitForShellReady,
+  beginSession, CLOSE_COMMENT, describeSidebar, dismissNotices, ensurePanelList, footerBadge, newGuiPage,
+  openPanel, openSession, panelState, pressUndo, row, rowControlOf, waitForCurrentSession, waitForShellReady,
 } from './helpers/gui.ts'
 import { openFloatList, noticesText, writeComment } from './helpers/panel.ts'
 
@@ -87,17 +87,27 @@ async function openFreshPage(tag: string): Promise<void> {
   // wait is the shell's own evidence, not a pause, and its deadline fails by name — see
   // `waitForShellReady`.
   await waitForShellReady(page)
-  // Which session the GUI opens is its own decision, and a reload is a fresh one: the press below can
-  // land while the sidebar is still drawing, and then the panel's badge stays disabled and `openPanel`
-  // waits out its whole 30s on a session that never arrives (measured: two consecutive runs failed
-  // exactly there, with `data-diff-approval-badge="0"` and no page error). So the press is made only
-  // while the badge says no session is open, and it is retried rather than slept on once.
+  // Which session the GUI opens is its own decision, and a reload is a fresh one. Two things are waited for
+  // here rather than assumed, and the order is the fix for the intermittent landing (measured: `f1` failed in
+  // runs 17/18/22 with `data-diff-approval-badge="0"`, the fresh page having bound no session at all):
+  //
+  //   1. WAIT for a session to become current before the first title lookup — the shell binds one in well
+  //      under a second when it does, and a page still drawing its sidebar is no longer pressed into blind.
+  //   2. When a press is needed, press the ROW'S OWN CONTROL, never the matched text node (see
+  //      `rowControlOf`): the same words sit in the plugin's comment badge and in the composer, so a press on
+  //      the bare node can open nothing while the helper reports it found the row.
+  //
+  // If nothing becomes current inside both budgets the failure is THROWN here, by name, with the sidebar's own
+  // account of itself — instead of falling through to `openPanel`, whose 30 s badge wait could only say that
+  // something was disabled.
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    if (await footerBadge(page).isEnabled().catch(() => false)) break
+    if (await waitForCurrentSession(page)) break
     const entry = page.getByText(COMMENT_TEXT, { exact: false })
     if (await entry.count() > 0) {
-      await entry.last().click({ timeout: 20_000 }).catch(() => {})
-      await new Promise(resolve => setTimeout(resolve, 4000))
+      const control = rowControlOf(entry.last())
+      const target = (await control.count()) > 0 ? control.first() : entry.last()
+      await target.click({ timeout: 20_000 }).catch(() => {})
+      if (await waitForCurrentSession(page)) break
       continue
     }
     // A miss is now VISIBLE: `openSession` throws when no row carries the title, and the attempt says so
@@ -106,13 +116,18 @@ async function openFreshPage(tag: string): Promise<void> {
     await openSession(page, SEED_MESSAGE).catch((error: unknown) => {
       console.log(`[openFreshPage:${tag}] attempt ${attempt + 1}/4 found no session row:`, String(error).split('\n')[0])
     })
-    await new Promise(resolve => setTimeout(resolve, 2000))
+    if (await waitForCurrentSession(page)) break
   }
-  // A session that never opens is worth one line of the page itself: the badge says only that the
-  // panel has nothing to show, and the next failure should say what the GUI was showing instead.
+  // A session that never opens is now a FAILURE AT ITS OWN SITE, with the two things a reader needs: that no
+  // session became current, and what the GUI was showing instead. `openPanel` keeps its own assertion for
+  // every other caller; this one names the state that made f1 intermittent.
   if (!await footerBadge(page).isEnabled().catch(() => false)) {
     const text = await page.locator('body').innerText().catch(() => '(no body text)')
     console.log(`[nosession:${tag}]`, text.replace(/\s+/g, ' ').slice(0, 400))
+    throw new Error(
+      `no session became current on the fresh page "${tag}" inside every attempt, so no panel can open.`
+      + `\n${await describeSidebar(page)}`,
+    )
   }
   await openPanel(page)
   await ensurePanelList(page)

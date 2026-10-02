@@ -494,13 +494,65 @@ export async function openSession(page: Page, title: string): Promise<void> {
       + `\n${await describeSidebar(page)}`,
     )
   }
-  await row.last().click({ timeout: 20_000 })
+  // The click goes to the row's own CONTROL, not to the matched text node (see `rowControlOf`): the same words
+  // appear in the plugin's comment badge and in the composer, so a press on the bare node can land somewhere
+  // that opens nothing while this helper reports that it found the row. When no control encloses the node the
+  // node itself is used, which is what every earlier build of this helper did.
+  const control = rowControlOf(row.last())
+  const target = (await control.count()) > 0 ? control.first() : row.last()
+  await target.click({ timeout: 20_000 })
   await sleep(3000)
 }
 
 /** Whether the plugin's footer badge is present and enabled (a blank session disables it). */
 export function footerBadge(page: Page): Locator {
   return page.locator('[data-diff-approval-badge]').first()
+}
+
+/**
+ * Wait until a session is CURRENT, and answer whether it became so inside the budget.
+ *
+ * `waitForShellReady` proves the chrome is on screen, and this is deliberately a different question: a page
+ * whose chrome is drawn with NO session bound still has a laid-out composer host (the resident one is
+ * rendered inert, not absent — the same fact its own note records), so it passes that gate while the badge
+ * stays disabled and every later step has nothing to work with. The footer badge is the one signal that says
+ * a session is bound — it renders `disabled={noSession}` — so that is what this polls.
+ *
+ * It is a WAIT and never a press: nothing is clicked here, so a page that is merely slow gets its budget
+ * instead of being pressed into while the sidebar is still drawing, and a page that never binds is answered
+ * `false` for the caller to name. The default is a beat, not a race budget: when the shell binds on its own
+ * it does so in well under a second, and the caller still has its own fallbacks afterwards.
+ *
+ * @param page - the GUI page.
+ * @param timeoutMs - how long the shell gets to bind a session.
+ * @returns `true` when a session became current, `false` when the budget ran out.
+ */
+export async function waitForCurrentSession(page: Page, timeoutMs = 8_000): Promise<boolean> {
+  const badge = footerBadge(page)
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    // `.catch` because the badge is not rendered at all until the panel's own host is mounted.
+    if (await badge.isEnabled().catch(() => false)) return true
+    if (Date.now() >= deadline) return false
+    await sleep(250)
+  }
+}
+
+/**
+ * The CONTROL that owns a matched text node, falling back to the node itself.
+ *
+ * A title lookup answers with whatever text node carries those words, and the same words appear in places
+ * that are not the row — the plugin's own comment badge shows the comment's text, and the composer holds
+ * what was typed. Clicking the bare node can therefore land on the wrong thing, which is how a landing that
+ * "found" its text still left no session current. The nearest enclosing control is the row's own press
+ * target; when there is none the node is returned, so a shell that reorganises its rows keeps the old
+ * behaviour rather than failing here.
+ *
+ * @param text - the matched text node.
+ * @returns the control to click.
+ */
+export function rowControlOf(text: Locator): Locator {
+  return text.locator('xpath=ancestor::*[self::button or @role="button" or @role="treeitem" or @role="option"][1]')
 }
 
 /**
