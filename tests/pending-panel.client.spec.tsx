@@ -13669,8 +13669,10 @@ describe('PendingPanel: the rows a comment covers', () => {
       id: 'entry-child', path: '/repo/child.txt', oldText: 'a\n', newText: 'b\n',
       sessionId: 'session-child' as SessionId, sessionIds: ['session-child' as SessionId],
       lineage: { parentSessionId: S1, origin: 'subagent', delegationDepth: 1, cwd: '/repo' },
-      // What the host computes for a row it scoped in through the merge: this session did not touch it.
+      // What the host computes for a row it scoped in through the merge: this session did not touch it, and
+      // the owner is BELOW it (the host walks the recorded links), so the sentence is the child's.
       viaLineage: true,
+      lineageDirection: 'child',
     })
     render(<PendingPanel {...panelProps({ read: true, files: [own, child], busy: new Set() })} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
@@ -13700,6 +13702,8 @@ describe('PendingPanel: the rows a comment covers', () => {
       path: '/repo/shared.txt',
       sessionIds: [S1, 'session-child' as SessionId],
       hasChildContribution: true,
+      // …and the child is BELOW this session, so the shared sentence is the child's too.
+      lineageDirection: 'child',
     })
     render(<PendingPanel {...panelProps({ read: true, files: [own, shared], busy: new Set() })} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
@@ -13711,15 +13715,95 @@ describe('PendingPanel: the rows a comment covers', () => {
     expect(document.querySelector('[data-diff-file="entry-own"] [data-diff-child]')).toBeNull()
   })
 
+  it('wears the sentence for the direction the HOST computed, never "child" by default', () => {
+    // One row per direction, each here ONLY through the merge (`viaLineage`), so each takes the "only" form.
+    // The mark used to say "child session" from every seat — a teammate's own panel called the lead's rows a
+    // child's, and two teammates each called the other one — so the sentence comes from the host's walk of
+    // the recorded parent links, never from the panel's guess.
+    const files = [
+      entry({ id: 'entry-child', path: '/repo/child.txt', viaLineage: true, lineageDirection: 'child' }),
+      entry({ id: 'entry-parent', path: '/repo/parent.txt', viaLineage: true, lineageDirection: 'parent' }),
+      entry({ id: 'entry-sibling', path: '/repo/sibling.txt', viaLineage: true, lineageDirection: 'sibling' }),
+      entry({ id: 'entry-mixed', path: '/repo/mixed.txt', viaLineage: true, lineageDirection: 'mixed' }),
+    ]
+    render(<PendingPanel {...panelProps({ read: true, files, busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const label = (id: string): string | null =>
+      document.querySelector(`[data-diff-file="${id}"] [data-diff-child]`)?.getAttribute('aria-label') ?? null
+    expect(label('entry-child')).toBe('row.fromChild')
+    expect(label('entry-parent')).toBe('row.fromParent')
+    expect(label('entry-sibling')).toBe('row.fromSibling')
+    // The owners' directions disagree: no single relationship is true of the row, so neither is named.
+    expect(label('entry-mixed')).toBe('row.fromOther')
+    // Every row wears exactly one mark, and no row wears another's sentence.
+    expect(document.querySelectorAll('[data-diff-child]')).toHaveLength(4)
+  })
+
+  it('wears the SHARED sentence of the same direction when this session touched the row too', () => {
+    // The other form of each direction: the row is the reader's own work as well, so "changed in …" alone
+    // would deny the reader's edit. The direction still decides WHICH shared sentence.
+    const files = [
+      entry({ id: 'entry-child', path: '/repo/child.txt', sessionIds: [S1, 'session-child' as SessionId], hasChildContribution: true, lineageDirection: 'child' }),
+      entry({ id: 'entry-parent', path: '/repo/parent.txt', sessionIds: [S1, 'session-parent' as SessionId], hasChildContribution: true, lineageDirection: 'parent' }),
+      entry({ id: 'entry-sibling', path: '/repo/sibling.txt', sessionIds: [S1, 'session-peer' as SessionId], hasChildContribution: true, lineageDirection: 'sibling' }),
+      entry({ id: 'entry-mixed', path: '/repo/mixed.txt', sessionIds: [S1, 'session-peer' as SessionId], hasChildContribution: true, lineageDirection: 'mixed' }),
+    ]
+    render(<PendingPanel {...panelProps({ read: true, files, busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const label = (id: string): string | null =>
+      document.querySelector(`[data-diff-file="${id}"] [data-diff-child]`)?.getAttribute('aria-label') ?? null
+    expect(label('entry-child')).toBe('row.fromChildShared')
+    expect(label('entry-parent')).toBe('row.fromParentShared')
+    expect(label('entry-sibling')).toBe('row.fromSiblingShared')
+    expect(label('entry-mixed')).toBe('row.fromOtherShared')
+    expect(document.querySelectorAll('[data-diff-child]')).toHaveLength(4)
+  })
+
+  it('falls back to the neutral sentence when the host sent no direction at all', () => {
+    // A host older than the field. The client cannot walk a lineage, so it must not name one — and the
+    // fallback is chosen per FORM, so both are exercised: the merge-only row and the shared row.
+    const files = [
+      entry({ id: 'entry-merged', path: '/repo/merged.txt', viaLineage: true }),
+      entry({ id: 'entry-shared', path: '/repo/shared.txt', sessionIds: [S1, 'session-child' as SessionId], hasChildContribution: true }),
+    ]
+    render(<PendingPanel {...panelProps({ read: true, files, busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const label = (id: string): string | null =>
+      document.querySelector(`[data-diff-file="${id}"] [data-diff-child]`)?.getAttribute('aria-label') ?? null
+    expect(label('entry-merged')).toBe('row.fromOther')
+    expect(label('entry-shared')).toBe('row.fromOtherShared')
+  })
+
   it('says "child session" in both blocks, and never claims a teammate', () => {
     expect(zh['row.fromChild']).toBe('来自子会话的改动')
     expect(en['row.fromChild']).toBe('Changed in a child session')
     expect(zh['row.fromChildShared']).toBe('也包含子会话的改动')
     expect(en['row.fromChildShared']).toBe('Also includes changes from a child session')
-    // The honest limit, pinned in the copy itself and in BOTH sentences: a child's own header cannot tell a
-    // teammate from any other subagent child, so neither block may say it does.
-    for (const text of [zh['row.fromChild'], zh['row.fromChildShared']]) expect(text).not.toContain('队友')
-    for (const text of [en['row.fromChild'], en['row.fromChildShared']]) expect(text).not.toContain('teammate')
+    // The other three directions, verbatim. 上级 is the unambiguous Chinese for an ANCESTOR — possibly
+    // several hops up — and the English "parent session" is written to mean exactly that, not the direct
+    // parent only.
+    expect(zh['row.fromParent']).toBe('来自上级会话的改动')
+    expect(en['row.fromParent']).toBe('Changed in a parent session')
+    expect(zh['row.fromParentShared']).toBe('也包含上级会话的改动')
+    expect(en['row.fromParentShared']).toBe('Also includes changes from a parent session')
+    expect(zh['row.fromSibling']).toBe('来自同级会话的改动')
+    expect(en['row.fromSibling']).toBe('Changed in a sibling session')
+    expect(zh['row.fromSiblingShared']).toBe('也包含同级会话的改动')
+    expect(en['row.fromSiblingShared']).toBe('Also includes changes from a sibling session')
+    expect(zh['row.fromOther']).toBe('来自其他会话的改动')
+    expect(en['row.fromOther']).toBe('Changed in another session')
+    expect(zh['row.fromOtherShared']).toBe('也包含其他会话的改动')
+    expect(en['row.fromOtherShared']).toBe('Also includes changes from other sessions')
+    // The honest limit, pinned in the copy itself and in EVERY sentence: a child's own header cannot tell a
+    // teammate from any other subagent child, so no block may say it does. Direction does not change that —
+    // an ancestor or a sibling is no more identifiable as a teammate than a child is.
+    const zhNotes = [zh['row.fromChild'], zh['row.fromChildShared'], zh['row.fromParent'], zh['row.fromParentShared'], zh['row.fromSibling'], zh['row.fromSiblingShared'], zh['row.fromOther'], zh['row.fromOtherShared']]
+    const enNotes = [en['row.fromChild'], en['row.fromChildShared'], en['row.fromParent'], en['row.fromParentShared'], en['row.fromSibling'], en['row.fromSiblingShared'], en['row.fromOther'], en['row.fromOtherShared']]
+    for (const text of zhNotes) expect(text).not.toContain('队友')
+    for (const text of enNotes) expect(text).not.toContain('teammate')
   })
 
   it('renders no mark at all when every row is the requester\'s own', () => {

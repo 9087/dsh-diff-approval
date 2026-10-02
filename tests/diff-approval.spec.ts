@@ -82,6 +82,12 @@ afterEach(async () => {
 async function harness(options: {
   sessionIds?: readonly SessionId[]
   workspacePath?: string
+  /**
+   * Several workspaces at once, one per entry: the shape a deployment whose sessions are attached to
+   * DIFFERENT workspaces hands the registry. Overrides the single `sessionIds`/`workspacePath` workspace
+   * when given, so a case that needs two roots can say so without touching the shared default.
+   */
+  workspacesByPath?: Record<string, readonly SessionId[]>
   storageDir?: string
   openPath?: (path: string, action: 'open' | 'reveal') => Promise<void>
   prepare?: (ctx: Context) => void
@@ -105,11 +111,17 @@ async function harness(options: {
   ctx.provide('connection', { rpc: { handle } } as unknown as HostConnectionHandle)
   // The plugin injects `webServer` so its channel owner can resolve it.
   ctx.provide('webServer', { register: vi.fn(() => () => {}) } as never)
-  const workspaces: Workspace[] = (options.sessionIds ?? []).length === 0 ? [] : [{
-    id: WorkspaceId('workspace-1'),
-    sessionIds: [...options.sessionIds!],
-    path: options.workspacePath ?? '',
-  } as unknown as Workspace]
+  const workspaces: Workspace[] = options.workspacesByPath !== undefined
+    ? Object.entries(options.workspacesByPath).map(([path, ids], index) => ({
+        id: WorkspaceId(`workspace-${index + 1}`),
+        sessionIds: [...ids],
+        path,
+      } as unknown as Workspace))
+    : (options.sessionIds ?? []).length === 0 ? [] : [{
+        id: WorkspaceId('workspace-1'),
+        sessionIds: [...options.sessionIds!],
+        path: options.workspacePath ?? '',
+      } as unknown as Workspace]
   ctx.provide('workspaceRegistry', { list: () => workspaces } as unknown as WorkspaceRegistry)
   const storageDir = options.storageDir ?? await mkdtemp(join(tmpdir(), 'dsh-diff-approval-'))
   tempDirs.push(storageDir)
@@ -3295,6 +3307,54 @@ describe('comments over the channel', () => {
       expect(parentRows[0]!.sessionIds).toEqual(['session-child'])
     })
 
+    it("merges a child's row when the two sit in the same workspace, whatever the spelling", async () => {
+      // The workspace half of the rule, positively. The pending list is NOT scoped by workspace (one map
+      // keyed by absolute path, one `pending.json` under the storage root), so the merge is where a
+      // workspace can be honoured at all — and it must honour EQUIVALENT spellings of one root, or a
+      // legitimate child whose row recorded `/repo/work/.` would vanish from its parent's list.
+      const { ctx, handle } = await harness({
+        workspacesByPath: { '/repo/work': ['session-parent'], '/repo/work/.': ['session-child'] },
+        prepare: (context) => { context.provide('sessions', registry('session-parent', 'session-child') as never) },
+      })
+      emitResult(ctx, execFor('session-child'), editSuccess('/repo/a.txt', 'a', 'b'))
+
+      expect((await listEntries(handle, 'session-child')).map(row => row.path)).toEqual(['/repo/a.txt'])
+      expect((await listEntries(handle, 'session-parent')).map(row => row.path)).toEqual(['/repo/a.txt'])
+    })
+
+    it("refuses a child's row when the two sit in DIFFERENT workspaces", async () => {
+      // The hole this closes: nothing else in the list path consults the workspace, so without the term the
+      // parent's view carried a row recorded in another root — and could act on it, resolving the file
+      // under that root. The lineage root is shared here; the workspace is not, and that is enough.
+      const { ctx, handle, fs } = await harness({
+        workspacesByPath: { '/repo/work': ['session-parent'], '/other/root': ['session-child'] },
+        prepare: (context) => { context.provide('sessions', registry('session-parent', 'session-child') as never) },
+      })
+      emitResult(ctx, execFor('session-child'), editSuccess('/other/root/a.txt', 'a', 'b'))
+
+      // The child keeps its own row…
+      expect((await listEntries(handle, 'session-child')).map(row => row.path)).toEqual(['/other/root/a.txt'])
+      // …the parent's view does not carry it…
+      expect(await listEntries(handle, 'session-parent')).toEqual([])
+      // …and it is not actionable from there either: the same `missing` an id that names nothing gets.
+      await expect(handle('revert', { sessionId: 'session-parent', id: '/other/root/a.txt' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+      expect(fs.writeText).not.toHaveBeenCalled()
+    })
+
+    it('keeps the merge when the registry does not account the other session', async () => {
+      // Unknown degrades to the answer this view gave before the workspace term existed: a session no
+      // workspace accounts (memory-only, a host that named none) must not lose rows it has always shown.
+      // Only the PARENT is accounted here, so the child's workspace is unknown.
+      const { ctx, handle } = await harness({
+        workspacesByPath: { '/repo/work': ['session-parent'] },
+        prepare: (context) => { context.provide('sessions', registry('session-parent', 'session-child') as never) },
+      })
+      emitResult(ctx, execFor('session-child'), editSuccess('/repo/a.txt', 'a', 'b'))
+
+      expect((await listEntries(handle, 'session-parent')).map(row => row.path)).toEqual(['/repo/a.txt'])
+    })
+
     it('leaves a root that has no children seeing exactly its own rows', async () => {
       const { ctx, handle } = await harness({
         prepare: (context) => {
@@ -3351,6 +3411,48 @@ describe('comments over the channel', () => {
       expect(await listEntries(handle, 'session-parent')).toEqual([])
     })
 
+    it("undoes a merged revert where the press happened, and not from the owner's view", async () => {
+      // The rule: the undo pair belongs to the session that PRESSED the action, because that is the only
+      // view whose Ctrl+Z can reach it (`undoStackOf` is keyed by session and `popOwnPair` refuses anyone
+      // else's pair) — while the FILE keeps being written under the row's OWNER, whose workspace and
+      // sandbox it belongs to. The drop branch used to file the pair under the owner, so the presser's
+      // undo answered `nothing` and the row never came back.
+      const { ctx, fs, handle } = await harness({
+        workspacesByPath: { '/repo': ['session-parent', 'session-child'] },
+        prepare: (context) => { context.provide('sessions', registry('session-parent', 'session-child') as never) },
+      })
+      // A file the double actually models: `readText` answers what `writeText` last put there, so the
+      // revert really leaves the baseline on disk and the undo's divergence guard sees the bytes the
+      // revert wrote (a double that always answered 'b' would make the undo refuse, not succeed).
+      let live = 'b'
+      fs.readText.mockImplementation(async () => live)
+      fs.writeText.mockImplementation(async (_target: unknown, text: string) => { live = text; return { version: 1 } })
+      emitResult(ctx, execFor('session-child'), editSuccess('/repo/a.txt', 'a', 'b'))
+
+      // The parent presses revert on the child's row: the row leaves BOTH views (one entry), and the file
+      // now holds the baseline. The write named the owner (see the test above).
+      await expect(handle('revert', { sessionId: 'session-parent', id: '/repo/a.txt' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'reverted' } })
+      expect(await listEntries(handle, 'session-parent')).toEqual([])
+      expect(live).toBe('a')
+
+      // The presser's Ctrl+Z gets the row AND the diff back.
+      await expect(handle('undo', { sessionId: 'session-parent' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: '/repo/a.txt' } })
+      const [restored] = await listEntries(handle, 'session-parent')
+      expect(restored).toMatchObject({ path: '/repo/a.txt', oldText: 'a', newText: 'b' })
+      // The row keeps its REAL owner — the merge widens the view, never the attribution.
+      expect(restored!.sessionId).toBe('session-child')
+      expect(fs.writeText).toHaveBeenLastCalledWith(
+        { displayPath: '/repo/a.txt', targetKey: 'key:/repo/a.txt' }, 'b', undefined, expect.anything() as AbortSignal,
+      )
+
+      // …and the OWNER's Ctrl+Z has none of the parent's press to move: an action cannot be taken back from
+      // a view whose reader never made it.
+      await expect(handle('undo', { sessionId: 'session-child' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'nothing' } })
+    })
+
     it("refuses an action on an entry outside the requester's lineage", async () => {
       const { ctx, handle } = await harness({
         prepare: (context) => {
@@ -3374,6 +3476,40 @@ describe('comments over the channel', () => {
       expect((await listEntries(handle, 'session-1')).map(row => row.path)).toEqual(['/repo/a.txt'])
     })
 
+    it("opens a merged row from the reader's view", async () => {
+      // The guard must not cost the feature it guards: the parent has the child's row in its list, so the
+      // parent can open it, and the row's dot goes out for the look that really happened.
+      const { ctx, handle, openPath } = await harness({
+        prepare: (context) => { context.provide('sessions', registry('session-parent', 'session-child') as never) },
+      })
+      emitResult(ctx, execFor('session-child'), editSuccess('/repo/a.txt', 'a', 'b'))
+      expect((await listEntries(handle, 'session-parent')).map(row => row.path)).toEqual(['/repo/a.txt'])
+
+      await expect(handle('open', { sessionId: 'session-parent', id: '/repo/a.txt', action: 'open' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'opened' } })
+      expect(openPath).toHaveBeenCalledWith('/repo/a.txt', 'open')
+    })
+
+    it("refuses to open a row outside the requester's lineage, and leaves its dot alone", async () => {
+      // `open` was the one entry-naming action that resolved its entry with the bare `store.get`, so a
+      // session that never had the row in its list could launch the file AND take the row's unseen dot
+      // down (`markSeen`) — a cross-session effect on a row it cannot see. It now refuses exactly as the
+      // other guarded actions do.
+      const { ctx, handle, openPath } = await harness({
+        prepare: (context) => {
+          context.provide('sessions', { get: (id: SessionId) => ({ id, header: { id: String(id) } }) } as never)
+        },
+      })
+      emitResult(ctx, execFor('session-1'), editSuccess('/repo/a.txt', 'a', 'b'))
+      expect((await listEntries(handle, 'session-1'))[0]!.unseen).toBe(true)
+
+      await expect(handle('open', { sessionId: 'session-2', id: '/repo/a.txt', action: 'open' }, signal()))
+        .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+      expect(openPath).not.toHaveBeenCalled()
+      // The owner's dot is exactly as it was: a refused `open` is not "the reader looked at it".
+      expect((await listEntries(handle, 'session-1'))[0]!.unseen).toBe(true)
+    })
+
     // The row's MARK, which is a different question from the merge: `viaLineage` says why a row is in the
     // list, `hasChildContribution` says whether a child's change is in it. A row the session touched AS WELL
     // is silent about the child without it — and a session outside the lineage touching the same path (the
@@ -3389,6 +3525,8 @@ describe('comments over the channel', () => {
       // Here only through the merge, and a child's change is all of it.
       expect(row.viaLineage).toBe(true)
       expect(row.hasChildContribution).toBe(true)
+      // …and the host says WHICH way that child stands, so the sentence can name it rather than guess.
+      expect(row.lineageDirection).toBe('child')
     })
 
     it('marks a row this session touched too, when a child in its lineage also touched it', async () => {
@@ -3404,6 +3542,127 @@ describe('comments over the channel', () => {
       // The row is here on its own merit — so NOT `viaLineage` — and still says a child had a hand in it.
       expect(row.viaLineage).toBeUndefined()
       expect(row.hasChildContribution).toBe(true)
+      expect(row.lineageDirection).toBe('child')
+    })
+
+    /** A registry where `first` and `second` are BOTH subagent children of `root` — two teammates under one
+     *  lead, which is the shape the sibling and mixed answers need. */
+    const siblingsRegistry = (root: string, first: string, second: string): { get: (id: SessionId) => unknown } => ({
+      get: (id: SessionId) => {
+        const name = String(id)
+        if (name === first || name === second) {
+          return { id, header: { id: name, parentSession: root, origin: 'subagent', delegationDepth: 1, cwd: '/repo' } }
+        }
+        if (name === root) return { id, header: { id: root, cwd: '/repo' } }
+        return undefined
+      },
+    })
+
+    /** A registry three levels deep, for the ancestor that is more than one hop up. */
+    const chainRegistry = (top: string, middle: string, bottom: string): { get: (id: SessionId) => unknown } => ({
+      get: (id: SessionId) => {
+        const name = String(id)
+        if (name === bottom) return { id, header: { id: name, parentSession: middle, origin: 'subagent', delegationDepth: 2, cwd: '/repo' } }
+        if (name === middle) return { id, header: { id: name, parentSession: top, origin: 'subagent', delegationDepth: 1, cwd: '/repo' } }
+        if (name === top) return { id, header: { id: name, cwd: '/repo' } }
+        return undefined
+      },
+    })
+
+    /**
+     * One row's direction, keyed by path so the assertion never depends on list order.
+     *
+     * The DIRECTION is what the marker's sentence needs: the same row is a child's change in its parent's
+     * panel and a parent's change in its child's, and two teammates' rows are a sibling's. Every case below
+     * carries BOTH forms of its direction — a row only the other session touched (`viaLineage`), and one this
+     * session touched too (`hasChildContribution`) — because the two say different things.
+     */
+    const directionOf = async (handle: ConnectionRpcHandler, sessionId: string, path: string): Promise<unknown> => {
+      const rows = await listEntries(handle, sessionId)
+      return rows.find(row => row.path === path)?.lineageDirection
+    }
+
+    it('answers "child" when the other owner is BELOW the lister, in both forms', async () => {
+      const { ctx, handle } = await harness({
+        prepare: (context) => { context.provide('sessions', registry('session-parent', 'session-child') as never) },
+      })
+      // Only the child touched this one; the parent edited this one as well.
+      emitResult(ctx, execFor('session-child'), editSuccess('/repo/only.txt', 'a', 'b'))
+      emitResult(ctx, execFor('session-child'), editSuccess('/repo/also.txt', 'a', 'b'))
+      emitResult(ctx, execFor('session-parent'), editSuccess('/repo/also.txt', 'b', 'c'))
+
+      expect(await directionOf(handle, 'session-parent', '/repo/only.txt')).toBe('child')
+      expect(await directionOf(handle, 'session-parent', '/repo/also.txt')).toBe('child')
+      // The two forms really are the two forms (what the sentence is chosen from).
+      const rows = await listEntries(handle, 'session-parent')
+      expect(rows.find(row => row.path === '/repo/only.txt')?.viaLineage).toBe(true)
+      expect(rows.find(row => row.path === '/repo/also.txt')?.viaLineage).toBeUndefined()
+    })
+
+    it('answers "parent" when the other owner is ABOVE the lister, in both forms', async () => {
+      // The same two sessions, the OTHER way round: the child lists, so its parent's change is a parent's.
+      const { ctx, handle } = await harness({
+        prepare: (context) => { context.provide('sessions', registry('session-parent', 'session-child') as never) },
+      })
+      emitResult(ctx, execFor('session-parent'), editSuccess('/repo/only.txt', 'a', 'b'))
+      emitResult(ctx, execFor('session-parent'), editSuccess('/repo/also.txt', 'a', 'b'))
+      emitResult(ctx, execFor('session-child'), editSuccess('/repo/also.txt', 'b', 'c'))
+
+      expect(await directionOf(handle, 'session-child', '/repo/only.txt')).toBe('parent')
+      expect(await directionOf(handle, 'session-child', '/repo/also.txt')).toBe('parent')
+    })
+
+    it('answers "parent" for an ancestor more than one hop up', async () => {
+      // "parent" means ANCESTOR, which is what 上级 says and what the English copy is written to mean: the
+      // bottom session lists a row its GRANDPARENT wrote, and the answer is still the ancestor's.
+      const { ctx, handle } = await harness({
+        prepare: (context) => { context.provide('sessions', chainRegistry('session-top', 'session-mid', 'session-low') as never) },
+      })
+      emitResult(ctx, execFor('session-top'), editSuccess('/repo/top.txt', 'a', 'b'))
+
+      expect(await directionOf(handle, 'session-low', '/repo/top.txt')).toBe('parent')
+      // …and the same row read from the middle is a parent's too, at one hop.
+      expect(await directionOf(handle, 'session-mid', '/repo/top.txt')).toBe('parent')
+    })
+
+    it('answers "sibling" when neither owner is on the other chain, in both forms', async () => {
+      // Two children of one lead: they share a root and have no parent/child link between them.
+      const { ctx, handle } = await harness({
+        prepare: (context) => { context.provide('sessions', siblingsRegistry('session-lead', 'session-peer-a', 'session-peer-b') as never) },
+      })
+      emitResult(ctx, execFor('session-peer-b'), editSuccess('/repo/only.txt', 'a', 'b'))
+      emitResult(ctx, execFor('session-peer-b'), editSuccess('/repo/also.txt', 'a', 'b'))
+      emitResult(ctx, execFor('session-peer-a'), editSuccess('/repo/also.txt', 'b', 'c'))
+
+      expect(await directionOf(handle, 'session-peer-a', '/repo/only.txt')).toBe('sibling')
+      expect(await directionOf(handle, 'session-peer-a', '/repo/also.txt')).toBe('sibling')
+    })
+
+    it('answers "mixed" when two other owners stand differently, in both forms', async () => {
+      // A row the lead AND a peer both touched, read by another peer: one owner is above (the lead), the
+      // other beside (the peer). Naming either would state something true of only half the row.
+      const { ctx, handle } = await harness({
+        prepare: (context) => { context.provide('sessions', siblingsRegistry('session-lead', 'session-peer-a', 'session-peer-b') as never) },
+      })
+      emitResult(ctx, execFor('session-lead'), editSuccess('/repo/only.txt', 'a', 'b'))
+      emitResult(ctx, execFor('session-peer-b'), editSuccess('/repo/only.txt', 'b', 'c'))
+      emitResult(ctx, execFor('session-lead'), editSuccess('/repo/also.txt', 'a', 'b'))
+      emitResult(ctx, execFor('session-peer-b'), editSuccess('/repo/also.txt', 'b', 'c'))
+      emitResult(ctx, execFor('session-peer-a'), editSuccess('/repo/also.txt', 'c', 'd'))
+
+      expect(await directionOf(handle, 'session-peer-a', '/repo/only.txt')).toBe('mixed')
+      expect(await directionOf(handle, 'session-peer-a', '/repo/also.txt')).toBe('mixed')
+    })
+
+    it('answers no direction at all when the only owner is the lister', async () => {
+      // Nothing to word, so nothing is sent: the mark is absent and the direction with it. A sibling or a
+      // parent invented here would give the mark a sentence for a row nobody else touched.
+      const { ctx, handle } = await harness({
+        prepare: (context) => { context.provide('sessions', siblingsRegistry('session-lead', 'session-peer-a', 'session-peer-b') as never) },
+      })
+      emitResult(ctx, execFor('session-peer-a'), editSuccess('/repo/own.txt', 'a', 'b'))
+
+      expect(await directionOf(handle, 'session-peer-a', '/repo/own.txt')).toBeUndefined()
     })
 
     it('says nothing about a child on a row the session wrote alone', async () => {
@@ -3432,6 +3691,9 @@ describe('comments over the channel', () => {
       expect(row.sessionIds).toEqual(expect.arrayContaining(['session-1', 'session-other']))
       expect(row.viaLineage).toBeUndefined()
       expect(row.hasChildContribution).toBe(false)
+      // No mark means no sentence, so there is no direction to send either — a sibling here would give the
+      // row a marker for a session that is not in its lineage at all.
+      expect(row.lineageDirection).toBeUndefined()
     })
 
     it('says nothing about a child when the lineage is unknown', async () => {

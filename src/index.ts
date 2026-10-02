@@ -68,14 +68,14 @@ import type {
   DiffApprovalActionValue, DiffApprovalAddOutcome, DiffApprovalAddValue, DiffApprovalBlockTarget, DiffApprovalBrowseEntry, DiffApprovalBrowseValue,
   DiffApprovalBulkValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue,
   CommentAnchor, CommentQuoteLine, CommentRecord, DiffApprovalCommentAddValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue,
-  PendingEntry, PendingEntryKind, PendingFileDiff, SessionLineage, VcsImportValue,
+  LineageDirection, PendingEntry, PendingEntryKind, PendingFileDiff, SessionLineage, VcsImportValue,
 } from './types.ts'
 
 export type {
   DiffApprovalActionOutcome, DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalBlockTarget,
   DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalRefreshOutcome, DiffApprovalRefreshValue,
   CommentAnchor, CommentQuoteLine, CommentRecord, DiffApprovalCommentAddValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue,
-  PendingEntry, PendingEntryKind, PendingFileDiff, SessionLineage,
+  LineageDirection, PendingEntry, PendingEntryKind, PendingFileDiff, SessionLineage,
 } from './types.ts'
 export { PendingDiffStore } from './pending.ts'
 export { PendingPersistence, defaultStorageDir } from './persist.ts'
@@ -1009,12 +1009,19 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       const viaLineage = ownersOf(entry).includes(sessionId) ? undefined : true
       // A DIFFERENT question, and deliberately a different field (see `PendingFileDiff.hasChildContribution`):
       // whether an owner other than the requester sits inside the requester's lineage, so a row the requester
-      // touched AS WELL still says a child's change shares it. The root walk is the view's own, so the mark
-      // and the merge cannot drift. A session OUTSIDE that lineage never counts: entries are keyed by path
-      // globally, and calling an unrelated session's touch a child's contribution would make the copy lie.
+      // touched AS WELL still says a child's change shares it. It asks the view's own ROOT walk (`sameRoot`)
+      // and NOT the workspace term the merge adds: this is a claim about who wrote the row, which a child in
+      // another workspace really did, so answering it with the visibility rule would make the copy lie. A
+      // session OUTSIDE that lineage never counts: entries are keyed by path globally, and calling an
+      // unrelated session's touch a child's contribution would make the copy lie.
       const hasChildContribution = ownersOf(entry)
         .some(owner => owner !== sessionId && view.sameRoot(owner, sessionId))
-      listed.push({ ...entry, newText: adopted, ...state, viaLineage, hasChildContribution })
+      // …and WHICH WAY that other contributor stands, so the marker's sentence is true from THIS seat
+      // (see `LineageDirection`): the same row is a child's change in its parent's panel and a parent's
+      // change in its child's, and two teammates' rows are a sibling's. Absent when nothing but the
+      // requester touched the row, which is exactly when there is no mark to word.
+      const lineageDirection = view.directionOf(sessionId, entry)
+      listed.push({ ...entry, newText: adopted, ...state, viaLineage, hasChildContribution, lineageDirection })
     }
     return { files: listed, redoCleared }
   }
@@ -1143,6 +1150,49 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       if (workspace.sessionIds.includes(sessionId)) return workspace
     }
     return undefined
+  }
+
+  /**
+   * The identity one session's workspace is compared by, or `undefined` when this
+   * deployment does not account the session.
+   *
+   * The merged view needs it because the pending list is NOT scoped by workspace: the store is one map
+   * keyed by absolute path (`pending.ts`) persisted to one `pending.json` under the storage root
+   * (`persist.ts`), and that root comes from the plugin's `storageDir` alone — the `workspaces/`
+   * component of the default path is the LEGACY per-workspace layout whose files are folded in and
+   * deleted on load. Nothing else in the list path consults the workspace, so a row recorded by a
+   * session in another one would otherwise be listed under this session's view.
+   *
+   * `resolve` folds separators and `.`/`..`; Windows additionally compares case-insensitively, the same
+   * way `withinSandboxRoot` and the backend's own containment do (`C:\Repo` and `c:\repo` are one
+   * directory there). An ABSENT workspace, or one the registry records with no path, answers
+   * `undefined` — "not known", never a guess: the caller keeps the pre-workspace behaviour for it
+   * rather than refusing a row it cannot show to be elsewhere.
+   * @param sessionId - the session whose workspace is wanted.
+   * @returns the comparison key, or `undefined` when it is not known.
+   */
+  function workspaceKeyOf(sessionId: SessionId): string | undefined {
+    const path = workspaceOf(sessionId)?.path
+    if (typeof path !== 'string' || path.length === 0) return undefined
+    const resolved = resolve(path)
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+  }
+
+  /**
+   * Whether two workspaces, already reduced to comparison keys by {@link workspaceKeyOf}, are the same
+   * one as far as this deployment can say.
+   *
+   * TRUE when either side is unknown, which is the whole point: an unknown workspace must not turn into
+   * a refusal. The pending list is not scoped by workspace (see `workspaceKeyOf`), so a session the
+   * registry does not account — a memory-only session, a row from a host that named no workspace, a
+   * deployment whose registry the plugin cannot read — would otherwise lose rows it has always shown.
+   * The check is for the case this code can actually see: two KNOWN roots that differ.
+   * @param left - one session's key, or `undefined` when unknown.
+   * @param right - the other's.
+   * @returns whether they can be shown to share a workspace.
+   */
+  function sameWorkspaceKey(left: string | undefined, right: string | undefined): boolean {
+    return left === undefined || right === undefined || left === right
   }
 
   /**
@@ -1294,10 +1344,28 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * The lineage view one request is answered from — which sessions' entries the requester may SEE, and
    * therefore act on.
    *
-   * The rule is ROOT-EQUAL: an entry is visible when any session that touched it walks to the same
-   * lineage root as the requester. Walking is `knownLineageOf` links only, so a teammate's rows appear in
-   * the lead's list (both walk to the lead) and the lead's appear in the teammate's — while a host fork,
-   * which names a parent but is not a subagent child, stays an independent root and shares nothing.
+   * The rule is ROOT-EQUAL **AND SAME-WORKSPACE**: an entry is visible when any session that touched it
+   * walks to the same lineage root as the requester AND can be shown to sit in the requester's workspace.
+   * Walking is `knownLineageOf` links only, so a teammate's rows appear in the lead's list (both walk to
+   * the lead) and the lead's appear in the teammate's — while a host fork, which names a parent but is not
+   * a subagent child, stays an independent root and shares nothing.
+   *
+   * The workspace half is not redundant with the lineage half, because NOTHING ELSE IN THE LIST PATH
+   * SCOPES BY WORKSPACE: the store is one map keyed by absolute path persisted to one `pending.json` under
+   * the storage root (`pending.ts`, `persist.ts` — the `workspaces/` component of the default path is the
+   * legacy per-workspace layout, folded in and deleted on load). So without this a row recorded by a
+   * session in ANOTHER workspace would be listed here whenever the two share a lineage root — which is a
+   * real shape: this view merges every subagent child (see the KNOWN LIMIT below), and the harness's
+   * out-of-process shape lets a child run under a configured `cwd` of its own, its cwd being documented as
+   * the child's "workspace identity" (`dsh-subagent/lib/types/out-of-process.js`:
+   * `resolveChildCwd`/`assertUsableCwd`). An in-process child copies its parent's cwd verbatim
+   * (`…/child-agent.js:childSessionMeta`), so the two agree there; this rule is what makes the plugin's
+   * answer independent of which of those two shapes it is handed.
+   *
+   * A session the registry does not account is NOT refused: `sameWorkspace` answers true when either
+   * side's workspace is unknown, so an unaccounted or memory-only session keeps exactly the view it had
+   * before this term existed. UNKNOWN DEGRADES TO SELF on the lineage half and TO THE OLD ANSWER here —
+   * never to a guess, and never to a refusal the reader cannot see the reason for.
    *
    * UNKNOWN DEGRADES TO SELF, never to a guess: with no recorded lineage and no header facts every
    * session is its own root, so only the requester matches — byte-for-byte today's behaviour. A cycle
@@ -1306,11 +1374,16 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    *
    * TWO THINGS A MERGED VIEW DOES NOT MERGE, so the next reader does not expect them:
    * comments stay per-session (`comments` is read with the requester's id, so a merged list shows the
-   * requester's threads only), and undo stacks stay per-session — every action records its pair under the
-   * session that PRESSED it, exactly as before, so a teammate's own action cannot be undone from the
-   * lead's view (`undoStackOf`/`popOwnPair` are keyed by session). The one session-scoped thing a merged
-   * press takes from the ROW is the WRITE: a revert runs under `ownerOf(entry)`, whose workspace and
-   * sandbox the file belongs to.
+   * requester's threads only), and undo stacks stay per-session — every ACTION records its pair under the
+   * session that PRESSED it, so a teammate's own action cannot be undone from the lead's view and a row
+   * the lead acted on cannot be undone from the teammate's (`undoStackOf`/`popOwnPair` are keyed by
+   * session). The one session-scoped thing a merged press takes from the ROW is the FILE: a revert runs
+   * under `ownerOf(entry)`, whose workspace and sandbox the file belongs to.
+   *
+   * THE MARK (`hasChildContribution`) IS A DIFFERENT QUESTION and keeps asking only the lineage half: it
+   * claims an owner other than the requester WROTE part of the row, which a child in another workspace
+   * really did. Adding the workspace term there would make that copy lie, so it deliberately does not ask
+   * it (see `sameRoot` below).
    *
    * KNOWN LIMIT: a teammate child cannot be told from ANY OTHER subagent child by its header. Both are
    * built by the one `childSessionMeta` above, and the Team spawner adds nothing to the child — it passes
@@ -1318,24 +1391,56 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * (`dsh-experimental-agent-team/lib/types/roster.js:253-262`) and records membership in the LEAD's own
    * journal (`:249`), which this plugin cannot read. So this view merges every subagent child, not only
    * teammates; narrowing it to the roster would need a service the plugin does not inject.
-   * @returns the view: `sees` answers the visibility question for one entry, and `sameRoot` answers whether
-   * two sessions share a root — the question the row's mark asks about its other owners.
+   * @returns the view: `sees` answers the visibility question for one entry, `sameRoot` answers whether two
+   * sessions share a lineage root (the question the row's mark asks about its other owners), and
+   * `directionOf` says WHICH WAY that other owner stands, for the sentence the mark wears.
    */
   function lineageView(): {
     sees: (sessionId: SessionId, entry: PendingEntry) => boolean
     sameRoot: (a: SessionId, b: SessionId) => boolean
+    directionOf: (sessionId: SessionId, entry: PendingEntry) => LineageDirection | undefined
   } {
     const recorded = new Map<SessionId, SessionLineage>()
     for (const entry of store.all()) {
       if (entry.lineage !== undefined && !recorded.has(entry.sessionId)) recorded.set(entry.sessionId, entry.lineage)
     }
     const facts = new Map<SessionId, { parent: SessionId | undefined; subagent: boolean }>()
-    const roots = new Map<SessionId, SessionId>()
-    const rootOf = (sessionId: SessionId): SessionId => {
-      const known = roots.get(sessionId)
+    /**
+     * One session's UPWARD CHAIN: itself, then each recorded subagent parent above it, in order.
+     *
+     * This is the one walk the whole view is made of. `rootOf` is its last element, and the mark's
+     * DIRECTION is a membership question over two of these chains — so the merge, the root and the
+     * direction can never be computed from different links. The links are `knownLineageOf`'s, which reads
+     * the lineage the entry RECORDED before it asks the live header (see that function), and only an
+     * `origin: 'subagent'` link is followed: a host fork names a parent while being an independent root.
+     *
+     * Memoized per view like `roots` was, because the list read asks this per entry per owner on a path
+     * every client repeats once a second. The walk stops at a repeat (`walked`) and at
+     * {@link MAX_LINEAGE_DEPTH}, so a malformed cycle cannot hang it — the same two guards the root walk
+     * has always had.
+     */
+    const chains = new Map<SessionId, readonly SessionId[]>()
+    /**
+     * Each session's workspace key, resolved once per view.
+     *
+     * Memoized for the same reason `chains` is: this runs inside `sees`, which the list read calls once per
+     * entry per owner (`listWithState`), on a path every client repeats once a second — and the registry
+     * lookup walks the deployment's workspace list. `has` rather than a truthy check so "known to be
+     * unknown" is cached as such instead of being asked again for an unaccounted session.
+     */
+    const workspaceKeys = new Map<SessionId, string | undefined>()
+    const workspaceKey = (sessionId: SessionId): string | undefined => {
+      if (workspaceKeys.has(sessionId)) return workspaceKeys.get(sessionId)
+      const key = workspaceKeyOf(sessionId)
+      workspaceKeys.set(sessionId, key)
+      return key
+    }
+    const chainOf = (sessionId: SessionId): readonly SessionId[] => {
+      const known = chains.get(sessionId)
       if (known !== undefined) return known
-      let current = sessionId
+      const chain: SessionId[] = [sessionId]
       const walked = new Set<SessionId>([sessionId])
+      let current = sessionId
       for (let depth = 0; depth < MAX_LINEAGE_DEPTH; depth += 1) {
         let fact = facts.get(current)
         if (fact === undefined) {
@@ -1344,20 +1449,75 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         }
         if (!fact.subagent || fact.parent === undefined || walked.has(fact.parent)) break
         walked.add(fact.parent)
+        chain.push(fact.parent)
         current = fact.parent
       }
-      roots.set(sessionId, current)
-      return current
+      chains.set(sessionId, chain)
+      return chain
+    }
+    /** The top of one session's chain: the lineage root both `sees` and `sameRoot` compare. */
+    const rootOf = (sessionId: SessionId): SessionId => {
+      const chain = chainOf(sessionId)
+      return chain[chain.length - 1]!
     }
     return {
       sees: (sessionId, entry) => {
         const root = rootOf(sessionId)
-        return ownersOf(entry).some(owner => rootOf(owner) === root)
+        const mine = workspaceKey(sessionId)
+        return ownersOf(entry).some((owner) => {
+          if (rootOf(owner) !== root) return false
+          // A row the requester TOUCHED is its own, whatever the registry says about anyone else on it:
+          // the store keys entries by absolute path, so the requester's own path is in its own workspace.
+          if (owner === sessionId) return true
+          return sameWorkspaceKey(workspaceKey(owner), mine)
+        })
       },
-      // The same walk, asked about two sessions rather than one session and one entry. The MARK needs this
-      // question (is that other owner inside my lineage?) and the two must not drift apart, so it is the very
-      // `rootOf` above rather than a second lineage rule.
+      // The mark's question, and DELIBERATELY not the visibility question above: it asks whether another
+      // owner walks to the same lineage root, which is a claim about who WROTE the row, not about whether
+      // the row is in this view. A cross-workspace child that really did edit the path has really
+      // contributed to it, and saying otherwise would make the copy lie — while the merge above is about
+      // what the reader may see and act on, which is exactly where the workspace belongs. The two share
+      // this one root walk (and `sameWorkspace` is the only addition to the other), so the sessions they
+      // call "kin" cannot drift; the questions they answer are different on purpose.
       sameRoot: (a, b) => rootOf(a) === rootOf(b),
+      /**
+       * Which way the row's other contributors stand, for the marker's sentence.
+       *
+       * Read off the SAME recorded links `rootOf` walks, never guessed and never inferred from a name: an
+       * owner is the requester's CHILD when the requester sits on that owner's upward chain, its PARENT
+       * when that owner sits on the requester's chain, and a SIBLING when the two merely share a root.
+       * `parent` therefore means ANCESTOR, however many hops up — which is exactly what the Chinese 上级
+       * says and what the English copy is written to mean.
+       *
+       * Owners of DIFFERENT directions answer `mixed`: the row carries two different relationships and
+       * picking one would state a fact about the row that is only true of part of it. The set is
+       * unresolvable in the honest direction too — "another session" is true of every member — which is
+       * why `mixed` is a real answer and not a failure. `undefined` when no other same-root owner
+       * contributed, i.e. when there is no mark to word.
+       *
+       * The criterion is `hasChildContribution`'s exactly (non-requester, same root) — the workspace term
+       * belongs to visibility, not to this claim (see `sameRoot`).
+       * @param sessionId - the session listing the row.
+       * @param entry - the row being listed.
+       * @returns the direction, or `undefined` when nothing but the lister touched the row.
+       */
+      directionOf: (sessionId, entry): LineageDirection | undefined => {
+        const root = rootOf(sessionId)
+        const mine = chainOf(sessionId)
+        const seen = new Set<LineageDirection>()
+        for (const owner of ownersOf(entry)) {
+          if (owner === sessionId) continue
+          if (rootOf(owner) !== root) continue
+          const theirs = chainOf(owner)
+          // Child first, so a malformed pair of cycles that walk through each other still answers
+          // deterministically rather than by iteration order.
+          if (theirs.includes(sessionId)) seen.add('child')
+          else if (mine.includes(owner)) seen.add('parent')
+          else seen.add('sibling')
+        }
+        if (seen.size === 0) return undefined
+        return seen.size === 1 ? [...seen][0] : 'mixed'
+      },
     }
   }
 
@@ -1516,8 +1676,23 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     return stack
   }
 
-  /** Record one undoable action in its own session's history. A fresh action
-   *  invalidates that session's redo history (and only that session's). */
+  /**
+   * Record one undoable action in its own session's history. A fresh action
+   * invalidates that session's redo history (and only that session's).
+   *
+   * THE RULE THIS STACK OBEYS, and the reason every caller must pass the session that PRESSED the action:
+   * a press happens in one session's view, and undo is retrieved from THAT session's own stack
+   * ({@link undoStackOf} is keyed by session and {@link popOwnPair} refuses a pair tagged with anyone
+   * else), so a pair filed under a session other than the presser is one the presser's Ctrl+Z can never
+   * pop — the action looks un-undoable where it was taken, while the other session's Ctrl+Z would take
+   * back a decision its reader never made. The row's OWNER still governs the FILE (the workspace and
+   * sandbox a revert writes under); only the bookkeeping is the presser's. On a merged row the two agree
+   * on the workspace anyway: the view only merges rows whose workspace can be shown to be the reader's
+   * (see `sameWorkspace`), so the pair's session is a right policy for the restore as well.
+   * @param sessionId - the session whose history this belongs to: the one that pressed.
+   * @param before - the state the action found, and what a restore puts back.
+   * @param after - the state the action left, and what a redo re-applies.
+   */
   function pushUndo(sessionId: SessionId, before: DiffApprovalUndoState, after: DiffApprovalUndoState): void {
     undoStackOf(sessionId).push({ sessionId, before, after })
     redoStackOf(sessionId).length = 0
@@ -2024,8 +2199,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             return { ok: true, value }
           }
         }
-        // The row's OWNER, not the reader: the sandbox a revert writes under and the stack an undo pair
-        // lands on are the recording session's (see `ownerOf` and `lineageView`).
+        // The row's OWNER governs the FILE: the sandbox and workspace a revert writes under are the ones
+        // the file was recorded in, never the reader's (see `ownerOf`). The undo pair is NOT the owner's —
+        // it belongs to the session that PRESSED, which is the only session whose Ctrl+Z can pop it
+        // (see `pushUndo` and the two comments on the pair below).
         const owner = ownerOf(entry)
         // A revert that deletes a created file is not undoable (the file is
         // gone); a revert that writes keeps a snapshot for Ctrl+Z.
@@ -2058,7 +2235,11 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // same "this action is not undoable" the file itself already is.
         const pair = undo === undefined ? undefined : { before: droppingComments(undo.before), after: undo.after }
         dropEntry(target.id)
-        if (pair !== undefined) pushUndo(owner, pair.before, pair.after)
+        // The session that PRESSED, not the row's owner: undo is retrieved from the requester's own stack
+        // (`undoStackOf`/`popOwnPair` are keyed by session, and the pop refuses a pair tagged with anyone
+        // else), so a pair filed under an owner who never saw the press could never be popped where the
+        // press happened. The file above was still written under the OWNER.
+        if (pair !== undefined) pushUndo(target.sessionId, pair.before, pair.after)
         persistSession(true)
         const value: DiffApprovalActionValue = { outcome: 'reverted' }
         return { ok: true, value }
@@ -2285,7 +2466,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         } catch (error: unknown) {
           return rpcError(`block revert failed: ${errorMessage(error)}`)
         }
-        if (undo !== undefined) pushUndo(ownerOf(entry), undo.before, undo.after)
+        // The pair goes to the session that PRESSED, like every other branch here — even though the write
+        // above named the row's owner. The drop branch just below is the same action's second half and
+        // must file its pair the same way, or one gesture would be undoable from one view and not another.
+        if (undo !== undefined) pushUndo(blockTarget.sessionId, undo.before, undo.after)
         persistSession()
         const fullyResolved = contentEqual(updatedNew, entry.oldText)
         if (fullyResolved && blockTarget.removeWhenResolved === true) {
@@ -2313,9 +2497,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           return { ok: true, value }
         }
         try {
-          // The write policy comes from the PAIR's session, not the caller's: the panel
-          // shows the open session's list, and that is not always the one whose entry is
-          // being restored.
+          // The write policy comes from the PAIR's session, which `popOwnPair` has already proved is this
+          // caller: a merged row's pair is filed under the session that pressed, so the restore writes as
+          // the presser — whose workspace is the row's own by the merge rule (see `pushUndo`).
           await restoreState(pair.sessionId, pair.before, pair.after, signal)
         } catch (error: unknown) {
           // Keep the pair on the stack so a later, still-valid undo works.
@@ -2692,7 +2876,20 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const target = openTargetOf(payload)
         if (target === undefined) return rpcError('sessionId, id, and action must be valid')
         await ensureLoaded()
-        const entry = store.get(target.id)
+        // Guarded by the same merged view the other entry-naming actions read through, so an `open` can
+        // only reach a row the requester can SEE. Without it this endpoint was the one hole in the rule:
+        // a session that never had the row in its list could still launch the file AND take the row's
+        // unseen dot down (`markSeen` below), which is exactly the cross-session effect the guard exists
+        // to refuse. A refusal answers `missing`, the same as the other actions, so it discloses nothing
+        // about a row the requester cannot see.
+        const lineage = lineageView()
+        let entry = actionableEntryOf(lineage, target.sessionId, target.id)
+        if (entry === undefined) {
+          // The list may only now have hydrated (`ensureLoaded` above is what folds it in), so the view is
+          // asked once more with the same shape the actions use rather than reading absence as a refusal.
+          await ensureLoaded()
+          entry = actionableEntryOf(lineage, target.sessionId, target.id)
+        }
         if (entry === undefined) {
           const value: DiffApprovalOpenValue = { outcome: 'missing' }
           return { ok: true, value }

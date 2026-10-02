@@ -434,4 +434,48 @@ describe('the merged-row flags', () => {
     expect(files[2]?.viaLineage).toBe(false)
     expect(files[2]?.hasChildContribution).toBe(false)
   })
+
+  it('carries the DIRECTION through the narrowing, and drops a value that is not one', async () => {
+    // The same boundary and the same trap as the two flags above: `pendingFileOf` names every field it keeps,
+    // so a direction it does not name never reaches the browser and the mark silently loses its sentence.
+    // VALIDATED rather than cast, on the same principle: a value no host should send reads as "not known"
+    // (the neutral sentence) instead of flowing into the panel's switch as an unchosen case.
+    const seam = fakeRpc({
+      list: {
+        ok: true,
+        value: {
+          files: [
+            {
+              id: '/repo/parent.txt', sessionId: 'session-parent', sessionIds: ['session-parent'],
+              path: '/repo/parent.txt', earlierVersion: 'file', oldText: 'a', newText: 'b',
+              updatedAt: 10, missing: false, diverged: false, viaLineage: true, lineageDirection: 'parent',
+            },
+            {
+              id: '/repo/sibling.txt', sessionId: 'session-peer', sessionIds: ['session-peer'],
+              path: '/repo/sibling.txt', earlierVersion: 'file', oldText: 'a', newText: 'b',
+              updatedAt: 11, missing: false, diverged: false, hasChildContribution: true, lineageDirection: 'sibling',
+            },
+            {
+              // A host older than the direction: no field at all.
+              id: '/repo/old.txt', sessionId: 'session-child', sessionIds: ['session-child'],
+              path: '/repo/old.txt', earlierVersion: 'file', oldText: 'a', newText: 'b',
+              updatedAt: 12, missing: false, diverged: false, viaLineage: true,
+            },
+            {
+              // Not one of the four: corrupted or hand-written state, which must not become a sentence.
+              id: '/repo/bogus.txt', sessionId: 'session-child', sessionIds: ['session-child'],
+              path: '/repo/bogus.txt', earlierVersion: 'file', oldText: 'a', newText: 'b',
+              updatedAt: 13, missing: false, diverged: false, viaLineage: true, lineageDirection: 'grandparent',
+            },
+          ],
+        },
+      },
+    })
+    const { files } = await createDiffApprovalPort(seam.rpc).list(S1)
+    expect(files[0]?.lineageDirection).toBe('parent')
+    expect(files[1]?.lineageDirection).toBe('sibling')
+    // Absent stays absent on both, so the panel takes its neutral fallback rather than naming a direction.
+    expect(files[2]?.lineageDirection).toBeUndefined()
+    expect(files[3]?.lineageDirection).toBeUndefined()
+  })
 })

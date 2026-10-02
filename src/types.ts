@@ -77,6 +77,19 @@ export interface PendingEntry {
 export type PendingEntryKind = 'file' | 'none'
 
 /**
+ * Which way a row's other contributor sits relative to the session LISTING it, walked from the recorded
+ * subagent parent links (see `lineageView` on the host).
+ *
+ * `child` — the other session descends from the lister (the lister is on the other's upward chain).
+ * `parent` — the other session is ABOVE the lister (the lister descends from it). It means an ANCESTOR,
+ *   possibly more than one hop up, not only the direct parent: the Chinese 上级 says exactly that without
+ *   ambiguity, so the English copy and this name keep that meaning.
+ * `sibling` — same lineage root, neither is on the other's chain (two children of one parent, say).
+ * `mixed` — non-requester owners of DIFFERENT directions: never one of them, and never a guess at one.
+ */
+export type LineageDirection = 'child' | 'parent' | 'sibling' | 'mixed'
+
+/**
  * One listed pending entry: the stored operation plus the live file state the
  * list endpoint computes by reading the file's current content.
  */
@@ -98,6 +111,18 @@ export interface PendingFileDiff extends PendingEntry {
    * work. Host-computed per read (`listWithState`), absent on a host older than the mark.
    */
   hasChildContribution?: boolean | undefined
+  /**
+   * WHICH WAY the row's other contributor stands, so the marker's sentence tells the truth from the seat it
+   * is drawn in: the same row is a child's change in its parent's panel and a parent's change in its
+   * child's. Host-computed per read from the SAME recorded parent links the merge walks, and carried to the
+   * browser like `viaLineage` — the client never infers lineage.
+   *
+   * Absent whenever no mark applies (the lister is the only contributor), and absent on a host older than
+   * this field — in which case the client says the neutral sentence rather than picking a direction.
+   * `mixed` is likewise the honest answer when the row carries non-requester owners of different
+   * directions; it is never resolved to one of them.
+   */
+  lineageDirection?: LineageDirection | undefined
   /**
    * Whether the file no longer exists (or cannot be resolved). Reverting a
    * missing entry restores its old content, which recreates the file.

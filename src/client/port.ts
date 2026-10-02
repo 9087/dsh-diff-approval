@@ -216,7 +216,7 @@ function legacyEarlierVersion(kind: unknown): 'file' | 'none' | undefined {
 function pendingFileOf(value: unknown): PendingFileDiff | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const record = value as Record<string, unknown>
-  const { id, sessionId, sessionIds, path, oldText, newText, updatedAt, missing, diverged, viaLineage, hasChildContribution } = record
+  const { id, sessionId, sessionIds, path, oldText, newText, updatedAt, missing, diverged, viaLineage, hasChildContribution, lineageDirection } = record
   // A host built before the rename answers with `kind: 'edit' | 'create'`. Host and client ship together
   // (the host serves this bundle), but a tab can hold the previous client for a moment: reading only the
   // new name would blank the whole list for that moment instead of showing it.
@@ -251,6 +251,15 @@ function pendingFileOf(value: unknown): PendingFileDiff | undefined {
     // same trap: this function rebuilds each row field by field, so a field it does not name never reaches
     // the browser. Absent from an older host reads as "no child's change in it", the behaviour before it.
     hasChildContribution: hasChildContribution === true,
+    // WHICH WAY that change came from, carried the same way and with the same trap: a direction the host
+    // sent and this narrowing dropped would silently cost the mark its sentence and leave the neutral one.
+    // Validated against the four literals rather than cast, so a malformed value from a hand-edited or
+    // unknown host reads as "not known" (the neutral sentence) instead of reaching a switch that has no
+    // case for it. Absent stays absent — there is no boolean default that means "no direction".
+    ...(lineageDirection === 'child' || lineageDirection === 'parent'
+      || lineageDirection === 'sibling' || lineageDirection === 'mixed'
+      ? { lineageDirection }
+      : {}),
     // The dot is host truth too, and dropping it here is invisible: everything upstream lights, and the row
     // simply never shows it. Only `true` is carried, so an older host's silence stays silence.
     ...(record.unseen === true ? { unseen: true } : {}),
