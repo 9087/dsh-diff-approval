@@ -134,8 +134,10 @@ function asksOf(value: unknown): CommentAsk[] {
     if (typeof requestId !== 'string' || requestId.length === 0) continue
     const turn = record.turn
     const text = record.text
+    const sessionId = record.sessionId
     asks.push({
       requestId,
+      ...(typeof sessionId === 'string' && sessionId !== '' ? { sessionId: sessionId as SessionId } : {}),
       ...(typeof text === 'string' && text !== '' ? { text } : {}),
       ...(typeof turn === 'number' ? { turn } : {}),
       ...(record.dropped === true ? { dropped: true } : {}),
@@ -150,6 +152,32 @@ function hasAsk(comment: CommentRecord, requestId: string, wanted: (ask: Comment
   return (comment.asks ?? []).some(ask => ask.requestId === requestId && wanted(ask))
 }
 
+/**
+ * The scope one request may act on: which comment AUTHORS its lineage covers.
+ *
+ * This module knows nothing about lineages — the host walks them — so the rule arrives as a predicate,
+ * built once per request from the lineage view the endpoint already has (`sameRoot`). Every read and
+ * every guard takes it, which is what lets the store answer for a whole lineage without a second
+ * lineage rule living down here beside the first.
+ */
+export type CommentScope = (author: SessionId) => boolean
+
+/**
+ * The transcript one question's answer will be written in.
+ *
+ * `ask.sessionId` when the question recorded one — every question asked since a lineage could read more
+ * than one seat's threads does — otherwise the comment's own session, which is where a question asked
+ * before that field existed necessarily went: the only session that could ask it was the one that wrote
+ * the thread. ONE definition, shared by the answer fold, the turn-end match and the asker's grouping,
+ * so the three cannot disagree about which transcript a question belongs to.
+ * @param ask - the question.
+ * @param comment - the thread it was asked in.
+ * @returns the session whose transcript holds its answer.
+ */
+export function askTranscript(ask: CommentAsk, comment: CommentRecord): SessionId {
+  return ask.sessionId ?? comment.sessionId
+}
+
 /** Whether two answer maps say the same thing, key for key and text for text. */
 function sameAnswers(left: Readonly<Record<string, string>> | undefined, right: Readonly<Record<string, string>> | undefined): boolean {
   const one = Object.entries(left ?? {})
@@ -159,28 +187,35 @@ function sameAnswers(left: Readonly<Record<string, string>> | undefined, right: 
 }
 
 /**
- * What the transcript currently says about one thread's questions, as the record keeps it.
+ * What ONE transcript currently says about the questions it owns, and which questions those are.
  *
- * Only the questions this thread actually asked are taken: the read is the whole session's, and a
- * thread that stored every other thread's answers would be a copy of the transcript rather than its
- * own state — and one whose text grows without bound as the conversation does. A question the read
- * found no answer for is LEFT OUT rather than stored empty, so a turn that has not written yet cannot
- * look like an answer that changed.
+ * Only the questions asked in that transcript are taken: a read is one session's, and a thread that
+ * stored every other transcript's answers would be a copy of the conversation rather than its own
+ * state. A question the read found no answer for is left out rather than stored empty, so a turn that
+ * has not written yet cannot look like an answer that changed.
  * @param comment - the thread, for the questions it asked.
- * @param answers - the session's answer text per question id.
- * @returns the thread's own answers, by question id.
+ * @param sessionId - the transcript being read.
+ * @param answers - that transcript's answer text per question id.
+ * @returns the thread's own question ids there, and the answers it holds for them.
  */
-function answerNowOf(comment: CommentRecord, answers: Readonly<Record<string, AskRead>>): Record<string, string> {
-  const own: Record<string, string> = {}
+function answersInTranscript(
+  comment: CommentRecord,
+  sessionId: SessionId,
+  answers: Readonly<Record<string, AskRead>>,
+): { own: string[]; now: Record<string, string> } {
+  const own: string[] = []
+  const now: Record<string, string> = {}
   for (const ask of comment.asks ?? []) {
+    if (askTranscript(ask, comment) !== sessionId) continue
+    own.push(ask.requestId)
     const text = answers[ask.requestId]?.answer
-    if (text !== undefined) own[ask.requestId] = text
+    if (text !== undefined) now[ask.requestId] = text
   }
-  return own
+  return { own, now }
 }
 
 /**
- * One thread as a read of the transcript leaves it: its questions' current answers, and the dot up if
+ * One thread as a read of ONE transcript leaves it: its questions' current answers, and the dot up if
  * those say something the reader has not been told about.
  *
  * "New" is a DIFFERENCE, not a presence: the transcript answers a question once and hands back the
@@ -190,12 +225,25 @@ function answerNowOf(comment: CommentRecord, answers: Readonly<Record<string, As
  * down — and it is STICKY: an answer that arrived while the dot was already up does not need to raise
  * it again. A question the transcript shows no answer for is absent here, so a log this process cannot
  * read, or a turn that has not written yet, leaves the thread exactly as it was.
+ *
+ * A thread may hold questions asked in MORE THAN ONE transcript (one card, two seats, each asking from
+ * its own conversation). This fold owns only its own transcript's entries: it updates those, clears the
+ * ones that transcript no longer shows an answer for, and leaves every other group exactly as that
+ * group's own fold left it. Replacing the map wholesale would erase a second transcript's answers on
+ * the next poll — the reader would watch an answer appear and then vanish.
  * @param comment - the thread as it stands.
- * @param answers - the session's answer text per question id.
+ * @param sessionId - the transcript being read.
+ * @param answers - that transcript's answer text per question id.
  * @returns what the record should hold after this read.
  */
-function answerStateOf(comment: CommentRecord, answers: Readonly<Record<string, AskRead>>): CommentRecord {
-  const answerNow = answerNowOf(comment, answers)
+function answerStateOf(comment: CommentRecord, sessionId: SessionId, answers: Readonly<Record<string, AskRead>>): CommentRecord {
+  const { own, now } = answersInTranscript(comment, sessionId, answers)
+  const answerNow: Record<string, string> = { ...(comment.answerNow ?? {}) }
+  for (const requestId of own) {
+    const text = now[requestId]
+    if (text === undefined) delete answerNow[requestId]
+    else answerNow[requestId] = text
+  }
   const seen = comment.answerSeen ?? {}
   const lit = comment.unseen === true
     || Object.entries(answerNow).some(([requestId, text]) => seen[requestId] !== text)
@@ -405,8 +453,27 @@ export class CommentStore {
     this.options.onLoadSkipped?.(file, error)
   }
 
-  /** One session's comments, oldest first (the order threads are read in). */
-  list(sessionId: SessionId): CommentRecord[] {
+  /**
+   * The comments one SCOPE may read, oldest first (the order threads are read in).
+   *
+   * The scope is the caller's lineage rule (`CommentScope`), so a seat reads every thread of the seats
+   * it shares a lineage root with — not only the ones it wrote. The files do not move for that: each
+   * comment still lives in its author's file (see `save`), and the fan-out happens here, in memory,
+   * over the one map `loadAll` filled from every file. That is what keeps a teammate's already-written
+   * threads visible, with no migration.
+   * @param scope - which comment authors this caller may read.
+   * @returns the comments those authors wrote, oldest first.
+   */
+  list(scope: CommentScope): CommentRecord[] {
+    const listed: CommentRecord[] = []
+    for (const comment of this.byId.values()) {
+      if (scope(comment.sessionId)) listed.push(comment)
+    }
+    return listed.sort((left, right) => left.createdAt - right.createdAt)
+  }
+
+  /** One author's own comments, oldest first: the WRITE-SET of that author's file (see `save`). */
+  private authoredBy(sessionId: SessionId): CommentRecord[] {
     const listed: CommentRecord[] = []
     for (const comment of this.byId.values()) {
       if (comment.sessionId === sessionId) listed.push(comment)
@@ -429,8 +496,8 @@ export class CommentStore {
   }
 
   /**
-   * Fold what the session's transcript now says into the threads that asked, so a thread whose answer
-   * has arrived (or been rewritten) wears the dot.
+   * Fold what ONE transcript now says into the threads that asked there, so a thread whose answer has
+   * arrived (or been rewritten) wears the dot.
    *
    * The answers are DERIVED on every list read and never trusted from the file (see
    * `CommentRecord.answerNow`): the read is the only moment the host knows what the agent has said, and
@@ -442,16 +509,21 @@ export class CommentStore {
    * empty answer: a log this process cannot read (or a turn that has not written yet) then leaves the
    * dot exactly as it was, instead of raising it on every poll.
    *
-   * @param sessionId - the session whose comments to fold.
-   * @param answers - the answer text per question id, as the transcript read it.
+   * The patch's own key is the TRANSCRIPT, not the comment's author: a thread written in one seat can
+   * hold a question asked from another (see `askTranscript`), and this read is that other seat's log.
+   * Only the questions whose answer lives in `sessionId` are folded; a thread that also holds questions
+   * asked elsewhere keeps those exactly as that transcript's own fold left them.
+   *
+   * @param sessionId - the transcript being folded, which owns the questions it is handed.
+   * @param answers - the answer text per question id, as that transcript read it.
    * @returns whether any thread changed.
    */
   syncAnswers(sessionId: SessionId, answers: Readonly<Record<string, AskRead>>): boolean {
-    // The session guard is the patch's own: the read is one session's, and a patch keyed on the
-    // transcript alone would fold a second session's answers into threads that never asked.
+    // The transcript guard is the patch's own: the read is one session's, and a patch keyed on the
+    // request ids alone would fold a second transcript's answers into questions that never asked there.
     const lit = (comment: CommentRecord): CommentRecord | undefined => {
-      if (comment.sessionId !== sessionId) return undefined
-      const next = answerStateOf(comment, answers)
+      if (!(comment.asks ?? []).some(ask => askTranscript(ask, comment) === sessionId)) return undefined
+      const next = answerStateOf(comment, sessionId, answers)
       return sameRecord(comment, next) ? undefined : next
     }
     return this.patch(
@@ -578,44 +650,51 @@ export class CommentStore {
   }
 
   /**
-   * Drop one comment.
-   * @param sessionId - the session the caller believes the comment belongs to.
+   * Drop one comment the caller's scope covers.
+   * @param scope - which comment authors the caller may act on.
    * @param id - the comment to drop.
-   * @returns whether it was there (and belonged to that session).
+   * @returns whether it was there (and was in scope).
    */
-  remove(sessionId: SessionId, id: string): boolean {
-    return this.removeMany(sessionId, [id]).length === 1
+  remove(scope: CommentScope, id: string): boolean {
+    return this.removeMany(scope, [id]).length === 1
   }
 
   /**
-   * Drop several comments of one session in ONE write.
+   * Drop several comments in one write PER FILE that holds them.
    *
    * This is what a batch action needs and what a loop of `remove` calls cannot give it: each
-   * `remove` saves the session's file, so ending ten comments wrote that file ten times — ten
-   * chances for a transient failure to leave the store and the disk disagreeing about an action
-   * the reader asked for once. The save happens only when something was actually dropped, so a
-   * batch that matches nothing does not rewrite the file.
+   * `remove` saves the file, so ending ten comments wrote that file ten times — ten chances for a
+   * transient failure to leave the store and the disk disagreeing about an action the reader asked
+   * for once. The save happens only when something was actually dropped, so a batch that matches
+   * nothing does not rewrite a file.
    *
-   * An id of another session, or one that is not here at all, is skipped rather than refused:
+   * Each record is removed from the file that HOLDS it, which is its author's (`save`), not the
+   * caller's: once a lineage reads every seat's threads, a batch can name comments written by several
+   * seats, and routing them all to the caller's file would leave the real files holding records the
+   * store no longer has — the next load would resurrect every one of them.
+   *
+   * An id outside the scope, or one that is not here at all, is skipped rather than refused:
    * a batch is one request and the comments it names are the ones it can act on, and a comment
    * another client already ended is the state the caller was asking for anyway.
    *
-   * @param sessionId - the session the caller believes the comments belong to.
+   * @param scope - which comment authors the caller may act on.
    * @param ids - the comments to drop; a repeated id is one comment.
    * @returns the ids that were dropped, in the order given.
    */
-  removeMany(sessionId: SessionId, ids: readonly string[]): string[] {
+  removeMany(scope: CommentScope, ids: readonly string[]): string[] {
     const removed: string[] = []
+    const sessions = new Set<SessionId>()
     for (const id of ids) {
       if (removed.includes(id)) continue
       const comment = this.byId.get(id)
-      if (comment === undefined || comment.sessionId !== sessionId) continue
+      if (comment === undefined || !scope(comment.sessionId)) continue
       this.byId.delete(id)
       removed.push(id)
+      sessions.add(comment.sessionId)
     }
     if (removed.length === 0) return removed
     this.revision += 1
-    this.save(sessionId)
+    for (const sessionId of sessions) this.save(sessionId)
     return removed
   }
 
@@ -700,7 +779,14 @@ export class CommentStore {
    * marker, the reference and the rules, and a thread that showed the prompt would show
    * the scaffolding rather than the question.
    *
-   * @param sessionId - the session the comment belongs to.
+   * The ASKING session is recorded on the question, not taken from the comment: a thread another
+   * seat wrote can be asked from this one, and the prompt then goes into the seat the human is
+   * using, so that session's transcript is where the answer will appear (see `askTranscript`).
+   *
+   * Matched by comment ID alone: the request id is minted here and is globally unique, and the
+   * caller has already checked that the thread is in its scope.
+   *
+   * @param sessionId - the transcript the question was submitted into.
    * @param id - the comment that was asked in.
    * @param requestId - the identity the submission carries into the transcript.
    * @param turn - the turn that claimed it, when that is already known.
@@ -709,10 +795,10 @@ export class CommentStore {
    */
   recordAsk(sessionId: SessionId, id: string, requestId: string, turn: number | undefined, text: string): boolean {
     return this.patch(
-      comment => comment.sessionId === sessionId && comment.id === id,
+      comment => comment.id === id,
       comment => ({
         ...comment,
-        asks: [...(comment.asks ?? []), { requestId, text, ...(turn === undefined ? {} : { turn }) }],
+        asks: [...(comment.asks ?? []), { requestId, sessionId, text, ...(turn === undefined ? {} : { turn }) }],
         updatedAt: Date.now(),
       }),
     ) > 0
@@ -722,14 +808,17 @@ export class CommentStore {
    * Record the turn that claimed one question, as the agent's inbox reported it. Two
    * questions claimed by the same turn were answered together, which is a fact the
    * panel can state instead of guessing from transcript positions.
-   * @param sessionId - the session the submission belongs to.
+   *
+   * Matched by REQUEST ID alone: it is minted per submission and globally unique, so it names the
+   * question on its own — and a thread another seat wrote can hold a question asked from this seat,
+   * which the old `comment.sessionId === sessionId` guard would refuse to write down.
    * @param requestId - the request identity the inbox reported back.
    * @param turn - the turn that claimed it.
    * @returns how many threads the patch touched.
    */
-  recordTurnForRequest(sessionId: SessionId, requestId: string, turn: number): number {
+  recordTurnForRequest(requestId: string, turn: number): number {
     return this.patch(
-      comment => comment.sessionId === sessionId && hasAsk(comment, requestId, ask => ask.turn !== turn),
+      comment => hasAsk(comment, requestId, ask => ask.turn !== turn),
       comment => ({
         ...comment,
         // The question is the record's OWN (`text`, and whatever else it carries): this only
@@ -743,15 +832,16 @@ export class CommentStore {
   }
 
   /**
-   * Record that the session dropped one question before a turn claimed it: nothing is
+   * Record that a session dropped one question before a turn claimed it: nothing is
    * coming, and the reader is told rather than left waiting.
-   * @param sessionId - the session the submission belongs to.
+   *
+   * Matched by REQUEST ID alone, for the same reason as `recordTurnForRequest`.
    * @param requestId - the request identity the inbox reported back.
    * @returns how many threads the patch touched.
    */
-  markDroppedForRequest(sessionId: SessionId, requestId: string): number {
+  markDroppedForRequest(requestId: string): number {
     return this.patch(
-      comment => comment.sessionId === sessionId && hasAsk(comment, requestId, ask => ask.dropped !== true),
+      comment => hasAsk(comment, requestId, ask => ask.dropped !== true),
       comment => ({
         ...comment,
         asks: (comment.asks ?? []).map(ask => (
@@ -773,20 +863,25 @@ export class CommentStore {
    * that: whether an answer exists is read from the transcript on each list read, so a
    * turn that stopped AFTER writing its answer keeps showing the answer.
    *
-   * @param sessionId - the session whose turn ended.
+   * Matched by TURN **within one transcript** (`askTranscript`), never by the thread's author: turn
+   * numbers are only unique inside a session, so two sessions can both have a turn 7, and a thread that
+   * holds questions from both would otherwise have one session's ending mark the other's questions
+   * over — the reader would be told a question was cut off while its answer was still coming.
+   * @param sessionId - the transcript whose turn ended.
    * @param turn - the turn that stopped.
    * @returns how many threads the patch touched.
    */
   markTurnEnded(sessionId: SessionId, turn: number): number {
+    const endedHere = (ask: CommentAsk, comment: CommentRecord): boolean =>
+      askTranscript(ask, comment) === sessionId && ask.turn === turn
     return this.patch(
       // Matched by TURN, not by request id: the stopping event names a turn and nothing
       // else, so the questions that recorded that turn when the inbox claimed them are
       // the ones it is about.
-      comment => comment.sessionId === sessionId
-        && (comment.asks ?? []).some(ask => ask.turn === turn && ask.ended !== true),
+      comment => (comment.asks ?? []).some(ask => endedHere(ask, comment) && ask.ended !== true),
       comment => ({
         ...comment,
-        asks: (comment.asks ?? []).map(ask => (ask.turn === turn ? { ...ask, ended: true } : ask)),
+        asks: (comment.asks ?? []).map(ask => (endedHere(ask, comment) ? { ...ask, ended: true } : ask)),
         updatedAt: Date.now(),
       }),
     )
@@ -844,7 +939,12 @@ export class CommentStore {
    * memory-only view would TRUNCATE that copy — turning a read failure into a permanent
    * loss — so the save is refused and reported instead, which is what tells the reader
    * those comments are memory-only.
-   * @param sessionId - the session whose file to rewrite.
+   *
+   * The write-set is the AUTHOR's own comments (`authoredBy`), never the wider read scope
+   * (`list`): a read spans the lineage, but a file must hold exactly the comments whose
+   * author it is named for — writing the scope's comments into one seat's file would
+   * duplicate every other seat's threads on disk and, on the next load, in memory.
+   * @param sessionId - the author whose file to rewrite.
    */
   private save(sessionId: SessionId): void {
     const file = fileOf(this.root, sessionId)
@@ -853,7 +953,7 @@ export class CommentStore {
       this.reportPersist(file, `'${file}' ${refused}, so this session's comments are kept in memory rather than written over it`)
       return
     }
-    const comments = this.list(sessionId)
+    const comments = this.authoredBy(sessionId)
     const task = async (): Promise<void> => {
       await writeJsonAtomic(file, { version: COMMENT_FILE_VERSION, comments })
     }

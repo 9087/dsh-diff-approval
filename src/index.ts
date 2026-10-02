@@ -51,7 +51,9 @@ import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import { PendingDiffStore } from './pending.ts'
 import { PendingPersistence, defaultStorageDir } from './persist.ts'
 import { CommentStore, commentsDirFor } from './comments.ts'
+import type { CommentScope } from './comments.ts'
 import { CommentAsker } from './comment-ask.ts'
+import type { TranscriptCache } from './comment-ask.ts'
 import { resolveCommentLines } from './comment-lines.ts'
 import type { CommentLineRange } from './comment-lines.ts'
 import { defaultOpenPath } from './open.ts'
@@ -313,7 +315,17 @@ interface DiffApprovalUndoState {
 
 /** Before/after pair pushed on each undoable keep/revert action. */
 interface DiffApprovalUndoPair {
-  sessionId: SessionId
+  /**
+   * The LINEAGE ROOT whose stack this pair sits on — the canonical session the stack is keyed by, so a
+   * Ctrl+Z in any seat of one lineage reaches it (see `undoStackOf`). In memory only: the stacks are.
+   */
+  root: SessionId
+  /**
+   * The session that PRESSED the action, kept for diagnostics and attribution. It is also the policy the
+   * restore writes under, because the write-policy half is deliberately NOT canonicalized yet — see the
+   * note on `undoStackOf`.
+   */
+  pressedBy: SessionId
   before: DiffApprovalUndoState
   after: DiffApprovalUndoState
 }
@@ -603,12 +615,12 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * A comment whose quote is gone from the content is ABSENT from the map rather than guessed at:
    * the caller then falls back to `record.anchor`, the line the comment was written on, which is
    * the same answer an outdated thread shows.
-   * @param sessionId - the session whose comments to resolve.
+   * @param scope - which comment authors this request may read (its lineage).
    * @returns the resolved lines per comment id; comments that do not resolve are left out.
    */
-  function resolvedCommentLines(sessionId: SessionId): Record<string, CommentLineRange> {
+  function resolvedCommentLines(scope: CommentScope): Record<string, CommentLineRange> {
     const resolved: Record<string, CommentLineRange> = {}
-    for (const comment of comments.list(sessionId)) {
+    for (const comment of comments.list(scope)) {
       const entry = store.get(comment.entryId)
       if (entry === undefined) continue
       const version = store.contentVersion(comment.entryId)
@@ -704,10 +716,18 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   // as the panel's own handlers do. Both halves of that store are the ones the panel uses — the pending
   // list decides which files a card can hang on, and the comment store takes the record — so an
   // agent's annotation IS a comment: the reader sees it, replies to it, and ends it like any other.
+  //
+  // Both reads are the LINEAGE's, like the panel's own: an agent in a child session must see the same rows
+  // and threads its panel shows, or it would annotate a path it cannot see (refused) or open a second
+  // thread beside one it cannot read. The view is built per call — this seam is a tool invocation, not a
+  // poll — and `addComment` still files the record under the AUTHOR.
   registerAnnotateTool(ctx, {
     ready: ensureLoaded,
-    entriesOf: sessionId => store.list(sessionId),
-    commentsOf: sessionId => comments.list(sessionId),
+    entriesOf: (sessionId) => {
+      const view = lineageView()
+      return store.all().filter(entry => view.sees(sessionId, entry))
+    },
+    commentsOf: sessionId => comments.list(commentScopeOf(sessionId, lineageView())),
     // An AGENT authored this card while the reader was looking elsewhere, so it is news and wears the
     // dot. The reader's own write goes through `comment-add` below and lights nothing — they are the
     // one who made it, and it is on screen as they make it.
@@ -939,24 +959,21 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * list and has its undo/redo records dropped, and externally changed content
    * is adopted as the new baseline with its own checkpoint.
    * @param sessionId - the session being listed (its session-scoped view).
+   * @param view - the request's lineage view: the caller builds it once and hands it here, because the
+   *   list read needs the same view for the comment scope, the answer fold and the undo keys, and a
+   *   second `lineageView()` would walk the store again for nothing.
    * @returns the listed entries plus whether an external change cleared redo.
    */
   async function listWithState(
     sessionId: SessionId,
+    view: LineageView,
   ): Promise<{ files: PendingFileDiff[]; redoCleared: boolean }> {
     const listed: PendingFileDiff[] = []
     let redoCleared = false
-    // The MERGED view: the entries this session sees today plus those of the sessions it shares a lineage
-    // root with (see `lineageView`). The entries keep their real owner — nothing is rewritten — and the
-    // settling below runs for a merged row exactly as it does for one of this session's own, so a
-    // teammate's vanished file leaves the list on the lead's read too.
-    const view = lineageView()
     for (const entry of store.all()) {
       if (!view.sees(sessionId, entry)) continue
-      // Session-scoped work names the OWNER, not the reader: the undo pair this read produces belongs to
-      // the row's session (so it cannot be popped from the lead's view — see `lineageView`), and the same
-      // The undo pair a READ produces belongs to the session that read — whoever pressed, exactly as
-      // before — while only the sandbox a revert writes under is the row's owner's (see `ownerOf`).
+      // The undo pair a READ produces belongs to the session that read — whoever pressed — while the
+      // sandbox a revert writes under stays the row's owner's (see `ownerOf` and `pushUndo`).
       const live = await liveStateOf(entry.path)
       if (live.kind === 'deleted') {
         // The file is gone: remove it from the list, keeping an undoable
@@ -968,7 +985,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const checkpoint = droppingComments({ id: entry.path, path: entry.path, entry, fileText: entry.newText })
         dropEntry(entry.path)
         pushUndo(sessionId, checkpoint,
-          { id: entry.path, path: entry.path, entry: undefined, fileText: undefined })
+          { id: entry.path, path: entry.path, entry: undefined, fileText: undefined }, view)
         persistSession()
         continue
       }
@@ -997,7 +1014,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         store.markUnseen(entry.path)
         pushUndo(sessionId,
           { id: entry.path, path: entry.path, entry, fileText: beforeText },
-          { id: entry.path, path: entry.path, entry: { ...entry, newText: content, updatedAt: Date.now() }, fileText: content })
+          { id: entry.path, path: entry.path, entry: { ...entry, newText: content, updatedAt: Date.now() }, fileText: content },
+          view)
         persistSession()
         if (redoWasPresent) redoCleared = true
       }
@@ -1392,13 +1410,16 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * journal (`:249`), which this plugin cannot read. So this view merges every subagent child, not only
    * teammates; narrowing it to the roster would need a service the plugin does not inject.
    * @returns the view: `sees` answers the visibility question for one entry, `sameRoot` answers whether two
-   * sessions share a lineage root (the question the row's mark asks about its other owners), and
-   * `directionOf` says WHICH WAY that other owner stands, for the sentence the mark wears.
+   * sessions share a lineage root (the question the row's mark asks about its other owners), `directionOf`
+   * says WHICH WAY that other owner stands for the sentence the mark wears, and `rootOf` is the CANONICAL
+   * session — the lineage root, or the session itself when its lineage is unknown — that every
+   * session-scoped store is keyed by (see `canonicalOf`).
    */
   function lineageView(): {
     sees: (sessionId: SessionId, entry: PendingEntry) => boolean
     sameRoot: (a: SessionId, b: SessionId) => boolean
     directionOf: (sessionId: SessionId, entry: PendingEntry) => LineageDirection | undefined
+    rootOf: (sessionId: SessionId) => SessionId
   } {
     const recorded = new Map<SessionId, SessionLineage>()
     for (const entry of store.all()) {
@@ -1480,6 +1501,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       // this one root walk (and `sameWorkspace` is the only addition to the other), so the sessions they
       // call "kin" cannot drift; the questions they answer are different on purpose.
       sameRoot: (a, b) => rootOf(a) === rootOf(b),
+      // The CANONICAL session: the one session-scoped state is keyed by (see `canonicalOf`). Exposed off
+      // the view rather than recomputed, so an endpoint that already walks a lineage for visibility does
+      // not walk it a second time for the key.
+      rootOf,
       /**
        * Which way the row's other contributors stand, for the marker's sentence.
        *
@@ -1519,6 +1544,42 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         return seen.size === 1 ? [...seen][0] : 'mixed'
       },
     }
+  }
+
+  /** The lineage view one request is answered from (see `lineageView`). */
+  type LineageView = ReturnType<typeof lineageView>
+
+  /**
+   * THE CANONICALIZATION SEAM: the one session-scoped state of a request belongs to.
+   *
+   * The lineage ROOT, because the seats of one lineage read one list — so the undo history they share and
+   * the comment threads they read must be keyed by the lineage, not by whichever seat is looking. A
+   * session whose lineage is unknown (no recorded link, no header facts) is its own root, which is
+   * byte-for-byte the behaviour before any of this existed.
+   *
+   * Every session-scoped seam goes through this function, and the endpoints that already hold a view pass
+   * it so the walk is done once per request (`view` is optional only so a push deep inside a helper cannot
+   * forget to canonicalize; it never means "do not canonicalize").
+   * @param sessionId - the session the request came from.
+   * @param view - the request's lineage view, when the caller already built one.
+   * @returns the canonical session: the lineage root, or `sessionId` itself when it has none.
+   */
+  function canonicalOf(sessionId: SessionId, view?: LineageView): SessionId {
+    return (view ?? lineageView()).rootOf(sessionId)
+  }
+
+  /**
+   * The comment scope of one request: which comment AUTHORS this lineage may read and act on.
+   *
+   * `sameRoot` is the view's own question, so the scope and the merge cannot disagree about who is kin —
+   * and it is the same predicate for reading, removing, marking seen and asking, so no verb can widen or
+   * narrow the lineage on its own.
+   * @param sessionId - the session the request came from.
+   * @param view - the request's lineage view.
+   * @returns the predicate the comment store's `CommentScope` takes.
+   */
+  function commentScopeOf(sessionId: SessionId, view: LineageView): CommentScope {
+    return author => view.sameRoot(author, sessionId)
   }
 
   /**
@@ -1646,56 +1707,64 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   // `before`, redo re-applies `after`. Actions that delete a file (revert of a
   // created file, block-revert to empty) are not pushed.
   //
-  // PER SESSION, not global: an entry's id is globally unique (it is the path), and a
-  // single LIFO queue across every session meant session B's Ctrl+Z could pop session
-  // A's keep and report success — an action the reader never took, on a file they may
-  // not even be looking at. The pair also remembers the session it was taken in, and
-  // the restore uses THAT session's sandbox policy: the panel may have moved on to
-  // another list by the time the undo arrives, and resolving from the viewer would
-  // write A's file under B's root.
+  // PER LINEAGE ROOT, not per session and not global: an entry's id is globally unique (it is the path),
+  // and a single LIFO queue across every session meant session B's Ctrl+Z could pop session A's keep and
+  // report success — an action the reader never took, on a file they may not even be looking at.
+  //
+  // The key is the requester's CANONICAL session — its lineage root, `canonicalOf` — because the seats of
+  // one lineage read ONE list: a row a teammate recorded is the lead's row, and the human who supervises
+  // the root is the one who presses Ctrl+Z. So the ACCEPTED consequence, and the point of the change
+  // rather than an accident of it: a teammate's Ctrl+Z can take back the root's last action, and the
+  // root's can take back a teammate's — one history per lineage, taken back from wherever it is read.
+  //
+  // What is NOT canonicalized here is the POLICY the restore writes under: the pair remembers the session
+  // that pressed (`pressedBy`) and `restoreState` resolves the sandbox from it, exactly as before. That
+  // split is deliberate and is the deferred half of this design — collapsing it means resolving the write
+  // from `rootOf` only where `sameWorkspaceKey(workspaceKeyOf(root), workspaceKeyOf(requester))` holds (or
+  // either side is unknown), because a lineage does NOT guarantee a shared workspace: with a child in
+  // another workspace, writing its own row under the root's policy would be inert for every safe row and
+  // wrong for that one. Until then the file's owner keeps governing the file (see `ownerOf`).
   const undoStacks = new Map<SessionId, DiffApprovalUndoPair[]>()
   const redoStacks = new Map<SessionId, DiffApprovalUndoPair[]>()
 
-  /** The undo stack of one session, created on first use. */
-  function undoStackOf(sessionId: SessionId): DiffApprovalUndoPair[] {
-    let stack = undoStacks.get(sessionId)
+  /** The undo stack of one lineage root, created on first use. Its key is a CANONICAL session. */
+  function undoStackOf(root: SessionId): DiffApprovalUndoPair[] {
+    let stack = undoStacks.get(root)
     if (stack === undefined) {
       stack = []
-      undoStacks.set(sessionId, stack)
+      undoStacks.set(root, stack)
     }
     return stack
   }
 
-  /** The redo stack of one session, created on first use. */
-  function redoStackOf(sessionId: SessionId): DiffApprovalUndoPair[] {
-    let stack = redoStacks.get(sessionId)
+  /** The redo stack of one lineage root, created on first use. Its key is a CANONICAL session. */
+  function redoStackOf(root: SessionId): DiffApprovalUndoPair[] {
+    let stack = redoStacks.get(root)
     if (stack === undefined) {
       stack = []
-      redoStacks.set(sessionId, stack)
+      redoStacks.set(root, stack)
     }
     return stack
   }
 
   /**
-   * Record one undoable action in its own session's history. A fresh action
-   * invalidates that session's redo history (and only that session's).
+   * Record one undoable action in its lineage's history. A fresh action invalidates that lineage's redo
+   * history (and only that lineage's).
    *
-   * THE RULE THIS STACK OBEYS, and the reason every caller must pass the session that PRESSED the action:
-   * a press happens in one session's view, and undo is retrieved from THAT session's own stack
-   * ({@link undoStackOf} is keyed by session and {@link popOwnPair} refuses a pair tagged with anyone
-   * else), so a pair filed under a session other than the presser is one the presser's Ctrl+Z can never
-   * pop — the action looks un-undoable where it was taken, while the other session's Ctrl+Z would take
-   * back a decision its reader never made. The row's OWNER still governs the FILE (the workspace and
-   * sandbox a revert writes under); only the bookkeeping is the presser's. On a merged row the two agree
-   * on the workspace anyway: the view only merges rows whose workspace can be shown to be the reader's
-   * (see `sameWorkspace`), so the pair's session is a right policy for the restore as well.
-   * @param sessionId - the session whose history this belongs to: the one that pressed.
+   * THE RULE: the pair is filed under the CANONICAL session, so every seat of one lineage shares one
+   * history and any of them can take the action back; the session that pressed is remembered on the pair
+   * (`pressedBy`) for attribution and for the write policy, which is deliberately still the presser's (see
+   * the note above `undoStacks`). Canonicalizing HERE rather than at the call site is what makes the rule
+   * unforgettable: every push in this file goes through this function.
+   * @param sessionId - the session that pressed the action.
    * @param before - the state the action found, and what a restore puts back.
    * @param after - the state the action left, and what a redo re-applies.
+   * @param view - the request's lineage view, when the caller already built one.
    */
-  function pushUndo(sessionId: SessionId, before: DiffApprovalUndoState, after: DiffApprovalUndoState): void {
-    undoStackOf(sessionId).push({ sessionId, before, after })
-    redoStackOf(sessionId).length = 0
+  function pushUndo(sessionId: SessionId, before: DiffApprovalUndoState, after: DiffApprovalUndoState, view?: LineageView): void {
+    const root = canonicalOf(sessionId, view)
+    undoStackOf(root).push({ root, pressedBy: sessionId, before, after })
+    redoStackOf(root).length = 0
   }
 
   /**
@@ -1705,27 +1774,31 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * take the whole thing back. A loop of single actions would push one step per entry instead, and undo
    * would then peel that one decision apart file by file.
    *
-   * @param sessionId - the session whose history this belongs to.
+   * @param sessionId - the session that pressed.
    * @param before - one state per entry, in the order the decision touched them.
    * @param after - the same entries as the decision left them; the two arrays are index-aligned, which
    *   is also what the divergence guard on a restore reads (see `restoreState`).
+   * @param view - the request's lineage view, when the caller already built one.
    */
-  function pushBatchUndo(sessionId: SessionId, before: DiffApprovalUndoState[], after: DiffApprovalUndoState[]): void {
+  function pushBatchUndo(sessionId: SessionId, before: DiffApprovalUndoState[], after: DiffApprovalUndoState[], view?: LineageView): void {
     if (before.length === 0) return
     pushUndo(sessionId,
       { id: before[0]!.id, path: before[0]!.path, entry: undefined, fileText: undefined, batch: before },
-      { id: after[0]!.id, path: after[0]!.path, entry: undefined, fileText: undefined, batch: after })
+      { id: after[0]!.id, path: after[0]!.path, entry: undefined, fileText: undefined, batch: after },
+      view)
   }
 
-  /** Drop the top pair of one stack when it belongs to `sessionId`; otherwise the
-   *  stack is left exactly as it was, so another session's action is untouched.
-   * @param stack - the session's stack (undo or redo).
-   * @param sessionId - the session the request is for.
-   * @returns the pair to move, or undefined when this session has nothing to move.
+  /** Drop the top pair of one lineage root's stack, when it belongs to that root; otherwise the
+   *  stack is left exactly as it was, so another lineage's action is untouched.
+   * @param stack - the root's stack (undo or redo).
+   * @param root - the canonical session the request is for.
+   * @returns the pair to move, or undefined when this lineage has nothing to move.
    */
-  function popOwnPair(stack: DiffApprovalUndoPair[], sessionId: SessionId): DiffApprovalUndoPair | undefined {
+  function popOwnPair(stack: DiffApprovalUndoPair[], root: SessionId): DiffApprovalUndoPair | undefined {
     const pair = stack[stack.length - 1]
-    if (pair === undefined || pair.sessionId !== sessionId) return undefined
+    // The stack is already keyed by the root, so this is a belt: a pair pushed under some other root
+    // (a bug, or a stack a caller reached by hand) is refused rather than taken back from here.
+    if (pair === undefined || pair.root !== root) return undefined
     stack.pop()
     return pair
   }
@@ -1787,14 +1860,16 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    *
    * Nothing here touches `ctx.fs` or the pending store: a comment is not a change to a file, and a
    * restore that also wrote one would turn "take the comment back" into "take the edit back".
-   * @param sessionId - the session the pair was taken in (a pair's comments are one session's).
    * @param state - the side to install.
    * @param expectedFile - the other side; the comments only it lists are the ones to remove.
+   * @param scope - which comment authors this restore may remove: the undo's lineage. The stale side is
+   *   the comments the OTHER side held, and they belong to whichever seats wrote them, so the removal has
+   *   to be allowed to reach every file the pair's records live in (see `CommentStore.removeMany`).
    */
   function restoreComments(
-    sessionId: SessionId,
     state: DiffApprovalUndoState,
     expectedFile: DiffApprovalUndoState | undefined,
+    scope: CommentScope,
   ): void {
     const installing = state.comments ?? []
     const installed = new Set(installing.map(record => record.id))
@@ -1802,7 +1877,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       .map(record => record.id)
       .filter(id => !installed.has(id))
     if (stale.length > 0) {
-      comments.removeMany(sessionId, stale)
+      comments.removeMany(scope, stale)
       for (const id of stale) commentLines.delete(id)
     }
     // One write for the whole side, not one per record: a pick of twenty comments is one undo, and it
@@ -1818,22 +1893,24 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * only after the write succeeds, keeping the restore all-or-nothing — and the
    * comments a dropping action removed are the LAST thing put back, so a refused
    * restore cannot leave a thread on a row that did not come back.
-   * @param sessionId - the owning session.
+   * @param sessionId - the session the policy is resolved from (the pair's presser — see `undoStackOf`).
    * @param state - the snapshot to restore.
    * @param expectedFile - the other side's file content, checked before a write.
    * @param signal - aborts before atomic publication takes effect.
+   * @param scope - which comment authors this restore may remove (the undo request's lineage).
    */
   async function restoreState(
     sessionId: SessionId,
     state: DiffApprovalUndoState,
     expectedFile: DiffApprovalUndoState | undefined,
     signal: AbortSignal,
+    scope: CommentScope,
   ): Promise<void> {
     // A comment pair carries no file and no entry, so it takes the one branch that has neither.
     // Dispatching on the pair's own kind is what keeps ONE stack honest: the top of it decides what
     // the pop means, and everything below this line is about files.
     if (state.kind === 'comments') {
-      restoreComments(sessionId, state, expectedFile)
+      restoreComments(state, expectedFile, scope)
       return
     }
     if (state.fileText !== undefined) {
@@ -1858,7 +1935,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       // the other side, so a single restore's divergence guard applies here too.
       const counterpart = expectedFile?.batch
       for (const [index, item] of state.batch.entries()) {
-        await restoreState(sessionId, { ...item, batch: undefined }, counterpart?.[index], signal)
+        await restoreState(sessionId, { ...item, batch: undefined }, counterpart?.[index], signal, scope)
       }
       return
     }
@@ -1974,6 +2051,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const sessionId = sessionOf(payload)
         if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
         await ensureLoaded()
+        // ONE view for the whole read: the merge, the comment scope and the undo keys are the same
+        // question, and `lineageView` walks the store to answer it — so it is built here and handed on.
+        const view = lineageView()
         // The sweep on every read, so a comment a crash left behind its entry is gone
         // before any client can be handed it; removing the entry already took its
         // comments with it (`dropEntry`), so this normally removes nothing.
@@ -1981,41 +2061,51 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           // What it did remove may have lines cached against content it never hung off.
           forgetOrphanedCommentLines()
         }
-        const { files, redoCleared } = await listWithState(sessionId)
-        // Nothing to derive when the session carries no comments, and the derivation is the
-        // expensive half of this read: `answers` and `endedTurns` each walk the session's WHOLE
-        // event log (a long session is >100k events), and every client repeats that once a
-        // second. A question exists only inside a comment — `ask` looks the comment up first
-        // and refuses an id the store does not hold, and `recordAsk` writes onto that comment —
-        // so an empty comment list means no answer and no turn is worth reading out of the log.
-        // The skip also skips `answers`'s re-arming of the inbox watcher, which is safe for the
-        // same reason: the ask that would need the watcher arms it itself (`ask` calls `watch`).
+        const { files, redoCleared } = await listWithState(sessionId, view)
+        // The threads of this LINEAGE — every seat's, not only the reader's — read once and reused for the
+        // gate, the fold and the wire below.
+        const scope = commentScopeOf(sessionId, view)
+        const visibleComments = comments.list(scope)
+        // Nothing to derive when the lineage carries no comments, and the derivation is the expensive half
+        // of this read: the answer fold and the turn-end read each walk a session's WHOLE event log (a long
+        // session is >100k events), and every client repeats that once a second. A question exists only
+        // inside a comment — `ask` looks the comment up first and refuses an id the store does not hold,
+        // and `recordAsk` writes onto that comment — so an empty list here means no answer and no turn is
+        // worth reading out of any log. The skip also skips `answersFor`'s re-arming of the inbox watcher,
+        // which is safe for the same reason: the ask that would need the watcher arms it itself.
         const commentAnswers: Record<string, string> = {}
-        if (comments.list(sessionId).length > 0) {
-          // Derived here, on every read, from the session's own event log: the log is the
-          // only place an answer is written down, and the turn that claimed a question is
-          // the only thing that bounds it. `answers` writes nothing, so the turn's end is
-          // recorded beside it first — the log is durable where `agent/turn-stopping` is a
-          // live event, so this is what marks a question over for a session whose ending
-          // this process never watched (a resume, a client that connected later).
-          const answers = commentAsker.answers(sessionId)
-          for (const [requestId, read] of Object.entries(answers)) {
-            // The transcript names the turn too, so a question asked while this process was
-            // not watching still learns it — which is what lets `markTurnEnded` below, and
-            // the panel, find it at all. Recording is a no-op once the inbox has written
-            // the same number down.
-            if (read.turn !== undefined) comments.recordTurnForRequest(sessionId, requestId, read.turn)
-          }
-          for (const turn of commentAsker.endedTurns(sessionId)) comments.markTurnEnded(sessionId, turn)
-          // An answer that has arrived (or been rewritten) is news the reader has not looked at yet,
-          // so this fold is what raises the card's dot — and it raises nothing on a read that found
-          // the same text as last time (see `CommentStore.syncAnswers`). Runs before the list below is
-          // taken, because the flag rides the records this read hands over. The read is already the
-          // session's questions and nothing else, so it is handed over as it is: a question whose turn
-          // has written nothing yet simply carries no answer, which is not a change.
-          comments.syncAnswers(sessionId, answers)
-          for (const [requestId, read] of Object.entries(answers)) {
-            if (read.answer !== undefined) commentAnswers[requestId] = read.answer
+        if (visibleComments.length > 0) {
+          // ONE walk per TRANSCRIPT that holds a question, not one per read: a lineage's threads can carry
+          // questions asked from several seats, and an answer lives in the transcript it was submitted
+          // into (`askTranscript`). `answerGroups` is empty when nothing was ever asked there.
+          const transcripts: TranscriptCache = new Map()
+          for (const [transcript, requestIds] of commentAsker.answerGroups(visibleComments)) {
+            // Derived here, on every read, from that session's own event log: the log is the only place an
+            // answer is written down, and the turn that claimed a question is the only thing that bounds
+            // it. The read writes nothing, so the turn's end is recorded beside it first — the log is
+            // durable where `agent/turn-stopping` is a live event, so this is what marks a question over
+            // for a session whose ending this process never watched (a resume, a later client).
+            const answers = commentAsker.answersFor(transcript, requestIds, transcripts)
+            for (const [requestId, read] of Object.entries(answers)) {
+              // The transcript names the turn too, so a question asked while this process was not watching
+              // still learns it — which is what lets `markTurnEnded` below, and the panel, find it at all.
+              // Recording is a no-op once the inbox has written the same number down. Keyed by the request
+              // id alone: it names the question wherever it was asked from.
+              if (read.turn !== undefined) comments.recordTurnForRequest(requestId, read.turn)
+            }
+            // The turn's end is per TRANSCRIPT, and turn numbers are only unique within one: this is the
+            // session whose log was just read, which is what `markTurnEnded` matches against.
+            for (const turn of commentAsker.endedTurns(transcript, transcripts)) comments.markTurnEnded(transcript, turn)
+            // An answer that has arrived (or been rewritten) is news the reader has not looked at yet, so
+            // this fold is what raises the card's dot — and it raises nothing on a read that found the same
+            // text as last time (see `CommentStore.syncAnswers`). It folds ONLY this transcript's questions
+            // and leaves the ones asked elsewhere alone, so a thread asked from two seats keeps both
+            // answers (see `answerStateOf`). Runs before the list below is taken, because the flag rides
+            // the records this read hands over.
+            comments.syncAnswers(transcript, answers)
+            for (const [requestId, read] of Object.entries(answers)) {
+              if (read.answer !== undefined) commentAnswers[requestId] = read.answer
+            }
           }
         }
         const value: DiffApprovalListValue = {
@@ -2024,12 +2114,12 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           // entries and the comments that hang off them arrive as one snapshot.
           // Read AFTER the derivation above: it writes the question's turn and its end onto
           // these very records, and the snapshot handed to the client has to carry them.
-          comments: comments.list(sessionId),
+          comments: comments.list(scope),
           // The lines each of those comments sits on in the entry's CURRENT content, resolved here
           // and shipped with the records: the list pane, the code view's own card and the jump all
           // draw one figure, and none of them needs the file to have been opened first. A comment
           // the host cannot place is absent from the map, and its callers keep `record.anchor`.
-          commentLines: resolvedCommentLines(sessionId),
+          commentLines: resolvedCommentLines(scope),
           commentsRevision: comments.commentsRevision(),
           commentAnswers,
           workspacePath: workspaceOf(sessionId)?.path,
@@ -2054,7 +2144,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         if (seen === undefined) return rpcError('sessionId and id must be non-empty strings')
         await ensureLoaded()
         const record = comments.get(seen.id)
-        if (record === undefined || record.sessionId !== seen.sessionId) {
+        // Any seat of the lineage may mark a thread it can SEE: the dot is one fact about one comment,
+        // not a per-seat copy of it. `markSeen` itself is already id-keyed, and writes the file that
+        // holds the record.
+        if (record === undefined || !commentScopeOf(seen.sessionId, lineageView())(record.sessionId)) {
           return { ok: true, value: { outcome: 'missing' as const } }
         }
         comments.markSeen(seen.id)
@@ -2064,10 +2157,12 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const input = commentAddOf(payload)
         if (input === undefined) return rpcError('sessionId, entryId, anchor, quote and text must be valid')
         await ensureLoaded()
-        // The entry has to be listed in THIS session. A comment on a file that has
-        // left the list is refused rather than stored: it is the one way a comment
-        // could be born already outliving its entry.
-        const entry = store.list(input.sessionId).find(candidate => candidate.id === input.entryId)
+        // The entry has to be in THIS session's VIEW — its own or one the lineage merged in. A comment on
+        // a file that has left the list is refused rather than stored: it is the one way a comment could
+        // be born already outliving its entry. Guarded rather than `store.list(input.sessionId)`, which is
+        // self-only and refused every merged row the panel legitimately shows (see `actionableEntryOf`).
+        const view = lineageView()
+        const entry = actionableEntryOf(view, input.sessionId, input.entryId)
         if (entry === undefined) {
           const value: DiffApprovalCommentAddValue = { outcome: 'missing' }
           return { ok: true, value }
@@ -2077,6 +2172,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           // The caller's id when it named one, so a retried request lands on the same
           // comment instead of writing a second copy of it.
           id: input.id ?? randomUUID(),
+          // The AUTHOR — the seat that wrote it, and therefore the file it lives in (`save`). Provenance
+          // is the capture data and stays honest; the lineage is what makes it readable elsewhere.
           sessionId: input.sessionId,
           entryId: entry.id,
           path: entry.path,
@@ -2093,7 +2190,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // decisions — as an empty → {it} pair, because the comment IS the change. Nothing about the
         // conversation goes near this: `comment-ask` and the answer arriving patch the thread, and a
         // Ctrl+Z that took a question back would be rewinding a conversation rather than an action.
-        pushUndo(input.sessionId, commentState(entry.path, []), commentState(entry.path, [record]))
+        pushUndo(input.sessionId, commentState(entry.path, []), commentState(entry.path, [record]), view)
         const value: DiffApprovalCommentAddValue = { outcome: 'added', comment: record }
         return { ok: true, value }
       }
@@ -2103,11 +2200,12 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         await ensureLoaded()
         // Read the record BEFORE the removal: `remove` keeps nothing, so a pair built afterwards could
         // only put an id back with no thread behind it.
+        const view = lineageView()
         const record = comments.get(target.id)
-        const removed = comments.remove(target.sessionId, target.id)
+        const removed = comments.remove(commentScopeOf(target.sessionId, view), target.id)
         const value: DiffApprovalCommentRemoveValue = { outcome: removed ? 'removed' : 'missing' }
         if (removed && record !== undefined) {
-          pushUndo(target.sessionId, commentState(record.entryId, [record]), commentState(record.entryId, []))
+          pushUndo(target.sessionId, commentState(record.entryId, [record]), commentState(record.entryId, []), view)
         }
         // The comment is gone, so the lines it resolved to are about nothing: a later comment reusing
         // the id (the client mints them, and a retry may) must not read as already resolved.
@@ -2118,21 +2216,24 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const request = commentRemoveManyOf(payload)
         if (request === undefined) return rpcError('sessionId and a non-empty ids array of strings must be given')
         await ensureLoaded()
-        // One batch is one write of the session's comment file (see `CommentStore.removeMany`), which is
+        // ONE write PER FILE that holds a record of the batch (see `CommentStore.removeMany`), which is
         // the whole reason this endpoint exists beside `comment-remove`.
         // The snapshot is taken first, and in the order given: `removeMany` reports the ids it actually
-        // dropped under those same two rules (it is here, and it is this session's), so the records
-        // below are exactly the ones that left.
+        // dropped under the same scope rule (it is here, and its author is in this lineage), so the
+        // records below are exactly the ones that left.
+        const view = lineageView()
+        const scope = commentScopeOf(request.sessionId, view)
         const snapshot = request.ids
           .map(id => comments.get(id))
-          .filter((record): record is CommentRecord => record !== undefined && record.sessionId === request.sessionId)
-        const removed = comments.removeMany(request.sessionId, request.ids)
+          .filter((record): record is CommentRecord => record !== undefined && scope(record.sessionId))
+        const removed = comments.removeMany(scope, request.ids)
         for (const id of removed) commentLines.delete(id)
         // ONE pair for the whole batch, like the pick that asked for it: a step per comment would make
-        // the reader press Ctrl+Z once per thread to take back one decision.
+        // the reader press Ctrl+Z once per thread to take back one decision. The pair goes on the
+        // LINEAGE's stack (`pushUndo` canonicalizes), so any seat of it can take the batch back.
         const first = snapshot[0]
         if (first !== undefined) {
-          pushUndo(request.sessionId, commentState(first.entryId, snapshot), commentState(first.entryId, []))
+          pushUndo(request.sessionId, commentState(first.entryId, snapshot), commentState(first.entryId, []), view)
         }
         const value: DiffApprovalCommentRemoveManyValue = { removed: removed.length }
         return { ok: true, value }
@@ -2141,7 +2242,11 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const input = commentAskOf(payload)
         if (input === undefined) return rpcError('sessionId, id, prompt and text must be valid')
         await ensureLoaded()
-        const value = await commentAsker.ask(input.sessionId, input.id, input.prompt, input.text, signal)
+        // The prompt is submitted into `input.sessionId` — the seat the human is using, which is where the
+        // answer will appear — while the THREAD may belong to any seat of the lineage, so the scope is
+        // what the asker checks (`not mine` becomes `not my lineage's`).
+        const view = lineageView()
+        const value = await commentAsker.ask(input.sessionId, input.id, input.prompt, input.text, signal, commentScopeOf(input.sessionId, view))
         return { ok: true, value }
       }
       case 'keep': {
@@ -2487,26 +2592,28 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       case 'undo': {
         const sessionId = sessionOf(payload)
         if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
-        // Only THIS session's history moves. The pair remembers the session it was taken
-        // in, and the pop refuses anything else, so a Ctrl+Z in B can never reach A's
-        // keep — and when B has nothing of its own the answer is `nothing`, which is the
-        // truth rather than a silent success on someone else's file.
-        const pair = popOwnPair(undoStackOf(sessionId), sessionId)
+        // ONE history per LINEAGE: the key is the requester's canonical session, so a Ctrl+Z in any seat
+        // of a lineage moves the same stack and `nothing` honestly means "this lineage has nothing to take
+        // back". That is the point of the change, not an accident of it: a teammate's Ctrl+Z can take back
+        // the root's last action, and the root's can take back a teammate's.
+        const view = lineageView()
+        const root = canonicalOf(sessionId, view)
+        const pair = popOwnPair(undoStackOf(root), root)
         if (pair === undefined) {
           const value: DiffApprovalActionValue = { outcome: 'nothing' }
           return { ok: true, value }
         }
         try {
-          // The write policy comes from the PAIR's session, which `popOwnPair` has already proved is this
-          // caller: a merged row's pair is filed under the session that pressed, so the restore writes as
-          // the presser — whose workspace is the row's own by the merge rule (see `pushUndo`).
-          await restoreState(pair.sessionId, pair.before, pair.after, signal)
+          // The write policy comes from the pair's PRESSER, not from the root: the write-policy half of
+          // this design is deliberately deferred (see the note above `undoStacks`), so the file keeps being
+          // written under the session that pressed — exactly as before.
+          await restoreState(pair.pressedBy, pair.before, pair.after, signal, commentScopeOf(pair.pressedBy, view))
         } catch (error: unknown) {
           // Keep the pair on the stack so a later, still-valid undo works.
-          undoStackOf(sessionId).push(pair)
+          undoStackOf(root).push(pair)
           return rpcError(`undo failed: ${errorMessage(error)}`)
         }
-        redoStackOf(sessionId).push(pair)
+        redoStackOf(root).push(pair)
         persistSession(true)
         const value: DiffApprovalActionValue = { outcome: 'undone', id: pair.after.id }
         return { ok: true, value }
@@ -2514,18 +2621,20 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       case 'redo': {
         const sessionId = sessionOf(payload)
         if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
-        const pair = popOwnPair(redoStackOf(sessionId), sessionId)
+        const view = lineageView()
+        const root = canonicalOf(sessionId, view)
+        const pair = popOwnPair(redoStackOf(root), root)
         if (pair === undefined) {
           const value: DiffApprovalActionValue = { outcome: 'nothing' }
           return { ok: true, value }
         }
         try {
-          await restoreState(pair.sessionId, pair.after, pair.before, signal)
+          await restoreState(pair.pressedBy, pair.after, pair.before, signal, commentScopeOf(pair.pressedBy, view))
         } catch (error: unknown) {
-          redoStackOf(sessionId).push(pair)
+          redoStackOf(root).push(pair)
           return rpcError(`redo failed: ${errorMessage(error)}`)
         }
-        undoStackOf(sessionId).push(pair)
+        undoStackOf(root).push(pair)
         persistSession(true)
         const value: DiffApprovalActionValue = { outcome: 'redone', id: pair.after.id }
         return { ok: true, value }

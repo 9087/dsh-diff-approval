@@ -10,11 +10,29 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { CommentRecord } from '../src/types.ts'
 import { CommentStore } from '../src/comments.ts'
+import type { CommentScope } from '../src/comments.ts'
 import { CommentAsker, answerForRequest } from '../src/comment-ask.ts'
+import type { AskRead } from '../src/comment-ask.ts'
 import { removeTempDir } from './cleanup.ts'
 
 const S1 = SessionId('session-1')
 const S2 = SessionId('session-2')
+
+/** The scope a seat of one lineage passes: every author it may read and act on. */
+const member: CommentScope = () => true
+
+/** A scope that covers only the named authors, for the refusals. */
+const only = (...ids: readonly SessionId[]): CommentScope => (author) => ids.includes(author)
+
+/**
+ * The read the host makes for ONE transcript: group the visible threads by the transcript each question
+ * went into, then read that transcript's log for that group. The host loops over `answerGroups`; a test
+ * that is about one log does the same two steps, so the grouping is exercised rather than bypassed.
+ */
+function answersOf(asker: CommentAsker, comments: CommentStore, transcript: SessionId): Record<string, AskRead> {
+  const groups = asker.answerGroups(comments.list(member))
+  return asker.answersFor(transcript, groups.get(transcript) ?? [])
+}
 
 /**
  * One session-log event, as the read sees it. The logger stamps a `seq` and a `time` on
@@ -200,25 +218,34 @@ describe('CommentAsker', () => {
     return { ctx, handlers, calls }
   }
 
-  it('refuses a comment that is not in that session', async () => {
+  it('refuses a comment outside the scope, and asks one it covers from ANOTHER seat', async () => {
+    // The guard is the caller's LINEAGE rule, not "the comment's own session": once a lineage reads every
+    // seat's threads, any seat of it can ask a question on any of them. The prompt goes into the ASKING
+    // seat — the one the human is using, which is where the answer appears — and the recorded
+    // `ask.sessionId` is what remembers that for the answer fold.
     const comments = await store()
     comments.add(comment())
     const { ctx, calls } = fakeContext()
     const asker = new CommentAsker(ctx, comments)
-    await expect(asker.ask(S2, 'c1', 'prompt', 'why?', new AbortController().signal)).resolves.toEqual({ outcome: 'missing' })
-    await expect(asker.ask(S1, 'nope', 'prompt', 'why?', new AbortController().signal)).resolves.toEqual({ outcome: 'missing' })
+    await expect(asker.ask(S2, 'c1', 'prompt', 'why?', new AbortController().signal, only(S2))).resolves.toEqual({ outcome: 'missing' })
+    await expect(asker.ask(S1, 'nope', 'prompt', 'why?', new AbortController().signal, member)).resolves.toEqual({ outcome: 'missing' })
     expect(calls).toEqual([])
+
+    await expect(asker.ask(S2, 'c1', 'prompt', 'why?', new AbortController().signal, member)).resolves.toMatchObject({ outcome: 'asked' })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.sessionId).toBe(S2)
+    expect(comments.get('c1')?.asks?.[0]).toMatchObject({ sessionId: S2, text: 'why?' })
   })
 
   it('refuses when this host drives no agent, or has no prompt verb', async () => {
     const comments = await store()
     comments.add(comment())
     const noAgent = fakeContext({ agent: false })
-    await expect(new CommentAsker(noAgent.ctx, comments).ask(S1, 'c1', 'prompt', 'why?', new AbortController().signal))
+    await expect(new CommentAsker(noAgent.ctx, comments).ask(S1, 'c1', 'prompt', 'why?', new AbortController().signal, member))
       .resolves.toEqual({ outcome: 'no-agent' })
     expect(noAgent.calls).toEqual([])
     const noController = fakeContext({ controller: false })
-    await expect(new CommentAsker(noController.ctx, comments).ask(S1, 'c1', 'prompt', 'why?', new AbortController().signal))
+    await expect(new CommentAsker(noController.ctx, comments).ask(S1, 'c1', 'prompt', 'why?', new AbortController().signal, member))
       .resolves.toEqual({ outcome: 'no-agent' })
   })
 
@@ -226,7 +253,7 @@ describe('CommentAsker', () => {
     const comments = await store()
     comments.add(comment())
     const { ctx, calls } = fakeContext()
-    const answer = await new CommentAsker(ctx, comments).ask(S1, 'c1', 'the prompt', 'why?', new AbortController().signal)
+    const answer = await new CommentAsker(ctx, comments).ask(S1, 'c1', 'the prompt', 'why?', new AbortController().signal, member)
     expect(answer.outcome).toBe('asked')
     // One text block, in the mode that opens the comment's OWN turn: two comments
     // asked at once are two turns, not one turn two blocks have to share.
@@ -247,7 +274,7 @@ describe('CommentAsker', () => {
     const comments = await store()
     comments.add(comment())
     const { ctx } = fakeContext({ prompt: () => Promise.reject(new Error('no live agent')) })
-    await expect(new CommentAsker(ctx, comments).ask(S1, 'c1', 'prompt', 'why?', new AbortController().signal))
+    await expect(new CommentAsker(ctx, comments).ask(S1, 'c1', 'prompt', 'why?', new AbortController().signal, member))
       .resolves.toEqual({ outcome: 'failed', message: 'no live agent' })
     // Nothing is coming, so the reader is told rather than left waiting.
     expect(comments.get('c1')?.asks?.[0]?.dropped).toBe(true)
@@ -262,7 +289,7 @@ describe('CommentAsker', () => {
     const { ctx } = fakeContext({
       prompt: () => Promise.reject({ code: 'session/model-unavailable', message: 'no adapter serves provider "x"' }),
     })
-    await expect(new CommentAsker(ctx, comments).ask(S1, 'c1', 'prompt', 'why?', new AbortController().signal))
+    await expect(new CommentAsker(ctx, comments).ask(S1, 'c1', 'prompt', 'why?', new AbortController().signal, member))
       .resolves.toEqual({ outcome: 'failed', message: 'no adapter serves provider "x"' })
   })
 
@@ -271,7 +298,7 @@ describe('CommentAsker', () => {
     comments.add(comment())
     const { ctx, handlers, calls } = fakeContext()
     const asker = new CommentAsker(ctx, comments)
-    const answer = await asker.ask(S1, 'c1', 'prompt', 'why?', new AbortController().signal)
+    const answer = await asker.ask(S1, 'c1', 'prompt', 'why?', new AbortController().signal, member)
     expect(handlers.has('agent/inbox/claimed')).toBe(true)
     expect(calls[0]?.requestId).toBe(answer.requestId)
 
@@ -293,7 +320,7 @@ describe('CommentAsker', () => {
     comments.add(comment())
     const { ctx, handlers, calls } = fakeContext()
     const asker = new CommentAsker(ctx, comments)
-    const answer = await asker.ask(S1, 'c1', 'prompt', 'why?', new AbortController().signal)
+    const answer = await asker.ask(S1, 'c1', 'prompt', 'why?', new AbortController().signal, member)
     expect(handlers.has('agent/turn-stopping')).toBe(true)
     handlers.get('agent/inbox/claimed')?.({ message: { source: { rpcId: answer.requestId } }, turn: 5 })
     handlers.get('agent/turn-stopping')?.({ turn: 5 })
@@ -321,7 +348,7 @@ describe('CommentAsker', () => {
     comments.recordAsk(S1, 'c1', 'req-1', undefined, 'why?')
     comments.recordAsk(S1, 'c2', 'req-2', undefined, 'and this one?')
     comments.recordAsk(S1, 'c3', 'req-3', undefined, 'and the third?')
-    const reads = asker.answers(S1)
+    const reads = answersOf(asker, comments, S1)
     expect(reads['req-1']).toEqual({ answer: 'the first answer', turn: 1, ended: true })
     expect(reads['req-3']).toEqual({ answer: 'the third answer', turn: 2, ended: true })
     // A question the log holds no message for is not answered at all — and is not over
@@ -342,7 +369,28 @@ describe('CommentAsker', () => {
     comments.add(comment())
     comments.recordAsk(S1, 'c1', 'req-1', undefined, 'why?')
     const { ctx } = fakeContext()
-    expect(new CommentAsker(ctx, comments).answers(S1)).toEqual({})
+    expect(answersOf(new CommentAsker(ctx, comments), comments, S1)).toEqual({})
+  })
+
+  it('groups each question by the transcript it was asked into, and reads THAT transcript', async () => {
+    // One read per TRANSCRIPT, not one per thread: a thread written by one seat can hold a question asked
+    // from another, and only the transcript a question went into can answer it. The question asked before
+    // the asking session was recorded groups under the comment's own author (`askTranscript`'s fallback).
+    const comments = await store()
+    comments.add(comment())
+    comments.recordAsk(S1, 'c1', 'req-legacy', undefined, 'why?')
+    comments.recordAsk(S2, 'c1', 'req-other', undefined, 'and then?')
+    const { ctx } = fakeContext({ events: [turnStart(0, 1), asked(1, 'req-legacy'), assistant(1, 0, 'the answer'), turnEnd(2, 1)] })
+    const asker = new CommentAsker(ctx, comments)
+
+    const groups = asker.answerGroups(comments.list(member))
+    expect(groups.size).toBe(2)
+    expect(groups.get(S1)).toEqual(['req-legacy'])
+    expect(groups.get(S2)).toEqual(['req-other'])
+    // S1's log answers its own question, and knows nothing about the other transcript's.
+    const reads = asker.answersFor(S1, groups.get(S1) ?? [])
+    expect(reads['req-legacy']).toEqual({ answer: 'the answer', turn: 1, ended: true })
+    expect(reads['req-other']).toBeUndefined()
   })
 
   it('re-subscribes after the session\'s agent is recreated, and records the new turn', async () => {
@@ -374,7 +422,7 @@ describe('CommentAsker', () => {
       logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() },
     } as unknown as Context
     const asker = new CommentAsker(ctx, comments)
-    const first = await asker.ask(S1, 'c1', 'prompt', 'why?', new AbortController().signal)
+    const first = await asker.ask(S1, 'c1', 'prompt', 'why?', new AbortController().signal, member)
     expect(inboxes[0]).toHaveLength(3)
 
     // The agent is recreated for the same session id; a second ask must subscribe to
@@ -382,7 +430,7 @@ describe('CommentAsker', () => {
     live = agentFor()
     inboxes.push([])
     comments.add(comment({ id: 'c2', text: 'and this one?' }))
-    const second = await asker.ask(S1, 'c2', 'prompt', 'and this one?', new AbortController().signal)
+    const second = await asker.ask(S1, 'c2', 'prompt', 'and this one?', new AbortController().signal, member)
     expect(inboxes[1]).toHaveLength(3)
 
     // The claim for the new question reaches it through the NEW subscription.
@@ -434,13 +482,13 @@ describe('CommentAsker', () => {
       logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() },
     } as unknown as Context
     const asker = new CommentAsker(ctx, comments)
-    const answer = await asker.ask(S1, 'c1', 'prompt', 'why?', new AbortController().signal)
+    const answer = await asker.ask(S1, 'c1', 'prompt', 'why?', new AbortController().signal, member)
     expect(inboxes[0]).toHaveLength(3)
 
     // A restart builds a new agent for the same session id; the question is still pending.
     live = agentFor()
     inboxes.push([])
-    asker.answers(S1)
+    answersOf(asker, comments, S1)
     expect(inboxes[1]).toHaveLength(3)
     inboxes[1]![0]!({ message: { source: { rpcId: answer.requestId } }, turn: 8 })
     expect(comments.get('c1')?.asks?.[0]?.turn).toBe(8)

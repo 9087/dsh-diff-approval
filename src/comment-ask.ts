@@ -21,8 +21,9 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import type { DiffApprovalCommentAskValue } from './types.ts'
-import type { CommentStore } from './comments.ts'
+import type { DiffApprovalCommentAskValue, CommentRecord } from './types.ts'
+import { askTranscript } from './comments.ts'
+import type { CommentScope, CommentStore } from './comments.ts'
 
 /** The one verb this plugin uses from the host's session business API. */
 interface SessionControllerSurface {
@@ -124,6 +125,15 @@ export interface AskRead {
 
 /** Nothing was found: no message of ours, so no turn and no end. */
 const NO_READ: AskRead = { answer: undefined, turn: undefined, ended: false }
+
+/**
+ * One request's already-read transcripts, keyed by the session read.
+ *
+ * `undefined` is cached as a value (hence `has`, not a truthy check): a session whose log cannot be
+ * read must not be asked for again within the same read, or a folded-over lineage would pay for the
+ * same failure once per transcript.
+ */
+export type TranscriptCache = Map<SessionId, readonly LogEvent[] | undefined>
 
 /** The prompt text a message holds, or '' when it carries none. */
 function textOf(message: DerivedMessage): string {
@@ -304,11 +314,14 @@ export class CommentAsker {
    * arrives while the submission is still in flight already finds its comment. A
    * submission that rejects is marked dropped rather than left looking pending.
    *
-   * @param sessionId - the session the comment belongs to.
+   * @param sessionId - the session the question is asked FROM: the prompt goes into it, so its
+   *   transcript is where the answer will appear.
    * @param commentId - the comment to ask.
    * @param prompt - the prompt text to send verbatim.
    * @param text - the reader's own words, which the prompt wraps: the thread keeps these.
    * @param signal - aborts the submission.
+   * @param inScope - which comment authors the caller's lineage covers, so a thread another seat
+   *   wrote can be asked from this one.
    * @returns what the request did.
    */
   async ask(
@@ -317,9 +330,12 @@ export class CommentAsker {
     prompt: string,
     text: string,
     signal: AbortSignal,
+    inScope: CommentScope,
   ): Promise<DiffApprovalCommentAskValue> {
     const comment = this.comments.get(commentId)
-    if (comment === undefined || comment.sessionId !== sessionId) return { outcome: 'missing' }
+    // Scoped, not "mine": a thread of any seat in this lineage can be asked, and the guard that used to
+    // require the comment's own session would refuse the ask the moment the panel showed a merged row.
+    if (comment === undefined || !inScope(comment.sessionId)) return { outcome: 'missing' }
     const controller = this.ctx.get('sessionController') as SessionControllerSurface | undefined
     if (typeof controller?.prompt !== 'function') {
       // Silence here is what made the first live failure undiagnosable: the panel says
@@ -348,40 +364,62 @@ export class CommentAsker {
       // Logged as well as returned: the panel shows one line of copy, and a live
       // failure whose only trace is that copy cannot be diagnosed from the host side.
       this.ctx.logger.warn(`diff-approval: asking a comment failed: ${reason}`)
-      this.comments.markDroppedForRequest(sessionId, requestId)
+      this.comments.markDroppedForRequest(requestId)
       return { outcome: 'failed', message: reason }
     }
   }
 
   /**
-   * Every question of one session and what the transcript says about it, keyed by the
+   * One scope's questions, grouped by THE TRANSCRIPT each was submitted into.
+   *
+   * A lineage's threads may hold questions asked from several seats, and an answer lives in the
+   * transcript of the session that was asked — so the read is per transcript, not per thread. Grouping
+   * here (rather than reading each thread separately) is what keeps a poll to ONE log walk per
+   * transcript, however many threads asked there.
+   *
+   * The legacy case is why `askTranscript` exists: a question asked before the asking session was
+   * recorded has only the comment's own session to go on, which is where it went.
+   * @param visible - the comments this read may see (already scoped by the caller).
+   * @returns the request ids per transcript; empty when nothing was ever asked.
+   */
+  answerGroups(visible: readonly CommentRecord[]): Map<SessionId, string[]> {
+    const groups = new Map<SessionId, string[]>()
+    for (const comment of visible) {
+      for (const ask of comment.asks ?? []) {
+        const transcript = askTranscript(ask, comment)
+        const ids = groups.get(transcript)
+        if (ids === undefined) groups.set(transcript, [ask.requestId])
+        else ids.push(ask.requestId)
+      }
+    }
+    return groups
+  }
+
+  /**
+   * Every question submitted into ONE transcript and what it says about them, keyed by the
    * question's request id (which is what `CommentAsk` records and what a client matches
-   * against). Derived from the session's own event log on every call and never stored:
-   * the log is the one source of truth for what the agent said, so a stored copy could
-   * only ever disagree with it.
-   * @param sessionId - the session whose comments to read.
+   * against). Derived from that session's event log on every call and never stored: the log
+   * is the one source of truth for what the agent said, so a stored copy could only ever
+   * disagree with it.
+   * @param sessionId - the transcript to read.
+   * @param requestIds - the questions that were submitted into it.
+   * @param cache - this request's already-read logs, so the answer fold and the turn-end read
+   *   below share ONE walk of a log that can hold >100k events.
    * @returns the read per question; empty when the session holds no questions.
    */
-  answers(sessionId: SessionId): Record<string, AskRead> {
+  answersFor(
+    sessionId: SessionId,
+    requestIds: readonly string[],
+    cache?: TranscriptCache,
+  ): Record<string, AskRead> {
     // The poll is also what re-arms the watcher. An agent replaced while a question is
     // still pending changes identity under us, and this read — which the panel makes on
     // every list poll — is the moment to move the subscriptions to the live agent (see
     // `watch`). Without it the claim and the turn's end arrive on an agent nobody is
     // listening to, and the thread waits on a turn that is already over.
     this.watch(sessionId)
-    const requestIds: string[] = []
-    for (const comment of this.comments.list(sessionId)) {
-      for (const ask of comment.asks ?? []) requestIds.push(ask.requestId)
-    }
     if (requestIds.length === 0) return {}
-    // A read that cannot reach the log answers nothing rather than failing: the list
-    // read this rides on is the panel's whole view of the session.
-    let events: readonly LogEvent[] | undefined
-    try {
-      events = this.sessionEvents(sessionId)
-    } catch {
-      events = undefined
-    }
+    const events = this.sessionEvents(sessionId, cache)
     if (events === undefined) return {}
     return answersIn(events, requestIds)
   }
@@ -395,16 +433,12 @@ export class CommentAsker {
    * a client that connected afterwards, a deployment whose agent events cannot be
    * subscribed at all — because `turn/end` is durable and the event is not.
    *
-   * @param sessionId - the session whose turns to check.
+   * @param sessionId - the transcript whose turns to check.
+   * @param cache - this request's already-read logs (see `answersFor`).
    * @returns the turns the log closed, or empty when the log cannot be read.
    */
-  endedTurns(sessionId: SessionId): number[] {
-    let events: readonly LogEvent[] | undefined
-    try {
-      events = this.sessionEvents(sessionId)
-    } catch {
-      events = undefined
-    }
+  endedTurns(sessionId: SessionId, cache?: TranscriptCache): number[] {
+    const events = this.sessionEvents(sessionId, cache)
     if (events === undefined) return []
     const turns: number[] = []
     for (const event of events) {
@@ -424,12 +458,27 @@ export class CommentAsker {
    * and `snapshotEvents` hands back a frozen, sequence-ordered copy of it, so walking it
    * is a plain read that cannot disturb the session.
    *
+   * The cache is per REQUEST, not per session: one list read asks this twice for every transcript
+   * (the answer fold and the turn-end read), and the copy is the expensive part of a long session's
+   * log. `has` rather than a truthy check, so "cannot be read" is cached as such instead of being
+   * asked again.
    * @param sessionId - the session to read.
+   * @param cache - this request's already-read logs, when the caller is doing several reads.
    * @returns its events, or undefined when no live session can be read.
    */
-  private sessionEvents(sessionId: SessionId): readonly LogEvent[] | undefined {
-    const session = this.ctx.sessions.get(sessionId) as SessionSurface | undefined
-    return session?.snapshotEvents?.()
+  private sessionEvents(sessionId: SessionId, cache?: TranscriptCache): readonly LogEvent[] | undefined {
+    if (cache !== undefined && cache.has(sessionId)) return cache.get(sessionId)
+    // A read that cannot reach the log answers nothing rather than failing: the list
+    // read this rides on is the panel's whole view of the session.
+    let events: readonly LogEvent[] | undefined
+    try {
+      const session = this.ctx.sessions.get(sessionId) as SessionSurface | undefined
+      events = session?.snapshotEvents?.()
+    } catch {
+      events = undefined
+    }
+    cache?.set(sessionId, events)
+    return events
   }
 
   /** The live agent for one session, or `undefined` when this host drives none. */
@@ -456,7 +505,7 @@ export class CommentAsker {
    * released first, so re-arming is not a leak: one set of handlers per live agent,
    * not one more per identity change.
    *
-   * Called on every ask AND on every poll read (`answers`), because the agent can be
+   * Called on every ask AND on every poll read (`answersFor`), because the agent can be
    * replaced while a question is still pending — the case where nothing asks again.
    * @param sessionId - the session whose agent to watch.
    */
@@ -491,11 +540,13 @@ export class CommentAsker {
         if (requestId === undefined) return
         const turn = typeof payload.turn === 'number' ? payload.turn : undefined
         if (turn === undefined) return
-        this.comments.recordTurnForRequest(sessionId, requestId, turn)
+        // Keyed by request id alone: the claim is about a question, and that question may have been
+        // asked from ANOTHER seat's panel (its `sessionId` on the ask says which transcript it went to).
+        this.comments.recordTurnForRequest(requestId, turn)
       })
       listen('agent/inbox/discarded', (payload) => {
         const requestId = requestIdOf(payload)
-        if (requestId !== undefined) this.comments.markDroppedForRequest(sessionId, requestId)
+        if (requestId !== undefined) this.comments.markDroppedForRequest(requestId)
       })
       // The turn is over. Its number is the only handle the event carries, so the
       // questions the inbox claimed for it are the ones marked: a question with no

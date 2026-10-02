@@ -8,10 +8,19 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { CommentRecord } from '../src/types.ts'
 import { CommentStore, commentsDirFor } from '../src/comments.ts'
+import type { CommentScope } from '../src/comments.ts'
 import { removeTempDir } from './cleanup.ts'
 
 const S1 = SessionId('session-1')
 const S2 = SessionId('session-2')
+
+/**
+ * The scope one reader acts as. `list`, `remove` and `removeMany` take the caller's LINEAGE rule
+ * (`CommentScope`); a test that is about one session's own file says `only(S1)`, and `all` is what a
+ * lineage root passes when it reads the whole team's threads.
+ */
+const only = (...ids: readonly SessionId[]): CommentScope => (author) => ids.includes(author)
+const all: CommentScope = () => true
 
 /** One stored comment, with only the fields a test cares about overridden. */
 function comment(overrides: Partial<CommentRecord> = {}): CommentRecord {
@@ -70,7 +79,7 @@ describe('loadAll', () => {
     await first.settled()
     const second = new CommentStore(root)
     await expect(second.loadAll()).resolves.toBe(1)
-    expect(second.list(S1)).toEqual([
+    expect(second.list(only(S1))).toEqual([
       comment({ quoteContext: 'before\nafter', quoteLines: [{ old: 3, new: 3, kind: 'add' }] }),
     ])
   })
@@ -85,10 +94,10 @@ describe('loadAll', () => {
     await first.settled()
     const second = new CommentStore(root)
     await expect(second.loadAll()).resolves.toBe(2)
-    expect(second.list(S1).find(row => row.id === 'c-agent'))
+    expect(second.list(only(S1)).find(row => row.id === 'c-agent'))
       .toEqual(comment({ id: 'c-agent', author: 'agent' }))
     // The reader's own comments are written without it, and absent stays absent.
-    const reader = second.list(S1).find(row => row.id === 'c-reader')
+    const reader = second.list(only(S1)).find(row => row.id === 'c-reader')
     expect(reader).toEqual(comment({ id: 'c-reader' }))
     expect(reader).not.toHaveProperty('author')
   })
@@ -207,7 +216,7 @@ describe('loadAll', () => {
     await writeFile(join(root, `${S1}.json`), JSON.stringify({ version: 1, comments: [legacy] }), 'utf8')
     const comments = new CommentStore(root)
     await expect(comments.loadAll()).resolves.toBe(1)
-    expect(comments.list(S1)).toEqual([legacy])
+    expect(comments.list(only(S1))).toEqual([legacy])
     expect(comments.get('c-old')).not.toHaveProperty('unseen')
     expect(comments.get('c-old')).not.toHaveProperty('answerNow')
     // The older file is still writable, and reading it changed nothing on disk.
@@ -216,14 +225,43 @@ describe('loadAll', () => {
     await expect(readFile(join(root, `${S1}.json`), 'utf8')).resolves.toContain('c-old')
   })
 
+  it('reads a teammate\'s legacy file, folds its answer from that seat\'s transcript, and removes it there', async () => {
+    // What fanning the READ out is for: a thread already on disk under a teammate's own id stays readable
+    // in the lineage, with no migration. Its question was asked before the asking session was recorded, so
+    // its answer is looked for in the only session that could have asked it — the comment's own — and a
+    // removal has to rewrite THAT file, or the next load brings the thread straight back.
+    await store()
+    const legacy = comment({
+      id: 'c-legacy',
+      sessionId: S2,
+      asks: [{ requestId: 'req-legacy', text: 'why?' }],
+    })
+    await writeFile(join(root, `${S2}.json`), JSON.stringify({ version: 1, comments: [legacy] }), 'utf8')
+    const comments = new CommentStore(root)
+    await comments.loadAll()
+    // Readable by a lineage that covers S2, and invisible to one that does not.
+    expect(comments.list(all).map(row => row.id)).toEqual(['c-legacy'])
+    expect(comments.list(only(S1))).toEqual([])
+    // The answer is looked for where the question went: the author's own transcript.
+    comments.syncAnswers(S2, { 'req-legacy': { answer: 'from S2', turn: 1, ended: false } })
+    expect(comments.get('c-legacy')?.answerNow).toEqual({ 'req-legacy': 'from S2' })
+    // …and the removal rewrites the file that holds it, not the caller's.
+    expect(comments.remove(all, 'c-legacy')).toBe(true)
+    await comments.settled()
+    await expect(readFile(join(root, `${S2}.json`), 'utf8')).resolves.not.toContain('c-legacy')
+    const second = new CommentStore(root)
+    await second.loadAll()
+    expect(second.list(all)).toEqual([])
+  })
+
   it('keeps each session in its own file, and lists only that session', async () => {    const comments = await store()
     comments.add(comment())
     comments.add(comment({ id: 'c2', sessionId: S2, entryId: '/repo/b.txt', path: '/repo/b.txt' }))
     await comments.settled()
     const second = new CommentStore(root)
     await second.loadAll()
-    expect(second.list(S1).map(entry => entry.id)).toEqual(['c1'])
-    expect(second.list(S2).map(entry => entry.id)).toEqual(['c2'])
+    expect(second.list(only(S1)).map(entry => entry.id)).toEqual(['c1'])
+    expect(second.list(only(S2)).map(entry => entry.id)).toEqual(['c2'])
     await expect(readFile(join(root, `${S1}.json`), 'utf8')).resolves.toContain('/repo/a.txt')
     await expect(readFile(join(root, `${S2}.json`), 'utf8')).resolves.toContain('/repo/b.txt')
   })
@@ -236,7 +274,7 @@ describe('loadAll', () => {
     }), 'utf8')
     const comments = new CommentStore(root)
     await expect(comments.loadAll()).resolves.toBe(1)
-    expect(comments.list(S1).map(entry => entry.id)).toEqual(['c9'])
+    expect(comments.list(only(S1)).map(entry => entry.id)).toEqual(['c9'])
   })
 
   it('keeps every other session\'s comments when one file is unreadable', async () => {
@@ -250,8 +288,8 @@ describe('loadAll', () => {
     const warnings: string[] = []
     const second = new CommentStore(root, { onLoadSkipped: file => warnings.push(file) })
     await expect(second.loadAll()).resolves.toBe(1)
-    expect(second.list(S2).map(entry => entry.id)).toEqual(['c2'])
-    expect(second.list(S1)).toEqual([])
+    expect(second.list(only(S2)).map(entry => entry.id)).toEqual(['c2'])
+    expect(second.list(only(S1))).toEqual([])
     // The bad file is named, and it is not silently dropped from the disk: it is moved
     // aside, so the store can write a fresh file for that session without the next save
     // being what destroys the unreadable bytes.
@@ -309,7 +347,7 @@ describe('loadAll', () => {
     const stored = comments.add(comment())
     await comments.settled()
     // The annotation is still usable in memory, and the reader is told it is only there…
-    expect(comments.list(S1).map(entry => entry.id)).toEqual([stored.id])
+    expect(comments.list(only(S1)).map(entry => entry.id)).toEqual([stored.id])
     expect(String(comments.persistError())).toContain(`${S1}.json`)
     // …while the bytes the load could not read are still on the disk, untouched.
     await expect(readFile(file, 'utf8')).resolves.toBe('{ not json')
@@ -331,7 +369,7 @@ describe('a comment write that fails', () => {
     // The annotation is in memory and usable: the list read the panel draws from still
     // shows it. That much was true before the fix too — the difference is that the
     // failure is now recorded rather than swallowed.
-    expect(comments.list(S1).map(entry => entry.id)).toEqual([stored.id])
+    expect(comments.list(only(S1)).map(entry => entry.id)).toEqual([stored.id])
     expect(errors).toHaveLength(1)
     expect(comments.persistError()).toBe(errors[0])
 
@@ -388,15 +426,15 @@ describe('the two guards against a comment outliving its entry', () => {
     comments.add(comment({ id: 'c2', sessionId: S2 }))
     comments.add(comment({ id: 'c3', entryId: '/repo/b.txt', path: '/repo/b.txt' }))
     expect(comments.removeForEntry('/repo/a.txt')).toBe(2)
-    expect(comments.list(S1).map(entry => entry.id)).toEqual(['c3'])
-    expect(comments.list(S2)).toEqual([])
+    expect(comments.list(only(S1)).map(entry => entry.id)).toEqual(['c3'])
+    expect(comments.list(only(S2))).toEqual([])
     // The removal reaches the disk: a second client reading the file back must not
     // find what the first one deleted.
     await comments.settled()
     const second = new CommentStore(root)
     await second.loadAll()
     expect(second.get('c1')).toBeUndefined()
-    expect(second.list(S1).map(entry => entry.id)).toEqual(['c3'])
+    expect(second.list(only(S1)).map(entry => entry.id)).toEqual(['c3'])
   })
 
   it('sweeps the orphans of entries that are not in the list at all', async () => {
@@ -406,29 +444,80 @@ describe('the two guards against a comment outliving its entry', () => {
     // The backstop for a crash between the entry's removal and the comments': the
     // entry set is the authority on what may still have comments.
     expect(comments.retain(new Set(['/repo/b.txt']))).toBe(1)
-    expect(comments.list(S1).map(entry => entry.id)).toEqual(['c2'])
+    expect(comments.list(only(S1)).map(entry => entry.id)).toEqual(['c2'])
     await comments.settled()
     const second = new CommentStore(root)
     await second.loadAll()
-    expect(second.list(S1).map(entry => entry.id)).toEqual(['c2'])
+    expect(second.list(only(S1)).map(entry => entry.id)).toEqual(['c2'])
   })
 
   it('leaves everything alone when every entry is still listed', async () => {
     const comments = await store()
     comments.add(comment())
     expect(comments.retain(new Set(['/repo/a.txt']))).toBe(0)
-    expect(comments.list(S1)).toHaveLength(1)
+    expect(comments.list(only(S1))).toHaveLength(1)
   })
 })
 
 describe('mutations', () => {
-  it('refuses to remove a comment through another session', async () => {
+  it('removes through the SCOPE, and refuses an author outside it', async () => {
+    // The guard is the caller's LINEAGE rule (`CommentScope`), not "the caller's own session": a seat of
+    // one lineage removes a thread any seat of it wrote, and a session outside the lineage is refused
+    // exactly as it was before. That is what makes the threads of a merged view actionable.
     const comments = await store()
     comments.add(comment())
-    expect(comments.remove(S2, 'c1')).toBe(false)
-    expect(comments.list(S1)).toHaveLength(1)
-    expect(comments.remove(S1, 'c1')).toBe(true)
-    expect(comments.list(S1)).toEqual([])
+    expect(comments.remove(only(S2), 'c1')).toBe(false)
+    expect(comments.list(only(S1))).toHaveLength(1)
+    // The same comment, removed by a scope that covers its author.
+    expect(comments.remove(all, 'c1')).toBe(true)
+    expect(comments.list(all)).toEqual([])
+  })
+
+  it('removes a lineage\'s batch from EVERY file that holds one, not from the caller\'s alone', async () => {
+    // A batch can name threads written by several seats of one lineage. Routing them all to the caller's
+    // file would leave the real files holding records the store no longer has — and the next load would
+    // resurrect every one of them.
+    const comments = await store()
+    comments.add(comment())
+    comments.add(comment({ id: 'c3', sessionId: S2 }))
+    await comments.settled()
+    expect(comments.removeMany(only(S1, S2), ['c1', 'c3'])).toEqual(['c1', 'c3'])
+    expect(comments.list(all)).toEqual([])
+    await comments.settled()
+    const second = new CommentStore(root)
+    await second.loadAll()
+    expect(second.list(all)).toEqual([])
+  })
+
+  it('folds each transcript\'s answers without erasing the other transcript\'s', async () => {
+    // ONE thread, TWO transcripts: the annotation was written by S1, so a question asked before the asking
+    // session was recorded has no `sessionId` and folds under S1 (`askTranscript`'s fallback), while a
+    // follow-up asked from S2 records S2. Each fold owns only its own transcript's questions — replacing
+    // the map wholesale would make the reader watch one answer appear and then vanish on the next poll.
+    const comments = await store()
+    comments.add(comment())
+    comments.recordAsk(S1, 'c1', 'req-legacy', 5, 'why?')
+    comments.recordAsk(S2, 'c1', 'req-other', 5, 'and then?')
+    comments.syncAnswers(S1, { 'req-legacy': { answer: 'from S1', turn: 5, ended: false } })
+    expect(comments.get('c1')?.answerNow).toEqual({ 'req-legacy': 'from S1' })
+    comments.syncAnswers(S2, { 'req-other': { answer: 'from S2', turn: 5, ended: false } })
+    expect(comments.get('c1')?.answerNow).toEqual({ 'req-legacy': 'from S1', 'req-other': 'from S2' })
+    // A later, unchanged read of S1 leaves S2's answer exactly where it was.
+    comments.syncAnswers(S1, { 'req-legacy': { answer: 'from S1', turn: 5, ended: false } })
+    expect(comments.get('c1')?.answerNow).toEqual({ 'req-legacy': 'from S1', 'req-other': 'from S2' })
+
+    // A turn number is unique only WITHIN one transcript, and both questions recorded turn 5: the end
+    // reported for S2's turn 5 must mark S2's question and leave S1's alone (and the other way round).
+    expect(comments.markTurnEnded(S2, 5)).toBe(1)
+    expect(comments.get('c1')?.asks).toEqual([
+      { requestId: 'req-legacy', sessionId: S1, text: 'why?', turn: 5 },
+      { requestId: 'req-other', sessionId: S2, text: 'and then?', turn: 5, ended: true },
+    ])
+    expect(comments.markTurnEnded(S1, 5)).toBe(1)
+    expect(comments.get('c1')?.asks).toEqual([
+      { requestId: 'req-legacy', sessionId: S1, text: 'why?', turn: 5, ended: true },
+      { requestId: 'req-other', sessionId: S2, text: 'and then?', turn: 5, ended: true },
+    ])
   })
 
   it('drops a batch in one write, and names only what it dropped', async () => {
@@ -440,23 +529,23 @@ describe('mutations', () => {
 
     // The ids it can act on are dropped; the ones it cannot are not errors. Another session's comment
     // and a comment that is already gone are both "not there to drop", and a repeated id names one.
-    expect(comments.removeMany(S1, ['c1', 'gone', 'c3', 'c1'])).toEqual(['c1'])
+    expect(comments.removeMany(only(S1), ['c1', 'gone', 'c3', 'c1'])).toEqual(['c1'])
     // ONE revision for the whole batch, which is what one write means: a loop of `remove` calls would
     // have bumped it per comment — and written the session's file per comment.
     expect(comments.commentsRevision()).toBe(before + 1)
-    expect(comments.list(S1).map(row => row.id)).toEqual(['c2'])
-    expect(comments.list(S2).map(row => row.id)).toEqual(['c3'])
+    expect(comments.list(only(S1)).map(row => row.id)).toEqual(['c2'])
+    expect(comments.list(only(S2)).map(row => row.id)).toEqual(['c3'])
 
     // A batch that matches nothing does not rewrite the file at all.
-    expect(comments.removeMany(S1, ['gone', 'c3'])).toEqual([])
+    expect(comments.removeMany(only(S1), ['gone', 'c3'])).toEqual([])
     expect(comments.commentsRevision()).toBe(before + 1)
 
     // The survivors are what the last write left on the disk, not just in memory.
     await comments.settled()
     const second = new CommentStore(root)
     await second.loadAll()
-    expect(second.list(S1).map(row => row.id)).toEqual(['c2'])
-    expect(second.list(S2).map(row => row.id)).toEqual(['c3'])
+    expect(second.list(only(S1)).map(row => row.id)).toEqual(['c2'])
+    expect(second.list(only(S2)).map(row => row.id)).toEqual(['c3'])
   })
 
   it('writes a batch of additions in one save per session, and one revision for the batch', async () => {
@@ -483,8 +572,8 @@ describe('mutations', () => {
     await comments.settled()
     const second = new CommentStore(root)
     await expect(second.loadAll()).resolves.toBe(3)
-    expect(second.list(S1).map(record => record.id)).toEqual(['c1', 'c2'])
-    expect(second.list(S2).map(record => record.id)).toEqual(['c3'])
+    expect(second.list(only(S1)).map(record => record.id)).toEqual(['c1', 'c2'])
+    expect(second.list(only(S2)).map(record => record.id)).toEqual(['c3'])
   })
 
   it('merges a rewritten record exactly as a single add does', async () => {
@@ -531,7 +620,7 @@ describe('mutations', () => {
     expect(again.text).toBe('why, though?')
     // `createdAt` orders a list read, so a rewrite does not reorder the thread.
     expect(again.createdAt).toBe(1)
-    expect(again.asks).toEqual([{ requestId: 'req-7', text: 'why?', turn: 3 }])
+    expect(again.asks).toEqual([{ requestId: 'req-7', sessionId: S1, text: 'why?', turn: 3 }])
     await comments.settled()
     const second = new CommentStore(root)
     await second.loadAll()
@@ -542,7 +631,7 @@ describe('mutations', () => {
     const comments = await store()
     comments.add(comment())
     comments.recordAsk(S1, 'c1', 'req-7', undefined, 'why?')
-    expect(comments.get('c1')?.asks).toEqual([{ requestId: 'req-7', text: 'why?' }])
+    expect(comments.get('c1')?.asks).toEqual([{ requestId: 'req-7', sessionId: S1, text: 'why?' }])
     // A follow-up appends rather than replacing: a thread is a conversation, and each
     // question carries its own turn, its own words and its own answer.
     comments.recordAsk(S1, 'c1', 'req-9', undefined, 'and then?')
@@ -550,28 +639,28 @@ describe('mutations', () => {
     // The inbox claimed the first one: the turn is the fact the panel may state instead
     // of guessing whether two questions shared an answer. Writing the turn down must not
     // write over the question's own words — they ride the same record.
-    expect(comments.recordTurnForRequest(S1, 'req-7', 3)).toBe(1)
+    expect(comments.recordTurnForRequest('req-7', 3)).toBe(1)
     expect(comments.get('c1')?.asks).toEqual([
-      { requestId: 'req-7', text: 'why?', turn: 3 },
-      { requestId: 'req-9', text: 'and then?' },
+      { requestId: 'req-7', sessionId: S1, text: 'why?', turn: 3 },
+      { requestId: 'req-9', sessionId: S1, text: 'and then?' },
     ])
     // A repeat of the same turn is not a change.
-    expect(comments.recordTurnForRequest(S1, 'req-7', 3)).toBe(0)
+    expect(comments.recordTurnForRequest('req-7', 3)).toBe(0)
     // Discarded before any turn took it: nothing is coming, so the reader is told.
-    expect(comments.markDroppedForRequest(S1, 'req-9')).toBe(1)
+    expect(comments.markDroppedForRequest('req-9')).toBe(1)
     expect(comments.get('c1')?.asks).toEqual([
-      { requestId: 'req-7', text: 'why?', turn: 3 },
-      { requestId: 'req-9', text: 'and then?', dropped: true },
+      { requestId: 'req-7', sessionId: S1, text: 'why?', turn: 3 },
+      { requestId: 'req-9', sessionId: S1, text: 'and then?', dropped: true },
     ])
-    expect(comments.markDroppedForRequest(S1, 'req-9')).toBe(0)
+    expect(comments.markDroppedForRequest('req-9')).toBe(0)
     // A request id nothing carries touches nothing.
-    expect(comments.recordTurnForRequest(S1, 'req-other', 9)).toBe(0)
+    expect(comments.recordTurnForRequest('req-other', 9)).toBe(0)
     await comments.settled()
     const second = new CommentStore(root)
     await second.loadAll()
     expect(second.get('c1')?.asks).toEqual([
-      { requestId: 'req-7', text: 'why?', turn: 3 },
-      { requestId: 'req-9', text: 'and then?', dropped: true },
+      { requestId: 'req-7', sessionId: S1, text: 'why?', turn: 3 },
+      { requestId: 'req-9', sessionId: S1, text: 'and then?', dropped: true },
     ])
   })
 
@@ -584,8 +673,8 @@ describe('mutations', () => {
     // off instead of waiting on a turn that ended. The other question is untouched.
     expect(comments.markTurnEnded(S1, 3)).toBe(1)
     expect(comments.get('c1')?.asks).toEqual([
-      { requestId: 'req-7', text: 'why?', turn: 3, ended: true },
-      { requestId: 'req-9', text: 'and then?', turn: 4 },
+      { requestId: 'req-7', sessionId: S1, text: 'why?', turn: 3, ended: true },
+      { requestId: 'req-9', sessionId: S1, text: 'and then?', turn: 4 },
     ])
     // A repeat changes nothing, and a turn nothing was claimed by touches nothing.
     expect(comments.markTurnEnded(S1, 3)).toBe(0)
@@ -602,11 +691,11 @@ describe('mutations', () => {
     comments.add(comment())
     const added = comments.commentsRevision()
     expect(added).toBeGreaterThan(start)
-    comments.remove(S1, 'c1')
+    comments.remove(only(S1), 'c1')
     expect(comments.commentsRevision()).toBeGreaterThan(added)
     // A no-op change is not a change: nothing moved, so nothing is reported.
     const quiet = comments.commentsRevision()
-    comments.remove(S1, 'c1')
+    comments.remove(only(S1), 'c1')
     comments.retain(new Set(['/repo/a.txt']))
     expect(comments.commentsRevision()).toBe(quiet)
   })

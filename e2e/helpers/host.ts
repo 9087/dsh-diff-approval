@@ -381,6 +381,44 @@ export function seedPending(
 }
 
 /**
+ * Write ONE session's comment file, without touching the pending store.
+ *
+ * `seedPending` writes both halves for the session it seeds and is the only writer of each, so a thread
+ * recorded by a DIFFERENT session — a teammate's, the case the lineage-wide comment read exists for — needs
+ * its own file, written after the pending store is in place. Nothing here needs the author to exist as a
+ * session: the host reads the lineage an entry RECORDED plus these files, so a seeded file IS the shape of
+ * "a teammate wrote this thread". The record is written verbatim (no `unseen`, no answers), which is what a
+ * build before those fields left on disk.
+ * @param fixture - the fixture whose home holds the state directory.
+ * @param sessionId - the session the threads are recorded under (their author, and their file's name).
+ * @param comments - the threads to write, each with the entry it hangs off.
+ */
+export function seedCommentFile(
+  fixture: Fixture,
+  sessionId: string,
+  comments: readonly {
+    id: string
+    entryId: string
+    path: string
+    quote: string
+    text: string
+    anchor?: { startLine: number; endLine: number }
+  }[],
+): void {
+  const dir = join(fixture.home, 'diff-approval', 'comments')
+  mkdirSync(dir, { recursive: true })
+  const now = Date.now()
+  const rows = comments.map(comment => ({
+    sessionId,
+    anchor: { startLine: 2, endLine: 2 },
+    createdAt: now,
+    updatedAt: now,
+    ...comment,
+  }))
+  writeFileSync(join(dir, `${encodeURIComponent(sessionId)}.json`), `${JSON.stringify({ version: 1, comments: rows }, null, 2)}\n`)
+}
+
+/**
  * Watch the session directory until a session exists there, or give up.
  *
  * This is the disk half of "which session did the GUI just create": the host writes

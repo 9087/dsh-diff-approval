@@ -3712,3 +3712,214 @@ describe('comments over the channel', () => {
   })
 })
 
+/**
+ * The canonicalization batch: session-scoped STATE collapses to the lineage ROOT, while provenance
+ * (`sessionId`/`sessionIds`, a comment's author) stays exactly as captured.
+ *
+ * Two things are keyed by the root now — the undo history and the comment read/guards — so a seat of one
+ * lineage shares one history and reads one set of threads. The workspace and sandbox policy a write runs
+ * under is deliberately NOT canonicalized (see the note above `undoStacks`), so nothing here asserts on it.
+ */
+describe('one lineage, one session-scoped state', () => {
+  const ROOT = SessionId('session-root')
+  const CHILD = SessionId('session-child')
+  const COMMENT_BODY = { anchor: { startLine: 1, endLine: 1 }, quote: 'a', text: 'why is this here?' }
+
+  const execFor = (id: SessionId): unknown => ({ name: 'edit', agent: { id } })
+
+  /**
+   * The session registry: `child` is recorded as a subagent child of `root` with `origin: 'subagent'`,
+   * which is the link the lineage walk follows, plus the event log each transcript read returns.
+   */
+  function lineageSessions(events: Record<string, readonly unknown[]> = {}): { get: (id: SessionId) => unknown } {
+    return {
+      get: (id: SessionId) => ({
+        id,
+        header: String(id) === String(CHILD)
+          ? { id: String(id), parentSession: String(ROOT), origin: 'subagent', delegationDepth: 1 }
+          : { id: String(id) },
+        snapshotEvents: () => events[String(id)] ?? [],
+      }),
+    }
+  }
+
+  /** Read one seat's comments through the channel's list read. */
+  async function listComments(handle: ConnectionRpcHandler, sessionId: string): Promise<CommentRecord[]> {
+    const answer = await handle('list', { sessionId }, signal())
+    if (!answer.ok) throw new Error('list failed')
+    return (answer.value as { comments?: CommentRecord[] }).comments ?? []
+  }
+
+  it("takes back another seat's action from this seat's keyboard, inside one lineage", async () => {
+    // The point of ONE stack per lineage root: the row a child recorded is the ROOT's row in the merged
+    // view, and the human who supervises the root is the one who presses Ctrl+Z. `nothing` now means the
+    // LINEAGE has nothing to take back, not that this seat has nothing of its own — so a teammate's Ctrl+Z
+    // can take back the root's last action and the root's can take back a teammate's.
+    const { ctx, handle, fs } = await harness({
+      sessionIds: [ROOT, CHILD],
+      prepare: (context) => { context.provide('sessions', lineageSessions() as never) },
+    })
+    // A file the double models: `readText` answers what `writeText` last put there, so the revert really
+    // leaves its bytes on disk and the undo's divergence guard sees what the revert wrote.
+    let live = 'b'
+    fs.readText.mockImplementation(async () => live)
+    fs.writeText.mockImplementation(async (_target: unknown, text: string) => { live = text; return { version: 1 } })
+    emitResult(ctx, execFor(CHILD), editSuccess('/repo/a.txt', 'a', 'b'))
+
+    // The child presses keep; the row leaves both seats' lists (it is one entry).
+    await expect(handle('keep', { sessionId: String(CHILD), id: '/repo/a.txt' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'kept' } })
+    expect(await listEntries(handle, String(ROOT))).toEqual([])
+
+    // …and the ROOT's Ctrl+Z takes it back, though the root pressed nothing.
+    await expect(handle('undo', { sessionId: String(ROOT) }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: '/repo/a.txt' } })
+    expect((await listEntries(handle, String(ROOT))).map(row => row.path)).toEqual(['/repo/a.txt'])
+
+    // The other way round too: the root reverts, the CHILD's Ctrl+Z takes it back.
+    await expect(handle('revert', { sessionId: String(ROOT), id: '/repo/a.txt' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'reverted' } })
+    await expect(handle('undo', { sessionId: String(CHILD) }, signal()))
+      .resolves.toMatchObject({ ok: true, value: { outcome: 'undone' } })
+    expect((await listEntries(handle, String(ROOT))).map(row => row.path)).toEqual(['/repo/a.txt'])
+  })
+
+  it('reads, marks seen, removes and restores a thread across the seats of one lineage', async () => {
+    // A comment stays in its AUTHOR's file (no migration); what changed is that the read fans out over the
+    // lineage and a removal is routed to the file that holds the record. The undo pair is the lineage's,
+    // so the seat that removed it can put it back — verbatim, in that same file.
+    const { ctx, handle } = await harness({
+      sessionIds: [ROOT, CHILD],
+      prepare: (context) => { context.provide('sessions', lineageSessions() as never) },
+    })
+    emitResult(ctx, execFor(ROOT), editSuccess('/repo/a.txt', 'a', 'b'))
+    const added = await handle('comment-add', { sessionId: String(ROOT), entryId: '/repo/a.txt', ...COMMENT_BODY }, signal())
+    expect(added).toMatchObject({ ok: true, value: { outcome: 'added' } })
+    const id = (added as { value: { comment: CommentRecord } }).value.comment.id
+
+    // The CHILD reads the ROOT's thread: readable from every seat of the lineage.
+    expect((await listComments(handle, String(CHILD))).map(row => row.id)).toEqual([id])
+    // Seen from the child's panel: one fact about one comment, not a per-seat copy of it.
+    await expect(handle('comment-seen', { sessionId: String(CHILD), id }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'seen' } })
+    // Removed from the child's seat, though the record lives in the ROOT's file.
+    await expect(handle('comment-remove', { sessionId: String(CHILD), id }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'removed' } })
+    expect(await listComments(handle, String(ROOT))).toEqual([])
+
+    // The child's Ctrl+Z puts it back, in the file that holds it.
+    await expect(handle('undo', { sessionId: String(CHILD) }, signal()))
+      .resolves.toMatchObject({ ok: true, value: { outcome: 'undone' } })
+    expect((await listComments(handle, String(ROOT))).map(row => row.id)).toEqual([id])
+  })
+
+  it('lets a seat comment on a row it sees only through the merge', async () => {
+    // The gap this closes: `comment-add` resolved its entry with the self-only `store.list`, so a row the
+    // merged view legitimately showed answered `missing` and could not be commented on at all.
+    const { ctx, handle } = await harness({
+      sessionIds: [ROOT, CHILD],
+      prepare: (context) => { context.provide('sessions', lineageSessions() as never) },
+    })
+    emitResult(ctx, execFor(ROOT), editSuccess('/repo/a.txt', 'a', 'b'))
+    expect((await listEntries(handle, String(CHILD))).map(row => row.path)).toEqual(['/repo/a.txt'])
+
+    const added = await handle('comment-add', { sessionId: String(CHILD), entryId: '/repo/a.txt', ...COMMENT_BODY }, signal())
+    expect(added).toMatchObject({ ok: true, value: { outcome: 'added' } })
+    const id = (added as { value: { comment: CommentRecord } }).value.comment.id
+    // Written by the child (its provenance, and therefore its file) and readable from the root.
+    expect((await listComments(handle, String(ROOT))).map(row => row.id)).toEqual([id])
+  })
+
+  it('folds each transcript\'s answers on the wire, and ends only that transcript\'s turn', async () => {
+    // ONE thread, TWO transcripts, and both ask a question in TURN 1. The root wrote the annotation and
+    // asked the first question before the asking session was recorded (so it folds under the author, which
+    // is where it went); the child asked a follow-up from its own panel. Each fold owns only its own
+    // transcript's question — a read that replaced the answer map would lose the other's, and a turn end
+    // matched by session+turn instead of by transcript would end the wrong question.
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-diff-approval-lineage-'))
+    tempDirs.push(storageDir)
+    await mkdir(commentsDirFor(storageDir), { recursive: true })
+    await writeFile(join(commentsDirFor(storageDir), `${ROOT}.json`), JSON.stringify({
+      version: 1,
+      comments: [{
+        id: 'c1', sessionId: ROOT, entryId: '/repo/a.txt', path: '/repo/a.txt',
+        anchor: { startLine: 1, endLine: 1 }, quote: 'a', text: 'why is this here?', createdAt: 1, updatedAt: 1,
+        asks: [
+          { requestId: 'req-root', text: 'why?', turn: 1 },
+          { requestId: 'req-child', sessionId: CHILD, text: 'and then?', turn: 1 },
+        ],
+      }],
+    }), 'utf8')
+
+    const log = (requestId: string, answer: string, ended: boolean): readonly unknown[] => [
+      { type: 'turn/start', seq: 0, time: 0, data: { turn: 1 } },
+      { type: 'user/message', seq: 1, time: 0, data: { role: 'user', source: { kind: 'user', rpcId: requestId }, content: [{ type: 'text', text: 'prompt' }] } },
+      { type: 'assistant/message', seq: 2, time: 0, data: { turn: 1, step: 0, message: { role: 'assistant', content: [{ type: 'text', text: answer }] } } },
+      // Only the CHILD's turn ends, so the two logs both ask in turn 1 while only one of them is over:
+      // the turn-end match has to be per transcript, or the root's question would be ended too.
+      ...(ended ? [{ type: 'turn/end', seq: 3, time: 0, data: { turn: 1, reason: { kind: 'completed' } } }] : []),
+    ]
+    const { ctx, handle } = await harness({
+      storageDir,
+      sessionIds: [ROOT, CHILD],
+      prepare: (context) => {
+        context.provide('sessions', lineageSessions({
+          [String(ROOT)]: log('req-root', 'answer from the root transcript', false),
+          [String(CHILD)]: log('req-child', 'answer from the child transcript', true),
+        }) as never)
+      },
+    })
+    emitResult(ctx, execFor(ROOT), editSuccess('/repo/a.txt', 'a', 'b'))
+
+    const read = async (): Promise<{ comments?: CommentRecord[]; commentAnswers?: Record<string, string> }> => {
+      const answer = await handle('list', { sessionId: String(CHILD) }, signal())
+      if (!answer.ok) throw new Error('list failed')
+      return answer.value as { comments?: CommentRecord[]; commentAnswers?: Record<string, string> }
+    }
+    const first = await read()
+    expect(first.commentAnswers).toEqual({
+      'req-root': 'answer from the root transcript',
+      'req-child': 'answer from the child transcript',
+    })
+    // A SECOND read folds each transcript again, and neither answer is erased by the other's fold.
+    expect((await read()).commentAnswers).toEqual(first.commentAnswers)
+    // The child's turn 1 ended: its own question is over, and the root's — also turn 1 — is not.
+    const asks = (await read()).comments?.[0]?.asks ?? []
+    expect(asks.find(ask => ask.requestId === 'req-child')?.ended).toBe(true)
+    expect(asks.find(ask => ask.requestId === 'req-root')?.ended).toBeUndefined()
+  })
+
+  it('keeps an unrelated root\'s history and threads to itself', async () => {
+    // The widening's negative: two roots with no lineage between them share NOTHING, so every verb still
+    // refuses exactly as it did before the canonicalization — the check is "same lineage", not "any
+    // session".
+    const A = SessionId('session-a')
+    const B = SessionId('session-b')
+    const { ctx, handle } = await harness({
+      sessionIds: [A, B],
+      prepare: (context) => { context.provide('sessions', { get: (id: SessionId) => ({ id, header: { id: String(id) } }) } as never) },
+    })
+    emitResult(ctx, execFor(A), editSuccess('/repo/a.txt', 'a', 'b'))
+    emitResult(ctx, execFor(A), editSuccess('/repo/b.txt', 'a', 'b'))
+    await handle('keep', { sessionId: String(A), id: '/repo/a.txt' }, signal())
+
+    // B's Ctrl+Z has nothing of its own, and cannot reach A's history.
+    await expect(handle('undo', { sessionId: String(B) }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'nothing' } })
+
+    // A comment A wrote on its OTHER row is invisible to B, and B cannot add one to A's row.
+    const added = await handle('comment-add', { sessionId: String(A), entryId: '/repo/b.txt', ...COMMENT_BODY }, signal())
+    expect(added).toMatchObject({ ok: true, value: { outcome: 'added' } })
+    const id = (added as { value: { comment: CommentRecord } }).value.comment.id
+    expect(await listComments(handle, String(B))).toEqual([])
+    await expect(handle('comment-add', { sessionId: String(B), entryId: '/repo/b.txt', ...COMMENT_BODY }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+    await expect(handle('comment-seen', { sessionId: String(B), id }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+    await expect(handle('comment-remove', { sessionId: String(B), id }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+    await expect(handle('comment-ask', { sessionId: String(B), id, prompt: 'p', text: 'p' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+  })
+})
+

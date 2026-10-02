@@ -395,6 +395,20 @@ export interface CommentAsk {
    */
   requestId: string
   /**
+   * The SESSION THIS QUESTION WAS SUBMITTED INTO — the transcript that will carry its answer.
+   *
+   * It is not always the comment's own `sessionId`: once a lineage reads every seat's threads (`list`
+   * fans the read out across the lineage root), any seat may ask a question on a thread another seat
+   * wrote, and the prompt goes into the seat the human is using. The answer fold then has to know which
+   * transcript to read for which question, and turn numbers are only unique WITHIN one session — so this
+   * is what `markTurnEnded` matches on as well.
+   *
+   * Absent on a question asked before this field existed, when the only session a question could have
+   * gone to was the comment's own: the fold reads the comment's `sessionId` for those (see
+   * `askTranscript` in the comment store), which is exactly where their answers already are.
+   */
+  sessionId?: SessionId | undefined
+  /**
    * The question's own words, as the reader typed them — without the marker, the
    * `(path:lines)` reference and the answer rules that wrap them in the submitted
    * prompt. The prompt is what the agent is asked; this is what the thread shows, so a

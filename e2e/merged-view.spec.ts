@@ -13,11 +13,12 @@
 
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test'
 import {
-  bootstrapHome, claimSession, makeFixture, resolveDsh, seedPending, startHost, stopHost,
+  bootstrapHome, claimSession, makeFixture, resolveDsh, seedCommentFile, seedPending, startHost, stopHost,
   type Fixture, type Host, type SeededFile,
 } from './helpers/host.ts'
 import {
-  beginSession, dismissNotices, ensurePanelList, newGuiPage, openPanel, openSession, waitForShellReady,
+  beginSession, commentRow, dismissNotices, ensurePanelList, newGuiPage, openListTab, openPanel, openSession,
+  waitForShellReady,
 } from './helpers/gui.ts'
 
 const SEED_MESSAGE = 'e2e: merged view'
@@ -27,6 +28,10 @@ const SEED_MESSAGE = 'e2e: merged view'
  * lineage recorded ON THE ROW, so the fixture needs the link, not the child.
  */
 const CHILD_SESSION = 'e2e-merged-view-child'
+
+/** The thread recorded in the CHILD's own comment file, and the words it must show up with. */
+const CHILD_COMMENT = 'e2e-merged-view-note'
+const CHILD_COMMENT_TEXT = 'note from the child seat'
 
 /** How the mark names itself, in whichever language the host drew (see `row.fromChild` in the locales). */
 const MARK_COPY = /来自子会话的改动|Changed in a child session/
@@ -80,6 +85,17 @@ test.describe('合并视图：子会话的行与它的标记', () => {
     const seeded = seedPending(fixture, sessionId, files, [])
     ownPath = seeded.entries[0]?.path ?? ''
     childPath = seeded.entries[1]?.path ?? ''
+    // The child's own comment FILE, written after the pending store: the thread belongs to a seat that never
+    // ran here, lives in that seat's file on disk (no migration), and is readable from the parent's panel
+    // only because the comment read fans out across the lineage instead of reading one session's file.
+    seedCommentFile(fixture, CHILD_SESSION, [{
+      id: CHILD_COMMENT,
+      entryId: childPath,
+      path: childPath,
+      // The child file's own last line, which is what lets the host place the thread in that content.
+      quote: 'child two',
+      text: CHILD_COMMENT_TEXT,
+    }])
     claimSession(fixture, workspaceId, sessionId)
 
     // ---- phase two: the same home with the store in place.
@@ -126,6 +142,21 @@ test.describe('合并视图：子会话的行与它的标记', () => {
     await mark.hover({ timeout: 20_000 })
     await expect(page.locator('[role="tooltip"]:visible').filter({ hasText: MARK_COPY }))
       .toHaveCount(1, { timeout: 20_000 })
+  })
+
+  test('m3. 子会话的评论在父会话的面板里列出', async () => {
+    test.setTimeout(120_000)
+    // The comment READ is the lineage's too. The thread lives in the CHILD's own file on disk — the author's,
+    // never migrated — and the parent's panel lists it because the read fans out across the lineage. Under
+    // the read this replaced (one session's own file) this thread was invisible to every seat but its
+    // author's, which is the state `m1`/`m2` cannot show: they are about the row, not the threads.
+    await openListTab(page, 'comments')
+    const thread = commentRow(page, CHILD_COMMENT)
+    await expect(thread).toBeVisible({ timeout: 30_000 })
+    await expect(thread).toContainText(CHILD_COMMENT_TEXT, { timeout: 20_000 })
+    // …and it is the only thread on screen: the parent wrote none, so a second row here would be the child's
+    // file read twice rather than one lineage's threads read once.
+    await expect(page.locator('[data-diff-comment-link]')).toHaveCount(1)
   })
 })
 
