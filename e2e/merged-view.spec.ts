@@ -31,6 +31,12 @@ const CHILD_SESSION = 'e2e-merged-view-child'
 /** How the mark names itself, in whichever language the host drew (see `row.fromChild` in the locales). */
 const MARK_COPY = /来自子会话的改动|Changed in a child session/
 
+/**
+ * The SHARED row's sentence, and it must NOT be the one above: that row carries the reader's own change too,
+ * so "changed in a child session" alone would deny it (see `row.fromChildShared` in the locales).
+ */
+const SHARED_COPY = /也包含子会话的改动|Also includes changes from a child session/
+
 let fixture: Fixture
 let browser: Browser
 let page: Page
@@ -119,6 +125,106 @@ test.describe('合并视图：子会话的行与它的标记', () => {
     // row's own path tooltip wraps the same button, so what matters is that THIS sentence is on screen.
     await mark.hover({ timeout: 20_000 })
     await expect(page.locator('[role="tooltip"]:visible').filter({ hasText: MARK_COPY }))
+      .toHaveCount(1, { timeout: 20_000 })
+  })
+})
+
+/**
+ * The SHARED row: one the listing session touched itself AND a child in its lineage touched too. Its own
+ * fixture, because `m1` asserts the exact row count of ITS two rows and must stay untouched; this block
+ * seeds the two rows its own claim needs.
+ *
+ * The shape that makes it shared is `sessionIds: [child, thisSession]` — written by `alsoSessions`. The
+ * session is therefore an OWNER of the row, so the host answers "not merged, but a child's change is in it",
+ * which is the second sentence. The child's lineage record rides the same row, so no live child is needed.
+ */
+test.describe('合并视图：与子会话共享的行', () => {
+  let sharedFixture: Fixture
+  let sharedBrowser: Browser
+  let sharedPage: Page
+  let sharedHost: Host
+  let sharedOwnPath: string
+  let sharedPath: string
+
+  test.beforeAll(async () => {
+    test.setTimeout(240_000)
+    const dsh = resolveDsh()
+    if (dsh === undefined) {
+      test.skip(true, '找不到 dsh 可执行文件：请设置 DSH_BIN，或把 `dsh`（@deepseek-ai/dsh 的 bin）放进 PATH。')
+      return
+    }
+    sharedFixture = makeFixture('merged-shared')
+    const workspaceId = await bootstrapHome(dsh, sharedFixture)
+
+    sharedHost = await startHost(dsh, sharedFixture.home, sharedFixture.workspace, sharedFixture.logFile)
+    sharedBrowser = await chromium.launch()
+    sharedPage = await newGuiPage(sharedBrowser)
+    await sharedPage.goto(sharedHost.url, { waitUntil: 'domcontentloaded' })
+    await sharedPage.waitForSelector('text=/工作区|Workspaces/', { timeout: 60_000 })
+    await dismissNotices(sharedPage)
+    const sessionId = await beginSession(
+      sharedPage, sharedFixture.workspace.split(/[\\/]/).pop() ?? 'workspace', sharedFixture.home, SEED_MESSAGE,
+    )
+    await sharedPage.close()
+    await stopHost(sharedHost.proc)
+
+    const files: SeededFile[] = [
+      { name: 'own.txt', oldText: 'own one\n', newText: 'own two\n' },
+      {
+        // The child is the first writer AND the recorded lineage is its own, while the session is named as a
+        // co-owner: exactly the shape `listWithState` answers with the shared mark.
+        name: 'shared.txt', oldText: 'shared one\n', newText: 'shared two\n',
+        owner: {
+          sessionId: CHILD_SESSION, parentSessionId: sessionId, origin: 'subagent', delegationDepth: 1,
+          alsoSessions: [sessionId],
+        },
+      },
+    ]
+    const seeded = seedPending(sharedFixture, sessionId, files, [])
+    sharedOwnPath = seeded.entries[0]?.path ?? ''
+    sharedPath = seeded.entries[1]?.path ?? ''
+    claimSession(sharedFixture, workspaceId, sessionId)
+
+    sharedHost = await startHost(dsh, sharedFixture.home, sharedFixture.workspace, sharedFixture.logFile)
+    sharedPage = await newGuiPage(sharedBrowser)
+    sharedPage.on('pageerror', error => { console.log('[pageerror]', error.message) })
+    await sharedPage.goto(sharedHost.url, { waitUntil: 'domcontentloaded' })
+    await sharedPage.waitForSelector('text=/工作区|Workspaces/', { timeout: 60_000 })
+    await dismissNotices(sharedPage)
+    await waitForShellReady(sharedPage)
+    await openSession(sharedPage, SEED_MESSAGE)
+    await openPanel(sharedPage)
+    await ensurePanelList(sharedPage)
+  })
+
+  test.afterAll(async () => {
+    await sharedPage?.close().catch(() => {})
+    await sharedBrowser?.close().catch(() => {})
+    await stopHost(sharedHost?.proc)
+    sharedFixture?.cleanup()
+  })
+
+  test('m2. 与子会话共享的行说的是另一句，而本会话自己的行仍然没有标记', async () => {
+    test.setTimeout(120_000)
+    const own = sharedPage.locator(`[data-diff-file="${sharedOwnPath.replace(/\\/g, '\\\\')}"]`).first()
+    const shared = sharedPage.locator(`[data-diff-file="${sharedPath.replace(/\\/g, '\\\\')}"]`).first()
+
+    // The shared row is in the list because THIS session is one of its owners, not through the merge.
+    await expect(sharedPage.locator('[data-diff-file]')).toHaveCount(2, { timeout: 30_000 })
+    await expect(own).toBeVisible({ timeout: 30_000 })
+    await expect(shared).toBeVisible({ timeout: 30_000 })
+
+    // It wears the mark, in the SHARED sentence: the row is the reader's own work as well, and the first
+    // sentence would deny that.
+    await expect(shared.locator('[data-diff-child]')).toHaveCount(1)
+    await expect(own.locator('[data-diff-child]')).toHaveCount(0)
+    await expect(shared.locator('[data-diff-child]').first()).toHaveAttribute('aria-label', SHARED_COPY)
+
+    // …and the sentence is on a RENDERED surface too, the way `m1` proves its own: hover the mark and a visible
+    // bubble carries it. Same technique, same locator shape, same nesting — only the sentence differs.
+    const mark = shared.locator('[data-diff-child]').first()
+    await mark.hover({ timeout: 20_000 })
+    await expect(sharedPage.locator('[role="tooltip"]:visible').filter({ hasText: SHARED_COPY }))
       .toHaveCount(1, { timeout: 20_000 })
   })
 })

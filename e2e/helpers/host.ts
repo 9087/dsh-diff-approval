@@ -306,6 +306,12 @@ export interface SeededFile {
     origin?: string
     /** How deep below its root the child was delegated. */
     delegationDepth?: number
+    /**
+     * Further sessions to name in `sessionIds` alongside the owner — how a SHARED row is written: one the
+     * listing session touched itself AND a child in its lineage touched too. The owner stays the first writer,
+     * exactly as the host's own union does.
+     */
+    alsoSessions?: readonly string[] | undefined
   } | undefined
 }
 
@@ -330,7 +336,9 @@ export function seedPending(
       newText: file.newText,
       updatedAt: Date.now(),
       sessionId: owner,
-      sessionIds: [owner],
+      // `alsoSessions` is how a SHARED row is written: the listing session named as a co-owner, which is what
+      // makes the host answer "this session touched it too" instead of "merged in".
+      sessionIds: [owner, ...(file.owner?.alsoSessions ?? [])],
       // No `lineage` key at all for an ordinary row: that is what a store written before the field looks
       // like, and the loader's tolerance for it is worth keeping exercised by every other spec here.
       ...(file.owner === undefined ? {} : {

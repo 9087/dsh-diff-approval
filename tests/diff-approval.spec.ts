@@ -3373,6 +3373,80 @@ describe('comments over the channel', () => {
       // The row is untouched for the session that owns it.
       expect((await listEntries(handle, 'session-1')).map(row => row.path)).toEqual(['/repo/a.txt'])
     })
+
+    // The row's MARK, which is a different question from the merge: `viaLineage` says why a row is in the
+    // list, `hasChildContribution` says whether a child's change is in it. A row the session touched AS WELL
+    // is silent about the child without it — and a session outside the lineage touching the same path (the
+    // store is keyed by path globally) is not a child's contribution, which is the case that would make the
+    // copy a lie.
+    it('marks a row only a child touched as a child contribution', async () => {
+      const { ctx, handle } = await harness({
+        prepare: (context) => { context.provide('sessions', registry('session-parent', 'session-child') as never) },
+      })
+      emitResult(ctx, execFor('session-child'), editSuccess('/repo/a.txt', 'a', 'b'))
+
+      const row = (await listEntries(handle, 'session-parent'))[0]!
+      // Here only through the merge, and a child's change is all of it.
+      expect(row.viaLineage).toBe(true)
+      expect(row.hasChildContribution).toBe(true)
+    })
+
+    it('marks a row this session touched too, when a child in its lineage also touched it', async () => {
+      const { ctx, handle } = await harness({
+        prepare: (context) => { context.provide('sessions', registry('session-parent', 'session-child') as never) },
+      })
+      // The child first, then the parent editing the same path: one entry, both sessions in `sessionIds`.
+      emitResult(ctx, execFor('session-child'), editSuccess('/repo/a.txt', 'a', 'b'))
+      emitResult(ctx, execFor('session-parent'), editSuccess('/repo/a.txt', 'b', 'c'))
+
+      const row = (await listEntries(handle, 'session-parent'))[0]!
+      expect(row.sessionIds).toEqual(expect.arrayContaining(['session-child', 'session-parent']))
+      // The row is here on its own merit — so NOT `viaLineage` — and still says a child had a hand in it.
+      expect(row.viaLineage).toBeUndefined()
+      expect(row.hasChildContribution).toBe(true)
+    })
+
+    it('says nothing about a child on a row the session wrote alone', async () => {
+      const { ctx, handle } = await harness({
+        prepare: (context) => { context.provide('sessions', registry('session-parent', 'session-child') as never) },
+      })
+      emitResult(ctx, execFor('session-parent'), editSuccess('/repo/a.txt', 'a', 'b'))
+
+      const row = (await listEntries(handle, 'session-parent'))[0]!
+      expect(row.viaLineage).toBeUndefined()
+      expect(row.hasChildContribution).toBe(false)
+    })
+
+    it("does not call an unrelated session's touch a child's contribution", async () => {
+      // Two roots, no lineage between them, and one path both happened to touch. This is the negative the
+      // copy rests on: the entry really does carry another session's edit, and it is NOT a child's.
+      const { ctx, handle } = await harness({
+        prepare: (context) => {
+          context.provide('sessions', { get: (id: SessionId) => ({ id, header: { id: String(id) } }) } as never)
+        },
+      })
+      emitResult(ctx, execFor('session-1'), editSuccess('/repo/a.txt', 'a', 'b'))
+      emitResult(ctx, execFor('session-other'), editSuccess('/repo/a.txt', 'b', 'c'))
+
+      const row = (await listEntries(handle, 'session-1'))[0]!
+      expect(row.sessionIds).toEqual(expect.arrayContaining(['session-1', 'session-other']))
+      expect(row.viaLineage).toBeUndefined()
+      expect(row.hasChildContribution).toBe(false)
+    })
+
+    it('says nothing about a child when the lineage is unknown', async () => {
+      // Nothing recorded and no header facts: the two sessions cannot be shown to share a root, so the mark
+      // stays off rather than guessing the relationship the copy names.
+      const { ctx, handle } = await harness({
+        prepare: (context) => { context.provide('sessions', { get: () => undefined } as never) },
+      })
+      emitResult(ctx, execFor('session-1'), editSuccess('/repo/a.txt', 'a', 'b'))
+      emitResult(ctx, execFor('session-2'), editSuccess('/repo/a.txt', 'b', 'c'))
+
+      const row = (await listEntries(handle, 'session-1'))[0]!
+      expect(row.viaLineage).toBeUndefined()
+      expect(row.hasChildContribution).toBe(false)
+    })
   })
 })
 

@@ -1007,7 +1007,14 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       // Absent — never `false` — for a row the session did touch, so an older client reads it as it always
       // did, and the wire stays tolerant of a host that does not know the field at all.
       const viaLineage = ownersOf(entry).includes(sessionId) ? undefined : true
-      listed.push({ ...entry, newText: adopted, ...state, viaLineage })
+      // A DIFFERENT question, and deliberately a different field (see `PendingFileDiff.hasChildContribution`):
+      // whether an owner other than the requester sits inside the requester's lineage, so a row the requester
+      // touched AS WELL still says a child's change shares it. The root walk is the view's own, so the mark
+      // and the merge cannot drift. A session OUTSIDE that lineage never counts: entries are keyed by path
+      // globally, and calling an unrelated session's touch a child's contribution would make the copy lie.
+      const hasChildContribution = ownersOf(entry)
+        .some(owner => owner !== sessionId && view.sameRoot(owner, sessionId))
+      listed.push({ ...entry, newText: adopted, ...state, viaLineage, hasChildContribution })
     }
     return { files: listed, redoCleared }
   }
@@ -1311,9 +1318,13 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * (`dsh-experimental-agent-team/lib/types/roster.js:253-262`) and records membership in the LEAD's own
    * journal (`:249`), which this plugin cannot read. So this view merges every subagent child, not only
    * teammates; narrowing it to the roster would need a service the plugin does not inject.
-   * @returns the view, whose `sees` answers the visibility question for one entry.
+   * @returns the view: `sees` answers the visibility question for one entry, and `sameRoot` answers whether
+   * two sessions share a root — the question the row's mark asks about its other owners.
    */
-  function lineageView(): { sees: (sessionId: SessionId, entry: PendingEntry) => boolean } {
+  function lineageView(): {
+    sees: (sessionId: SessionId, entry: PendingEntry) => boolean
+    sameRoot: (a: SessionId, b: SessionId) => boolean
+  } {
     const recorded = new Map<SessionId, SessionLineage>()
     for (const entry of store.all()) {
       if (entry.lineage !== undefined && !recorded.has(entry.sessionId)) recorded.set(entry.sessionId, entry.lineage)
@@ -1343,6 +1354,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const root = rootOf(sessionId)
         return ownersOf(entry).some(owner => rootOf(owner) === root)
       },
+      // The same walk, asked about two sessions rather than one session and one entry. The MARK needs this
+      // question (is that other owner inside my lineage?) and the two must not drift apart, so it is the very
+      // `rootOf` above rather than a second lineage rule.
+      sameRoot: (a, b) => rootOf(a) === rootOf(b),
     }
   }
 

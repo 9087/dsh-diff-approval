@@ -105,6 +105,11 @@ export const zh = {
    * teammate from any other subagent child, so the copy must not claim more than the header knows.
    */
   'row.fromChild': '来自子会话的改动',
+  /**
+   * The mark on a row this session touched AND a child in its lineage touched too. Its own sentence, because
+   * "changed in a child session" would be wrong here: the reader changed it as well.
+   */
+  'row.fromChildShared': '也包含子会话的改动',
   'panel.unseen': '有新的改动还没看',
   'row.dismiss': '移出',
   'row.keepListed': '保留',
@@ -392,6 +397,8 @@ export const en = {
   'row.failed': 'Failed',
   /** See the Chinese block: "child session", never "teammate" — the header cannot tell them apart. */
   'row.fromChild': 'Changed in a child session',
+  /** The shared row: "changed in a child session" alone would be wrong — the reader changed it too. */
+  'row.fromChildShared': 'Also includes changes from a child session',
   'panel.unseen': 'Changes you have not looked at yet',
   'row.dismiss': 'Remove',
   'row.keepListed': 'Keep',

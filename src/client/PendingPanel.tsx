@@ -868,11 +868,12 @@ interface PendingFileRowProps {
   /** Picked for a decision over several files (Ctrl/Cmd-click). Not the same as `selected`. */
   picked: boolean
   /**
-   * Whether this row arrived through the MERGED view: the host scoped it into this session's list because
-   * the row's owning session is a child in this session's lineage (see `PendingFileDiff.viaLineage`),
-   * NOT because this session touched it. Marked, never moved, and still actionable exactly like its own.
+   * Which sentence this row's mark wears, or `undefined` for no mark at all (see `childNoteOf`): the host's
+   * `viaLineage` for a row that is here only because of the merge, its `hasChildContribution` for a row this
+   * session touched that a child in its lineage touched too. Marked, never moved, and still actionable
+   * exactly like this session's own — the host resolves the owner for a keep or a revert.
    */
-  fromChild: boolean
+  childNote: ChildNoteKey | undefined
   /** The last keep/revert failure for this file, shown as an inline tag. */
   failedMessage?: string | undefined
   t: Translator
@@ -3835,8 +3836,29 @@ function markdownPreviewMarkers(container: HTMLElement): PreviewRulerMarker[] {
   return markers
 }
 
+/**
+ * Which sentence marks a row, or none. Two keys because the two cases say different things: a row only a
+ * child touched, and one this session touched as well.
+ */
+type ChildNoteKey = 'row.fromChild' | 'row.fromChildShared'
+
+/**
+ * The mark one row wears, from the host's two answers — and the order matters.
+ *
+ * `viaLineage` first: a row in this session's list ONLY because of the merge was not touched here at all, so
+ * "changed in a child session" is the whole truth about it. A row that got here on its own merit and ALSO has
+ * a child's change in it says so instead, because the first sentence would deny the reader's own edit.
+ * @param file - one listed row.
+ * @returns the locale key to draw, or `undefined` for a row with nothing to say.
+ */
+function childNoteOf(file: PendingFileDiff): ChildNoteKey | undefined {
+  if (file.viaLineage === true) return 'row.fromChild'
+  if (file.hasChildContribution === true) return 'row.fromChildShared'
+  return undefined
+}
+
 /** One row of the file list: the clickable head in the left pane. */
-function PendingFileRow({ file, selected, picked, fromChild, failedMessage, t, onSelect, onMenu }: PendingFileRowProps) {
+function PendingFileRow({ file, selected, picked, childNote, failedMessage, t, onSelect, onMenu }: PendingFileRowProps) {
   const stats = useMemo(
     () => computeWholeFileDiff(file.oldText, file.newText),
     [file.oldText, file.newText],
@@ -3878,15 +3900,16 @@ function PendingFileRow({ file, selected, picked, fromChild, failedMessage, t, o
             </svg>
           )}
           <span className={css.rowPath}>{basenameOf(file.path)}</span>
-          {fromChild && (
-            // A row that came in through the merged view: a child session owns it (see `touchedBy`), so it
-            // is MARKED rather than moved, and it stays actionable exactly like this session's own rows —
-            // the host resolves the owner for a keep or a revert. The copy says CHILD SESSION and never
+          {childNote !== undefined && (
+            // A row with a child session's change in it — either ONLY that (it arrived through the merged view
+            // and this session never touched it) or a child's share of a row this session touched too. MARKED
+            // rather than moved either way, and actionable exactly like this session's own rows: the host
+            // resolves the owner for a keep or a revert. The copy says CHILD SESSION and never
             // 队友/teammate, because a child's own header cannot tell a teammate from any other subagent
             // child (see the host's `lineageView`), and never claims the comments or the undo history are
             // merged either: those stay per-session.
-            <Tooltip label={t('row.fromChild')} delayMs={500}>
-              <span className={css.rowChild} data-diff-child role="img" aria-label={t('row.fromChild')}>
+            <Tooltip label={t(childNote)} delayMs={500}>
+              <span className={css.rowChild} data-diff-child role="img" aria-label={t(childNote)}>
                 <svg width="9" height="9" viewBox="0 0 9 9" aria-hidden="true">
                   <path d="M1.5 1 V5.2 A1.3 1.3 0 0 0 2.8 6.5 H6.6" fill="none" stroke="currentColor" strokeWidth="1.1" />
                   <path d="M5.1 4.7 L6.9 6.5 L5.1 8.3" fill="none" stroke="currentColor" strokeWidth="1.1" />
@@ -9684,7 +9707,7 @@ export function PendingPanel({
       // A row the HOST scoped into this list through the lineage merge (its owner is a child session in this
       // session's lineage). It is marked, not moved: the row keeps its owner and every decision on it works
       // exactly as it does on one of this session's own — the host resolves the owner for those.
-      fromChild={entry.viaLineage === true}
+      childNote={childNoteOf(entry)}
       selected={selected === entry.id}
       picked={pickedFiles.has(entry.id)}
       failedMessage={failed.get(entry.id)}

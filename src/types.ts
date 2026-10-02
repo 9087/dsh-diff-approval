@@ -90,6 +90,15 @@ export interface PendingFileDiff extends PendingEntry {
    */
   viaLineage?: boolean | undefined
   /**
+   * Whether some session OTHER than the listing one — and inside the listing session's lineage — also
+   * contributed to this row, so a row the session touched itself still says a child had a hand in it. Kept
+   * apart from `viaLineage` on purpose: that one answers "why is this row here" (visibility), this one
+   * answers "whose change does it carry" (the mark). Only a session in the same lineage counts: entries are
+   * keyed by path globally, so an unrelated session's touch of the same file must never be called a child's
+   * work. Host-computed per read (`listWithState`), absent on a host older than the mark.
+   */
+  hasChildContribution?: boolean | undefined
+  /**
    * Whether the file no longer exists (or cannot be resolved). Reverting a
    * missing entry restores its old content, which recreates the file.
    */

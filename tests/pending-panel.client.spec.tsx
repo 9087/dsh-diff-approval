@@ -13690,13 +13690,36 @@ describe('PendingPanel: the rows a comment covers', () => {
     expect(document.querySelectorAll('[data-diff-file]')).toHaveLength(2)
   })
 
+  it('marks the row this session shares with a child, in the other sentence', () => {
+    // The same mark telling a different truth: this row is in the list because session-1 touched it, and a
+    // child in its lineage touched it too. The host answers that with `hasChildContribution`, NOT `viaLineage`
+    // — so the sentence must be the shared one, and the row's own edit is not denied.
+    const own = entry({ id: 'entry-own', path: '/repo/own.txt' })
+    const shared = entry({
+      id: 'entry-shared',
+      path: '/repo/shared.txt',
+      sessionIds: [S1, 'session-child' as SessionId],
+      hasChildContribution: true,
+    })
+    render(<PendingPanel {...panelProps({ read: true, files: [own, shared], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    const sharedRow = document.querySelector('[data-diff-file="entry-shared"]') as HTMLElement
+    expect(sharedRow.querySelector('[data-diff-child]')?.getAttribute('aria-label')).toBe('row.fromChildShared')
+    // Still exactly one mark, and not on the row the session wrote alone.
+    expect(document.querySelectorAll('[data-diff-child]')).toHaveLength(1)
+    expect(document.querySelector('[data-diff-file="entry-own"] [data-diff-child]')).toBeNull()
+  })
+
   it('says "child session" in both blocks, and never claims a teammate', () => {
     expect(zh['row.fromChild']).toBe('来自子会话的改动')
     expect(en['row.fromChild']).toBe('Changed in a child session')
-    // The honest limit, pinned in the copy itself: a child's own header cannot tell a teammate from any
-    // other subagent child, so neither block may say it does.
-    expect(zh['row.fromChild']).not.toContain('队友')
-    expect(en['row.fromChild']).not.toContain('teammate')
+    expect(zh['row.fromChildShared']).toBe('也包含子会话的改动')
+    expect(en['row.fromChildShared']).toBe('Also includes changes from a child session')
+    // The honest limit, pinned in the copy itself and in BOTH sentences: a child's own header cannot tell a
+    // teammate from any other subagent child, so neither block may say it does.
+    for (const text of [zh['row.fromChild'], zh['row.fromChildShared']]) expect(text).not.toContain('队友')
+    for (const text of [en['row.fromChild'], en['row.fromChildShared']]) expect(text).not.toContain('teammate')
   })
 
   it('renders no mark at all when every row is the requester\'s own', () => {

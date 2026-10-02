@@ -87,17 +87,18 @@ describe('list', () => {
           // Carried for every row, and `false` here: the host did not mark this one as merged, and the
           // narrowing is the boundary where the flag used to die (see `viaLineage` below).
           viaLineage: false,
+          hasChildContribution: false,
           sessionIds: ['session-1'],
         },
         {
           id: 'e2', sessionId: 'session-1', path: '/repo/c.txt', earlierVersion: 'none',
           oldText: '', newText: 'c', updatedAt: 20, missing: false, diverged: false,
-          sessionIds: ['session-1'], viaLineage: false,
+          sessionIds: ['session-1'], viaLineage: false, hasChildContribution: false,
         },
         {
           id: 'e3', sessionId: 'session-1', path: '/repo/d.txt', earlierVersion: 'none',
           oldText: '', newText: 'd', updatedAt: 30, missing: false, diverged: false,
-          sessionIds: ['session-1'], viaLineage: false,
+          sessionIds: ['session-1'], viaLineage: false, hasChildContribution: false,
         },
       ],
     })
@@ -385,22 +386,31 @@ describe('comments', () => {
   })
 })
 
-describe('the merged-row flag', () => {
-  it('carries viaLineage through the narrowing, and reads a missing one as "not merged"', async () => {
+describe('the merged-row flags', () => {
+  it('carries viaLineage and hasChildContribution through the narrowing, missing ones as "no"', async () => {
     // The boundary THIS file guards, and the defect it did not know about: `pendingFileOf` rebuilds each row
     // field by field, so a field it does not name is DROPPED rather than passed through. `viaLineage` was
     // dropped exactly that way, and the panel then hid the legitimately merged row — it draws a row whose
     // owner is not this session only when this flag says so. No host test crosses this line, and the client
-    // tests build their rows by hand, so this is the only place the loss could have been caught.
+    // tests build their rows by hand, so this is the only place the loss could have been caught. The second
+    // field is the row's MARK for a row this session touched as well, and it dies the same way if unnamed.
     const seam = fakeRpc({
       list: {
         ok: true,
         value: {
           files: [
             {
+              // A row only a child touched: here through the merge, marked as the child's own change.
               id: '/repo/child.txt', sessionId: 'session-child', sessionIds: ['session-child'],
               path: '/repo/child.txt', earlierVersion: 'file', oldText: 'a', newText: 'b',
-              updatedAt: 10, missing: false, diverged: false, viaLineage: true,
+              updatedAt: 10, missing: false, diverged: false, viaLineage: true, hasChildContribution: true,
+            },
+            {
+              // A row this session touched too, a child in its lineage having touched it as well: NOT merged,
+              // and still carrying the child's share.
+              id: '/repo/shared.txt', sessionId: 'session-1', sessionIds: ['session-1', 'session-child'],
+              path: '/repo/shared.txt', earlierVersion: 'file', oldText: 'a', newText: 'b',
+              updatedAt: 12, missing: false, diverged: false, hasChildContribution: true,
             },
             {
               id: '/repo/own.txt', sessionId: 'session-1', sessionIds: ['session-1'],
@@ -415,8 +425,13 @@ describe('the merged-row flag', () => {
     // The host said this row reached the list through the lineage merge: that answer has to survive the
     // narrowing, or the row is not merely unmarked — it is gone from the panel.
     expect(files[0]?.viaLineage).toBe(true)
-    // A host that never sends the field — one older than the merge — reads as "not merged", which is exactly
-    // how the client behaved before the field existed. Never a merge the host did not ask for.
+    expect(files[0]?.hasChildContribution).toBe(true)
+    // The shared row is here on its own merit and says so in the other field.
     expect(files[1]?.viaLineage).toBe(false)
+    expect(files[1]?.hasChildContribution).toBe(true)
+    // A host that never sends either field — one older than the mark — reads as "no", which is exactly how
+    // the client behaved before they existed. Never a merge, and never a child, the host did not name.
+    expect(files[2]?.viaLineage).toBe(false)
+    expect(files[2]?.hasChildContribution).toBe(false)
   })
 })
