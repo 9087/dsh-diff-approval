@@ -785,6 +785,16 @@ export interface PendingPanelDockProps {
    * at-a-glance count, and a badge that never read would simply show nothing.
    */
   showing?: boolean
+  /**
+   * Ask the host how many rows this session has, WITHOUT reading the list (`list-count`).
+   *
+   * This is what the tick asks while this seat has no surface on screen: the badge is the thing that has
+   * to keep working while the panel is shut, and the full read is what makes it slow (it ships every
+   * visible entry's whole old and new text). A seat that IS on screen keeps the full read, and so does a
+   * face that offers no counter at all — absent means "this face cannot count", which is today's
+   * behaviour: one full read per tick.
+   */
+  onRefreshCount?: ((sessionId: SessionId | undefined) => void) | undefined
 }
 
 /** A last-block keep/revert awaiting the user's remove-or-keep choice; the choice
@@ -8241,7 +8251,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, sessionId, usePending, pendingView, showing = true, onRefresh, onMarkSeen, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onCommentAdd, onCommentRemove, onCommentRemoveMany, onCommentAsk, onCommentSeen, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onKeepMany, onRevertMany, onAckRedoCleared, onAckUndoNotice, collapseSidebar, t,
+  wide, useSessions, sessionId, usePending, pendingView, showing = true, onRefresh, onRefreshCount, onMarkSeen, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onCommentAdd, onCommentRemove, onCommentRemoveMany, onCommentAsk, onCommentSeen, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onKeepMany, onRevertMany, onAckRedoCleared, onAckUndoNotice, collapseSidebar, t,
   docked = false, dockHost, onOpenDock, closeDock, useDock,
 }: PendingPanelProps) {
   // The two tooltips that name a way out of the panel, decided once (see `chords.ts`): this host's
@@ -8795,10 +8805,26 @@ export function PendingPanel({
     // has switched away from was polling its own session once a second for nobody, and (before the
     // per-session views) its answers were what every badge on the page was reading.
     if (!showing || current === undefined || currentBlank) return
-    onRefresh(current)
-    const timer = setInterval(() => { onRefresh(current) }, POLL_INTERVAL_MS)
+    // …and a seat that is showing NOTHING BUT ITS BADGE does not need the list either — it needs a number.
+    // The tick therefore asks the light question (`list-count`: a count on the wire, no file content) and
+    // only pays for the full read while a surface is actually ON SCREEN: the overlay the reader has open,
+    // or the docked tab this seat IS. `showing` alone cannot decide it — the footer seat is always
+    // "showing" (its badge is the reader's at-a-glance count) while its overlay is shut, which is exactly
+    // the state the whole-megabyte poll used to run in.
+    //
+    // Neither direction is optional: a closed panel must keep its count fresh (the badge is the thing that
+    // keeps working while the panel is shut), and an open one must keep the full read on its unchanged
+    // interval (the list, the comments and the diff all come from it).
+    //
+    // A face with no counter at all keeps the old behaviour: one full read per tick.
+    const onScreen = docked || open || dockShowing
+    const tick = onScreen || onRefreshCount === undefined
+      ? (): void => onRefresh(current)
+      : (): void => onRefreshCount(current)
+    tick()
+    const timer = setInterval(tick, POLL_INTERVAL_MS)
     return () => { clearInterval(timer) }
-  }, [current, currentBlank, showing, onRefresh])
+  }, [current, currentBlank, showing, docked, open, dockShowing, onRefresh, onRefreshCount])
 
   /**
    * A file the list no longer holds takes its placed-but-unsent blocks with it, on every poll.
@@ -9111,6 +9137,16 @@ export function PendingPanel({
     // of their views. Tolerant of a legacy row carrying only `sessionId`.
     .filter(file => belongsToSession(file, current))
     .sort((left, right) => compareFileNames(left.path, right.path))
+  /**
+   * What the badge counts: the light count when one has arrived, else the rows of the last full read.
+   *
+   * `count` is the host's own answer to "how many rows would a full read carry", which is the list this
+   * badge is a badge for; the fallback is the list this seat actually holds — the same figure the badge
+   * showed before the count existed, and the one every older host keeps answering with (see `countOf`'s
+   * counterpart here: this seat draws the FILTERED rows, so its fallback is their length, not the raw
+   * array's).
+   */
+  const badgeCount = snapshot.count ?? files.length
   // Wrap the block keep/revert so a last-block action prompts for remove-or-keep
   // up front; the choice rides the same RPC as `removeWhenResolved`. A file with
   // more than one remaining block is never cleared by a single action, so it runs
@@ -11225,7 +11261,7 @@ export function PendingPanel({
           <button
             type="button"
             className={css.badge}
-            data-diff-approval-badge={files.length}
+            data-diff-approval-badge={badgeCount}
             data-active={open || dockShowing ? '' : undefined}
             aria-label={t('panel.aria')}
             aria-keyshortcuts={summonTip.aria}
@@ -11235,7 +11271,7 @@ export function PendingPanel({
           >
             <IconListPenOutline16 size={wide ? 16 : 18} />
             {wide && <span className={css.badgeLabel}>{t('panel.aria')}</span>}
-            {(wide || files.length > 0) && <span className={css.badgeCount}>{files.length}</span>}
+            {(wide || badgeCount > 0) && <span className={css.badgeCount}>{badgeCount}</span>}
           </button>
         </Tooltip>
       </div>}

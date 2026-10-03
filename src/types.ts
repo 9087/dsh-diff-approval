@@ -198,6 +198,31 @@ export interface DiffApprovalListValue {
   commentAnswers: Record<string, string>
 }
 
+/**
+ * Value returned by the channel's `list-count` endpoint: how many rows a full `list` read for the same
+ * session would carry.
+ *
+ * The badge needs a number once a second, and a full read is enormously more than a number: it ships
+ * every visible entry's whole `oldText`+`newText` (measured at 6.77 MB across 302 stored entries, with
+ * single rows at 1.2-1.6 MB). So this is the LIGHT read — the same visibility rule (`lineageView().sees`
+ * for the requesting session) and the same `ensureLoaded` discipline as `list`, and nothing else.
+ *
+ * WHAT IT DELIBERATELY DOES NOT DO: it reads no file content (`ctx.fs.readText` is never called), so it
+ * computes no diff, adopts no external change, creates no undo checkpoint, sweeps no comments and does not
+ * persist anything. It sends no texts, no comment records, no `commentLines`, no revision and no errors —
+ * `count` is the whole answer.
+ *
+ * WHAT THAT COSTS THE CALLER: a count is not a list. It asks `stat` about each visible row (the cheap
+ * liveness signal) and drops a row whose file is GONE, which is the one state `list` also drops without
+ * reading — but a file that is present and merely unreadable cannot be told from a readable one without
+ * reading it, so it is counted here and dropped by the next full read. The number can therefore be one
+ * poll stale, and the next full read is what corrects it; nothing else in this value is authoritative.
+ */
+export interface DiffApprovalListCountValue {
+  /** How many rows this session's next full `list` read would carry. */
+  count: number
+}
+
 /** What the open endpoint asks the OS to do with a file. */
 export type DiffApprovalOpenAction = 'open' | 'reveal'
 

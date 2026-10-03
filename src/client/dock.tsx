@@ -26,6 +26,7 @@ import { PresentationMenu } from './presentation-menu.tsx'
 import { setPanelPresentation } from './settings.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
 import type { PendingDiffSnapshot, PendingViewHooks } from './slots.ts'
+import { countOf } from './slots.ts'
 import { usePublishedSessionId, selectedSessionOf } from './session-seat.ts'
 
 /** The tab type's `kind`: what `openTab` names. */
@@ -361,9 +362,12 @@ export function DiffDockTitle(props: DiffDockBodyProps): ReactNode {
   const tab = useTabInfo?.()
   let count = 0
   try {
+    // `countOf` is the shared rule: the light count while one is the freshest number this session has,
+    // else the length of the list the last full read carried. A chip that only knew `files.length` would
+    // sit on a stale figure while the panel is shut — nothing re-reads the LIST then (see `countOf`).
     count = pendingView !== undefined
-      ? pendingView(here, view => view.files.length)
-      : pageWide?.files.length ?? 0
+      ? pendingView(here, countOf)
+      : pageWide === undefined ? 0 : countOf(pageWide)
   } catch {
     count = 0
   }

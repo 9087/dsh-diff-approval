@@ -252,6 +252,22 @@ describe('DiffDockTitle', () => {
     expect(screen.getByText('panel.title')).not.toBeNull()
   })
 
+  it('prefers the session\'s light count over the rows the last full read carried', () => {
+    // A chip is a count with a title, and while the panel is shut the light read is the only thing keeping
+    // that count alive — a chip on `files.length` would sit frozen at whatever the last full read left.
+    const chip = {
+      t: (key: string) => key,
+      usePending: ((select: (snapshot: PendingDiffSnapshot) => unknown) =>
+        select({ files: [{}], count: 6 } as unknown as PendingDiffSnapshot)) as never,
+      pendingView: ((_sessionId: string | undefined, select: (view: PendingDiffSnapshot) => unknown) =>
+        select({ files: [{}, {}], count: 8 } as unknown as PendingDiffSnapshot)) as never,
+      sessionId: 'session-1',
+    } as never
+    render(<DiffDockTitle {...chip} />)
+    // Its own session's count (8) — not the page-wide snapshot's 6, and not the two rows it holds.
+    expect(screen.getByText('panel.title · 8')).not.toBeNull()
+  })
+
   it('shows Its own session\'s count, never another session\'s', () => {
     // The chip belongs to the session whose conversation it sits in, so its count comes from that
     // session's own view. Reading the page-wide snapshot here is how a chip showed another session's

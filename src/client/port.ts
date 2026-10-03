@@ -10,6 +10,7 @@ import type {
   CommentAnchor, CommentAsk, CommentQuoteLine, CommentRecord,
   DiffApprovalActionValue, DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalBulkValue,
   DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue,
+  DiffApprovalListCountValue,
   DiffApprovalListValue,
   DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue, PendingFileDiff, VcsImportValue,
 } from '../types.ts'
@@ -43,6 +44,18 @@ export interface CommentDraft {
 export interface DiffApprovalPort {
   /** Read one session's pending entries (plus its workspace root), oldest capture first. */
   list(sessionId: SessionId): Promise<DiffApprovalListValue>
+  /**
+   * Ask HOW MANY rows a full `list` read would carry for this session, reading no file content.
+   *
+   * This is the badge's own question: the full read ships every visible entry's whole old/new text
+   * (megabytes on a long-lived session), while the count costs one stat per visible row on the host and
+   * puts a single number on the wire. It is the SAME visibility rule as `list` on the host's side.
+   *
+   * A host that predates the endpoint throws instead — its handler answers `unknown endpoint
+   * "list-count"` — and the caller is expected to fall back to the full read (see
+   * `PendingDiffStore.refreshCount`), which is exactly the behaviour a page had before this verb existed.
+   */
+  listCount(sessionId: SessionId): Promise<DiffApprovalListCountValue>
   /** Keep one operation. `keepListed` leaves the resolved entry in the list. */
   keep(sessionId: SessionId, id: string, keepListed?: boolean): Promise<DiffApprovalActionValue>
   /** Revert one operation. `keepListed` leaves the resolved entry in the list. */
@@ -116,6 +129,11 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
   return {
     async list(sessionId) {
       return listValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'list', { sessionId }))
+    },
+    async listCount(sessionId) {
+      // The same channel and the same payload shape as `list`: a host that has one has the other, and a
+      // host that does not answers `unknown endpoint` here rather than inventing a number.
+      return countValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'list-count', { sessionId }))
     },
     async keep(sessionId, id, keepListed) {
       // Omit the field entirely when unset, so the wire payload keeps its shape.
@@ -411,6 +429,27 @@ function listValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): 
     commentPersistError,
     ...(redoCleared === true ? { redoCleared: true } : {}),
   }
+}
+
+/**
+ * Narrow the light count endpoint's value; a malformed wire value is a read failure.
+ *
+ * A host that predates the endpoint does not answer `{ count }` at all: its channel handler falls through
+ * to `unknown endpoint "list-count"` (`code: 'internal'`), which the line below turns into an Error whose
+ * message carries those words. The store detects exactly that and falls back to the full read — see
+ * `PendingDiffStore.refreshCount`.
+ */
+function countValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffApprovalListCountValue {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+  const value: unknown = result.value
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('list-count returned a malformed value')
+  }
+  const count = (value as Record<string, unknown>).count
+  if (typeof count !== 'number' || !Number.isFinite(count) || count < 0) {
+    throw new Error('list-count returned a malformed count')
+  }
+  return { count }
 }
 
 /** Narrow one action endpoint's value; a malformed wire value is an action failure. */

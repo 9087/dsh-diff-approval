@@ -237,6 +237,9 @@ export function apply(ctx: ClientContext): void {
       // page is showing is answered by `shownSession` above, and every reader that knows its own session
       // passes it explicitly (the panel's seats all do).
       onRefresh: (sessionId) => { void store.refresh(sessionId) },
+      // The badge's tick, for a seat with nothing on screen: one number, no file content (see
+      // `PendingDiffStore.refreshCount`, which also degrades to `refresh` on a host without the endpoint).
+      onRefreshCount: (sessionId) => { void store.refreshCount(sessionId) },
       onMarkSeen: (sessionId, id) => { if (sessionId !== undefined) void store.markSeen(sessionId, id) },
       onKeep: (sessionId, path, keepListed) => store.keep(sessionId, path, keepListed),
       onRevert: (sessionId, path, keepListed) => {

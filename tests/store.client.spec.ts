@@ -2,7 +2,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
-import type { DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue, DiffApprovalListValue, DiffApprovalRefreshValue, PendingFileDiff } from '../src/types.ts'
+import type { DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue, DiffApprovalListCountValue, DiffApprovalListValue, DiffApprovalRefreshValue, PendingFileDiff } from '../src/types.ts'
 import type { CommentDraft, DiffApprovalPort } from '../src/client/port.ts'
 import { createPendingDiffStore } from '../src/client/store.ts'
 
@@ -31,6 +31,7 @@ const NO_COMMENTS = { comments: [], commentLines: {}, commentsRevision: 0, comme
 interface PortSeam {
   port: DiffApprovalPort
   list: ListMock
+  listCount: ReturnType<typeof vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListCountValue>>>
   keep: ActionMock
   revert: ActionMock
   blockKeep: BlockActionMock
@@ -47,8 +48,11 @@ interface PortSeam {
 }
 
 /** Build one seam whose answers the test controls through typed mocks. */
-function port(overrides: Partial<Pick<PortSeam, 'list' | 'keep' | 'revert' | 'blockKeep' | 'blockRevert' | 'undo' | 'redo' | 'refreshVcs'>> = {}): PortSeam {
+function port(overrides: Partial<Pick<PortSeam, 'list' | 'listCount' | 'keep' | 'revert' | 'blockKeep' | 'blockRevert' | 'undo' | 'redo' | 'refreshVcs'>> = {}): PortSeam {
   const list = vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>(async () => listValue({ files: [FILE] }))
+  // An empty count by default: this suite is about entries, and a canned non-zero number would make a
+  // test that forgot to stage one pass for the wrong reason.
+  const listCount = vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListCountValue>>(async () => ({ count: 0 }))
   const keep = vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'kept' }))
   const revert = vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'reverted' }))
   const blockKeep = vi.fn<(sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'kept' }))
@@ -67,8 +71,8 @@ function port(overrides: Partial<Pick<PortSeam, 'list' | 'keep' | 'revert' | 'bl
     // silently replaced the caller's `list` (and every other mock) with the canned one here, so a test
     // that staged a bespoke answer was handed the default and could not tell — and the store under test
     // received the canned one too.
-    port: { list, keep, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentRemoveMany, commentAsk, markSeen, commentSeen, ...overrides },
-    list, keep, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentRemoveMany, commentAsk, markSeen, commentSeen, ...overrides,
+    port: { list, listCount, keep, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentRemoveMany, commentAsk, markSeen, commentSeen, ...overrides },
+    list, listCount, keep, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentRemoveMany, commentAsk, markSeen, commentSeen, ...overrides,
   }
 }
 
@@ -125,10 +129,13 @@ describe('refresh', () => {
 })
 
 describe('refresh epochs', () => {
-  it('keeps the newer snapshot when an older read resolves after it', async () => {
-    // Two polls of one session can overlap — a slow host and a poll interval that does not
-    // wait for the last one. The first request is older by construction, so when its answer
-    // lands last it must not put the files it read back over the newer view.
+  it('keeps ONE read in flight per session, and folds the ticks that arrive during it into one trailing read', async () => {
+    // The poll interval does not wait for the last read, and on a slow link a read outlasts several
+    // intervals: starting one request per tick is what let the queue grow without bound and left the
+    // count badge waiting behind the reader's own polls, all asking the same question. A tick during a
+    // read is therefore FOLDED, not sent — and exactly one trailing read runs when it settles, so the
+    // refresh an action makes (keep, revert, comment) is not lost either: the read in flight may predate
+    // that action and can only publish the state that came before it.
     const releases: ((value: DiffApprovalListValue) => void)[] = []
     const seam = port({
       list: vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>(
@@ -136,17 +143,19 @@ describe('refresh epochs', () => {
       ),
     })
     const store = createPendingDiffStore(seam.port)
-    const older = store.refresh(S1)
-    const newer = store.refresh(S1)
+    const first = store.refresh(S1)
+    const second = store.refresh(S1)
+    expect(releases).toHaveLength(1)
+
+    releases[0]!(listValue({ files: [FILE] }))
+    await first
+    await second
+    expect(store.getSnapshot().files).toEqual([FILE])
     expect(releases).toHaveLength(2)
 
     const NEWER: PendingFileDiff = { ...FILE, newText: 'newer' }
     releases[1]!(listValue({ files: [NEWER] }))
-    await newer
-    expect(store.getSnapshot().files).toEqual([NEWER])
-
-    releases[0]!(listValue({ files: [FILE] }))
-    await older
+    await new Promise((resolve) => { setTimeout(resolve, 0) })
     expect(store.getSnapshot().files).toEqual([NEWER])
   })
 
@@ -181,6 +190,118 @@ describe('refresh epochs', () => {
     // newest response's to carry.
     expect(store.getSnapshot().read).toBe(true)
     expect(store.getSnapshot().busy).toEqual(new Set())
+  })
+})
+
+describe('the light count', () => {
+  it('publishes the host\'s number into that session\'s view, and does NOT make it look read', async () => {
+    const seam = port({ listCount: vi.fn(async () => ({ count: 7 })) })
+    const store = createPendingDiffStore(seam.port)
+    await store.refreshCount(S1)
+    // The number is in the session's own slot, which is what every badge subscribed to that session reads.
+    expect(store.viewFor(S1).count).toBe(7)
+    // …and the slot is still UNREAD with an empty list: a count is not a list, so a session whose list
+    // nobody has read must not look like one that was (the panel draws an empty state from `read`).
+    expect(store.viewFor(S1).read).toBe(false)
+    expect(store.viewFor(S1).files).toEqual([])
+    expect(seam.list).not.toHaveBeenCalled()
+    // No other session is touched by a count for this one.
+    expect(store.viewFor('session-2' as SessionId).count).toBeUndefined()
+  })
+
+  it('names the session for the whole-page readers, so a shut panel is actually handed the number', async () => {
+    // The regression the new browser case found, pinned here at its cheapest level: a count published into
+    // the session's OWN slot but never named as the page-wide session left `getSnapshot()` answering the
+    // constant never-read view, and a seat that memoizes on that identity (`useSessionView`) was never woken
+    // with a new one — so a shut panel asked the host for the count, received it, and kept drawing 0. With
+    // the panel closed nothing else calls `refresh`, so this path is the ONLY one that can name the session.
+    const seam = port({ listCount: vi.fn(async () => ({ count: 2 })) })
+    const store = createPendingDiffStore(seam.port)
+    const before = store.getSnapshot()
+    const seen: (number | undefined)[] = []
+    store.subscribe(() => { seen.push(store.getSnapshot().count) })
+
+    await store.refreshCount(S1)
+
+    // A subscriber ran, and the page-wide answer is now this session's, carrying the number.
+    expect(seen).toContain(2)
+    expect(store.getSnapshot()).not.toBe(before)
+    expect(store.getSnapshot().count).toBe(2)
+    expect(store.viewFor(undefined).count).toBe(2)
+    // And it is still the cheap path it claims to be: no full read happened.
+    expect(seam.list).not.toHaveBeenCalled()
+  })
+
+  it('keeps the last good number when a count fails, and drops it once a full read carries the same fact', async () => {
+    const seam = port({ listCount: vi.fn(async () => ({ count: 3 })) })
+    const store = createPendingDiffStore(seam.port)
+    await store.refreshCount(S1)
+    expect(store.viewFor(S1).count).toBe(3)
+
+    // A count that failed knows nothing, so the number stays: 0 or a blank badge for a list that may well
+    // be full is worse than one poll of a stale figure.
+    seam.listCount.mockRejectedValue(new Error('socket closed'))
+    await store.refreshCount(S1)
+    expect(store.viewFor(S1).count).toBe(3)
+
+    // A full read is the same fact and NEWER — its `files` are what a reader falls back to — so the count
+    // it supersedes is dropped rather than left to shadow the list with an older number.
+    await store.refresh(S1)
+    expect(store.viewFor(S1).count).toBeUndefined()
+    expect(store.viewFor(S1).files).toEqual([FILE])
+  })
+
+  it('falls back to the full read on a host without the endpoint, and stops asking after that', async () => {
+    // What an older host answers for an endpoint it does not have: the channel's own catch-all, whose
+    // message the port turns into `internal: unknown endpoint "list-count"`.
+    const seam = port({
+      listCount: vi.fn(async () => { throw new Error('internal: unknown endpoint "list-count"') }),
+    })
+    const store = createPendingDiffStore(seam.port)
+    await store.refreshCount(S1)
+    // Degraded to today's behaviour, at today's cost: the FULL read ran, and a badge has the list's own
+    // length to read.
+    expect(seam.list).toHaveBeenCalledTimes(1)
+    expect(store.viewFor(S1).files).toEqual([FILE])
+    expect(store.viewFor(S1).read).toBe(true)
+
+    // Latched: the next tick does not pay for a request to an endpoint that is not there.
+    await store.refreshCount(S1)
+    expect(seam.listCount).toHaveBeenCalledTimes(1)
+    expect(seam.list).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps ONE count in flight per session, and folds the ticks that arrive during it', async () => {
+    const releases: ((value: DiffApprovalListCountValue) => void)[] = []
+    const seam = port({
+      listCount: vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListCountValue>>(
+        () => new Promise(resolve => { releases.push(resolve) }),
+      ),
+    })
+    const store = createPendingDiffStore(seam.port)
+    const first = store.refreshCount(S1)
+    const second = store.refreshCount(S1)
+    // The second tick did not start a second request: a slow link would otherwise stack them, which is
+    // what left the badge waiting behind the reader's own polls.
+    expect(releases).toHaveLength(1)
+
+    releases[0]!({ count: 4 })
+    await first
+    await second
+    expect(store.viewFor(S1).count).toBe(4)
+    // …and exactly one trailing count ran, so the number the folded tick asked for is not lost.
+    expect(releases).toHaveLength(2)
+    releases[1]!({ count: 5 })
+    await new Promise(resolve => { setTimeout(resolve, 0) })
+    expect(store.viewFor(S1).count).toBe(5)
+  })
+
+  it('has no count to ask for an absent session', async () => {
+    const seam = port()
+    const store = createPendingDiffStore(seam.port)
+    await store.refreshCount(undefined)
+    expect(seam.listCount).not.toHaveBeenCalled()
+    expect(seam.list).not.toHaveBeenCalled()
   })
 })
 
@@ -555,6 +676,28 @@ describe('reset', () => {
     await store.refresh(S1)
     store.reset()
     expect(store.getSnapshot()).toEqual({ read: false, files: [], ...NO_COMMENTS, busy: new Set() })
+  })
+
+  it('does not let a read that lands after the reset republish, and does not poll again on its own', async () => {
+    // With one read per session at a time the epoch has one job left: the connection died while a read was
+    // in flight, so that answer must land nowhere. A tick folded into it must not survive the reset either
+    // — a socket that just died must not be polled again on the store's own initiative.
+    let release: ((value: DiffApprovalListValue) => void) | undefined
+    const seam = port({
+      list: vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>(
+        () => new Promise((resolve) => { release = resolve }),
+      ),
+    })
+    const store = createPendingDiffStore(seam.port)
+    const reading = store.refresh(S1)
+    const folded = store.refresh(S1)
+    store.reset()
+
+    release?.(listValue({ files: [FILE] }))
+    await reading
+    await folded
+    expect(store.getSnapshot()).toEqual({ read: false, files: [], ...NO_COMMENTS, busy: new Set() })
+    expect(seam.list).toHaveBeenCalledTimes(1)
   })
 })
 

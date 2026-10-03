@@ -68,14 +68,14 @@ import { detectVcsRoot, listVcsChanges } from './vcs.ts'
 import type { VcsChange, VcsImportInput, ShellExecutorLike } from './vcs.ts'
 import type {
   DiffApprovalActionValue, DiffApprovalAddOutcome, DiffApprovalAddValue, DiffApprovalBlockTarget, DiffApprovalBrowseEntry, DiffApprovalBrowseValue,
-  DiffApprovalBulkValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue,
+  DiffApprovalBulkValue, DiffApprovalListCountValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue,
   CommentAnchor, CommentQuoteLine, CommentRecord, DiffApprovalCommentAddValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue,
   LineageDirection, PendingEntry, PendingEntryKind, PendingFileDiff, SessionLineage, VcsImportValue,
 } from './types.ts'
 
 export type {
   DiffApprovalActionOutcome, DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalBlockTarget,
-  DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalRefreshOutcome, DiffApprovalRefreshValue,
+  DiffApprovalListCountValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalRefreshOutcome, DiffApprovalRefreshValue,
   CommentAnchor, CommentQuoteLine, CommentRecord, DiffApprovalCommentAddValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue,
   LineageDirection, PendingEntry, PendingEntryKind, PendingFileDiff, SessionLineage,
 } from './types.ts'
@@ -615,12 +615,14 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * A comment whose quote is gone from the content is ABSENT from the map rather than guessed at:
    * the caller then falls back to `record.anchor`, the line the comment was written on, which is
    * the same answer an outdated thread shows.
-   * @param scope - which comment authors this request may read (its lineage).
+   * @param listed - the comments this read is handing over: the caller took ONE scoped list and reuses it
+   *   here, because resolving lines is derived from a record's own fields (`quote`, `anchor`, `entryId`),
+   *   none of which a fold touches — so the pre-fold and post-fold lists resolve identically.
    * @returns the resolved lines per comment id; comments that do not resolve are left out.
    */
-  function resolvedCommentLines(scope: CommentScope): Record<string, CommentLineRange> {
+  function resolvedCommentLines(listed: readonly CommentRecord[]): Record<string, CommentLineRange> {
     const resolved: Record<string, CommentLineRange> = {}
-    for (const comment of comments.list(scope)) {
+    for (const comment of listed) {
       const entry = store.get(comment.entryId)
       if (entry === undefined) continue
       const version = store.contentVersion(comment.entryId)
@@ -808,6 +810,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     comments.removeForEntry(id)
     // …and the lines those comments resolved to, which are about content this path no longer lists.
     forgetCommentLinesForEntry(id)
+    // The live-file observation goes with the entry: it exists to answer for a TRACKED path, and keeping it
+    // would let a path re-tracked much later (with a token that happens to match) be answered from a read
+    // taken before it left.
+    liveObservations.delete(id)
     return removed
   }
 
@@ -895,6 +901,25 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     | { kind: 'deleted' }
     | { kind: 'unavailable' }
 
+  /** What one `stat` said about a tracked path, and nothing read from it (see `probePath`). */
+  type PathProbe =
+    | { kind: 'present'; target: FsTarget; version: string | undefined; size: number | undefined }
+    | { kind: 'deleted' }
+    | { kind: 'unavailable' }
+
+  /**
+   * What was last READ from one tracked path, and the freshness token that read was taken at.
+   *
+   * `ctx.fs.stat` returns no `mtimeMs` (see `FsStat`): its freshness signal is `version`, an opaque token
+   * the backend documents as "the freshness token a write/edit guards against" and derives from the file's
+   * identity and times — the local backend builds it as `dev:ino:size:mtimeNs:ctimeNs`, so it moves when
+   * the size or either timestamp does, which is exactly the `mtimeMs`+`size` signal wanted here. `size` is
+   * carried beside it as a second, plain-text field.
+   *
+   * In memory only, one entry per tracked path: a restart has read nothing, so it observes afresh.
+   */
+  const liveObservations = new Map<string, { version: string; size: number; content: string }>()
+
   /** The stable `FsError.code`, when the thrown value carries one. */
   function fsErrorCodeOf(error: unknown): string | undefined {
     if (typeof error !== 'object' || error === null) return undefined
@@ -903,13 +928,16 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   }
 
   /**
-   * Read one path's live state. The only existence test is `stat`: it returns
-   * `undefined` for an absent target (gone), so a deleted file never falls into
-   * the unreadable bucket. A file that exists but cannot be read is `unavailable`.
+   * Ask the backend where one tracked path is and what it is, reading NOTHING.
+   *
+   * This is the whole liveness test, shared by the full read (`liveStateOf`) and the light count
+   * (`list-count`): `resolve` + `stat`, with `undefined` from `stat` meaning the target is absent, and a
+   * thrown `FS_NOT_FOUND` meaning the same one step earlier. `version`/`size` come back as `undefined` when
+   * the backend does not report them, which is what tells `liveStateOf` it has no freshness evidence.
    * @param path - backend display path to probe through `ctx.fs`.
-   * @returns the live state.
+   * @returns what the backend says, and the target a caller may then read.
    */
-  async function liveStateOf(path: string): Promise<LiveFileState> {
+  async function probePath(path: string): Promise<PathProbe> {
     let target
     try {
       target = await ctx.fs.resolve(path, {})
@@ -923,9 +951,49 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       return fsErrorCodeOf(error) === 'FS_NOT_FOUND' ? { kind: 'deleted' } : { kind: 'unavailable' }
     }
     if (info === undefined) return { kind: 'deleted' }
+    return {
+      kind: 'present',
+      target,
+      version: typeof info.version === 'string' && info.version.length > 0 ? info.version : undefined,
+      size: typeof info.size === 'number' ? info.size : undefined,
+    }
+  }
+
+  /**
+   * Read one path's live state. The only existence test is `stat`: it returns
+   * `undefined` for an absent target (gone), so a deleted file never falls into
+   * the unreadable bucket. A file that exists but cannot be read is `unavailable`.
+   *
+   * The CONTENT is not re-read when the backend's own freshness evidence says the file has not moved since
+   * the last observation: an identical `version` AND an identical numeric `size`, both reported. The stat
+   * still runs — it is the cheap half, and it is what notices a file that has gone — so a deleted file is
+   * still `deleted`, a moved one is read again, and `diverged`/`missing` are computed from real content
+   * either way. The skip needs BOTH fields: a stat that reports no size is a weaker observation than the
+   * contract allows, so it falls back to reading rather than trusting a token alone.
+   * @param path - backend display path to probe through `ctx.fs`.
+   * @returns the live state.
+   */
+  async function liveStateOf(path: string): Promise<LiveFileState> {
+    const probe = await probePath(path)
+    if (probe.kind !== 'present') {
+      // No content to remember for a path that is gone or unreadable, so a re-created file is read again.
+      liveObservations.delete(path)
+      return probe
+    }
+    const { target, version, size } = probe
+    const trustable = version !== undefined && size !== undefined
+    if (trustable) {
+      const observed = liveObservations.get(path)
+      if (observed !== undefined && observed.version === version && observed.size === size) {
+        return { kind: 'present', content: observed.content }
+      }
+    }
     try {
-      return { kind: 'present', content: await ctx.fs.readText(target, undefined) }
+      const content = await ctx.fs.readText(target, undefined)
+      if (trustable) liveObservations.set(path, { version, size, content })
+      return { kind: 'present', content }
     } catch (error) {
+      liveObservations.delete(path)
       return fsErrorCodeOf(error) === 'FS_NOT_FOUND' ? { kind: 'deleted' } : { kind: 'unavailable' }
     }
   }
@@ -962,15 +1030,17 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * @param view - the request's lineage view: the caller builds it once and hands it here, because the
    *   list read needs the same view for the comment scope, the answer fold and the undo keys, and a
    *   second `lineageView()` would walk the store again for nothing.
+   * @param entries - that request's ONE `store.all()` snapshot (see `lineageView`).
    * @returns the listed entries plus whether an external change cleared redo.
    */
   async function listWithState(
     sessionId: SessionId,
     view: LineageView,
+    entries: readonly PendingEntry[],
   ): Promise<{ files: PendingFileDiff[]; redoCleared: boolean }> {
     const listed: PendingFileDiff[] = []
     let redoCleared = false
-    for (const entry of store.all()) {
+    for (const entry of entries) {
       if (!view.sees(sessionId, entry)) continue
       // The undo pair a READ produces belongs to the session that read — whoever pressed — while the
       // sandbox a revert writes under stays the row's owner's (see `ownerOf` and `pushUndo`).
@@ -1409,20 +1479,23 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * (`dsh-experimental-agent-team/lib/types/roster.js:253-262`) and records membership in the LEAD's own
    * journal (`:249`), which this plugin cannot read. So this view merges every subagent child, not only
    * teammates; narrowing it to the roster would need a service the plugin does not inject.
+   * @param entries - the store's entries, when the caller already took ONE snapshot for the whole request
+   *   (`store.all()` rebuilds and re-sorts the array, so a read takes it once and hands it down). Defaults
+   *   to a fresh snapshot for the callers that only need the walk.
    * @returns the view: `sees` answers the visibility question for one entry, `sameRoot` answers whether two
    * sessions share a lineage root (the question the row's mark asks about its other owners), `directionOf`
    * says WHICH WAY that other owner stands for the sentence the mark wears, and `rootOf` is the CANONICAL
    * session — the lineage root, or the session itself when its lineage is unknown — that every
    * session-scoped store is keyed by (see `canonicalOf`).
    */
-  function lineageView(): {
+  function lineageView(entries: readonly PendingEntry[] = store.all()): {
     sees: (sessionId: SessionId, entry: PendingEntry) => boolean
     sameRoot: (a: SessionId, b: SessionId) => boolean
     directionOf: (sessionId: SessionId, entry: PendingEntry) => LineageDirection | undefined
     rootOf: (sessionId: SessionId) => SessionId
   } {
     const recorded = new Map<SessionId, SessionLineage>()
-    for (const entry of store.all()) {
+    for (const entry of entries) {
       if (entry.lineage !== undefined && !recorded.has(entry.sessionId)) recorded.set(entry.sessionId, entry.lineage)
     }
     const facts = new Map<SessionId, { parent: SessionId | undefined; subagent: boolean }>()
@@ -2051,21 +2124,29 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const sessionId = sessionOf(payload)
         if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
         await ensureLoaded()
+        // ONE snapshot of the store for the whole read. `store.all()` copies and re-sorts the entry array,
+        // and this read wants the same one for the lineage walk, the settlement below and the comment sweep
+        // — three calls became one. It is a snapshot either way (settlement mutates the STORE, not this
+        // array), and the sweep's ids are equivalents: an entry dropped during settlement had its comments
+        // removed with it by `dropEntry`, so retaining its id here can keep nothing alive.
+        const entries = store.all()
         // ONE view for the whole read: the merge, the comment scope and the undo keys are the same
         // question, and `lineageView` walks the store to answer it — so it is built here and handed on.
-        const view = lineageView()
+        const view = lineageView(entries)
         // The sweep on every read, so a comment a crash left behind its entry is gone
         // before any client can be handed it; removing the entry already took its
         // comments with it (`dropEntry`), so this normally removes nothing.
-        if (comments.retain(new Set(store.all().map(entry => entry.id))) > 0) {
+        if (comments.retain(new Set(entries.map(entry => entry.id))) > 0) {
           // What it did remove may have lines cached against content it never hung off.
           forgetOrphanedCommentLines()
         }
-        const { files, redoCleared } = await listWithState(sessionId, view)
-        // The threads of this LINEAGE — every seat's, not only the reader's — read once and reused for the
-        // gate, the fold and the wire below.
+        const { files, redoCleared } = await listWithState(sessionId, view, entries)
+        // The threads of this LINEAGE — every seat's, not only the reader's — read ONCE and reused for the
+        // gate, the fold, the resolved lines and the wire below. It is re-read only when the fold actually
+        // replaced a record (see `folded`), because `patch` swaps the object in the store.
         const scope = commentScopeOf(sessionId, view)
         const visibleComments = comments.list(scope)
+        let folded = false
         // Nothing to derive when the lineage carries no comments, and the derivation is the expensive half
         // of this read: the answer fold and the turn-end read each walk a session's WHOLE event log (a long
         // session is >100k events), and every client repeats that once a second. A question exists only
@@ -2091,35 +2172,40 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
               // still learns it — which is what lets `markTurnEnded` below, and the panel, find it at all.
               // Recording is a no-op once the inbox has written the same number down. Keyed by the request
               // id alone: it names the question wherever it was asked from.
-              if (read.turn !== undefined) comments.recordTurnForRequest(requestId, read.turn)
+              if (read.turn !== undefined && comments.recordTurnForRequest(requestId, read.turn) > 0) folded = true
             }
             // The turn's end is per TRANSCRIPT, and turn numbers are only unique within one: this is the
             // session whose log was just read, which is what `markTurnEnded` matches against.
-            for (const turn of commentAsker.endedTurns(transcript, transcripts)) comments.markTurnEnded(transcript, turn)
+            for (const turn of commentAsker.endedTurns(transcript, transcripts)) {
+              if (comments.markTurnEnded(transcript, turn) > 0) folded = true
+            }
             // An answer that has arrived (or been rewritten) is news the reader has not looked at yet, so
             // this fold is what raises the card's dot — and it raises nothing on a read that found the same
             // text as last time (see `CommentStore.syncAnswers`). It folds ONLY this transcript's questions
             // and leaves the ones asked elsewhere alone, so a thread asked from two seats keeps both
             // answers (see `answerStateOf`). Runs before the list below is taken, because the flag rides
             // the records this read hands over.
-            comments.syncAnswers(transcript, answers)
+            if (comments.syncAnswers(transcript, answers)) folded = true
             for (const [requestId, read] of Object.entries(answers)) {
               if (read.answer !== undefined) commentAnswers[requestId] = read.answer
             }
           }
         }
+        // The records handed over below: the list read at the top, unless the fold above replaced one in the
+        // store (`patch` swaps the object, so a touched record is only in a fresh read). Nothing else in this
+        // value depends on the difference: `resolvedCommentLines` works off a record's own quote and anchor,
+        // which no fold touches.
+        const listedComments = folded ? comments.list(scope) : visibleComments
         const value: DiffApprovalListValue = {
           files,
           // The comments ride this read rather than a channel of their own, so the
           // entries and the comments that hang off them arrive as one snapshot.
-          // Read AFTER the derivation above: it writes the question's turn and its end onto
-          // these very records, and the snapshot handed to the client has to carry them.
-          comments: comments.list(scope),
+          comments: listedComments,
           // The lines each of those comments sits on in the entry's CURRENT content, resolved here
           // and shipped with the records: the list pane, the code view's own card and the jump all
           // draw one figure, and none of them needs the file to have been opened first. A comment
           // the host cannot place is absent from the map, and its callers keep `record.anchor`.
-          commentLines: resolvedCommentLines(scope),
+          commentLines: resolvedCommentLines(listedComments),
           commentsRevision: comments.commentsRevision(),
           commentAnswers,
           workspacePath: workspaceOf(sessionId)?.path,
@@ -2134,6 +2220,28 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           // to memory while its file refuses the write is erased by a restart just as silently.
           commentPersistError: comments.persistError(),
         }
+        return { ok: true, value }
+      }
+      case 'list-count': {
+        // The badge's own read: the same visibility rule as `list`, over one snapshot and one view, and
+        // NOTHING read from any file. `list` ships every visible entry's whole `oldText`+`newText` (measured
+        // at 6.77 MB for 302 entries), which is the latency this verb exists to avoid — see
+        // `DiffApprovalListCountValue` for what it deliberately leaves out and what that costs the caller.
+        const sessionId = sessionOf(payload)
+        if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')
+        await ensureLoaded()
+        const entries = store.all()
+        const view = lineageView(entries)
+        let count = 0
+        for (const entry of entries) {
+          if (!view.sees(sessionId, entry)) continue
+          // A stat, and nothing else. It is what keeps a file that is GONE out of the number — the one drop
+          // `list` also makes without reading — while a present-but-unreadable row is counted here and
+          // dropped by the next full read, which is the accepted cost of not reading.
+          if ((await probePath(entry.path)).kind !== 'present') continue
+          count += 1
+        }
+        const value: DiffApprovalListCountValue = { count }
         return { ok: true, value }
       }
       case 'comment-seen': {

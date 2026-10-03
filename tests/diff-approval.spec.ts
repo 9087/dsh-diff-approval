@@ -3923,3 +3923,160 @@ describe('one lineage, one session-scoped state', () => {
   })
 })
 
+/**
+ * The badge's read and the two cheap wins behind it: a count with no content read, and a full read that
+ * does not re-read a file the backend says has not moved.
+ */
+describe('the light count and the cheap reads', () => {
+  /** Two rows session-1 owns, on different paths. */
+  const captureTwo = (ctx: Context): void => {
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a\n', 'b\n'))
+    emitResult(ctx, editExec(), editSuccess('/repo/b.txt', 'a\n', 'b\n'))
+  }
+
+  it('counts exactly what the full read carries, and reads no file content at all', async () => {
+    const { ctx, handle, fs } = await harness()
+    captureTwo(ctx)
+    // The full read is the authority the count has to match.
+    expect(await listEntries(handle, 'session-1')).toHaveLength(2)
+
+    fs.readText.mockClear()
+    fs.stat.mockClear()
+    await expect(handle('list-count', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: true, value: { count: 2 } })
+    // THE PIN: the whole point of the verb is that it never reads content. A `readText` here would ship the
+    // same bytes the full read does — the diff is computed from what is read — which is the 6.77 MB the
+    // badge's poll used to cost.
+    expect(fs.readText).not.toHaveBeenCalled()
+    // …and what it does pay for: the cheap liveness signal, one stat per visible row.
+    expect(fs.stat).toHaveBeenCalledTimes(2)
+  })
+
+  it('leaves a missing file out of the count, the one drop the full read also makes without reading', async () => {
+    const { ctx, handle, fs } = await harness()
+    captureTwo(ctx)
+    fs.stat.mockImplementation(async (target: { displayPath?: string }) =>
+      target.displayPath === '/repo/b.txt'
+        ? undefined
+        : ({ version: 'v1', type: 'file', size: 4 } as never))
+
+    await expect(handle('list-count', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: true, value: { count: 1 } })
+    // The count itself read nothing — asserted BEFORE the full read below, which does read.
+    expect(fs.readText).not.toHaveBeenCalled()
+    // …and the full read agrees about which rows there are (it drops the missing one as it goes).
+    expect((await listEntries(handle, 'session-1')).map(row => row.path)).toEqual(['/repo/a.txt'])
+  })
+
+  it('answers a session with nothing, and a session outside a root it does not share', async () => {
+    const A = SessionId('session-a')
+    const B = SessionId('session-b')
+    const { ctx, handle } = await harness({
+      sessionIds: [A, B],
+      prepare: (context) => { context.provide('sessions', { get: (id: SessionId) => ({ id, header: { id: String(id) } }) } as never) },
+    })
+    emitResult(ctx, { name: 'edit', agent: { id: A } }, editSuccess('/repo/a.txt', 'a\n', 'b\n'))
+    emitResult(ctx, { name: 'edit', agent: { id: B } }, editSuccess('/repo/b.txt', 'a\n', 'b\n'))
+
+    // Each session's own row, and only that: the same visibility rule as `list`.
+    await expect(handle('list-count', { sessionId: String(A) }, signal()))
+      .resolves.toEqual({ ok: true, value: { count: 1 } })
+    await expect(handle('list-count', { sessionId: String(B) }, signal()))
+      .resolves.toEqual({ ok: true, value: { count: 1 } })
+    // An UNKNOWN lineage is its own root, exactly as before: a session that touched nothing counts nothing.
+    await expect(handle('list-count', { sessionId: 'session-none' }, signal()))
+      .resolves.toEqual({ ok: true, value: { count: 0 } })
+  })
+
+  it('counts the merged view\'s rows too, so the badge agrees with the list it is a badge for', async () => {
+    const ROOT = SessionId('session-root')
+    const CHILD = SessionId('session-child')
+    const { ctx, handle } = await harness({
+      sessionIds: [ROOT, CHILD],
+      prepare: (context) => {
+        context.provide('sessions', {
+          get: (id: SessionId) => ({
+            id,
+            header: String(id) === String(CHILD)
+              ? { id: String(id), parentSession: String(ROOT), origin: 'subagent', delegationDepth: 1 }
+              : { id: String(id) },
+          }),
+        } as never)
+      },
+    })
+    emitResult(ctx, { name: 'edit', agent: { id: CHILD } }, editSuccess('/repo/child.txt', 'a\n', 'b\n'))
+
+    // The child's row is in the ROOT's list (the merge)…
+    expect((await listEntries(handle, String(ROOT))).map(row => row.path)).toEqual(['/repo/child.txt'])
+    // …so the root's count carries it: the same `sees`, not a second rule.
+    await expect(handle('list-count', { sessionId: String(ROOT) }, signal()))
+      .resolves.toEqual({ ok: true, value: { count: 1 } })
+    await expect(handle('list-count', { sessionId: String(CHILD) }, signal()))
+      .resolves.toEqual({ ok: true, value: { count: 1 } })
+  })
+
+  it('does not re-read a file whose freshness token and size are unchanged', async () => {
+    const { ctx, handle, fs } = await harness()
+    let version = 'v1'
+    let size = 4
+    let content = 'b\n'
+    fs.stat.mockImplementation(async () => ({ version, type: 'file', size } as never))
+    fs.readText.mockImplementation(async () => content)
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a\n', 'b\n'))
+
+    // First observation: the file must be read, and this is what it holds.
+    expect((await listEntries(handle, 'session-1'))[0]).toMatchObject({ newText: 'b\n', diverged: false })
+    expect(fs.readText).toHaveBeenCalledTimes(1)
+
+    // Same token, same size — the backend's own evidence that the content has not moved: no read, and the
+    // row is computed from the remembered content exactly as if it had been read.
+    expect((await listEntries(handle, 'session-1'))[0]).toMatchObject({ newText: 'b\n', diverged: false })
+    expect(fs.readText).toHaveBeenCalledTimes(1)
+
+    // The file MOVED: a new token and size, so it is read again and its new content is adopted as the
+    // baseline (which is what a full read has always done with an external change).
+    version = 'v2'
+    size = 6
+    content = 'c\nd\n'
+    expect((await listEntries(handle, 'session-1'))[0]).toMatchObject({ newText: 'c\nd\n', diverged: false })
+    expect(fs.readText).toHaveBeenCalledTimes(2)
+  })
+
+  it('never decides freshness from a stat that reports no size', async () => {
+    // The skip needs POSITIVE evidence — a token AND a size. A stat that reports no size is weaker than the
+    // contract allows (the local backend always reports one), so the row is read as it always was rather
+    // than trusted on a token alone. This is also what keeps every older test's double honest: it reports
+    // `{ version: 'v1', type: 'file' }` and nothing more.
+    const { ctx, handle, fs } = await harness()
+    fs.readText.mockImplementation(async () => 'b\n')
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a\n', 'b\n'))
+
+    await listEntries(handle, 'session-1')
+    await listEntries(handle, 'session-1')
+    expect(fs.readText).toHaveBeenCalledTimes(2)
+  })
+
+  it('drops the observation with a file that went, so a row that comes back is read again', async () => {
+    const { ctx, handle, fs } = await harness()
+    let gone = false
+    fs.stat.mockImplementation(async () => (gone ? undefined : ({ version: 'v1', type: 'file', size: 4 } as never)))
+    fs.readText.mockImplementation(async () => 'b\n')
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a\n', 'b\n'))
+    await listEntries(handle, 'session-1')
+    expect(fs.readText).toHaveBeenCalledTimes(1)
+
+    // The file goes: the row leaves the list, nothing is read for it, and its observation goes with it.
+    gone = true
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+    expect(fs.readText).toHaveBeenCalledTimes(1)
+
+    // Ctrl+Z brings the row (and the file) back. The SAME token and size it was observed at must still be
+    // read, because the observation was dropped when the path went — a stale answer here would report the
+    // content of a file that had been deleted and recreated by the undo.
+    await handle('undo', { sessionId: 'session-1' }, signal())
+    gone = false
+    expect((await listEntries(handle, 'session-1'))[0]).toMatchObject({ newText: 'b\n', diverged: false })
+    expect(fs.readText).toHaveBeenCalledTimes(2)
+  })
+})
+

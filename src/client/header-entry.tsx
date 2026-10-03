@@ -25,6 +25,7 @@ import { publishSessionId, selectedSessionOf, sessionIsBlank } from './session-s
 import type { HostObservable, InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingDiffSnapshot, PendingViewHooks } from './slots.ts'
+import { countOf } from './slots.ts'
 import type { DockSnapshot, PanelStateDetail } from './dock.tsx'
 import { PANEL_STATE_EVENT, TOGGLE_PANEL_EVENT } from './dock.tsx'
 import { summonTooltip } from './chords.ts'
@@ -93,9 +94,13 @@ export function DiffApprovalHeaderEntry({ usePending, useSessions, useDock, pend
   // The `usePending` call is also the subscription that re-renders this button whenever anything
   // publishes, so the count tracks the list without a second store hook.
   const pageWide = usePending(snapshot => snapshot) as PendingDiffSnapshot
+  // The count the host last answered for this session when there is one, else the list's own length:
+  // `countOf` states that rule once, and it is what makes this entry live on the light read the footer
+  // badge polls with — an entry that only knew `files.length` would sit on a stale number while the panel
+  // is shut, because nothing is reading the list then (see `PendingDiffSnapshot.count`).
   const count = pendingView === undefined
-    ? pageWide.files.length
-    : pendingView(sessionId, view => view.files.length)
+    ? countOf(pageWide)
+    : pendingView(sessionId, countOf)
   // Whether the panel is showing *dock-side* is observable here; whether it is
   // showing as the overlay comes back as an event, from the mount that owns it.
   const dockShowing = useDock?.((state: DockSnapshot) => state.open) === true

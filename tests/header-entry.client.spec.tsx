@@ -231,4 +231,29 @@ describe('DiffApprovalHeaderEntry per-session count', () => {
     expect(publishedSessionId()).toBe('b')
     expect(store.viewFor(publishedSessionId() as never).files).toHaveLength(1)
   })
+
+  it('carries the light count when the session has one, and the list\'s own length when it does not', () => {
+    // No count yet (a page that just loaded, or a host built before the endpoint): the entry shows the
+    // length of the list the read carried — unchanged behaviour.
+    const first = render(<DiffApprovalHeaderEntry {...entryProps({ count: 3 })} />)
+    expect(button().dataset.diffApprovalHeaderEntry).toBe('3')
+    first.unmount()
+
+    // A count has landed (published by the store on the session's own view): THAT is the number, even
+    // though the last full read carried two rows. This is what keeps an entry live while the panel is
+    // shut, when nothing is reading the list at all.
+    const pageWide = entryProps()
+    pageWide.usePending = ((select: (snapshot: PendingDiffSnapshot) => unknown) =>
+      select({ files: [{}, {}], count: 9 } as unknown as PendingDiffSnapshot)) as never
+    render(<DiffApprovalHeaderEntry {...pageWide} />)
+    expect(button().dataset.diffApprovalHeaderEntry).toBe('9')
+    cleanup()
+
+    // …and the same rule on the PER-SESSION branch, which is the one a session-scoped seat uses.
+    const perSession = entryProps()
+    perSession.pendingView = ((_sessionId: string | undefined, select: (view: PendingDiffSnapshot) => unknown) =>
+      select({ files: [{}], count: 4 } as unknown as PendingDiffSnapshot)) as never
+    render(<DiffApprovalHeaderEntry {...perSession} sessionId={'a' as never} />)
+    expect(button().dataset.diffApprovalHeaderEntry).toBe('4')
+  })
 })

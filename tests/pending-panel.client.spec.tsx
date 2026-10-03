@@ -618,6 +618,8 @@ function panelProps(
     pendingView: (sessionId: SessionId | undefined, select: (view: PendingDiffSnapshot) => unknown) =>
       select(viewFor(sessionId)),
     onRefresh: vi.fn(),
+    // The badge's light read: the panel asks THIS instead of the full read while nothing is on screen.
+    onRefreshCount: vi.fn(),
     onMarkSeen: vi.fn(),
     onCommentSeen: vi.fn(),
     onKeep: vi.fn(async () => {}),
@@ -727,19 +729,104 @@ describe('PendingPanel', () => {
     expect(screen.queryByText('a.txt')).toBeNull()
   })
 
-  it('performs no read while it is not showing anything', () => {
-    // A seat that is not on screen (an undocked tab the reader has switched away from) draws nothing, so
-    // its poll is a read of a list nobody is looking at — once a second, for a session the reader may not
-    // even be in. Showing again is what starts it.
+  it('keeps the full read for a seat that is on screen, asks only for the count while the panel is shut, and reads nothing while hidden', () => {
+    // Three states, and the tick has to be right in all three:
+    //  - HIDDEN (a docked tab the reader has switched away from): no read at all — nobody is looking.
+    //  - SHUT (this is the footer badge, the overlay closed): the COUNT. The badge must keep working while
+    //    the panel is shut; the full read is what made it slow, because it ships every visible entry's
+    //    whole old and new text for a number the host can answer with one stat per row.
+    //  - ON SCREEN (the overlay open, or this seat IS the dock tab): the FULL read, unchanged.
+    const calls = (fn: unknown): number => (fn as { mock: { calls: unknown[][] } }).mock.calls.length
+
     const hidden = panelProps({ read: true, files: [FILE], busy: new Set() })
     const view = render(<PendingPanel {...hidden} showing={false} />)
-    const refreshMock = hidden.onRefresh as unknown as { mock: { calls: unknown[][] } }
-    expect(refreshMock.mock.calls).toHaveLength(0)
+    expect(calls(hidden.onRefresh)).toBe(0)
+    expect(calls(hidden.onRefreshCount)).toBe(0)
 
-    // …and a shown seat does read, so the gate is not simply "never".
-    const shown = panelProps({ read: true, files: [FILE], busy: new Set() })
-    view.rerender(<PendingPanel {...shown} showing />)
-    expect((shown.onRefresh as unknown as { mock: { calls: unknown[][] } }).mock.calls).toHaveLength(1)
+    // Shown but nothing on screen: the light question, and NOT the list.
+    const shut = panelProps({ read: true, files: [FILE], busy: new Set() })
+    view.rerender(<PendingPanel {...shut} showing />)
+    expect(calls(shut.onRefreshCount)).toBe(1)
+    expect(calls(shut.onRefresh)).toBe(0)
+
+    // The reader opens it: the full read runs at once, which is the read the list, the comments and the
+    // diff are drawn from. The count is not asked for alongside it — a count is a badge's question, and
+    // the badge is not what is on screen now.
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(calls(shut.onRefresh)).toBe(1)
+    expect(calls(shut.onRefreshCount)).toBe(1)
+
+    // Closing it puts the tick back on the count, so a badge that was stale is fresh again a second later.
+    fireEvent.click(document.querySelector('[data-diff-approval-close]') as HTMLElement)
+    expect(calls(shut.onRefreshCount)).toBe(2)
+  })
+
+  it('polls the count once a second while nothing is on screen, and the full read once a second while it is', () => {
+    // The interval itself is unchanged (one second in both states); what the tick ASKS changes. This is
+    // the load-bearing half of the fix: a shut panel used to re-read the whole list every second.
+    vi.useFakeTimers()
+    try {
+      const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+      render(<PendingPanel {...props} />)
+      const calls = (fn: unknown): number => (fn as { mock: { calls: unknown[][] } }).mock.calls.length
+      // The first tick runs on mount, as it always did — it just asks the light question now.
+      expect(calls(props.onRefreshCount)).toBe(1)
+      expect(calls(props.onRefresh)).toBe(0)
+
+      act(() => { vi.advanceTimersByTime(3000) })
+      expect(calls(props.onRefreshCount)).toBe(4)
+      expect(calls(props.onRefresh)).toBe(0)
+
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      expect(calls(props.onRefresh)).toBe(1)
+      act(() => { vi.advanceTimersByTime(3000) })
+      expect(calls(props.onRefresh)).toBe(4)
+      expect(calls(props.onRefreshCount)).toBe(4)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('shows the light count once one has arrived, the last full read\'s rows before that, and keeps the last good number when a count fails', async () => {
+    // The real store, wired the way the plugin wires it: `onRefreshCount` drives `store.refreshCount`, and
+    // the badge reads whatever that session's view published. A badge must never fall to 0 or to nothing
+    // because a count failed, and it must never need the list to show a number while the panel is shut.
+    const files = [FILE]
+    const seam = {
+      list: vi.fn(async () => ({ files, comments: [], commentLines: {}, commentsRevision: 0, commentAnswers: {} })),
+      listCount: vi.fn(async () => ({ count: 5 })),
+    }
+    const store = createPendingDiffStore(seam as unknown as DiffApprovalPort)
+    await store.refresh(S1)
+    const props = panelProps({ read: true, files, busy: new Set() })
+    props.usePending = ((select: (state: PendingDiffSnapshot) => unknown) => select(store.getSnapshot())) as never
+    props.pendingView = ((sessionId: SessionId | undefined, select: (view: PendingDiffSnapshot) => unknown) => select(store.viewFor(sessionId))) as never
+    props.onRefreshCount = ((sessionId: SessionId | undefined) => { void store.refreshCount(sessionId) }) as never
+    const view = render(<PendingPanel {...props} />)
+    const badge = (): string => (document.querySelector('[data-diff-approval-badge]') as HTMLElement).dataset.diffApprovalBadge ?? ''
+    const draw = (): void => { view.rerender(<PendingPanel {...props} />) }
+
+    // Before any count has arrived: the list this read carried — what the badge has always shown, and what
+    // an older host keeps showing.
+    expect(badge()).toBe('1')
+
+    // A count lands: the badge reads the host's own number.
+    await act(async () => { await store.refreshCount(S1) })
+    draw()
+    expect(badge()).toBe('5')
+
+    // A count that FAILED knows nothing: the last good number stays (never 0, never blank).
+    seam.listCount.mockRejectedValueOnce(new Error('socket closed'))
+    await act(async () => { await store.refreshCount(S1) })
+    draw()
+    expect(badge()).toBe('5')
+
+    // A host with no such endpoint at all: the store degrades to the full read, so the badge shows that
+    // read's own rows — today's behaviour, at today's cost, and never nothing.
+    seam.listCount.mockRejectedValue(new Error('internal: unknown endpoint "list-count"'))
+    await act(async () => { await store.refreshCount(S1) })
+    draw()
+    expect(badge()).toBe('1')
   })
 
   it('disables the pending button when no session is selected', () => {

@@ -187,6 +187,33 @@ describe('list', () => {
   })
 })
 
+describe('list-count', () => {
+  it('asks the light endpoint with the same payload shape as list, and narrows the number', async () => {
+    const seam = fakeRpc({ 'list-count': { ok: true, value: { count: 12 } } })
+    await expect(createDiffApprovalPort(seam.rpc).listCount(S1)).resolves.toEqual({ count: 12 })
+    expect(seam.call).toHaveBeenCalledWith('/diff-approval', 'list-count', { sessionId: S1 })
+  })
+
+  it('rejects a malformed count rather than inventing a number', async () => {
+    // A value with no usable `count` is a read failure — the caller keeps the number it had (see
+    // `PendingDiffStore.refreshCount`), which is the only honest answer for a number nobody sent.
+    const missing = fakeRpc({ 'list-count': { ok: true, value: {} } })
+    await expect(createDiffApprovalPort(missing.rpc).listCount(S1)).rejects.toThrow('malformed count')
+    const negative = fakeRpc({ 'list-count': { ok: true, value: { count: -1 } } })
+    await expect(createDiffApprovalPort(negative.rpc).listCount(S1)).rejects.toThrow('malformed count')
+  })
+
+  it('folds the unknown-endpoint answer of an older host into a rejection the store can read', async () => {
+    // What a host built before this verb answers: the channel's own catch-all. The message is what the
+    // store matches on to fall back to the full read, so it has to survive the port unchanged.
+    const seam = fakeRpc({
+      'list-count': { ok: false, error: { code: 'internal', message: 'unknown endpoint "list-count"', details: {} } },
+    })
+    await expect(createDiffApprovalPort(seam.rpc).listCount(S1))
+      .rejects.toThrow('internal: unknown endpoint "list-count"')
+  })
+})
+
 describe('keep and revert', () => {
   it('narrows each action outcome and validates it', async () => {
     const seam = fakeRpc({

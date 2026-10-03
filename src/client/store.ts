@@ -34,6 +34,21 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   viewFor: (sessionId: SessionId | undefined) => PendingDiffSnapshot
   /** Re-read one session's pending list (an absent session empties the view). */
   refresh: (sessionId: SessionId | undefined) => Promise<void>
+  /**
+   * Ask how many rows this session has, THE LIGHT WAY: one number, no file content.
+   *
+   * This is what a seat polls while it is showing nothing but its badge. It publishes into the same
+   * per-session slot as `refresh` — as `count`, never as `files` — so a badge keeps reading the view it
+   * already subscribes to, and it deliberately does NOT set `read` (a count is not a list: a session
+   * whose list has never been read stays unread, and its list stays empty rather than looking loaded).
+   *
+   * Failure keeps the LAST GOOD number: a count that failed knows nothing, and showing 0 or a blank
+   * badge for a list that may well be full is worse than showing the previous figure. A host that
+   * predates the endpoint (`unknown endpoint "list-count"`) is detected here ONCE and then this call
+   * degrades to `refresh`, which is exactly the old behaviour at exactly the old cost — one full read
+   * per tick — and an absent session has no count to ask for, so it returns without a call.
+   */
+  refreshCount: (sessionId: SessionId | undefined) => Promise<void>
   /** Keep one operation. `keepListed` leaves the resolved entry in the list. */
   keep: (sessionId: SessionId, id: string, keepListed?: boolean) => Promise<void>
   /** Revert one operation. `keepListed` leaves the resolved entry in the list. */
@@ -157,6 +172,28 @@ interface SessionView {
   view: PendingDiffSnapshot
   /** Bumped by every read of this session; an answer whose epoch has moved on is stale. */
   epoch: number
+  /**
+   * The read this session is waiting on right now, or `undefined` when none is running.
+   *
+   * The poll is a one-second interval and a read on a slow link outlasts several of them, so without this
+   * the ticks STACK: each one starts another request, the transport never drains, and the reader queues
+   * behind their own polls asking the same question — which is what made the count badge take tens of
+   * seconds to appear after a page load. A tick that arrives while a read is in flight does not start one.
+   */
+  inFlight?: Promise<void> | undefined
+  /** Set by a tick that arrived during a read, so exactly one trailing read runs when it settles. */
+  queued?: boolean | undefined
+  /**
+   * Bumped by every COUNT read of this session; a count answer whose epoch has moved on is stale.
+   *
+   * Separate from `epoch` on purpose: the two reads are independent questions about the same session, and
+   * sharing one counter would make a count tick drop a list read that is still in flight (and vice versa).
+   */
+  countEpoch: number
+  /** The count read this session is waiting on, with the same folding rule as `inFlight`. */
+  countInFlight?: Promise<void> | undefined
+  /** Set by a count tick that arrived during a count read, so exactly one trailing count read runs. */
+  countQueued?: boolean | undefined
 }
 
 /**
@@ -191,6 +228,17 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
   // Latched until the panel acknowledges it: a detected external change that
   // superseded the redo history must surface even when the panel is closed.
   let redoCleared = false
+  /**
+   * Set when this host answered the light count with `unknown endpoint "list-count"`.
+   *
+   * That is what a host built before the endpoint says, and it is a fact about the HOST, not about one
+   * session or one tick: once seen, every later count tick goes straight to `refresh` instead of paying a
+   * doomed round trip first. The fallback is therefore exactly the read a page had before the count
+   * existed, at exactly its cost. Cleared by `reset`, because a reconnection may reach a host that HAS the
+   * endpoint (an upgraded process), and the cost of being wrong is one wasted request rather than a badge
+   * that stops using the light read for the rest of the page's life.
+   */
+  let countUnsupported = false
 
   const failedOf = (value: PendingDiffSnapshot): ReadonlyMap<string, string> => value.failed ?? EMPTY_FAILED
 
@@ -198,7 +246,7 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
   const slotOf = (sessionId: SessionId): SessionView => {
     const existing = views.get(sessionId)
     if (existing !== undefined) return existing
-    const created: SessionView = { view: emptyView(), epoch: 0 }
+    const created: SessionView = { view: emptyView(), epoch: 0, countEpoch: 0 }
     views.set(sessionId, created)
     return created
   }
@@ -383,7 +431,7 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
     }
   }
 
-  return {
+  const store: PendingDiffStore = {
     getSnapshot: () => viewOf(pointed),
     viewFor: (sessionId) => viewOf(sessionId),
     subscribe(listener) {
@@ -400,8 +448,31 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
         return
       }
       const slot = slotOf(sessionId)
-      // This read supersedes every read of THIS session already in flight — and only this session's:
-      // another seat polling another session is asking a different question, not an older one.
+      // AT MOST ONE READ IN FLIGHT for this session (see `SessionView.inFlight`). A tick that arrives while
+      // one is running does not start a second request — that is what let the queue grow without bound on a
+      // slow link — it records that a fresher answer is wanted and hands back the read already running.
+      if (slot.inFlight !== undefined) {
+        slot.queued = true
+        return slot.inFlight
+      }
+      let release!: () => void
+      slot.inFlight = new Promise<void>(resolve => { release = resolve })
+      // Runs on EVERY way out of the read below, the two stale exits included, so the guard can never be
+      // left latched and strand the session with no further reads. A tick folded into this read starts
+      // exactly one more when it settles: the read in flight may predate an action (keep, revert, comment)
+      // and can only publish the state that came before it, so dropping that tick outright would leave the
+      // action invisible until the next interval.
+      const finish = (): void => {
+        slot.inFlight = undefined
+        release()
+        if (slot.queued === true) {
+          slot.queued = undefined
+          void store.refresh(sessionId)
+        }
+      }
+      // Bumped BEFORE the await: an answer whose epoch has moved on is stale. With one read per session at
+      // a time, the only thing that can move it now is `reset`, which is exactly when a landing read must
+      // not republish over the dropped state.
       const request = ++slot.epoch
       try {
         const {
@@ -413,7 +484,7 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
         // and failed bookkeeping is left exactly as the session's live view has it — the newer response
         // carries both through, so a drop cannot clear a busy row mid-action. It cannot strand
         // `read: false` either: the refresh that made this one stale is the one that resolves it.
-        if (request !== slot.epoch) return
+        if (request !== slot.epoch) { finish(); return }
         if (cleared) redoCleared = true
         // Carry the failure markers through: a hint must survive the poll
         // (auto-clears on its own timer) rather than vanish a second later. The skill
@@ -439,7 +510,7 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
         // shown the files, comments and lines this session already had, plus the reason. Only the error
         // field changes. A stale failure is still dropped whole — it is about a question this session has
         // already answered.
-        if (request !== slot.epoch) return
+        if (request !== slot.epoch) { finish(); return }
         const live = slot.view
         publishView(sessionId, {
           ...live,
@@ -447,6 +518,67 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
           error: error instanceof Error ? error.message : String(error),
         })
       }
+      // The read is over, whichever branch it took: let the next tick start one, and run the single
+      // trailing read if any tick was folded into this one.
+      finish()
+    },
+    async refreshCount(sessionId) {
+      // No session, no count to ask about: the page-wide readers follow whichever session was last read,
+      // and there is nothing here to name. (A count is not a list, so it never publishes an empty view the
+      // way `refresh(undefined)` does.)
+      if (sessionId === undefined) return
+      // The whole-page readers follow the session just read, exactly as `refresh` does — and with the panel
+      // SHUT this is the only read there is. Leaving it out is not a missed repaint: `getSnapshot()` would
+      // keep answering the constant never-read page-wide view, and a seat that memoizes on that identity
+      // (see `useSessionView`) would never be handed the count at all — which is how a closed panel ended up
+      // asking the host for the count, receiving it, and still drawing 0. A count read is a read of this
+      // session, so it names it here like every other read.
+      pointed = sessionId
+      const slot = slotOf(sessionId)
+      // AT MOST ONE COUNT IN FLIGHT, folded exactly like the full read (see `SessionView.inFlight`): a tick
+      // that lands during a count records that a fresher number is wanted and hands back the one running.
+      if (slot.countInFlight !== undefined) {
+        slot.countQueued = true
+        return slot.countInFlight
+      }
+      // A host that has already told us it has no such endpoint: do the read it DOES have rather than
+      // paying for a doomed request first. `refresh` has its own per-session guard, so several ticks
+      // arriving here fold into one full read.
+      if (countUnsupported) {
+        await store.refresh(sessionId)
+        return
+      }
+      let release!: () => void
+      slot.countInFlight = new Promise<void>(resolve => { release = resolve })
+      // Runs on every way out, the stale exits included, so the guard can never latch and strand the badge.
+      const finish = (): void => {
+        slot.countInFlight = undefined
+        release()
+        if (slot.countQueued === true) {
+          slot.countQueued = undefined
+          void store.refreshCount(sessionId)
+        }
+      }
+      const request = ++slot.countEpoch
+      try {
+        const { count } = await port.listCount(sessionId)
+        if (request !== slot.countEpoch) { finish(); return }
+        // The number rides the session's OWN view, so every badge subscribed to that slot re-renders and
+        // no other session's view moves. `read` is deliberately left as it was: a count is not a list, and
+        // a session whose list was never read must not look like one that was.
+        publishView(sessionId, { ...slot.view, count })
+      } catch (error: unknown) {
+        if (request !== slot.countEpoch) { finish(); return }
+        // A count that failed knows nothing, so the last good number stays — never 0, never blank, which
+        // is what a badge that blanked on one flaky tick would show. The one failure that is not a
+        // failure of the question is an OLD HOST: it has no endpoint to answer, so from here on the tick
+        // does the full read instead (today's behaviour, today's cost) and this stays latched.
+        if ((error instanceof Error ? error.message : String(error)).includes('unknown endpoint')) {
+          countUnsupported = true
+          await store.refresh(sessionId)
+        }
+      }
+      finish()
     },
     keep(sessionId, id, keepListed) {
       if (keepListed === true) {
@@ -623,11 +755,20 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
       // the connection that just died cannot republish its session over the dropped state, and every
       // slot — the page-wide reader included — goes back to an unread empty view.
       for (const slot of views.values()) {
+        // Bump past any read still in flight, and forget a folded tick: a read that lands after this must
+        // not republish, and a read this slot asked for on its own must not run against a dead connection.
         slot.epoch += 1
+        slot.queued = undefined
+        // The count read is its own question with its own guard, so it is dropped the same way.
+        slot.countEpoch += 1
+        slot.countQueued = undefined
         slot.view = emptyView()
       }
       snapshot = emptyView()
       pointed = undefined
+      // A reconnection may reach a host that HAS the light endpoint (an upgraded process), so the old
+      // host's verdict is not carried across the connection that made it.
+      countUnsupported = false
       for (const listener of [...listeners]) listener()
     },
     clearRedoCleared() {
@@ -642,4 +783,5 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
       publishUndoNotice(undefined, undefined)
     },
   }
+  return store
 }

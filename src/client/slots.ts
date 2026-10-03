@@ -37,6 +37,21 @@ export interface PendingDiffSnapshot {
   commentAnswers: Record<string, string>
   /** A read failure's message; absent while the latest read succeeded. */
   error?: string
+  /**
+   * How many rows the host says this session has, from the LIGHT read (`list-count`) — the badge's
+   * question, answered without shipping any file content.
+   *
+   * It is the number a full read would have carried, but it is a separate fact with a separate age: a
+   * count lands on ticks that ask only for a count (when nothing is showing), and a FULL read clears it,
+   * because that read carries the same fact in `files` and is newer. So a reader's rule is
+   * `count ?? files.length` — the fallback covers both "no count has arrived" and "the list is fresher",
+   * and a count that FAILED leaves the previous number in place rather than showing zero.
+   *
+   * Absent on a host that predates the endpoint: there the store keeps doing full reads, the value stays
+   * absent, and every reader stays on the fallback — today's behaviour, at today's cost (see
+   * `PendingDiffStore.refreshCount`).
+   */
+  count?: number | undefined
   /** Entry ids whose keep/revert is in flight; their controls are disabled. */
   busy: ReadonlySet<string>
   /** Entry ids whose last keep/revert failed, mapped to the error message; the panel surfaces these inline (row tag + detail banner) instead of hiding the list. */
@@ -77,6 +92,22 @@ export interface PendingDiffSnapshot {
 
 /** One filter over one session's view of the pending list; the shape every view hook takes. */
 export type PendingViewSelector<T> = (view: PendingDiffSnapshot) => T
+
+/**
+ * The number a badge, a header entry or a dock chip shows for one session: the light count when one has
+ * arrived, else the length of the list that read carried.
+ *
+ * The fallback is not a nicety — it is the whole older-host story and the state before the first count
+ * lands. `count` is absent when no count has arrived (the page just loaded, or the host predates the
+ * endpoint, where the store keeps doing full reads) and it is cleared by every full read, whose `files`
+ * are the same fact and newer. So `count` is only ever shown while it is the FRESHEST number the client
+ * has; otherwise the list speaks. See `PendingDiffSnapshot.count`.
+ * @param view - one session's view.
+ * @returns how many rows it holds.
+ */
+export function countOf(view: PendingDiffSnapshot): number {
+  return view.count ?? view.files.length
+}
 
 /** Function shape of {@link PendingViewHooks.pendingView}; named so a seat can call it directly. */
 export type PendingViewReader = <T>(sessionId: SessionId | undefined, select: PendingViewSelector<T>) => T
@@ -136,6 +167,12 @@ export interface PendingPanelFace extends PendingViewHooks {
   closeDock?: (() => void) | undefined
   /** Read the pending list for the current session into the snapshot. */
   onRefresh: (sessionId: SessionId | undefined) => void
+  /**
+   * The badge's tick, for a seat with nothing on screen: ask how many rows the session has, with no file
+   * content on the wire. Optional so a face built against an older shape still renders — the panel then
+   * keeps the full read, which is what such a page did before the verb existed.
+   */
+  onRefreshCount?: ((sessionId: SessionId | undefined) => void) | undefined
   /** The reader is looking at this file now: its row's unseen dot goes out. */
   onMarkSeen?: ((sessionId: SessionId | undefined, id: string) => void) | undefined
   /** Keep one operation. `keepListed` leaves the resolved entry in the list. */
