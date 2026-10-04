@@ -1423,11 +1423,12 @@ describe('undo/redo', () => {
     expect(restored).toMatchObject({ id: entry!.id })
   })
 
-  it('writes the undo under the policy of the session that owns the pair', async () => {
-    // The pair remembers the session its action was taken in, and the write policy has to
-    // come from THAT session: the reader's panel may be showing another session's list by
-    // the time Ctrl+Z arrives, and resolving the policy from the viewer would write A's
-    // file under B's sandbox root.
+  it('writes the undo under the policy RECORDED on the pair', async () => {
+    // The pair remembers the session its action was taken in, and the restore's write policy comes from
+    // THAT recorded session: the reader's panel may be showing another session's list by the time Ctrl+Z
+    // arrives, and resolving the policy from the viewer would write A's file under B's sandbox root. The
+    // file is inside A's workspace root, which is what lets the restore's own preflight (the SAME
+    // containment predicate the write enforces — see `preflightRestore`) pass and the write happen at all.
     //
     // This is NOT the red-first evidence for the per-session history, whatever the old title
     // claimed: the caller here IS the pair's own session, so it passes with the ownership
@@ -1460,7 +1461,7 @@ describe('undo/redo', () => {
     let diskContent = 'b'
     fs.readText.mockImplementation(async () => diskContent)
     fs.writeText.mockImplementation(async (_target: unknown, content: string) => { diskContent = content; return { version: 1 } })
-    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    emitResult(ctx, editExec(), editSuccess(join(workspaceA, 'a.txt'), 'a', 'b'))
     const [entry] = await listEntries(handle, 'session-1')
 
     await handle('revert', { sessionId: 'session-1', id: entry!.id }, signal())
@@ -4009,6 +4010,7 @@ describe('the light count and the cheap reads', () => {
     // The child's row is in the ROOT's list (the merge)…
     expect((await listEntries(handle, String(ROOT))).map(row => row.path)).toEqual(['/repo/child.txt'])
     // …so the root's count carries it: the same `sees`, not a second rule.
+    // …so the root's count carries it: the same `sees`, not a second rule.
     await expect(handle('list-count', { sessionId: String(ROOT) }, signal()))
       .resolves.toEqual({ ok: true, value: { count: 1 } })
     await expect(handle('list-count', { sessionId: String(CHILD) }, signal()))
@@ -4077,6 +4079,370 @@ describe('the light count and the cheap reads', () => {
     gone = false
     expect((await listEntries(handle, 'session-1'))[0]).toMatchObject({ newText: 'b\n', diverged: false })
     expect(fs.readText).toHaveBeenCalledTimes(2)
+  })
+})
+
+/**
+ * WHO WRITES, AND UNDER WHOSE AUTHORITY.
+ *
+ * Four rules, pinned together because they are the same decision seen from four sides: a forward action
+ * writes under the REQUESTING seat's own policy (never the last toucher's); the undo pair RECORDS the seat
+ * that acted and replays it even when another seat of the lineage pops the pair; only targets that really
+ * changed are recorded; and a restore preflights EVERY write before the first one, so a permission refusal
+ * takes back nothing at all and is reported in words that name the path.
+ */
+describe('write authority: the requester writes, and the pair remembers its seat', () => {
+  const P = 'session-parent'
+  const C = 'session-child'
+
+  /** A tool execution for one session. */
+  const execFor = (id: string): unknown => ({ name: 'edit', agent: { id: SessionId(id) } })
+
+  /** A registry where `child` is a subagent child of `parent`: ONE lineage, two seats, each its own root. */
+  const lineage = (): { get: (id: SessionId) => unknown } => ({
+    get: (id: SessionId) => {
+      if (String(id) === C) return { id, header: { id: C, parentSession: P, origin: 'subagent', delegationDepth: 1 } }
+      if (String(id) === P) return { id, header: { id: P } }
+      return undefined
+    },
+  })
+
+  /** One live session with no lineage recorded: its own root, and no other seat in its history. */
+  const solo = (id: string): { get: (sessionId: SessionId) => unknown } => ({
+    get: (sessionId: SessionId) => (String(sessionId) === id ? { id: sessionId, header: { id } } : undefined),
+  })
+
+  /** A confining policy whose root is read fresh, so a case can NARROW it between two requests. */
+  const rootPolicy = (root: () => string): unknown => ({
+    defaultMode: 'workspace-write' as const,
+    resolve: vi.fn(() => ({ mode: 'workspace-write' as const, workspaceRoot: root() })),
+  })
+
+  /** A per-seat policy: each session id gets its own workspace root. */
+  const perSeatPolicy = (roots: Record<string, string>): unknown => ({
+    defaultMode: 'workspace-write' as const,
+    resolve: vi.fn((request?: { session?: { id?: unknown } }) => ({
+      mode: 'workspace-write' as const,
+      workspaceRoot: roots[String(request?.session?.id)] ?? '/none',
+    })),
+  })
+
+  /**
+   * A disk the double actually models: `readText` answers what `writeText` last put there.
+   *
+   * The map is returned so an assertion can READ a file back rather than infer that it did not change —
+   * which is what "byte-identical" has to mean for the no-partial-undo case.
+   */
+  function modelDisk(fs: FsDouble, initial: Record<string, string>): Map<string, string> {
+    const disk = new Map(Object.entries(initial))
+    fs.readText.mockImplementation(async (target: { displayPath?: string }) => disk.get(String(target.displayPath)))
+    fs.writeText.mockImplementation(async (target: { displayPath?: string }, content: string) => {
+      disk.set(String(target.displayPath), content)
+      return { version: 1 }
+    })
+    return disk
+  }
+
+  /** The workspace root every recorded write ran under, in order; `undefined` where none was carried. */
+  function rootsWritten(fs: FsDouble): unknown[] {
+    const calls = fs.writeText.mock.calls as unknown as [unknown, unknown, unknown, unknown, { workspaceRoot?: string } | undefined][]
+    return calls.map(call => call[4]?.workspaceRoot)
+  }
+
+  /** The message of a failed answer, with the shape asserted so a passing result cannot slip through. */
+  function refusalMessage(answer: Awaited<ReturnType<ConnectionRpcHandler>>): string {
+    expect(answer.ok).toBe(false)
+    return (answer as { error: { message: string } }).error.message
+  }
+
+  it("runs the forward write under the REQUESTER's policy, not the owner who touched the file last", async () => {
+    // The row belongs to the CHILD (it touched the file last) while the file itself lives under the
+    // PARENT's root: the requester is the parent, and the press must run under the requester's own grant
+    // rather than borrowing the seat that happened to record the row.
+    const { ctx, handle, fs } = await harness({
+      workspacesByPath: { '/repo': [P, C] },
+      prepare: (context) => {
+        context.provide('sessions', lineage() as never)
+        context.provide('sandboxPolicy', perSeatPolicy({ [P]: '/repo', [C]: '/other' }) as never)
+      },
+    })
+    emitResult(ctx, execFor(C), editSuccess('/repo/a.txt', 'a', 'b'))
+
+    await expect(handle('revert', { sessionId: P, id: '/repo/a.txt' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'reverted' } })
+    expect(rootsWritten(fs)).toEqual(['/repo'])
+  })
+
+  it('does not move the policy when the owner flips between two seats', async () => {
+    // Two rows and ONE requester: the first was last touched by the child, the second by the parent. The
+    // owner differs, the presser does not, so the policy the write runs under must not move either.
+    const { ctx, handle, fs } = await harness({
+      workspacesByPath: { '/repo': [P, C] },
+      prepare: (context) => {
+        context.provide('sessions', lineage() as never)
+        context.provide('sandboxPolicy', perSeatPolicy({ [P]: '/repo', [C]: '/other' }) as never)
+      },
+    })
+    emitResult(ctx, execFor(C), editSuccess('/repo/a.txt', 'a', 'b'))
+    emitResult(ctx, execFor(P), editSuccess('/repo/b.txt', 'a', 'b'))
+    expect((await listEntries(handle, P)).map(row => row.path).sort()).toEqual(['/repo/a.txt', '/repo/b.txt'])
+
+    await handle('revert', { sessionId: P, id: '/repo/a.txt' }, signal())
+    await handle('revert', { sessionId: P, id: '/repo/b.txt' }, signal())
+    expect(rootsWritten(fs)).toEqual(['/repo', '/repo'])
+  })
+
+  it('replays the RECORDED seat when another seat of the lineage pops the pair', async () => {
+    // The file lives under the CHILD's root, and the child is the seat that presses: the pair records the
+    // child. A DIFFERENT seat of the same lineage (the parent, whose own root is '/repo') then takes it
+    // back — and the restore must run under the recorded seat, or the preflight under the parent's root
+    // would refuse a file the action itself was allowed to write.
+    const { ctx, handle, fs } = await harness({
+      workspacesByPath: { '/other': [P, C] },
+      prepare: (context) => {
+        context.provide('sessions', lineage() as never)
+        context.provide('sandboxPolicy', perSeatPolicy({ [P]: '/repo', [C]: '/other' }) as never)
+      },
+    })
+    const disk = modelDisk(fs, { '/other/a.txt': 'b' })
+    emitResult(ctx, execFor(C), editSuccess('/other/a.txt', 'a', 'b'))
+
+    await expect(handle('revert', { sessionId: C, id: '/other/a.txt' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'reverted' } })
+    expect(disk.get('/other/a.txt')).toBe('a')
+    fs.writeText.mockClear()
+
+    await expect(handle('undo', { sessionId: P }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: '/other/a.txt' } })
+    expect(disk.get('/other/a.txt')).toBe('b')
+    expect(rootsWritten(fs)).toEqual(['/other'])
+  })
+
+  it('names a permission refusal, and keeps the ordinary failures distinct from it', async () => {
+    /** One harness over a modelled disk, with the caller's policy root. */
+    const setup = async (): Promise<{ ctx: Context; handle: ConnectionRpcHandler; fs: FsDouble }> =>
+      harness({
+        sessionIds: [SessionId('session-1')],
+        workspacePath: '/repo',
+        prepare: (context) => {
+          context.provide('sessions', solo('session-1') as never)
+          context.provide('sandboxPolicy', rootPolicy(() => '/repo') as never)
+        },
+      })
+
+    // (1) The SANDBOX refuses the write: `FS_SANDBOX_DENIED`, the code the policy layer owns.
+    const denied = await setup()
+    denied.fs.readText.mockImplementation(async () => 'b')
+    denied.fs.writeText.mockRejectedValue(Object.assign(new Error('file access denied under workspace-write mode'), { code: 'FS_SANDBOX_DENIED' }))
+    emitResult(denied.ctx, execFor('session-1'), editSuccess('/repo/a.txt', 'a', 'b'))
+    const deniedMessage = refusalMessage(await denied.handle('revert', { sessionId: 'session-1', id: '/repo/a.txt' }, signal()))
+    expect(deniedMessage).toContain('/repo/a.txt')                 // it names the path
+    expect(deniedMessage).toContain("this session's write authority") // it says whose authority was short
+    expect(deniedMessage).toContain('workspace-write mode')        // and it carries the reason
+
+    // (2) The FILE is gone: a read failure that is not a policy refusal keeps its own answer.
+    const missing = await setup()
+    missing.fs.readText.mockRejectedValue(Object.assign(new Error('a.txt is gone'), { code: 'FS_NOT_FOUND' }))
+    emitResult(missing.ctx, execFor('session-1'), editSuccess('/repo/a.txt', 'a', 'b'))
+    const missingMessage = refusalMessage(await missing.handle('revert', { sessionId: 'session-1', id: '/repo/a.txt' }, signal()))
+    expect(missingMessage).toBe('revert failed: a.txt is gone')
+
+    // (3) An IO fault on the write: its own answer, and NOT the refusal sentence.
+    const io = await setup()
+    io.fs.readText.mockImplementation(async () => 'b')
+    io.fs.writeText.mockRejectedValue(new Error('disk on fire'))
+    emitResult(io.ctx, execFor('session-1'), editSuccess('/repo/a.txt', 'a', 'b'))
+    const ioMessage = refusalMessage(await io.handle('revert', { sessionId: 'session-1', id: '/repo/a.txt' }, signal()))
+    expect(ioMessage).toBe('revert failed: disk on fire')
+
+    // (4) The file DIVERGED between the action and the undo: the preflight catches it before any write, and
+    // the answer is the guard's own sentence — not a refusal, and not a partial write.
+    const diverged = await setup()
+    const disk = modelDisk(diverged.fs, { '/repo/a.txt': 'b' })
+    emitResult(diverged.ctx, execFor('session-1'), editSuccess('/repo/a.txt', 'a', 'b'))
+    await diverged.handle('revert', { sessionId: 'session-1', id: '/repo/a.txt' }, signal())
+    disk.set('/repo/a.txt', 'tampered')
+    diverged.fs.writeText.mockClear()
+    const divergedMessage = refusalMessage(await diverged.handle('undo', { sessionId: 'session-1' }, signal()))
+    expect(divergedMessage).toBe('undo failed: the file changed outside the review after the action; undo is unavailable')
+    expect(diverged.fs.writeText).not.toHaveBeenCalled()
+
+    // All four are DIFFERENT answers: a reader can tell "I may not write there" from "it is gone", from an
+    // IO fault and from "someone else changed it".
+    expect(new Set([deniedMessage, missingMessage, ioMessage, divergedMessage]).size).toBe(4)
+  })
+
+  it('keeps the missing answer for a seat outside the lineage, whatever the policy would say', async () => {
+    const { ctx, handle, fs } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: '/repo',
+      prepare: (context) => {
+        context.provide('sessions', solo('session-1') as never)
+        context.provide('sandboxPolicy', rootPolicy(() => '/repo') as never)
+      },
+    })
+    emitResult(ctx, execFor('session-1'), editSuccess('/repo/a.txt', 'a', 'b'))
+
+    // The visibility guard answers first and answers the same thing it always did: a row outside the
+    // requester's lineage is `missing`, never a permission refusal (which would disclose that it exists).
+    await expect(handle('revert', { sessionId: 'session-2', id: '/repo/a.txt' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'missing' } })
+    await expect(handle('revert-all', { sessionId: 'session-2' }, signal()))
+      .resolves.toEqual({ ok: true, value: { affected: 0 } })
+    await expect(handle('revert-many', { sessionId: 'session-2', ids: ['/repo/a.txt'] }, signal()))
+      .resolves.toEqual({ ok: true, value: { affected: 0 } })
+    expect(fs.writeText).not.toHaveBeenCalled()
+  })
+
+  it('refuses the WHOLE undo when one target is outside the recorded seat\'s authority, and writes nothing', async () => {
+    const { ctx, handle, fs } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: '/repo',
+      prepare: (context) => {
+        context.provide('sessions', solo('session-1') as never)
+        context.provide('sandboxPolicy', rootPolicy(() => '/repo') as never)
+      },
+    })
+    const disk = modelDisk(fs, { '/repo/a.txt': 'b', '/other/b.txt': 'b' })
+    emitResult(ctx, execFor('session-1'), editSuccess('/repo/a.txt', 'a', 'b'))
+    emitResult(ctx, execFor('session-1'), editSuccess('/other/b.txt', 'a', 'b'))
+
+    // The press itself: both files go back to their baselines, so ONE batch pair with two members is
+    // recorded. The write path hands the policy to the backend (a permissive deployment accepts it), which
+    // is why both reverts land here.
+    await expect(handle('revert-all', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: true, value: { affected: 2 } })
+    expect(disk.get('/repo/a.txt')).toBe('a')
+    expect(disk.get('/other/b.txt')).toBe('a')
+    fs.writeText.mockClear()
+
+    // Ctrl+Z: '/other/b.txt' is outside this seat's root, so the FIRST file must not be touched either —
+    // half an undo is not an undo — and the reader is told which path and why.
+    const message = refusalMessage(await handle('undo', { sessionId: 'session-1' }, signal()))
+    expect(message).toContain('/other/b.txt')
+    expect(message).toContain("this session's write authority")
+    expect(fs.writeText).not.toHaveBeenCalled()
+    // Byte-identical is READ back, not inferred: both files still hold what the revert left.
+    expect(disk.get('/repo/a.txt')).toBe('a')
+    expect(disk.get('/other/b.txt')).toBe('a')
+  })
+
+  it('applies a permitted set whole', async () => {
+    // The same two-file pair, with a root that covers BOTH files: the preflight passes and every member is
+    // written — the check is a gate, not a filter that silently drops members.
+    const { ctx, handle, fs } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: '/',
+      prepare: (context) => {
+        context.provide('sessions', solo('session-1') as never)
+        context.provide('sandboxPolicy', rootPolicy(() => '/') as never)
+      },
+    })
+    const disk = modelDisk(fs, { '/repo/a.txt': 'b', '/other/b.txt': 'b' })
+    emitResult(ctx, execFor('session-1'), editSuccess('/repo/a.txt', 'a', 'b'))
+    emitResult(ctx, execFor('session-1'), editSuccess('/other/b.txt', 'a', 'b'))
+    await handle('revert-all', { sessionId: 'session-1' }, signal())
+    fs.writeText.mockClear()
+
+    await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+      .resolves.toMatchObject({ ok: true, value: { outcome: 'undone' } })
+    expect(disk.get('/repo/a.txt')).toBe('b')
+    expect(disk.get('/other/b.txt')).toBe('b')
+    expect(rootsWritten(fs)).toEqual(['/', '/'])
+  })
+
+  it('records nothing for a press that changes nothing, and answers nothing to its undo', async () => {
+    const { ctx, handle, fs } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: '/repo',
+      prepare: (context) => {
+        context.provide('sessions', solo('session-1') as never)
+        context.provide('sandboxPolicy', rootPolicy(() => '/repo') as never)
+      },
+    })
+    modelDisk(fs, { '/repo/a.txt': 'b' })
+    emitResult(ctx, execFor('session-1'), editSuccess('/repo/a.txt', 'a', 'b'))
+
+    // The first fold is a REAL change: the file goes back to its baseline and the entry folds onto it.
+    await expect(handle('revert', { sessionId: 'session-1', id: '/repo/a.txt', keepListed: true }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'reverted', resolved: true } })
+    // The second fold changes NOTHING (the file already holds the baseline, the entry is already folded),
+    // so it records no pair. Its own answer is unchanged — it did what the reader asked of the LIST, and the
+    // outcome vocabulary has no "nothing happened" for a press — and the absence shows up on Ctrl+Z.
+    await expect(handle('revert', { sessionId: 'session-1', id: '/repo/a.txt', keepListed: true }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'reverted', resolved: true } })
+
+    // ONE undo takes the first fold back; a SECOND has nothing left because the second press recorded
+    // nothing. With every press recorded, this second answer would be `undone` instead.
+    await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+      .resolves.toMatchObject({ ok: true, value: { outcome: 'undone' } })
+    await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'nothing' } })
+  })
+
+  it('records only the changed members of a batch, so an unchanged one cannot refuse its undo', async () => {
+    const { ctx, handle, fs } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: '/repo',
+      prepare: (context) => {
+        context.provide('sessions', solo('session-1') as never)
+        context.provide('sandboxPolicy', rootPolicy(() => '/repo') as never)
+      },
+    })
+    const disk = modelDisk(fs, { '/repo/a.txt': 'b', '/other/b.txt': 'b' })
+    emitResult(ctx, execFor('session-1'), editSuccess('/repo/a.txt', 'a', 'b'))
+    emitResult(ctx, execFor('session-1'), editSuccess('/other/b.txt', 'a', 'b'))
+
+    // Bring '/other/b.txt' to the state the pick below would leave it in: its file at the baseline and its
+    // entry folded. THAT press is a real change and is recorded.
+    await handle('revert', { sessionId: 'session-1', id: '/other/b.txt', keepListed: true }, signal())
+    expect(disk.get('/other/b.txt')).toBe('a')
+
+    // The pick covers BOTH rows, but only '/repo/a.txt' changes. The batch records that one member only —
+    // and that matters beyond tidiness: '/other/b.txt' sits outside this seat's root, so a recorded no-op
+    // member would make the undo refuse over a file it would never have written.
+    await expect(handle('revert-many', { sessionId: 'session-1', ids: ['/repo/a.txt', '/other/b.txt'], keepListed: true }, signal()))
+      .resolves.toEqual({ ok: true, value: { affected: 2 } })
+    expect(disk.get('/repo/a.txt')).toBe('a')
+
+    await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+      .resolves.toMatchObject({ ok: true, value: { outcome: 'undone' } })
+    // The changed member came back…
+    expect(disk.get('/repo/a.txt')).toBe('b')
+    // …and the unchanged one was never part of the pair, so the undo never touched its file.
+    expect(disk.get('/other/b.txt')).toBe('a')
+  })
+
+  it('obeys the same preflight on redo, and writes nothing when it refuses', async () => {
+    let root = '/'
+    const { ctx, handle, fs } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: '/',
+      prepare: (context) => {
+        context.provide('sessions', solo('session-1') as never)
+        context.provide('sandboxPolicy', rootPolicy(() => root) as never)
+      },
+    })
+    const disk = modelDisk(fs, { '/repo/a.txt': 'b', '/other/b.txt': 'b' })
+    emitResult(ctx, execFor('session-1'), editSuccess('/repo/a.txt', 'a', 'b'))
+    emitResult(ctx, execFor('session-1'), editSuccess('/other/b.txt', 'a', 'b'))
+    await handle('revert-all', { sessionId: 'session-1' }, signal())
+    // Undo it while the authority still covers both files: the whole set comes back.
+    await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+      .resolves.toMatchObject({ ok: true, value: { outcome: 'undone' } })
+    expect(disk.get('/repo/a.txt')).toBe('b')
+    expect(disk.get('/other/b.txt')).toBe('b')
+
+    // Now the seat's authority NARROWS (a workspace moved under it). The redo must refuse the whole set and
+    // leave both files where the undo put them — a redo is the same promise in the other direction.
+    root = '/repo'
+    fs.writeText.mockClear()
+    const message = refusalMessage(await handle('redo', { sessionId: 'session-1' }, signal()))
+    expect(message).toContain('/other/b.txt')
+    expect(message).toContain("this session's write authority")
+    expect(fs.writeText).not.toHaveBeenCalled()
+    expect(disk.get('/repo/a.txt')).toBe('b')
+    expect(disk.get('/other/b.txt')).toBe('b')
   })
 })
 

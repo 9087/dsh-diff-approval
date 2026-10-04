@@ -321,11 +321,27 @@ interface DiffApprovalUndoPair {
    */
   root: SessionId
   /**
-   * The session that PRESSED the action, kept for diagnostics and attribution. It is also the policy the
-   * restore writes under, because the write-policy half is deliberately NOT canonicalized yet — see the
-   * note on `undoStackOf`.
+   * The session that PRESSED the action, kept for diagnostics and attribution — and the session the undo
+   * stack is filed under, because `pushUndo` canonicalizes it (see `undoStackOf`).
    */
   pressedBy: SessionId
+  /**
+   * The session whose workspace and sandbox policy the RESTORE writes under, RECORDED rather than
+   * re-derived.
+   *
+   * This is the session that performed the forward action — the seat that pressed it — and a forward action
+   * now resolves its own write from the REQUESTING session (see the three `revertEntryContent` call sites):
+   * visibility already guarantees the requester shares a workspace with an owner, so the file is inside the
+   * requester's workspace, and a press runs under the authority of the seat that pressed it rather than
+   * borrowing another session's wider grant.
+   *
+   * It is a separate field because the restore cannot re-derive it: the stack is keyed by the LINEAGE ROOT,
+   * so a DIFFERENT seat of the same lineage may pop this pair (`undo`/`redo` read it from here), and the
+   * restore must still run under the seat that acted — never under the popper, and never again from the
+   * entry's owner. Today every push records the presser, because that is what the forward write used; the
+   * field is what makes that a fact about the ACTION rather than a guess about the popper.
+   */
+  policySession: SessionId
   before: DiffApprovalUndoState
   after: DiffApprovalUndoState
 }
@@ -1042,8 +1058,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     let redoCleared = false
     for (const entry of entries) {
       if (!view.sees(sessionId, entry)) continue
-      // The undo pair a READ produces belongs to the session that read — whoever pressed — while the
-      // sandbox a revert writes under stays the row's owner's (see `ownerOf` and `pushUndo`).
+      // The undo pair a READ produces belongs to the session that read — whoever pressed — and that same
+      // session is the policy its restore replays (see `DiffApprovalUndoPair.policySession`).
       const live = await liveStateOf(entry.path)
       if (live.kind === 'deleted') {
         // The file is gone: remove it from the list, keeping an undoable
@@ -1374,24 +1390,15 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   /** The most lineage hops one walk will take: a bound, not a depth anyone should reach. */
   const MAX_LINEAGE_DEPTH = 16
 
-  /** Every session that touched an entry (its own fallback, the way the store reads an old row). */
+  /** Every session that touched an entry (its own fallback, the way the store reads an old row).
+   *
+   *  PROVENANCE, and the merge's basis: it is who WROTE the row, which is what the row's mark and its
+   *  `viaLineage` flag are made of. It is deliberately NOT the write policy any more — an action's write
+   *  runs under the REQUESTING session (see `DiffApprovalUndoPair.policySession` and the
+   *  `revertEntryContent` call sites), so nothing here decides who may write.
+   */
   function ownersOf(entry: PendingEntry): SessionId[] {
     return Array.isArray(entry.sessionIds) && entry.sessionIds.length > 0 ? entry.sessionIds : [entry.sessionId]
-  }
-
-  /**
-   * The session an ACTION on this entry belongs to.
-   *
-   * The entry's `sessionId` is "the most recent session whose agent touched the file", which is the one
-   * whose workspace and sandbox policy apply to the file as it now stands. Actions name it for the
-   * session-scoped halves of their work — the sandbox policy a revert writes under, and the undo stack a
-   * pair is pushed onto — so a row recorded by a teammate is acted on as THE TEAMMATE'S row even when the
-   * press came from the lead's view.
-   * @param entry - the entry being acted on.
-   * @returns the owning session.
-   */
-  function ownerOf(entry: PendingEntry): SessionId {
-    return entry.sessionId
   }
 
   /**
@@ -1462,11 +1469,12 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    *
    * TWO THINGS A MERGED VIEW DOES NOT MERGE, so the next reader does not expect them:
    * comments stay per-session (`comments` is read with the requester's id, so a merged list shows the
-   * requester's threads only), and undo stacks stay per-session — every ACTION records its pair under the
-   * session that PRESSED it, so a teammate's own action cannot be undone from the lead's view and a row
-   * the lead acted on cannot be undone from the teammate's (`undoStackOf`/`popOwnPair` are keyed by
-   * session). The one session-scoped thing a merged press takes from the ROW is the FILE: a revert runs
-   * under `ownerOf(entry)`, whose workspace and sandbox the file belongs to.
+   * requester's threads only), and undo stacks stay per-lineage — every ACTION records its pair under the
+   * canonical session of the seat that PRESSED it, so the seats of one lineage share one history and a
+   * different lineage cannot reach into it (`undoStackOf`/`popOwnPair` are keyed by that root). The
+   * session-scoped thing a merged press does NOT take from the ROW is the write policy: an action's file
+   * write runs under the REQUESTING session's own workspace and sandbox (see
+   * `DiffApprovalUndoPair.policySession`), never the owner's.
    *
    * THE MARK (`hasChildContribution`) IS A DIFFERENT QUESTION and keeps asking only the lineage half: it
    * claims an owner other than the requester WROTE part of the row, which a child in another workspace
@@ -1713,9 +1721,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     const policy = sandboxPolicyOf(sessionId)
     const osPath = processPathOf(target)
     if (policy !== undefined && !withinSandboxRoot(osPath, policy)) {
-      throw new Error(
-        `file access denied under ${policy.mode} mode: '${osPath}' is outside the sandbox workspace root '${policy.workspaceRoot}'`,
-      )
+      throw new Error(sandboxDenial(osPath, policy))
     }
     const fs = ctx.fs as unknown as { remove?: (target: FsTarget, policy: SandboxExecutionPolicyLike, signal: AbortSignal) => Promise<unknown> }
     if (policy !== undefined && typeof fs.remove === 'function') {
@@ -1747,6 +1753,177 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     if (target === root) return true
     const rel = relative(root, target)
     return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
+  }
+
+  /**
+   * The sentence a confining policy uses when it refuses one path, wherever it is produced.
+   *
+   * ONE producer, so the check a delete performs, the preflight a restore runs and the message a reader is
+   * handed can never describe the refusal differently.
+   * @param path - the OS path the policy refused.
+   * @param policy - the session's resolved policy.
+   * @returns the refusal sentence.
+   */
+  function sandboxDenial(path: string, policy: SandboxExecutionPolicyLike): string {
+    return `file access denied under ${policy.mode} mode: '${path}' is outside the sandbox workspace root '${policy.workspaceRoot}'`
+  }
+
+  /**
+   * Whether a thrown write error is the session's own AUTHORITY refusing it, rather than the file being
+   * gone, changed, or unreadable.
+   *
+   * Exactly two shapes qualify, and nothing else does: a confining backend raises `FS_SANDBOX_DENIED` (the
+   * `FsErrorCode` the fs package owns for "the policy layer said no"), and this file's own containment
+   * check in `removeRevert` raises a plain Error saying the path is outside the sandbox workspace root.
+   * Everything else keeps its own answer: `FS_NOT_FOUND` is a missing file, the divergence guard's "changed
+   * outside the review" is a diverged one, `FS_PERMISSION_DENIED` is the FILE SYSTEM refusing (a fact about
+   * the file, not about this session's grant) and the rest are IO or aborted faults. The predicate is
+   * deliberately this narrow: widening it is how a reader loses the difference between "I may not write
+   * there" and "that file is gone".
+   * @param error - the value a write path threw.
+   * @returns whether the sandbox/policy refused the write.
+   */
+  function isPolicyRefusal(error: unknown): boolean {
+    if (fsErrorCodeOf(error) === 'FS_SANDBOX_DENIED') return true
+    return /outside the sandbox workspace root/i.test(errorMessage(error))
+  }
+
+  /**
+   * The answer for a write the session's authority refused: a sentence that NAMES THE PATH and says, in
+   * words, that this session may not write there, carrying the sandbox's own reason with it.
+   *
+   * Why TEXT and not a code: the RPC error vocabulary this channel answers in is closed and owned by the
+   * vendor (`RpcErrorDetailsMap` in `@deepseek-ai/dsh-host-apiproxy` — `internal` is its catch-all, and a
+   * new code needs a row in that table), so this package cannot mint a `permission` code of its own. The
+   * reader still gets the sentence: the port folds a failed call into `Error(code: message)` and the
+   * panel's failed-row notice prints that message verbatim, so the refusal arrives as words on the path the
+   * panel already has for a failed action. A LOCALIZED route would need a client-side classifier over the
+   * message plus new locale keys — a copy change across the host/client seam — for no difference the reader
+   * can see, since every other message on this channel is host English too.
+   * @param path - the file the refused write was about (the entry's own path).
+   * @param error - what the write threw.
+   * @returns the error branch to answer with.
+   */
+  function policyRefusal(path: string, error: unknown): RpcResult<unknown> {
+    return rpcError(refusalText(path, error))
+  }
+
+  /** The refusal sentence itself, shared by every path that answers with one. */
+  function refusalText(path: string, error: unknown): string {
+    return `'${path}' is outside this session's write authority: the workspace this session may write does not cover it.`
+      + ` The sandbox refused the write: ${errorMessage(error)}`
+  }
+
+  /** One file write a restore will make: the entry path, and the bytes its counterpart expects to find. */
+  interface RestoreWrite {
+    path: string
+    /** What the OTHER side's snapshot says the file holds, or undefined when there is no divergence check. */
+    expected: string | undefined
+  }
+
+  /** How far a restore got: the writes it completed, how many it had to make, and the file it was on. */
+  interface RestoreProgress {
+    written: number
+    total: number
+    /** The path of the write being attempted, so a mid-way failure can name the file it stopped on. */
+    path: string
+  }
+
+  /**
+   * Every file write a restore will make, in the order it will make them.
+   *
+   * Mirrors `restoreState`'s own walk, index-aligned with the counterpart side, so the preflight below and
+   * the writer can never disagree about WHICH files a restore touches. A state with no `fileText` writes
+   * nothing: it puts an entry back in the list (or takes it out) and never opens a file.
+   * @param state - the side being installed.
+   * @param expectedFile - the other side, whose per-index `fileText` is the divergence snapshot.
+   * @returns the writes, in order.
+   */
+  function restoreWritesOf(state: DiffApprovalUndoState, expectedFile: DiffApprovalUndoState | undefined): RestoreWrite[] {
+    const writes: RestoreWrite[] = []
+    if (state.batch !== undefined) {
+      const counterpart = expectedFile?.batch
+      for (const [index, item] of state.batch.entries()) {
+        writes.push(...restoreWritesOf({ ...item, batch: undefined }, counterpart?.[index]))
+      }
+      return writes
+    }
+    if (state.fileText !== undefined) writes.push({ path: state.path, expected: expectedFile?.fileText })
+    return writes
+  }
+
+  /**
+   * Check EVERY write a restore will make before it makes the first one, and refuse the whole restore if any
+   * of them would be refused.
+   *
+   * WHAT IS GUARANTEED, and what is not (this is the honest half of the design):
+   *
+   * - AUTHORITY is guaranteed all-or-nothing. Each target is checked with the SAME predicate the write path
+   *   enforces (`withinSandboxRoot`, the one `removeRevert` refuses with and the policy `writeRevert` hands
+   *   the backend), under `pair.policySession` — the seat the action ran under. A refusal anywhere means no
+   *   file is written at all, so an undo can never take back half of a decision. This is a check made before
+   *   the first byte, so it is a guarantee rather than a hope.
+   * - DIVERGENCE is also preflighted, because it is cheap and detectable up front: a target whose
+   *   counterpart snapshot no longer matches the file refuses the whole restore rather than stopping
+   *   half-way through it.
+   * - A RUNTIME failure is NOT preflightable and is not promised away: a file that vanishes between this
+   *   check and the write, or an IO fault on the third of five files, can still leave the earlier writes
+   *   applied. When that happens the caller reports exactly how far the restore got (`RestoreProgress`)
+   *   instead of claiming nothing happened. Do not read this function as an atomicity promise; it is a
+   *   permission and staleness promise, and the mid-way case is reported as the partial state it is.
+   * @param writes - the plan, from `restoreWritesOf`.
+   * @param policySession - the session whose policy the write runs under (the pair's recorded seat).
+   * @param signal - aborts the checks too.
+   * @returns the first refusal (its path and the reason to report), or undefined when the plan may run.
+   */
+  async function preflightRestore(
+    writes: readonly RestoreWrite[],
+    policySession: SessionId,
+    signal: AbortSignal,
+  ): Promise<{ path: string; error: unknown } | undefined> {
+    const policy = sandboxPolicyOf(policySession)
+    for (const write of writes) {
+      let resolved: FsTarget
+      try {
+        // `resolve` only: it is the path half of the write's own prologue, and a failure here is a refusal
+        // for the whole restore rather than a mid-way surprise.
+        resolved = await ctx.fs.resolve(write.path, { signal })
+      } catch (error: unknown) {
+        return { path: write.path, error }
+      }
+      if (policy !== undefined && !withinSandboxRoot(processPathOf(resolved), policy)) {
+        return { path: write.path, error: new Error(sandboxDenial(processPathOf(resolved), policy)) }
+      }
+      if (write.expected !== undefined) {
+        const current = await ctx.fs.readText(resolved, undefined)
+        if (current !== write.expected) {
+          return { path: write.path, error: new Error('the file changed outside the review after the action; undo is unavailable') }
+        }
+      }
+    }
+    return undefined
+  }
+
+  /**
+   * The answer for a restore that did not finish: the refusal sentence when the sandbox was the reason, the
+   * ordinary `undo failed:`/`redo failed:` text otherwise — and in EVERY case, when the restore had already
+   * written something, how far it got. "Never that nothing happened": a partial restore is reported as the
+   * partial state it is.
+   * @param action - which direction was running.
+   * @param path - the file the failure is about.
+   * @param error - what the restore threw.
+   * @param progress - the writes it completed, and how many it had to make.
+   * @returns the error branch to answer with.
+   */
+  function restoreFailure(action: 'undo' | 'redo', path: string, error: unknown, progress: RestoreProgress): RpcResult<unknown> {
+    if (isPolicyRefusal(error)) {
+      const far = progress.written === 0
+        ? ''
+        : ` The ${action} had already written ${progress.written} of ${progress.total} files before that.`
+      return rpcError(refusalText(path, error) + far)
+    }
+    const far = progress.written === 0 ? '' : ` after writing ${progress.written} of ${progress.total} files`
+    return rpcError(`${action} failed${far}: ${errorMessage(error)}`)
   }
 
   /**
@@ -1790,13 +1967,12 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   // rather than an accident of it: a teammate's Ctrl+Z can take back the root's last action, and the
   // root's can take back a teammate's — one history per lineage, taken back from wherever it is read.
   //
-  // What is NOT canonicalized here is the POLICY the restore writes under: the pair remembers the session
-  // that pressed (`pressedBy`) and `restoreState` resolves the sandbox from it, exactly as before. That
-  // split is deliberate and is the deferred half of this design — collapsing it means resolving the write
-  // from `rootOf` only where `sameWorkspaceKey(workspaceKeyOf(root), workspaceKeyOf(requester))` holds (or
-  // either side is unknown), because a lineage does NOT guarantee a shared workspace: with a child in
-  // another workspace, writing its own row under the root's policy would be inert for every safe row and
-  // wrong for that one. Until then the file's owner keeps governing the file (see `ownerOf`).
+  // The POLICY a restore writes under is canonicalized in the opposite direction: the pair RECORDS the
+  // session the action ran under (`policySession`) and the restore replays exactly that — never the seat
+  // that popped the pair, and never the entry's owner re-derived at restore time. That is what makes a
+  // cross-seat Ctrl+Z safe: the popper's wider (or narrower) grant cannot leak into a write the presser
+  // made, and a lineage whose seats do NOT share a workspace still writes each file under the seat that
+  // actually acted on it.
   const undoStacks = new Map<SessionId, DiffApprovalUndoPair[]>()
   const redoStacks = new Map<SessionId, DiffApprovalUndoPair[]>()
 
@@ -1821,22 +1997,74 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   }
 
   /**
+   * One entry as an undo target sees it, for the "did this really change?" comparison.
+   *
+   * `updatedAt` is deliberately NOT in the key: every action stamps it with `Date.now()`, so including it
+   * would make every recorded target look changed — the exact false positive the comparison exists to stop.
+   */
+  function entryKeyOf(entry: PendingEntry | undefined): string {
+    if (entry === undefined) return '(no entry)'
+    return JSON.stringify(entry, (key, value) => (key === 'updatedAt' ? undefined : value))
+  }
+
+  /** One side's comment records as a comparable key (a pair that carries threads changes when they do). */
+  function commentsKeyOf(comments: readonly CommentRecord[] | undefined): string {
+    return (comments ?? []).map(comment => `${comment.id}@${comment.anchor.startLine}-${comment.anchor.endLine}:${comment.text}`).join('|')
+  }
+
+  /**
+   * Whether one target of a forward action really changed anything.
+   *
+   * THE RULE the reader asked for: a pair records only what changed. `before` is what the action found and
+   * `after` is what it left — which is also what the file and the entry hold NOW, since the action has just
+   * finished — so comparing the two sides is comparing the target against the world. Three things can
+   * differ and each counts on its own: the file bytes (`fileText`, with `undefined` meaning "no write"), the
+   * entry (its content-bearing fields; see `entryKeyOf`), and a comment pair's records. A target where none
+   * of them differs is not a change and is not recorded, so Ctrl+Z cannot walk a file the action never
+   * moved.
+   *
+   * A BATCH state is not compared here: its members are filtered one by one in `pushBatchUndo`, which is
+   * where the index alignment lives.
+   * @param before - the state the action found.
+   * @param after - the state it left.
+   * @returns whether recording this target would give the reader something to take back.
+   */
+  function stateChanged(before: DiffApprovalUndoState, after: DiffApprovalUndoState): boolean {
+    if (before.batch !== undefined || after.batch !== undefined) return true
+    if (before.kind === 'comments' || after.kind === 'comments') {
+      return commentsKeyOf(before.comments) !== commentsKeyOf(after.comments)
+    }
+    if (before.fileText !== after.fileText) return true
+    return entryKeyOf(before.entry) !== entryKeyOf(after.entry)
+  }
+
+  /**
    * Record one undoable action in its lineage's history. A fresh action invalidates that lineage's redo
    * history (and only that lineage's).
    *
    * THE RULE: the pair is filed under the CANONICAL session, so every seat of one lineage shares one
    * history and any of them can take the action back; the session that pressed is remembered on the pair
-   * (`pressedBy`) for attribution and for the write policy, which is deliberately still the presser's (see
-   * the note above `undoStacks`). Canonicalizing HERE rather than at the call site is what makes the rule
-   * unforgettable: every push in this file goes through this function.
+   * (`pressedBy` for attribution, and `policySession` for the write the RESTORE runs) — and the write
+   * policy is recorded rather than re-derived, because the seat that POPS a pair need not be the seat that
+   * made it. Canonicalizing HERE rather than at the call site is what makes the rule unforgettable: every
+   * push in this file goes through this function.
+   *
+   * `policySession` is the presser because the forward action's own write is the requester's (see the
+   * `revertEntryContent` call sites) — so every push here records the seat whose authority the action ran
+   * under, and the restore replays exactly that.
    * @param sessionId - the session that pressed the action.
    * @param before - the state the action found, and what a restore puts back.
    * @param after - the state the action left, and what a redo re-applies.
    * @param view - the request's lineage view, when the caller already built one.
    */
   function pushUndo(sessionId: SessionId, before: DiffApprovalUndoState, after: DiffApprovalUndoState, view?: LineageView): void {
+    // ONLY WHAT REALLY CHANGED is recorded (see `stateChanged`): an action that left the file and the entry
+    // exactly as it found them has nothing to take back, and filing a pair for it would let a Ctrl+Z report
+    // an undo the reader never made. The ACTION's own answer is untouched — it did what was asked of the
+    // list — and the absence shows up honestly as `nothing` when the undo is pressed.
+    if (!stateChanged(before, after)) return
     const root = canonicalOf(sessionId, view)
-    undoStackOf(root).push({ root, pressedBy: sessionId, before, after })
+    undoStackOf(root).push({ root, pressedBy: sessionId, policySession: sessionId, before, after })
     redoStackOf(root).length = 0
   }
 
@@ -1854,10 +2082,23 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * @param view - the request's lineage view, when the caller already built one.
    */
   function pushBatchUndo(sessionId: SessionId, before: DiffApprovalUndoState[], after: DiffApprovalUndoState[], view?: LineageView): void {
-    if (before.length === 0) return
+    // ONLY THE MEMBERS THAT REALLY CHANGED (see `stateChanged`), filtered index-aligned so each kept member
+    // still carries its own other side. A pick or an import routinely includes a row already in the state
+    // this action would leave it in; recording those would make one Ctrl+Z walk files it never moved — and,
+    // through the restore's preflight, would let a permission question about such a row refuse an undo that
+    // would never have touched it.
+    const changedBefore: DiffApprovalUndoState[] = []
+    const changedAfter: DiffApprovalUndoState[] = []
+    for (const [index, item] of before.entries()) {
+      const counterpart = after[index]
+      if (counterpart === undefined || !stateChanged(item, counterpart)) continue
+      changedBefore.push(item)
+      changedAfter.push(counterpart)
+    }
+    if (changedBefore.length === 0) return
     pushUndo(sessionId,
-      { id: before[0]!.id, path: before[0]!.path, entry: undefined, fileText: undefined, batch: before },
-      { id: after[0]!.id, path: after[0]!.path, entry: undefined, fileText: undefined, batch: after },
+      { id: changedBefore[0]!.id, path: changedBefore[0]!.path, entry: undefined, fileText: undefined, batch: changedBefore },
+      { id: changedAfter[0]!.id, path: changedAfter[0]!.path, entry: undefined, fileText: undefined, batch: changedAfter },
       view)
   }
 
@@ -1971,6 +2212,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * @param expectedFile - the other side's file content, checked before a write.
    * @param signal - aborts before atomic publication takes effect.
    * @param scope - which comment authors this restore may remove (the undo request's lineage).
+   * @param progress - counts the file writes as they land, so a mid-way failure can report exactly how far
+   *   it got instead of claiming nothing happened (see `restoreFailure`). Omitted where the caller has no
+   *   use for it; a restore that gets no `progress` is unchanged.
    */
   async function restoreState(
     sessionId: SessionId,
@@ -1978,6 +2222,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     expectedFile: DiffApprovalUndoState | undefined,
     signal: AbortSignal,
     scope: CommentScope,
+    progress?: RestoreProgress,
   ): Promise<void> {
     // A comment pair carries no file and no entry, so it takes the one branch that has neither.
     // Dispatching on the pair's own kind is what keeps ONE stack honest: the top of it decides what
@@ -1997,7 +2242,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       // The snapshot is the exact bytes the action wrote (line-endings already
       // adjusted), so restore writes it verbatim — reproducing the action
       // regardless of the current line-ending-sensitivity setting.
+      if (progress !== undefined) progress.path = state.path
       await writeRevert(resolved, state.fileText, sessionId, signal)
+      if (progress !== undefined) progress.written += 1
     }
     if (state.batch !== undefined) {
       // A batch is ONE decision over several entries — one VCS import, or one keep/revert asked of a
@@ -2008,7 +2255,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       // the other side, so a single restore's divergence guard applies here too.
       const counterpart = expectedFile?.batch
       for (const [index, item] of state.batch.entries()) {
-        await restoreState(sessionId, { ...item, batch: undefined }, counterpart?.[index], signal, scope)
+        await restoreState(sessionId, { ...item, batch: undefined }, counterpart?.[index], signal, scope, progress)
       }
       return
     }
@@ -2412,17 +2659,21 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             return { ok: true, value }
           }
         }
-        // The row's OWNER governs the FILE: the sandbox and workspace a revert writes under are the ones
-        // the file was recorded in, never the reader's (see `ownerOf`). The undo pair is NOT the owner's —
-        // it belongs to the session that PRESSED, which is the only session whose Ctrl+Z can pop it
-        // (see `pushUndo` and the two comments on the pair below).
-        const owner = ownerOf(entry)
+        // The REQUESTER governs the WRITE: the sandbox and workspace a revert runs under are the pressing
+        // seat's own, never another session's (see `DiffApprovalUndoPair.policySession`). Visibility has
+        // already established that this session shares a workspace with an owner of the row, so the file is
+        // inside this session's workspace — and a press runs under the authority of the seat that pressed it
+        // rather than silently borrowing a wider grant from whoever touched the file last. The undo pair
+        // below is filed under that same pressing session (`pushUndo` canonicalizes the STACK, not this).
         // A revert that deletes a created file is not undoable (the file is
         // gone); a revert that writes keeps a snapshot for Ctrl+Z.
         let undo: { before: DiffApprovalUndoState; after: DiffApprovalUndoState } | undefined
         try {
-          undo = await revertEntryContent(entry, owner, signal)
+          undo = await revertEntryContent(entry, target.sessionId, signal)
         } catch (error: unknown) {
+          // A refusal by this session's own authority says so, and names the file; every other failure
+          // (a missing file, a diverged one, an IO fault) keeps its own answer.
+          if (isPolicyRefusal(error)) return policyRefusal(entry.path, error)
           return rpcError(`revert failed: ${errorMessage(error)}`)
         }
         // The file now holds its old content; folding that into `newText` clears
@@ -2448,10 +2699,10 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // same "this action is not undoable" the file itself already is.
         const pair = undo === undefined ? undefined : { before: droppingComments(undo.before), after: undo.after }
         dropEntry(target.id)
-        // The session that PRESSED, not the row's owner: undo is retrieved from the requester's own stack
-        // (`undoStackOf`/`popOwnPair` are keyed by session, and the pop refuses a pair tagged with anyone
-        // else), so a pair filed under an owner who never saw the press could never be popped where the
-        // press happened. The file above was still written under the OWNER.
+        // The session that PRESSED, which is also the session whose policy the write above ran under: undo
+        // is retrieved from the requester's own lineage stack (`undoStackOf`/`popOwnPair` are keyed
+        // canonically, and the pop refuses a pair tagged with another root), so the pair and the write it
+        // replays name one and the same seat (see `DiffApprovalUndoPair.policySession`).
         if (pair !== undefined) pushUndo(target.sessionId, pair.before, pair.after)
         persistSession(true)
         const value: DiffApprovalActionValue = { outcome: 'reverted' }
@@ -2485,19 +2736,25 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const entries = store.all().filter(entry => lineage.sees(sessionId, entry))
         const batchBefore: DiffApprovalUndoState[] = []
         const batchAfter: DiffApprovalUndoState[] = []
+        /** How many files this press had already put back when it stopped: said, never hidden (see 3c). */
+        let reverted = 0
         for (const entry of entries) {
-          // The row's own session for the WRITE: the sandbox and workspace a revert runs under are the
-          // ones the file was recorded in, not the reader's (see `ownerOf`). The undo pair, like every
-          // other, stays on the stack of the session that pressed.
-          const owner = ownerOf(entry)
+          // The REQUESTER's own policy for the WRITE, like the single revert: every row this batch touches
+          // is one this session can see, which puts it inside this session's workspace, and the press runs
+          // under the authority of the seat that pressed it (see `DiffApprovalUndoPair.policySession`).
           let undo: { before: DiffApprovalUndoState; after: DiffApprovalUndoState } | undefined
           try {
-            undo = await revertEntryContent(entry, owner, signal)
-          } catch {
+            undo = await revertEntryContent(entry, sessionId, signal)
+          } catch (error: unknown) {
+            // A refusal by this session's own authority names the file and says so, and says how far the
+            // press got when it got anywhere; every other failure keeps the answer it has always had.
+            const far = reverted === 0 ? '' : ` (this press had already reverted ${reverted} of ${entries.length} files)`
+            if (isPolicyRefusal(error)) return rpcError(refusalText(entry.path, error) + far)
             // An unreadable file is left listed (the caller sees it as a failed
             // entry) rather than silently dropped; stop the bulk here.
-            return rpcError(`revert-all failed for ${entry.path}`)
+            return rpcError(`revert-all failed for ${entry.path}${far}`)
           }
+          reverted += 1
           if (undo !== undefined) {
             batchBefore.push(droppingComments(undo.before))
             batchAfter.push(undo.after)
@@ -2558,16 +2815,20 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           const entry = actionableEntryOf(lineage, request.sessionId, id)
           if (entry === undefined) continue
           affected += 1
-          // The row's own session for the WRITE; the pair below stays on the pressing session's stack.
-          const owner = ownerOf(entry)
+          // The REQUESTER's own policy for the WRITE, like the single revert; the pair below stays on the
+          // pressing session's stack (see `DiffApprovalUndoPair.policySession`).
           let undo: { before: DiffApprovalUndoState; after: DiffApprovalUndoState } | undefined
           try {
-            undo = await revertEntryContent(entry, owner, signal)
-          } catch {
+            undo = await revertEntryContent(entry, request.sessionId, signal)
+          } catch (error: unknown) {
+            // A refusal by this session's own authority names the file and says so, plus how far the pick
+            // got when it got anywhere; every other failure keeps the answer it has always had.
+            const far = affected - 1 === 0 ? '' : ` (this pick had already reverted ${affected - 1} of ${request.ids.length} files)`
+            if (isPolicyRefusal(error)) return rpcError(refusalText(entry.path, error) + far)
             // An unreadable file is left listed (the caller sees it as a failed entry) rather than
             // silently dropped; stop the pick here, the way the session-wide revert does — what the
             // batch has already put back is what the reader sees.
-            return rpcError(`revert-many failed for ${entry.path}`)
+            return rpcError(`revert-many failed for ${entry.path}${far}`)
           }
           if (request.keepListed === true) {
             // The file holds its old content again and the entry stays listed with the diff gone — the
@@ -2677,11 +2938,15 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             }
           }
         } catch (error: unknown) {
+          // A refusal by this session's own authority names the file and says so; every other failure
+          // keeps the answer it has always had.
+          if (isPolicyRefusal(error)) return policyRefusal(entry.path, error)
           return rpcError(`block revert failed: ${errorMessage(error)}`)
         }
-        // The pair goes to the session that PRESSED, like every other branch here — even though the write
-        // above named the row's owner. The drop branch just below is the same action's second half and
-        // must file its pair the same way, or one gesture would be undoable from one view and not another.
+        // The pair goes to the session that PRESSED, like every other branch here — and the write above ran
+        // under that same seat's policy, so the pair's `policySession` is the one the restore replays. The
+        // drop branch just below is the same action's second half and must file its pair the same way, or
+        // one gesture would be undoable from one view and not another.
         if (undo !== undefined) pushUndo(blockTarget.sessionId, undo.before, undo.after)
         persistSession()
         const fullyResolved = contentEqual(updatedNew, entry.oldText)
@@ -2711,15 +2976,27 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           const value: DiffApprovalActionValue = { outcome: 'nothing' }
           return { ok: true, value }
         }
+        // EVERY write this undo will make is checked BEFORE the first one, under the pair's RECORDED seat:
+        // a refusal anywhere means no file is touched, so a Ctrl+Z can never take back half a decision (see
+        // `preflightRestore`). A refused undo leaves the pair exactly where it was — it is still takeable.
+        const writes = restoreWritesOf(pair.before, pair.after)
+        const refused = await preflightRestore(writes, pair.policySession, signal)
+        if (refused !== undefined) {
+          undoStackOf(root).push(pair)
+          return restoreFailure('undo', refused.path, refused.error, { written: 0, total: writes.length, path: refused.path })
+        }
+        const progress: RestoreProgress = { written: 0, total: writes.length, path: pair.before.path }
         try {
-          // The write policy comes from the pair's PRESSER, not from the root: the write-policy half of
-          // this design is deliberately deferred (see the note above `undoStacks`), so the file keeps being
-          // written under the session that pressed — exactly as before.
-          await restoreState(pair.pressedBy, pair.before, pair.after, signal, commentScopeOf(pair.pressedBy, view))
+          // The write policy is the pair's OWN recorded session — the seat that PERFORMED the action — never
+          // the seat that popped it and never re-derived from the entry: the stack is keyed by the lineage
+          // root, so any seat of that lineage may take this pair back, and a restore must not silently run
+          // under a wider grant than the action did (see `DiffApprovalUndoPair.policySession`). The comment
+          // scope stays the presser's for the same reason: it is the pair's own attribution.
+          await restoreState(pair.policySession, pair.before, pair.after, signal, commentScopeOf(pair.pressedBy, view), progress)
         } catch (error: unknown) {
           // Keep the pair on the stack so a later, still-valid undo works.
           undoStackOf(root).push(pair)
-          return rpcError(`undo failed: ${errorMessage(error)}`)
+          return restoreFailure('undo', progress.path, error, progress)
         }
         redoStackOf(root).push(pair)
         persistSession(true)
@@ -2736,11 +3013,21 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           const value: DiffApprovalActionValue = { outcome: 'nothing' }
           return { ok: true, value }
         }
+        // A redo re-applies what the action left, under the same RECORDED seat and through the same
+        // whole-set preflight as the undo (see the undo above): a redo that would be refused anywhere
+        // writes nothing at all.
+        const writes = restoreWritesOf(pair.after, pair.before)
+        const refused = await preflightRestore(writes, pair.policySession, signal)
+        if (refused !== undefined) {
+          redoStackOf(root).push(pair)
+          return restoreFailure('redo', refused.path, refused.error, { written: 0, total: writes.length, path: refused.path })
+        }
+        const progress: RestoreProgress = { written: 0, total: writes.length, path: pair.after.path }
         try {
-          await restoreState(pair.pressedBy, pair.after, pair.before, signal, commentScopeOf(pair.pressedBy, view))
+          await restoreState(pair.policySession, pair.after, pair.before, signal, commentScopeOf(pair.pressedBy, view), progress)
         } catch (error: unknown) {
           redoStackOf(root).push(pair)
-          return rpcError(`redo failed: ${errorMessage(error)}`)
+          return restoreFailure('redo', progress.path, error, progress)
         }
         undoStackOf(root).push(pair)
         persistSession(true)
