@@ -538,6 +538,301 @@ export async function waitForCurrentSession(page: Page, timeoutMs = 8_000): Prom
   }
 }
 
+/** One element `getByText(title)` matched, and what pressing it would do. */
+export interface TitleMatch {
+  /** Position in `getByText`'s order — `.last()` is the highest index. */
+  index: number
+  /** The element's own tag. */
+  tag: string
+  /** Its own role, or the control ancestor's role. */
+  role: string
+  /** Its viewport `top`, which tells a sidebar row (top of a left column) from prose further down. */
+  y: number
+  /** Whether it sits inside the shell's session chrome (`aside`/`nav`/a list role). */
+  inSidebar: boolean
+  /** Whether it sits inside this plugin's own surfaces — the other place the same words appear. */
+  inPlugin: boolean
+  /** `rowControlOf`'s answer for it: `none` when the press would land on a bare text node. */
+  control: string
+  /** The first 40 characters of its text. */
+  text: string
+}
+
+/**
+ * Every element `getByText(title, { exact: false })` matches, and what each one is.
+ *
+ * This exists to settle one specific question: `openSession` presses `.last()`, the same title lives in the
+ * sidebar AND in the session's own transcript/composer once that session is current, and a press on the
+ * transcript copy would bind nothing. The fields are chosen for it: `inSidebar` and `inPlugin` say WHERE a
+ * match lives, `control` says whether the press would reach a control or a bare text node, and `y`
+ * separates a sidebar row from prose in the middle of the page.
+ *
+ * Diagnostic only: a read that fails is left out rather than thrown.
+ *
+ * @param page - the GUI page.
+ * @param title - the text to match (the seeded message, typically).
+ * @returns one entry per match, in `getByText` order.
+ */
+export async function titleMatches(page: Page, title: string): Promise<TitleMatch[]> {
+  const locator = page.getByText(title, { exact: false })
+  const count = await locator.count().catch(() => 0)
+  const found: TitleMatch[] = []
+  for (let index = 0; index < count; index += 1) {
+    const entry = await locator.nth(index).evaluate((node: Element, position: number) => {
+      const control = node.closest('button, [role="button"], [role="treeitem"], [role="option"]')
+      const controlRole = control?.getAttribute('role') ?? null
+      return {
+        index: position,
+        tag: node.tagName.toLowerCase(),
+        role: node.getAttribute('role') ?? controlRole ?? '',
+        y: Math.round(node.getBoundingClientRect().top),
+        inSidebar: node.closest('aside, nav, [data-sidebar], [role="tree"], [role="listbox"]') !== null,
+        inPlugin: node.closest('[data-diff-approval-panel], [data-diff-approval-dock], [data-diff-approval-chip]') !== null,
+        control: control === null ? 'none' : `${control.tagName.toLowerCase()}${controlRole === null ? '' : `[role=${controlRole}]`}`,
+        text: (node.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 40),
+      }
+    }, index).catch(() => undefined)
+    if (entry !== undefined) found.push(entry)
+  }
+  return found
+}
+
+/** The chrome the shell draws its session list in — the rows the landing may press. */
+const SESSION_ROW_SELECTOR = '[role="treeitem"], [role="option"], [role="listitem"], aside li'
+
+/** One row of the shell's session chrome, as data: what it says and what it CARRIES. */
+export interface SessionRow {
+  /** Its visible text, whitespace-collapsed and capped. */
+  text: string
+  /** `name=value` for every attribute on the row itself. */
+  attributes: string[]
+  /** `tag[attrs]` for up to four ancestors, nearest first — where an identity may live instead. */
+  ancestors: string[]
+  /** The control `rowControlOf` would press, or `none`. */
+  control: string
+  /** Whether the row is on screen at all (a row the shell has in the DOM but has not laid out says no). */
+  laidOut: boolean
+}
+
+/**
+ * The shell's session chrome, row by row, with every attribute the shell puts on each one.
+ *
+ * This is the IDENTITY half of the landing: the title of a session row is the shell's business and it
+ * changes (measured: a row titled `e2e-flow: seed this session` came back titled
+ * `[评论] (alpha.txt:2…` after a comment was written), while the id behind it does not. The attributes are
+ * returned verbatim — on the row AND on its ancestors, because a list item often carries its identity on
+ * the `role="treeitem"` wrapper rather than on the text node's own element — so a caller can match the
+ * seeded session id itself instead of matching words.
+ *
+ * Diagnostic and structural read at once: it never throws, and its answer is what the failure message
+ * prints as "the row set".
+ *
+ * @param page - the GUI page.
+ * @returns one entry per row, in DOM order.
+ */
+export async function sessionRows(page: Page): Promise<SessionRow[]> {
+  return await page.evaluate((selector: string) => {
+    const attrsOf = (element: Element): string[] =>
+      [...element.attributes].map(attribute => `${attribute.name}=${attribute.value.slice(0, 80)}`)
+    return [...document.querySelectorAll(selector)].map(row => {
+      const ancestors: string[] = []
+      let node: Element | null = row.parentElement
+      for (let depth = 0; depth < 4 && node !== null && node !== document.body; depth += 1, node = node.parentElement) {
+        ancestors.push(`${node.tagName.toLowerCase()}[${attrsOf(node).join(',')}]`)
+      }
+      const control = row.closest('button, [role="button"], [role="treeitem"], [role="option"]')
+      const box = row.getBoundingClientRect()
+      return {
+        text: (row.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 60),
+        attributes: attrsOf(row),
+        ancestors,
+        control: control === null
+          ? 'none'
+          : `${control.tagName.toLowerCase()}${control.getAttribute('role') === null ? '' : `[role=${control.getAttribute('role')}]`}`,
+        laidOut: box.width > 0 && box.height > 0,
+      }
+    })
+  }, SESSION_ROW_SELECTOR).catch(() => [])
+}
+
+/**
+ * The CSS that names a session row by its id, most specific first.
+ *
+ * Measured on the live shell: the session-list item carries `data-row-key="session:<id>"`, and it carries
+ * it on the page that needs pressing as well as on the page that does not, before any session is current.
+ * The alternatives are here because that is one shell's spelling of an identity, not a contract: if a
+ * future shell names the same thing `data-session-id` or puts the bare id in `data-row-key`, this finds it
+ * too, and the generic `*=` form is the last resort that still cannot match a title.
+ *
+ * @param id - the session id.
+ * @returns selectors to try, in order.
+ */
+export function identitySelectors(id: string): string[] {
+  return [
+    `[data-row-key="session:${id}"]`,
+    `[data-row-key="${id}"]`,
+    `[data-session-id="${id}"]`,
+    `[data-row-key*="${id}"]`,
+  ]
+}
+
+/** The chrome selector {@link sessionRows} enumerates, so a caller can address the same rows as locators. */
+export const sessionRowSelector = SESSION_ROW_SELECTOR
+
+/**
+ * Every attribute in the document whose VALUE names this id, as `tag[attr=value]`.
+ * It is asked of the whole document, not of the row, because the answer may be an ancestor wrapper, an
+ * `aria-controls`, an `href`, or a data attribute on a sibling.
+ *
+ * @param page - the GUI page.
+ * @param id - the session id to look for.
+ * @returns up to eight hits, or an empty array.
+ */
+export async function identityHits(page: Page, id: string): Promise<string[]> {
+  if (id === '') return []
+  return await page.evaluate((sessionId: string) => {
+    const hits: string[] = []
+    for (const element of document.querySelectorAll('*')) {
+      for (const attribute of [...element.attributes]) {
+        if (attribute.value.includes(sessionId)) {
+          hits.push(`${element.tagName.toLowerCase()}[${attribute.name}=${attribute.value.slice(0, 70)}]`)
+        }
+      }
+      if (hits.length >= 8) return hits
+    }
+    return hits
+  }, id).catch(() => [])
+}
+
+/**
+ * The matches as one log line, with the one `openSession` presses — `.last()` — marked.
+ *
+ * @param matches - {@link titleMatches}' answer.
+ * @returns one line, or `n=0` when nothing on screen carries the title.
+ */
+export function describeTitleMatches(matches: readonly TitleMatch[]): string {
+  if (matches.length === 0) return 'n=0 (nothing on screen carries the title)'
+  const parts = matches.map(match =>
+    `${match.index === matches.length - 1 ? `LAST=#${match.index}` : `#${match.index}`}`
+    + ` ${match.tag}${match.role === '' ? '' : `[role=${match.role}]`} y=${match.y}`
+    + ` ${match.inSidebar ? 'sidebar' : 'NOT-sidebar'}${match.inPlugin ? '+plugin' : ''}`
+    + ` control=${match.control} text=${JSON.stringify(match.text)}`)
+  return `n=${matches.length} | ${parts.join(' | ')}`
+}
+
+/**
+ * One line describing what the page is offering RIGHT NOW, for the landing wait's timeline.
+ *
+ * Every field answers a question the f1 flake left open, and each is read separately on purpose:
+ * the badge says whether a session is BOUND (the same signal `waitForCurrentSession` polls), `drawn`
+ * says whether the shell's session view is on screen at all, `titleRows` says whether the sidebar is
+ * offering the session by name, and `sidebar` is the shell's own words when none of the above is true.
+ * A failed landing with `badge=disabled titleRows=0 sidebar="新会话"` is the shell showing an empty,
+ * unbranded session list; the same line with `drawn=no` is a shell that never got that far.
+ *
+ * Diagnostic only: every read is caught, so probing a page mid-navigation cannot fail a run.
+ *
+ * @param page - the GUI page.
+ * @param title - the text a session row would carry (the seeded message, typically).
+ * @returns a single line, `key=value` per field.
+ */
+export async function landingProbe(page: Page, title: string): Promise<string> {
+  const badge = footerBadge(page)
+  const present = await badge.count().catch(() => -1)
+  const enabled = present > 0 ? await badge.isEnabled().catch(() => false) : false
+  const value = present > 0 ? await badge.getAttribute('data-diff-approval-badge').catch(() => null) : null
+  // The cheap locator read first; the shadow-root walk only when that said no, so a passing sample
+  // costs one round trip rather than a full DOM walk.
+  const drawn = await sessionViewUp(page, 200) || await shellDrewSessionView(page).catch(() => false)
+  const matches = await titleMatches(page, title).catch(() => [])
+  const titleRows = matches.length
+  // WHERE each match lives, and what `.last()` — the one `openSession` presses — would land on. A page with
+  // one match in the sidebar is a page the press can bind; a page whose last match is prose, or a copy in
+  // this plugin's own panel, is a page where the press could bind nothing (see `titleMatches`).
+  const last = matches[matches.length - 1]
+  const where = `matches=${matches.length}`
+    + `${matches.length > 0 ? ` sidebar=${matches.filter(match => match.inSidebar).length}/plugin=${matches.filter(match => match.inPlugin).length}` : ''}`
+    + `${last === undefined ? '' : ` last=${last.inSidebar ? 'sidebar' : 'NOT-sidebar'}${last.inPlugin ? '+plugin' : ''}/control=${last.control}`}`
+  // What the shell is OFFERING, as its own words: the list rows when it draws them as rows, and the head
+  // of the page's text when it does not. `titleRows` says whether the seeded session is among them; this
+  // says what is there instead — the `新会话`/`未命名` of the failing runs was only ever visible this way.
+  const rows = await page.evaluate(() => {
+    const nodes = [...document.querySelectorAll('[role="treeitem"], [role="option"], [role="listitem"], aside li')]
+    const texts = nodes.map(node => (node.textContent ?? '').replace(/\s+/g, ' ').trim()).filter(text => text !== '')
+    if (texts.length > 0) return texts.slice(0, 5)
+    return [(document.body.innerText ?? '').replace(/\s+/g, ' ').trim().slice(0, 200)]
+  }).catch(() => ['(unreadable)'])
+  const state = present === 0 ? 'absent' : `${enabled ? 'enabled' : 'disabled'}${value === null ? '' : `=${value}`}`
+  return `badge=${state}`
+    + ` drawn=${drawn ? 'yes' : 'no'} titleRows=${titleRows} ${where} rows=${JSON.stringify(rows)}`
+}
+
+/** A running timeline of {@link landingProbe} samples, and the one-line verdict when it stops. */
+export interface LandingWatch {
+  /** The samples collected so far, oldest first, each `"<elapsed>ms <probe>"`. */
+  samples: string[]
+  /**
+   * Stop sampling and print the landing's own verdict.
+   *
+   * @param note - what the caller wants beside the elapsed time (attempts, presses).
+   * @param keepSamples - force the timeline into the log even when the landing was quick.
+   * @returns the samples, for a failure that has to dump them.
+   */
+  stop: (note: string, keepSamples?: boolean) => string[]
+}
+
+/**
+ * Sample the landing state once a second from the moment the shell is ready until a caller stops it.
+ *
+ * This is the measurement the 8 s budget question is decided on: `stop` prints the elapsed time from
+ * `waitForShellReady` returning to the moment a session became current, so a passing landing that sits
+ * near that budget is visible as a number instead of a hunch. The per-second lines are printed when the
+ * landing took longer than {@link LANDING_SLOW_MS} or when `E2E_LANDING=1` asks for every sample, and
+ * they are always returned so a failure can dump the whole timeline.
+ *
+ * A sample never fails the run and never overlaps itself (`busy`), and a sample that is still in flight
+ * when the caller stops is simply dropped.
+ *
+ * @param page - the GUI page.
+ * @param tag - the fresh page's name, as the caller labels it.
+ * @param title - the text a session row would carry.
+ * @returns the watch; call `stop` exactly once.
+ */
+export function watchLanding(page: Page, tag: string, title: string): LandingWatch {
+  const startedAt = Date.now()
+  const samples: string[] = []
+  let busy = false
+  let stopped = false
+  const tick = async (): Promise<void> => {
+    if (stopped || busy) return
+    busy = true
+    try {
+      samples.push(`${Date.now() - startedAt}ms ${await landingProbe(page, title)}`)
+    } catch {
+      // A probe is evidence, never a gate: whatever it cannot read, it cannot fail.
+    } finally {
+      busy = false
+    }
+  }
+  const timer = setInterval(() => { void tick() }, 1_000)
+  return {
+    samples,
+    stop(note, keepSamples = false) {
+      stopped = true
+      clearInterval(timer)
+      const elapsed = Date.now() - startedAt
+      console.log(`[landing:${tag}] current after ${elapsed}ms (${note})`)
+      if (keepSamples || elapsed >= LANDING_SLOW_MS || process.env.E2E_LANDING === '1') {
+        for (const sample of samples) console.log(`[landing:${tag}]   ${sample}`)
+      }
+      return samples
+    },
+  }
+}
+
+/** How long a landing may take before its per-second timeline is printed without being asked for. */
+const LANDING_SLOW_MS = 3_000
+
 /**
  * The CONTROL that owns a matched text node, falling back to the node itself.
  *
