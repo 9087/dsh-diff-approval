@@ -1,0 +1,38 @@
+name: Compat (newer releases, REPORT ONLY)
+
+# The releases this plugin has NOT been released against yet: every published release newer than the
+# `latest` channel tag, probed against the real build. This exists because a release that renames a seat,
+# an icon or a list marker breaks the plugin in the reader's browser, and the first place that shows is a
+# release nobody has pinned yet.
+#
+# THIS WORKFLOW NEVER GATES. `continue-on-error` keeps a failure from failing the run (GitHub marks a
+# continue-on-error job's own conclusion as failed but the RUN as successful) and the script itself exits 0
+# in this mode and says so in its output. It follows that it must NOT be added to a branch protection rule's
+# required status checks: required checks look at the JOB's conclusion, which is exactly the thing this job
+# is allowed to have failed. The rule is report, discuss, never block a release.
+
+on:
+  schedule:
+    # Nightly, 04:17 UTC — off the hour so it does not queue behind the many jobs that start at :00.
+    - cron: '17 4 * * *'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  newer:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The probe boots the real build from `lib/`, so the build has to exist even though this job's verdict
+      # is not a gate: without it the script can only report that the build is missing.
+      - run: pnpm run build
+      # `npm view` reads the registry: which releases exist, what each one pins, and the channel tags.
+      - run: pnpm run compat:newer

@@ -60,6 +60,7 @@
     "test": "vitest run",
     "e2e": "playwright test",
     "compat": "node scripts/dsh-compat.mjs",
+    "compat:newer": "node scripts/dsh-compat.mjs --newer",
     "verify:release": "node scripts/verify-release.mjs",
     "fonts:check": "python -m scripts.fonts.build --check",
     "fonts:plan": "python -m scripts.fonts.build --plan",

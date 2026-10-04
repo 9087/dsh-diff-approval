@@ -8,11 +8,24 @@
 //   pnpm run compat -- --all        # every published release, including older ones
 //   pnpm run compat -- --recent 6   # the newest 6 releases
 //   pnpm run compat -- --versions 0.1.2-rc.1,0.1.5-rc.1
+//   pnpm run compat -- --newer      # every release newer than the `latest` tag, REPORTED, never gating
+//   pnpm run compat -- --verbose    # say which cordis each release is installed with, and why
+//
+// The gating modes (default, `--all`, `--recent`, `--versions`) fail the run when a supported release
+// fails. `--newer` is the same probe pointed FORWARD, at releases this plugin has not been released
+// against yet, and it never gates: it exits 0 whatever it finds, says so in its own output, and names the
+// FAILURE CLASS of each failure — an INSTALL failure (this harness could not set the release up, which says
+// nothing about compatibility) is reported apart from a MOUNT failure (the release installed and the plugin
+// did not work in it, which does).
 //
 // Each release is installed into its own isolated directory under `.compat/`
 // (git-ignored and reused between runs), so releases never resolve against each
 // other and a re-run only installs what is missing. The plugin is the real build
 // from `lib/`, so run `pnpm run build` first.
+//
+// The runtime installed beside a release is the one that release DECLARES: a release pins the cordis it
+// was built against, and that pin moves between releases, so a harness that installs one fixed cordis
+// everywhere turns a release's own pin into an install failure before any plugin code runs. See `cordisFor`.
 
 import { exec, execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
@@ -125,8 +138,25 @@ function runNpm(args, cwd) {
 
 /** The floor declared by this plugin's peer range (`>=0.1.0-rc.5`). */
 const PEER_FLOOR = '0.1.0-rc.5'
-/** Cordis to install alongside; satisfies every release's peer range seen so far. */
+/** The runtime a release is built against, and the one the probe has to install beside it. */
+const CORDIS_PACKAGE = '@deepseek-ai/cordis'
+/**
+ * Cordis to install when a release declares none of its own.
+ *
+ * THE FALLBACK, not the rule. A release pins the cordis it was built against in its own
+ * `peerDependencies`, and that pin MOVES: measured on 2026-05-03, `0.1.5-alpha.1` and `0.1.6-alpha.2` ask
+ * for `^4.0.2`, `0.1.7-rc.2` and `0.2.0-rc.2` for `~4.0.4`, and `0.2.1-alpha.1` for `~4.0.5-alpha.1`.
+ * Installing one fixed cordis beside every release therefore does not test the release: npm refuses the
+ * tree (`ERESOLVE`) before any plugin code loads, which is a fact about this harness rather than about
+ * compatibility — `0.2.1-alpha.1` read as "incompatible" for exactly that reason. The declared range is
+ * read per release instead ({@link cordisFor}); this constant answers only where a release declares none,
+ * and where the lookup itself cannot be made.
+ */
 const CORDIS = '^4.0.2'
+/** The connection package under test: its versions are the releases, and its tags are the fallback tags. */
+const CONNECTION_PACKAGE = '@deepseek-ai/dsh-client-connection'
+/** The CLI package, whose dist-tags are the release channels (`latest`, `next`, `alpha`). */
+const CLI_PACKAGE = '@deepseek-ai/dsh'
 
 function parseVersion(value) {
   const [core = '', pre = ''] = value.split('-')
@@ -161,28 +191,106 @@ function compareVersions(a, b) {
 
 /** Every published release, oldest first. */
 async function publishedVersions() {
-  const { stdout } = await runNpm(['view', '@deepseek-ai/dsh-client-connection', 'versions', '--json'], projectRoot)
+  const { stdout } = await runNpm(['view', CONNECTION_PACKAGE, 'versions', '--json'], projectRoot)
   const parsed = JSON.parse(stdout)
   return (Array.isArray(parsed) ? parsed : [parsed]).filter(value => typeof value === 'string')
 }
 
+/**
+ * The cordis range a release declares, cached per version.
+ *
+ * A release pins the runtime it was built against in its own `peerDependencies`, so that is where this is
+ * read from: `npm view <connection>@<version> peerDependencies --json`. The answer is cached because a
+ * matrix run must not ask npm the same question once per release, and because the lookup is the one thing
+ * here that needs the network beyond the packages themselves.
+ *
+ * A release that declares no cordis peer — 0.1.0-rc.5 does not — and a lookup that cannot be made (offline,
+ * a version npm refuses to describe) both fall back to {@link CORDIS}: the probe then runs with the
+ * harness's own cordis, which is honest for a release that pins none, and is at worst the old behaviour for
+ * one whose pin could not be read.
+ *
+ * @param version - the release.
+ * @returns `{ range, source }`, where `source` is `'declared'` or `'fallback'` (`reason` says why).
+ */
+const cordisRanges = new Map()
+async function cordisFor(version) {
+  const cached = cordisRanges.get(version)
+  if (cached !== undefined) return cached
+  let resolved
+  try {
+    const { stdout } = await runNpm(
+      ['view', `${CONNECTION_PACKAGE}@${version}`, 'peerDependencies', '--json'],
+      projectRoot,
+    )
+    const declared = JSON.parse(stdout === '' ? '{}' : stdout)?.[CORDIS_PACKAGE]
+    resolved = typeof declared === 'string' && declared.trim() !== ''
+      ? { range: declared.trim(), source: 'declared' }
+      : { range: CORDIS, source: 'fallback', reason: 'the release declares no cordis peer' }
+  } catch (error) {
+    resolved = {
+      range: CORDIS,
+      source: 'fallback',
+      reason: `peer lookup failed: ${(error.stderr || error.message || String(error)).trim().split('\n').pop()?.slice(0, 120) ?? 'unknown'}`,
+    }
+  }
+  cordisRanges.set(version, resolved)
+  return resolved
+}
+
+/**
+ * The `latest` dist-tag, and which package it was read from.
+ *
+ * The CLI package carries the release channels (`latest`, `next`, `alpha`); the connection package's own
+ * tags are a fallback only, and a poor one — its `latest` is 0.0.1-rc.1 while the CLI's is 0.2.0-rc.2, so a
+ * fallback run selects a much wider set. That is stated in the output when it happens rather than hidden.
+ *
+ * @returns `{ latest, from }`, or undefined when no package's tags could be read.
+ */
+async function latestTag() {
+  for (const pkg of [CLI_PACKAGE, CONNECTION_PACKAGE]) {
+    try {
+      const { stdout } = await runNpm(['view', pkg, 'dist-tags', '--json'], projectRoot)
+      const tags = JSON.parse(stdout)
+      const latest = tags === null || typeof tags !== 'object' ? undefined : tags.latest
+      if (typeof latest === 'string' && latest !== '') return { latest, from: pkg }
+    } catch {
+      // The next package is the fallback; a package that cannot be read is not a reason to stop.
+    }
+  }
+  return undefined
+}
+
 function parseArgs(argv) {
-  const options = { all: false, recent: 0, versions: [] }
+  const options = { all: false, newer: false, verbose: false, recent: 0, versions: [] }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--all') options.all = true
+    else if (arg === '--newer') options.newer = true
+    else if (arg === '--verbose' || arg === '-v') options.verbose = true
     else if (arg === '--recent') options.recent = Number.parseInt(argv[++i] ?? '0', 10) || 0
     else if (arg === '--versions') options.versions = (argv[++i] ?? '').split(',').map(v => v.trim()).filter(Boolean)
   }
   return options
 }
 
-/** Install one release into its isolated directory; reuse an existing install. */
-async function ensureInstalled(version) {
+/**
+ * Install one release into its isolated directory; reuse an existing install.
+ *
+ * The directory records WHICH cordis it was built with (`.cordis-range`). That marker is what makes the
+ * cache honest: the cordis a release needs is read from the release itself, and that pin moves between
+ * releases, so a directory installed before this rule existed — or for another range — is not evidence
+ * about this run and is reinstalled once. After that the marker matches and the install is reused as before.
+ *
+ * @param version - the release.
+ * @param cordis - `{ range, source }` from {@link cordisFor}: the runtime to install beside it.
+ * @returns `{ dir, installError?, skillsAbsent? }`.
+ */
+async function ensureInstalled(version, cordis) {
   const dir = join(compatRoot, version)
   const installedManifest = join(dir, 'node_modules', '@deepseek-ai', 'dsh-client-connection', 'package.json')
   const skillsManifest = join(dir, 'node_modules', '@deepseek-ai', 'dsh-skill', 'package.json')
-  if (existsSync(installedManifest) && existsSync(skillsManifest)) {
+  const rangeMarker = join(dir, '.cordis-range')
+  if (existsSync(installedManifest) && existsSync(skillsManifest) && existsSync(rangeMarker)) {
     const manifest = JSON.parse(await readFile(installedManifest, 'utf8'))
     if (manifest.version === version) return { dir }
   }
@@ -194,10 +302,11 @@ async function ensureInstalled(version) {
     // release without the package still boots (the plugin feature-detects it).
     await runNpm([
       'install', '--no-audit', '--no-fund', '--silent',
-      `@deepseek-ai/cordis@${CORDIS}`,
+      `${CORDIS_PACKAGE}@${cordis.range}`,
       `@deepseek-ai/dsh-client-connection@${version}`,
       `@deepseek-ai/dsh-skill@${version}`,
     ], dir)
+    await writeFile(rangeMarker, `${cordis.range}\n`)
     return { dir }
   } catch (error) {
     const detail = (error.stderr || error.message || String(error)).trim().split('\n').slice(-4).join(' ').slice(0, 400)
@@ -206,9 +315,10 @@ async function ensureInstalled(version) {
     try {
       await runNpm([
         'install', '--no-audit', '--no-fund', '--silent',
-        `@deepseek-ai/cordis@${CORDIS}`,
+        `${CORDIS_PACKAGE}@${cordis.range}`,
         `@deepseek-ai/dsh-client-connection@${version}`,
       ], dir)
+      await writeFile(rangeMarker, `${cordis.range}\n`)
       return { dir, skillsAbsent: detail }
     } catch (retryError) {
       return { dir, installError: (retryError.stderr || retryError.message || String(retryError)).trim().split('\n').slice(-4).join(' ').slice(0, 400) }
@@ -566,6 +676,26 @@ async function publishedClientVersions() {
   }
 }
 
+/** The two failure classes, as the words a report uses for them. */
+const FAILURE_CLASSES = { install: 'install failure', mount: 'mount failure' }
+
+/**
+ * How one verdict is spelled.
+ *
+ * The gating modes keep their own labels untouched. `--newer` names the failure CLASS beside the label,
+ * because "this harness could not install the release" and "the release installed and our plugin did not
+ * work in it" are different findings — and only the second one is evidence about the release.
+ *
+ * @param status - the verdict label.
+ * @param failureClass - `'install'`, `'mount'`, or undefined when nothing failed.
+ * @param options - the parsed arguments.
+ * @returns the label to print.
+ */
+function verdictLabel(status, failureClass, options) {
+  if (!options.newer || failureClass === undefined) return status
+  return `${status} (${FAILURE_CLASSES[failureClass]})`
+}
+
 const options = parseArgs(process.argv.slice(2))
 
 if (!existsSync(pluginLib)) {
@@ -589,47 +719,83 @@ const needs = clientNeeds(await readFile(pluginClientLib, 'utf8'))
 const clientVersions = await publishedClientVersions()
 
 const all = await publishedVersions()
+// `--newer` is the forward-looking probe: every published release after the `latest` channel tag, with the
+// peer floor deliberately NOT applied. A release newer than `latest` is by definition above this plugin's
+// own floor, and the question here is what the NEXT releases do — not what this plugin claims to support.
+const newerFrom = options.newer ? await latestTag() : undefined
 let targets
-if (options.versions.length > 0) targets = options.versions
-else if (options.all) targets = all
-else targets = all.filter(version => compareVersions(version, PEER_FLOOR) >= 0)
+let skipped = []
+if (options.newer) {
+  targets = newerFrom === undefined
+    ? []
+    : all.filter(version => compareVersions(version, newerFrom.latest) > 0)
+} else {
+  if (options.versions.length > 0) targets = options.versions
+  else if (options.all) targets = all
+  else targets = all.filter(version => compareVersions(version, PEER_FLOOR) >= 0)
+  skipped = options.all ? [] : all.filter(version => compareVersions(version, PEER_FLOOR) < 0)
+}
 if (options.recent > 0) targets = targets.slice(-options.recent)
-
-const skipped = options.all ? [] : all.filter(version => compareVersions(version, PEER_FLOOR) < 0)
 
 console.log(`compat: ${targets.length} release(s) in scope, plugin build ${pluginLib}`)
 console.log(`compat: client needs ${needs.glyphs.length} glyph(s) and ${needs.required.length} unconditional name(s) from ${CLIENT_PACKAGE} (reader self-checked)`)
 if (needs.optional.length > 0) {
   console.log(`compat: plus ${needs.optional.length} probed name(s) — optional by design, reported per release: ${needs.optional.join(', ')}`)
 }
-console.log(`compat: peer floor ${PEER_FLOOR}${skipped.length > 0 ? `, ${skipped.length} older release(s) skipped (use --all)` : ''}`)
+if (options.newer) {
+  if (newerFrom === undefined) {
+    console.log(`compat: --newer could not read a latest dist-tag from ${CLI_PACKAGE} or ${CONNECTION_PACKAGE}: no release was selected — and that is not a gate either.`)
+  } else {
+    console.log(`compat: --newer: every published release newer than ${newerFrom.latest} (the latest tag of ${newerFrom.from}), peer floor ${PEER_FLOOR} NOT applied`)
+    if (newerFrom.from === CONNECTION_PACKAGE) {
+      console.log(`compat: NOTE: that tag came from the FALLBACK package, whose own latest is far behind the CLI's — this set is wider than the channels say.`)
+    }
+  }
+  console.log('compat: --newer NEVER gates: whatever it finds is reported for the reader to discuss, and the run still exits 0.')
+} else {
+  console.log(`compat: peer floor ${PEER_FLOOR}${skipped.length > 0 ? `, ${skipped.length} older release(s) skipped (use --all)` : ''}`)
+}
 console.log('')
 
 const rows = []
 let failed = 0
 let inScope = 0
 let outOfScopeFailures = 0
+let installFailures = 0
+let mountFailures = 0
 for (const version of targets) {
   // Releases below the declared peer floor are reported for information only —
   // they may predate services this plugin injects (0.0.1 renamed `httpServer` to
-  // `webServer`), so they must not gate the run.
-  const supported = compareVersions(version, PEER_FLOOR) >= 0
+  // `webServer`), so they must not gate the run. `--newer` applies no floor.
+  const supported = options.newer || compareVersions(version, PEER_FLOOR) >= 0
   if (supported) inScope += 1
   const note = supported ? '' : '  (out of range)'
-  const installed = await ensureInstalled(version)
+  // Which cordis this release is installed with comes from the release itself; `--newer` always says so,
+  // because "the runtime we pinned by hand" is exactly what made an install failure look like a verdict.
+  const cordis = await cordisFor(version)
+  if (options.verbose || options.newer) {
+    const why = cordis.source === 'declared' ? 'declared by the release' : `harness fallback (${cordis.reason ?? 'no reason recorded'})`
+    console.log(`  ${version.padEnd(14)}   cordis ${cordis.range} — ${why}`)
+  }
+  const installed = await ensureInstalled(version, cordis)
   if (installed.installError !== undefined) {
-    rows.push({ version, status: 'INSTALL FAILED', detail: installed.installError })
+    // INSTALL failure: the release never ran. It says nothing about compatibility — it is this harness
+    // failing to set the release up — which is why it is reported apart from a mount failure.
+    installFailures += 1
+    rows.push({ version, status: 'INSTALL FAILED', failureClass: 'install', detail: installed.installError })
     if (supported) failed += 1
     else outOfScopeFailures += 1
-    console.log(`  ${version.padEnd(14)} INSTALL FAILED  ${installed.installError}${note}`)
+    console.log(`  ${version.padEnd(14)} ${verdictLabel('INSTALL FAILED', 'install', options)}  ${installed.installError}${note}`)
     continue
   }
   const probed = await probe(version, installed.dir)
   if (!probed.ok) {
-    rows.push({ version, status: 'PROBE FAILED', detail: probed.detail })
+    // MOUNT failure: the release installed and our plugin did not boot in it.
+    mountFailures += 1
+    rows.push({ version, status: 'PROBE FAILED', failureClass: 'mount', detail: probed.detail })
     if (supported) failed += 1
     else outOfScopeFailures += 1
-    console.log(`  ${version.padEnd(14)} PROBE FAILED    ${probed.detail}${note}`)
+    console.log(`  ${version.padEnd(14)} ${verdictLabel('PROBE FAILED', 'mount', options)}    ${probed.detail}${note}`)
     continue
   }
   const { activated, mounted, error, routes, skills, skillBody } = probed.result
@@ -646,20 +812,29 @@ for (const version of targets) {
     rows.push({ version, status: 'ok', routes, skills, skillBody, client: client.detail })
     console.log(`  ${version.padEnd(14)} ok              ${mountedNote}${note}`)
   } else {
+    // MOUNT failure: the release installed and the plugin did not work in it — the verdict this probe is for.
+    mountFailures += 1
     if (supported) failed += 1
     else outOfScopeFailures += 1
     const detail = activated && mounted
       ? `client: ${client.detail}`
       : (error ?? 'plugin activated but the channel was not mounted')
-    rows.push({ version, status: 'FAIL', detail })
-    console.log(`  ${version.padEnd(14)} FAIL            ${detail}${note}`)
+    rows.push({ version, status: 'FAIL', failureClass: 'mount', detail })
+    console.log(`  ${version.padEnd(14)} ${verdictLabel('FAIL', 'mount', options)}            ${detail}${note}`)
   }
 }
 
 console.log('')
 console.log(`compat: ${inScope - failed}/${inScope} supported release(s) OK`)
+if (options.newer) {
+  if (targets.length === 0) {
+    console.log(`compat: nothing is published after ${newerFrom?.latest ?? 'the unread latest tag'} — an empty set, which is not a pass and not a failure: there was nothing newer to probe.`)
+  }
+  console.log(`compat: newer failures — install: ${installFailures} (this harness could not set the release up), mount: ${mountFailures} (the release installed and our plugin did not work in it)`)
+  console.log('compat: NOT GATING — this mode exits 0 whatever the verdicts above say: report it, discuss it, never block a release.')
+}
 if (outOfScopeFailures > 0) {
   console.log(`compat: ${outOfScopeFailures} release(s) below the peer floor ${PEER_FLOOR} did not mount (out of range, not gating)`)
 }
 if (skipped.length > 0) console.log(`compat: skipped below the declared floor: ${skipped.join(', ')}`)
-process.exit(failed === 0 ? 0 : 1)
+process.exit(options.newer || failed === 0 ? 0 : 1)
