@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue, DiffApprovalListCountValue, DiffApprovalListValue, DiffApprovalRefreshValue, PendingFileDiff } from '../src/types.ts'
 import type { CommentDraft, DiffApprovalPort } from '../src/client/port.ts'
+import type { PendingDiffSnapshot } from '../src/client/slots.ts'
 import { createPendingDiffStore } from '../src/client/store.ts'
 
 const S1 = 'session-1' as SessionId
@@ -209,27 +210,52 @@ describe('the light count', () => {
     expect(store.viewFor('session-2' as SessionId).count).toBeUndefined()
   })
 
-  it('names the session for the whole-page readers, so a shut panel is actually handed the number', async () => {
-    // The regression the new browser case found, pinned here at its cheapest level: a count published into
-    // the session's OWN slot but never named as the page-wide session left `getSnapshot()` answering the
-    // constant never-read view, and a seat that memoizes on that identity (`useSessionView`) was never woken
-    // with a new one — so a shut panel asked the host for the count, received it, and kept drawing 0. With
-    // the panel closed nothing else calls `refresh`, so this path is the ONLY one that can name the session.
-    const seam = port({ listCount: vi.fn(async () => ({ count: 2 })) })
+  it('wakes subscribers on a count publish WITHOUT moving the session the whole-page readers follow', async () => {
+    // TWO requirements, and the first fix for the badge satisfied one by breaking the other:
+    //
+    //  (1) A count publish must REACH a seat that reads that session. Subscribers are notified, and the
+    //      object `getSnapshot()` answers must change IDENTITY — a React seat only re-renders on that, and a
+    //      seat whose session slot moved has no other way to be woken (see `publishView`). With every
+    //      surface shut nothing else calls `refresh`, so this publish is the only one there is.
+    //  (2) A count read must NOT move the session the page-wide readers follow. A tick for A while B is on
+    //      screen would otherwise hand B's consumers A's answer, and the same press worked one second and
+    //      not the next.
+    const S2 = 'session-2' as SessionId
+    const B_ROW: PendingFileDiff = { ...FILE, id: 'entry-b', sessionId: S2, path: '/repo/b.txt' }
+    const seam = port({
+      list: vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>(
+        async (sessionId) => listValue({ files: String(sessionId) === String(S2) ? [B_ROW] : [FILE] }),
+      ),
+      listCount: vi.fn(async () => ({ count: 2 })),
+    })
     const store = createPendingDiffStore(seam.port)
-    const before = store.getSnapshot()
-    const seen: (number | undefined)[] = []
-    store.subscribe(() => { seen.push(store.getSnapshot().count) })
+    await store.refresh(S2)
+    const paged = store.getSnapshot()
+    expect(paged.files.map(file => file.id)).toEqual(['entry-b'])
+    const seen: { snapshot: PendingDiffSnapshot; count: number | undefined }[] = []
+    store.subscribe(() => {
+      const snapshot = store.getSnapshot()
+      seen.push({ snapshot, count: snapshot.count })
+    })
 
     await store.refreshCount(S1)
 
-    // A subscriber ran, and the page-wide answer is now this session's, carrying the number.
-    expect(seen).toContain(2)
-    expect(store.getSnapshot()).not.toBe(before)
-    expect(store.getSnapshot().count).toBe(2)
-    expect(store.viewFor(undefined).count).toBe(2)
+    // (1) A subscriber ran and was handed a DIFFERENT object — which is what wakes a React seat. What that
+    // object ANSWERS is still B's (that is requirement 2), so the count is not on it: the wake is what lets
+    // the seat re-read its OWN slot, which is where the number is (see `useSessionView`, and the panel test
+    // that draws the badge through this exact wiring).
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.snapshot).not.toBe(paged)
+    expect(seen[0]!.snapshot.files.map(file => file.id)).toEqual(['entry-b'])
+    expect(seen[0]!.count).toBeUndefined()
+    // …and the session's OWN view is where the number lives.
+    expect(store.viewFor(S1).count).toBe(2)
+    // (2) The page-wide answer is still B's: B's rows, and no count of A's on it.
+    expect(store.getSnapshot().files.map(file => file.id)).toEqual(['entry-b'])
+    expect(store.getSnapshot().count).toBeUndefined()
+    expect(store.viewFor(undefined).files.map(file => file.id)).toEqual(['entry-b'])
     // And it is still the cheap path it claims to be: no full read happened.
-    expect(seam.list).not.toHaveBeenCalled()
+    expect(seam.list).toHaveBeenCalledTimes(1)
   })
 
   it('keeps the last good number when a count fails, and drops it once a full read carries the same fact', async () => {

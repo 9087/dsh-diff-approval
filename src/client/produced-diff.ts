@@ -13,17 +13,39 @@
  *   `a[href]`                             any other link naming a file     `href`  = the path
  *
  * Everything else is left entirely alone: a link to a URL, an in-page anchor, a chip naming something
- * that is not a file, a file this panel does not hold, a modified press (Ctrl/Cmd/Shift/Alt, or a
- * middle click — gestures the harness may give its own meaning later), and any press inside this
+ * that is not a file, a file LINK whose file this panel does not hold, a modified press (Ctrl/Cmd/Shift/
+ * Alt, or a middle click — gestures the harness may give its own meaning later), and any press inside this
  * plugin's own surface, whose buttons carry paths too and belong to the panel that is already showing
- * the file.
+ * the file. A file-list ROW is the one press taken over whether or not the panel holds its file (see
+ * `ROW_SELECTOR`); "we do not hold it" then decides what the menu offers, not whether it appears.
  *
  * The name of the module (and of the event it raises) dates from when the produced-file card was the
  * only press of this kind; `data-presented-files-row` is that same list under 0.1.7's name for it.
  */
 
+import type { PendingDiffSnapshot } from './slots.ts'
+import { diffPathsMatch } from './path-match.ts'
+
 /** Window event dispatched when a pending file's press is taken over; the panel listens for it. */
 export const CHIP_MENU_EVENT = 'diff-approval:chip-menu'
+/**
+ * Whether the page HOLDS this path — the `held` label a press carries into the menu.
+ *
+ * It is a LABEL now, not a gate: every file-list row's press becomes the menu regardless, and `held` only
+ * decides whether "在审批面板中查看" opens the row directly or adds it first (see `PendingPanel`). It is
+ * answered from the views the page is holding, i.e. from the last FULL read of each session: while every
+ * surface is shut nothing re-reads the list, so a row edited since then is labelled not-held. That is
+ * acceptable rather than hidden: the add answers the truth (a path already listed comes back `duplicate` and
+ * selects the same entry), so the item still opens the file — one request later. What the label must not do
+ * is claim a row exists that does not: `false` errs towards adding, never towards acting on nothing.
+ * @param views - the views this page is holding, one per session it has read (see `PendingDiffStore.views`).
+ * @param path - the path a press named.
+ * @returns whether any held view holds it.
+ */
+export function panelHolds(views: readonly PendingDiffSnapshot[], path: string): boolean {
+  return views.some(view =>
+    view.files.some(file => diffPathsMatch(path, file.path, view.workspacePath)))
+}
 
 /** Window event dispatched by the panel to open a file in the panel; PendingPanel listens for it. */
 export const OPEN_FILE_EVENT = 'diff-approval:open-file'
@@ -31,11 +53,19 @@ export const OPEN_FILE_EVENT = 'diff-approval:open-file'
 /**
  * The presses that open a file in the shell's own viewer, one per shape measured in a shell.
  *
- * The list is deliberately wider than the produced-file cards, because those are no longer the only
- * press of this kind: since 0.1.7 a file link written in a message is a `<button>` whose `title` is the
- * path and whose click calls the shell's `openFile` (see `MarkdownFileLink`), and a `@file` chip is the
- * same thing with the raw token in `title`. A press this list misses is not a crash — it is one menu the
- * reader does not get — and a press it matches that names nothing this panel holds is left alone.
+ * ONE FAMILY, ONE RULE: every press this list matches becomes this menu, whether or not the review list
+ * holds the file. A row of a file list (`[data-produced-files-row]`, `[data-presented-files-row]`,
+ * `[data-changed-files]`) is a file the session changed, and a file link written in a message
+ * (`button[title]`, an `@file` chip, an `a[href]`) is a file the reader pointed at — in both cases the
+ * reader aimed at a file, and "the review list does not hold it (yet)" is a thing the menu ANSWERS by
+ * offering to add it rather than a reason to leave the press to the shell and show nothing. This is the
+ * reader's bug: a link whose change had been settled away popped no menu at all.
+ *
+ * What decides that a press is not ours at all is `pressPathOf`'s own filter (`looksLikePath`): a URL, an
+ * in-page anchor, a `mailto:` and every other non-file spelling never reaches this list's decision, so an
+ * ordinary web link is still the shell's. `held` is a LABEL the menu carries, never a gate on the press.
+ *
+ * A press this list misses is not a crash — it is one menu the reader does not get.
  */
 const PRESS_SELECTOR = [
   '[data-produced-files-row] button',
@@ -73,20 +103,33 @@ const OWN_SURFACE_SELECTOR = [
   '[data-diff-approval-settings]',
 ].join(', ')
 
-/** What a press tells the panel: which file, and where the press was (the menu hangs under it). */
+/** What a press tells the panel: which file, where the press was (the menu hangs under it), and whether
+ *  the review list already holds that file. */
 export interface ProducedChipMenuDetail {
   /** The path the pressed element names. */
   path: string
   /** The pressed element's own box, in viewport coordinates. */
   x: number
   y: number
+  /**
+   * Whether the review list holds this path right now.
+   *
+   * It decides what the menu's items DO, never whether the menu appears: a row press always becomes the
+   * menu, and "not held" is what makes "在审批面板中查看" add the path first (see `PendingPanel`). It is
+   * also what a future item that NEEDS a listed entry has to gate on — pressing keep or revert for a file
+   * the host is not holding would simply fail.
+   */
+  held: boolean
 }
 
 /** What the bridge needs from the host to decide, and to report. */
 export interface ProducedChipBridge {
   /**
-   * Whether the panel holds this file right now. Called synchronously on every press, because
-   * the decision it answers is whether the press is prevented — there is no second chance at it.
+   * Whether the review list holds this path right now.
+   *
+   * A LABEL, not a gate: it rides every press this bridge takes over (a file-list row and a message's file
+   * link alike) and decides only what the menu's items DO — see `held` above. It is called synchronously on
+   * every press because that is when the menu is raised, and there is no second chance at a press.
    */
   isPending: (path: string) => boolean
   /** A pending file's press was taken over: open the menu the press asked for. */
@@ -201,15 +244,19 @@ export function startProducedChipMenu(bridge: ProducedChipBridge): () => void {
     const press = target.closest(PRESS_SELECTOR)
     if (press === null || press === replaying) return
     const path = pressPathOf(press)
-    // Not a file the panel holds: the shell's press, untouched.
-    if (path === undefined || !bridge.isPending(path)) return
+    if (path === undefined) return
+    // EVERY matched press becomes the menu — a file-list row and a message's file link alike — and the
+    // shell's own press is suppressed from here on. "Does the review list hold it" rides along as the
+    // `held` label the menu's items read (see `ProducedChipMenuDetail.held`); it does not decide whether
+    // this press is ours, which is `pressPathOf`'s filter's job alone.
+    const held = bridge.isPending(path)
     // The review panel's press: the shell must not also act on it, or the reader would get both the
     // shell's open and the menu. Captured on the document so no handler between here and the press
     // sees it either.
     event.preventDefault()
     event.stopImmediatePropagation()
     const rect = press.getBoundingClientRect()
-    bridge.onMenu({ path, x: rect.left, y: rect.bottom })
+    bridge.onMenu({ path, x: rect.left, y: rect.bottom, held })
   }
   document.addEventListener('click', onClick, true)
   return () => { document.removeEventListener('click', onClick, true) }

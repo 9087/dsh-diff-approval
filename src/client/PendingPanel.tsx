@@ -169,36 +169,13 @@ const FLOAT_GRIP_OVERHANG_PX = 3
  *  `fileListShrink` animation's duration, which the panel holds the card for. */
 const FILE_LIST_FOLD_MS = 140
 
-/** Normalize a path for comparison: forward slashes, no trailing slash. */
-export function normalizeDiffPath(p: string): string {
-  return p.replaceAll('\\', '/').replace(/\/+$/, '')
-}
-
-/** Whether a produced-file chip path and a pending file path refer to the same
- *  file, tolerant of separator style (\\ vs /) and of a workspace-relative vs
- *  absolute form. `chipPath` is typically the harness's workspace-relative
- *  forward-slash path; `filePath` is the host's absolute native-separator path.
- *  Matching is case-insensitive so a Windows drive/segment case difference does
- *  not miss the file the user clicked. */
-export function diffPathsMatch(chipPath: string, filePath: string, workspacePath: string | undefined): boolean {
-  const toAbsolute = (p: string): string => {
-    const norm = normalizeDiffPath(p)
-    // Already absolute on this platform (drive letter or a leading /).
-    if (/^[A-Za-z]:\//.test(norm) || norm.startsWith('/')) return norm
-    // Workspace-relative: resolve against the workspace root when it is known.
-    if (workspacePath !== undefined && workspacePath !== '') {
-      return `${normalizeDiffPath(workspacePath).replace(/\/+$/, '')}/${norm}`
-    }
-    return norm
-  }
-  const absolute = toAbsolute(chipPath).toLowerCase()
-  const file = toAbsolute(filePath).toLowerCase()
-  if (absolute === file) return true
-  // Fallback (no usable workspace root): the relative chip path as a normalized
-  // suffix of the absolute pending path.
-  const rel = normalizeDiffPath(chipPath).toLowerCase()
-  return file === rel || file.endsWith(`/${rel}`)
-}
+/**
+ * Path comparison, re-exported from its own module so every existing importer keeps working: the panel's
+ * own jump, the plugin's press bridge and the store reader all ask the same question, and they must not
+ * each carry their own answer (see `path-match.ts`).
+ */
+export { diffPathsMatch, normalizeDiffPath } from './path-match.ts'
+import { diffPathsMatch } from './path-match.ts'
 
 /**
  * Whether one pending row belongs to a session's own view.
@@ -8539,7 +8516,7 @@ export function PendingPanel({
       const detail = (event as CustomEvent<ProducedChipMenuDetail>).detail
       if (detail === undefined || typeof detail.path !== 'string') return
       if (typeof detail.x !== 'number' || typeof detail.y !== 'number') return
-      setChipMenu({ path: detail.path, x: detail.x, y: detail.y })
+      setChipMenu({ path: detail.path, x: detail.x, y: detail.y, held: detail.held === true })
     }
     window.addEventListener(CHIP_MENU_EVENT, onChipMenu)
     return () => { window.removeEventListener(CHIP_MENU_EVENT, onChipMenu) }
@@ -8765,7 +8742,7 @@ export function PendingPanel({
   const [commentMenu, setCommentMenu] = useState<{ id: string; fileId: string; x: number; y: number; picked: boolean } | null>(null)
   /** The produced-file chip whose menu is open, and where that chip is: the press on a pending file's
    *  chip is the panel's (see produced-diff.ts), so the panel answers it with the two ways to open it. */
-  const [chipMenu, setChipMenu] = useState<{ path: string; x: number; y: number } | null>(null)
+  const [chipMenu, setChipMenu] = useState<{ path: string; x: number; y: number; held: boolean } | null>(null)
   /** Whether the add-path dialog is open. One dialog covers both shapes: what
    *  the browser settles on decides whether a file or a directory is added. */
   const [addOpen, setAddOpen] = useState(false)
@@ -9642,15 +9619,20 @@ export function PendingPanel({
    * hit and that dialog cannot (a directory named as one file, and an add that raises).
    *
    * @param path - the path as typed.
+   * @param includeUnchanged - whether a file with no local change is listed anyway. The path FIELD passes
+   *   true: opening a file is what the field is for, and a clean file is still a file to review. The chip
+   *   menu passes FALSE for a changed-files row (see `runChipMenu`), because the shell is presenting that
+   *   row as a change and the host's own verdict is the one that counts; `unchanged` then answers with the
+   *   wording that already exists for it, and nothing is opened.
    * @returns what to select: the entry opened (the one already listed, for a duplicate), or
    *   undefined when the host refused the path.
    */
-  const addTypedPath = async (path: string): Promise<{ openPath?: string } | undefined> => {
+  const addTypedPath = async (path: string, includeUnchanged = true): Promise<{ openPath?: string } | undefined> => {
     if (current === undefined) {
       showCopyToast(t('panel.fileNotPending'))
       return undefined
     }
-    const value = await onAddPath(current, path, true, true).catch((error: unknown) => {
+    const value = await onAddPath(current, path, includeUnchanged, true).catch((error: unknown) => {
       showCopyToast(t('panel.addFailed', { message: error instanceof Error ? error.message : String(error) }))
       return undefined
     })
@@ -10073,6 +10055,10 @@ export function PendingPanel({
    * is the only way to run it faithfully (what the harness does with that press is its business) — and
    * the second is this panel, which is the whole reason the press was taken over. The third is not a
    * way to open it at all: it hands back the path the shell itself gave the menu.
+   *
+   * EVERY row here is safe for a file the panel does NOT hold — an open, an add-then-open, and a copy.
+   * An item that NEEDED a listed entry (keep, revert, a comment) would have to be hidden or disabled
+   * unless `chipMenu.held`, because pressing it for an unheld file can only fail.
    */
   const chipMenuItems = useMemo<MenuEntry[]>(() => [
     { id: 'default', label: t('chip.openDefault') },
@@ -10100,7 +10086,26 @@ export function PendingPanel({
       return
     }
     if (id !== 'review') return
-    window.dispatchEvent(new CustomEvent(OPEN_FILE_EVENT, { detail: { path: target.path } }))
+    // HELD: the row is already in the list — open it, exactly as this item always has.
+    if (target.held) {
+      window.dispatchEvent(new CustomEvent(OPEN_FILE_EVENT, { detail: { path: target.path } }))
+      return
+    }
+    // NOT HELD (the reader's case: the row's change was settled away, or it was never imported): ADD it
+    // first and open what the host says it landed as — through the SAME verb the picker and the path field
+    // use (`onAddPath` → the channel's add; no second scanner exists here) and its outcome reporting, which
+    // already says why when the host refuses (missing, outside the workspace, `unchanged`, an empty scan).
+    //
+    // `includeUnchanged = FALSE` is chosen deliberately for a changed-files CARD row: the shell is
+    // presenting that row as a change, so the honest request is "add this change" — and if the host finds
+    // none (a stale card, or a change already settled), its existing `unchanged` notice tells the reader so
+    // and NOTHING opens, rather than an empty row being drawn as if a file had been opened. The path field
+    // asks the same verb with `true`, because opening a clean file by name is exactly what that field is for.
+    void addTypedPath(target.path, false).then((added) => {
+      const open = added?.openPath
+      if (open === undefined) return
+      window.dispatchEvent(new CustomEvent(OPEN_FILE_EVENT, { detail: { path: open } }))
+    })
   }
   /**
    * End what the comment menu was opened on: that one comment, or every picked one.

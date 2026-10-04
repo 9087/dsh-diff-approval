@@ -799,33 +799,33 @@ describe('PendingPanel', () => {
     const store = createPendingDiffStore(seam as unknown as DiffApprovalPort)
     await store.refresh(S1)
     const props = panelProps({ read: true, files, busy: new Set() })
-    props.usePending = ((select: (state: PendingDiffSnapshot) => unknown) => select(store.getSnapshot())) as never
+    // The REAL subscription the app has: `usePending` is `useSyncExternalStore` over the store, so a
+    // publish has to WAKE this seat for the badge to move — no manual re-render here, because a manual one
+    // is exactly what hid the bug this pins (a count that arrived and was never drawn).
+    props.usePending = ((select: (state: PendingDiffSnapshot) => unknown) =>
+      select(useSyncExternalStore(store.subscribe, store.getSnapshot))) as never
     props.pendingView = ((sessionId: SessionId | undefined, select: (view: PendingDiffSnapshot) => unknown) => select(store.viewFor(sessionId))) as never
     props.onRefreshCount = ((sessionId: SessionId | undefined) => { void store.refreshCount(sessionId) }) as never
-    const view = render(<PendingPanel {...props} />)
+    render(<PendingPanel {...props} />)
     const badge = (): string => (document.querySelector('[data-diff-approval-badge]') as HTMLElement).dataset.diffApprovalBadge ?? ''
-    const draw = (): void => { view.rerender(<PendingPanel {...props} />) }
 
     // Before any count has arrived: the list this read carried — what the badge has always shown, and what
     // an older host keeps showing.
     expect(badge()).toBe('1')
 
-    // A count lands: the badge reads the host's own number.
+    // A count lands: the store's publish alone has to redraw the badge with the host's own number.
     await act(async () => { await store.refreshCount(S1) })
-    draw()
     expect(badge()).toBe('5')
 
     // A count that FAILED knows nothing: the last good number stays (never 0, never blank).
     seam.listCount.mockRejectedValueOnce(new Error('socket closed'))
     await act(async () => { await store.refreshCount(S1) })
-    draw()
     expect(badge()).toBe('5')
 
     // A host with no such endpoint at all: the store degrades to the full read, so the badge shows that
     // read's own rows — today's behaviour, at today's cost, and never nothing.
     seam.listCount.mockRejectedValue(new Error('internal: unknown endpoint "list-count"'))
     await act(async () => { await store.refreshCount(S1) })
-    draw()
     expect(badge()).toBe('1')
   })
 
@@ -5420,7 +5420,7 @@ describe('PendingPanel', () => {
 
     act(() => {
       window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
-        detail: { path: FILE.path, x: 10, y: 20 },
+        detail: { path: FILE.path, x: 10, y: 20, held: true },
       }))
     })
     const items = [...document.querySelectorAll('[role="menuitem"]')]
@@ -5431,14 +5431,16 @@ describe('PendingPanel', () => {
     expect(opened).toHaveBeenCalledTimes(1)
     expect(document.querySelector('[data-diff-approval-diff]')).toBeNull()
 
-    // The second row is this panel, through the same bridge a chip used before it became a menu.
+    // The second row is this panel, through the same bridge a chip used before it became a menu — and for a
+    // file the list HOLDS it opens it directly, with no add.
     act(() => {
       window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
-        detail: { path: FILE.path, x: 10, y: 20 },
+        detail: { path: FILE.path, x: 10, y: 20, held: true },
       }))
     })
     fireEvent.click([...document.querySelectorAll('[role="menuitem"]')][1]!)
     await waitFor(() => { expect(document.querySelector('[data-diff-approval-diff]')).not.toBeNull() })
+    expect(props.onAddPath).not.toHaveBeenCalled()
     row.remove()
   })
 
@@ -5448,12 +5450,86 @@ describe('PendingPanel', () => {
 
     act(() => {
       window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
-        detail: { path: FILE.path, x: 10, y: 20 },
+        detail: { path: FILE.path, x: 10, y: 20, held: true },
       }))
     })
     fireEvent.click([...document.querySelectorAll('[role="menuitem"]')][0]!)
 
     await waitFor(() => { expect(screen.getAllByText('chip.gone').length).toBeGreaterThanOrEqual(1) })
+  })
+
+  it('adds a file the panel does not hold before showing it in the panel', async () => {
+    // THE READER'S CASE, at the panel: the row's change had been settled away (or never imported), so the
+    // press arrives with `held: false`. Choosing 在审批面板中查看 has to ADD it first — through the host's own
+    // add verb, which is the only thing that scans for the local VCS change — and open what it landed as.
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    ;(props.onAddPath as unknown as { mockResolvedValueOnce: (v: unknown) => void }).mockResolvedValueOnce({
+      outcome: 'added', added: 1, duplicates: 0, id: FILE.path,
+    })
+    render(<PendingPanel {...props} />)
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
+        detail: { path: FILE.path, x: 10, y: 20, held: false },
+      }))
+    })
+    // The item set does not change with `held`: every row of this menu is safe for a file the list does not
+    // hold (an open, an add-then-open, a copy). An item that NEEDED an entry would have to gate on `held`.
+    const items = [...document.querySelectorAll('[role="menuitem"]')]
+    expect(items.map(item => item.textContent)).toEqual(['chip.openDefault', 'chip.reviewInPanel', 'chip.copyPath'])
+    fireEvent.click(items[1]!)
+
+    // The add is asked for the path the press named, with `includeUnchanged` FALSE — the shell is showing
+    // this row as a CHANGE, so the honest request is "add this change"; a host that finds none answers
+    // `unchanged` and the reader gets that existing notice instead of an empty row. `exact` is true: the
+    // press named one file, not a directory to scan.
+    await waitFor(() => {
+      expect((props.onAddPath as unknown as { mock: { calls: unknown[][] } }).mock.calls)
+        .toEqual([[S1, FILE.path, false, true]])
+    })
+    // …and the panel then SHOWS the file the host answered with, rather than leaving the pick silent.
+    await waitFor(() => { expect(document.querySelector('[data-diff-approval-diff]')).not.toBeNull() })
+  })
+
+  it('opens a row the label called unheld when the host answers that it was already listed', async () => {
+    // The label is answered from the last FULL read, so a row added since then is labelled not-held. That is
+    // harmless by construction: the add answers `duplicate` for a path the host already holds, and this item
+    // opens the SAME entry the host names. The cost is one request, never a wrong menu.
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    ;(props.onAddPath as unknown as { mockResolvedValueOnce: (v: unknown) => void }).mockResolvedValueOnce({
+      outcome: 'duplicate', added: 0, duplicates: 1, id: FILE.path,
+    })
+    render(<PendingPanel {...props} />)
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
+        detail: { path: FILE.path, x: 10, y: 20, held: false },
+      }))
+    })
+    fireEvent.click([...document.querySelectorAll('[role="menuitem"]')][1]!)
+
+    await waitFor(() => { expect(document.querySelector('[data-diff-approval-diff]')).not.toBeNull() })
+  })
+
+  it('says there is no pending change when the add finds none, and draws no empty row', async () => {
+    // The other half of the add-then-open: the host looked and found nothing to review. The reader is told
+    // in words (`panel.addUnchanged`, the same notice the path field gives for the same outcome) and NO
+    // diff is drawn — an empty panel pretending a file had been opened is exactly the dead end to avoid.
+    const props = panelProps({ read: true, files: [], busy: new Set() })
+    ;(props.onAddPath as unknown as { mockResolvedValueOnce: (v: unknown) => void }).mockResolvedValueOnce({
+      outcome: 'unchanged', added: 0, duplicates: 0,
+    })
+    render(<PendingPanel {...props} />)
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
+        detail: { path: FILE.path, x: 10, y: 20, held: false },
+      }))
+    })
+    fireEvent.click([...document.querySelectorAll('[role="menuitem"]')][1]!)
+
+    await waitFor(() => { expect(screen.getAllByText('panel.addUnchanged').length).toBeGreaterThanOrEqual(1) })
+    expect(document.querySelector('[data-diff-approval-diff]')).toBeNull()
   })
 
   it('copies the path the chip menu was raised for, and toasts only what the clipboard took', async () => {

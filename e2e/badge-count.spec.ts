@@ -29,18 +29,16 @@
 // page reading 2 the moment the panel opens (one `list`, 313,363 bytes) — so the number reaches the store
 // and the seat never sees it.
 //
-// The cause is in `src/client/store.ts`: `refreshCount` publishes the count into the session's slot but
-// never sets `pointed`, the session the whole-page readers follow. `getSnapshot()` then keeps answering the
-// constant page-wide (never-read) view, `useSessionView`'s `useMemo` is keyed on that identity, and so no
-// subscriber is woken with anything new — the badge keeps drawing the empty view it memoized. A full read
-// `pointed`, which is why the opened panel shows the count and a freshly loaded shut one does not. The fix
-// is one line, beside `refresh`'s own:
-//
-//     async refreshCount(sessionId) {
-//       if (sessionId === undefined) return
-//       pointed = sessionId            // ← the whole-page readers follow the session just read
-//
-// After a rebuild this file is expected to pass as written; it is the browser-level pin for that line.
+// WHAT THE READER ACTUALLY HIT, corrected after their second report: the shell's changed-files card was
+// showing a path this panel no longer held (the change had been settled away, and re-importing the file from
+// version control made the menu work again). That was the press bridge's "not held ⇒ leave the press to the
+// shell" path, working as designed and looking like a dead control. A file-list ROW's press is now ALWAYS
+// this menu, with "not held" deciding only that "在审批面板中查看" adds the file first (through the same add
+// verb the path picker uses) and then opens it. The menu and that flow are pinned in
+// `tests/produced-diff.client.spec.ts` and `tests/pending-panel.client.spec.tsx`: the shell's own
+// changed-files card cannot be raised from this fixture, whose store is seeded directly rather than by
+// session events, so no synthetic press on it would be honest. What the browser is used for here is what
+// only a browser can measure: the badge, and the two payloads.
 
 import { chromium, expect, test } from '@playwright/test'
 import type { Browser, Page } from '@playwright/test'

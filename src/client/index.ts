@@ -8,7 +8,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 // Type-only: brings the `settings.section` SlotMap entry into this program.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import { diffPathsMatch, PendingPanel, SIDEBAR_AUTO_COLLAPSE_PX } from './PendingPanel.tsx'
+import { PendingPanel, SIDEBAR_AUTO_COLLAPSE_PX } from './PendingPanel.tsx'
 import { pasteReferenceIntoComposer } from './composer-cover.ts'
 import type { PendingPanelProps } from './PendingPanel.tsx'
 import { PanelBoundary } from './boundary.tsx'
@@ -18,7 +18,7 @@ import { createPendingDiffStore } from './store.ts'
 import { attachReferenceRemap } from './remap-sync.ts'
 import { conversationAccess } from './conversation-access.ts'
 import { shownSessionId, selectedSessionOf } from './session-seat.ts'
-import { CHIP_MENU_EVENT, startProducedChipMenu } from './produced-diff.ts'
+import { CHIP_MENU_EVENT, panelHolds, startProducedChipMenu } from './produced-diff.ts'
 import type { PendingPanelFace } from './slots.ts'
 import { attachDiffDock, createDockState, DIFF_DOCK_ID, DiffDockBody, DiffDockTitle } from './dock.tsx'
 import type { DockHostContext } from './dock.tsx'
@@ -365,23 +365,16 @@ export function apply(ctx: ClientContext): void {
   // ProducedFiles component is untouched) and it injects no control of its own — see produced-diff.ts.
   if (typeof window !== 'undefined') {
     ctx.effect(() => startProducedChipMenu({
-      // The panel's list, read at press time: the press is prevented on this answer, so it cannot
-      // wait for a poll to settle. This press carries NO session (the chip is DSH's own DOM, not one
-      // of this plugin's seats), so there is no "the session this chip is in" to ask for. What CAN be
-      // answered honestly is the page-wide question: is this path pending in any session this page has
-      // read? That is the old page-wide behaviour, and it errs towards offering the review — a file
-      // pending in a session nobody has read yet simply misses the menu until a read reaches it.
-      isPending: (path) => {
-        // The sessions the page-wide view knows of (the newest read's rows carry theirs).
-        const seen = store.getSnapshot()
-        const known = new Set<SessionId>()
-        for (const file of seen.files) for (const id of file.sessionIds ?? [file.sessionId]) known.add(id)
-        for (const id of known) {
-          const view = store.viewFor(id)
-          if (view.files.some(file => diffPathsMatch(path, file.path, view.workspacePath))) return true
-        }
-        return seen.files.some(file => diffPathsMatch(path, file.path, seen.workspacePath))
-      },
+      // The panel's list, read at press time: the press is answered on this call, so it cannot wait for a
+      // poll. This press carries NO session (the chip is DSH's own DOM, not one of this plugin's seats), so
+      // there is no "the session this chip is in" to ask for. What CAN be answered honestly is the
+      // page-wide question: is this path pending in any session this page has read?
+      //
+      // `panelHolds` answers it from every held view's FRESHEST read — the light read's paths as well as
+      // the last full read's rows. A file edited since that full read lives only in the paths (nothing
+      // re-reads the list while every surface is shut), and it is exactly the newest row the reader
+      // presses; a stale answer here under-offers review actions for a file the host would have accepted.
+      isPending: (path) => panelHolds(store.views(), path),
       onMenu: (detail) => {
         window.dispatchEvent(new CustomEvent(CHIP_MENU_EVENT, { detail }))
       },

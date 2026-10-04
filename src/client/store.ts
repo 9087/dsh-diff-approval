@@ -32,6 +32,16 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
    * @returns that session's snapshot, identity-stable until it is next published.
    */
   viewFor: (sessionId: SessionId | undefined) => PendingDiffSnapshot
+  /**
+   * Every session's view this page is HOLDING, one per session it has read.
+   *
+   * This is the reader a press needs (see `produced-diff.ts`): a shell press names a file and asks whether
+   * ANY session this page has read holds it, and the press cannot wait for a poll. The slots are where the
+   * fresh paths live — the light read's `paths` and the last full read's `files` — so answering from the
+   * slots is what keeps a file edited since the last full read from being a press nothing recognises.
+   * @returns the held views; a session never read contributes nothing (it has no slot).
+   */
+  views: () => readonly PendingDiffSnapshot[]
   /** Re-read one session's pending list (an absent session empties the view). */
   refresh: (sessionId: SessionId | undefined) => Promise<void>
   /**
@@ -275,6 +285,24 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
     const result = redoCleared ? { ...merged, redoCleared: true } : merged
     if (sessionId === undefined) snapshot = result
     else slotOf(sessionId).view = result
+    // WAKE EVERY SUBSCRIBER, whichever slot moved.
+    //
+    // Telling every listener (below) is only half of it: a React seat subscribes through
+    // `getSnapshot()`, and `useSyncExternalStore` re-renders only when that value changes IDENTITY. So a
+    // publish that left `getSnapshot()`'s own object alone notified listeners that then compared two equal
+    // objects and drew nothing — which is how a shut panel asked the host for a count, received it, and
+    // kept showing 0, and how a badge for one session could sit frozen while another session's slot moved.
+    // The fix is to re-stamp whatever `getSnapshot()` ANSWERS with a copy: the object's contents — and so
+    // its answer — are untouched, and every listener is handed a new identity and re-reads its own slot
+    // the way `useSessionView` says it does.
+    //
+    // Only when this publish did not already replace that object: `snapshot` when nothing is pointed at,
+    // the pointed session's view otherwise.
+    if (pointed === undefined) {
+      if (sessionId !== undefined) snapshot = { ...snapshot }
+    } else if (sessionId !== pointed) {
+      slotOf(pointed).view = { ...slotOf(pointed).view }
+    }
     for (const listener of [...listeners]) listener()
   }
 
@@ -434,6 +462,10 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
   const store: PendingDiffStore = {
     getSnapshot: () => viewOf(pointed),
     viewFor: (sessionId) => viewOf(sessionId),
+    // One view per session this page has read, in the order the slots were first created. The page-wide
+    // `snapshot` is not among them when a session is pointed at (that IS one of these slots); before
+    // anything is pointed at it is the unread empty view, which holds no path either way.
+    views: () => [...views.values()].map(slot => slot.view),
     subscribe(listener) {
       listeners.add(listener)
       return () => { listeners.delete(listener) }
@@ -527,13 +559,11 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
       // and there is nothing here to name. (A count is not a list, so it never publishes an empty view the
       // way `refresh(undefined)` does.)
       if (sessionId === undefined) return
-      // The whole-page readers follow the session just read, exactly as `refresh` does — and with the panel
-      // SHUT this is the only read there is. Leaving it out is not a missed repaint: `getSnapshot()` would
-      // keep answering the constant never-read page-wide view, and a seat that memoizes on that identity
-      // (see `useSessionView`) would never be handed the count at all — which is how a closed panel ended up
-      // asking the host for the count, receiving it, and still drawing 0. A count read is a read of this
-      // session, so it names it here like every other read.
-      pointed = sessionId
+      // NOTE, because it was tried and reverted: a count read must NOT point the whole-page readers at its
+      // session. Doing that made a tick for session A move the page-wide answer away from session B while
+      // B's own panel was on screen, so the same press worked one second and not the next. What a count
+      // read owes its subscribers instead is the wake in `publishView` — a new identity on the object
+      // `getSnapshot()` answers, whatever it answers — and it gives that from any slot.
       const slot = slotOf(sessionId)
       // AT MOST ONE COUNT IN FLIGHT, folded exactly like the full read (see `SessionView.inFlight`): a tick
       // that lands during a count records that a fresher number is wanted and hands back the one running.
@@ -563,9 +593,9 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
       try {
         const { count } = await port.listCount(sessionId)
         if (request !== slot.countEpoch) { finish(); return }
-        // The number rides the session's OWN view, so every badge subscribed to that slot re-renders and
-        // no other session's view moves. `read` is deliberately left as it was: a count is not a list, and
-        // a session whose list was never read must not look like one that was.
+        // The number rides the session's OWN view, so every badge subscribed to that slot re-renders and no
+        // other session's view moves. `read` is deliberately left as it was: a count is not a list, and a
+        // session whose list was never read must not look like one that was.
         publishView(sessionId, { ...slot.view, count })
       } catch (error: unknown) {
         if (request !== slot.countEpoch) { finish(); return }
