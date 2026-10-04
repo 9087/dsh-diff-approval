@@ -854,14 +854,6 @@ interface PendingFileRowProps {
   selected: boolean
   /** Picked for a decision over several files (Ctrl/Cmd-click). Not the same as `selected`. */
   picked: boolean
-  /**
-   * Which sentence this row's mark wears, or `undefined` for no mark at all (see `lineageNoteOf`): the host's
-   * `viaLineage` for a row that is here only because of the merge, its `hasChildContribution` for a row this
-   * session touched that another session in its lineage touched too — and its `lineageDirection` for WHICH
-   * way that other session stands, so the same row reads right from either seat. Marked, never moved, and
-   * still actionable exactly like this session's own — the host resolves the owner for a keep or a revert.
-   */
-  lineageNote: LineageNoteKey | undefined
   /** The last keep/revert failure for this file, shown as an inline tag. */
   failedMessage?: string | undefined
   t: Translator
@@ -3824,52 +3816,8 @@ function markdownPreviewMarkers(container: HTMLElement): PreviewRulerMarker[] {
   return markers
 }
 
-/**
- * Which sentence a row's mark wears, or none: FOUR directions (the host's answer, one walk of the recorded
- * parent links) times the two forms.
- *
- * The two forms are separate sentences because they say different things: a row only the other session
- * touched, and one THIS session touched as well — the first would deny the reader's own edit on the second.
- */
-type LineageNoteKey =
-  | 'row.fromChild' | 'row.fromChildShared'
-  | 'row.fromParent' | 'row.fromParentShared'
-  | 'row.fromSibling' | 'row.fromSiblingShared'
-  | 'row.fromOther' | 'row.fromOtherShared'
-
-/**
- * The mark one row wears, from the host's two answers plus its direction — the ONE place a sentence is
- * picked from them, so no call site can choose one.
- *
- * `viaLineage` first: a row in this session's list ONLY because of the merge was not touched here at all, so
- * the "only" form is the whole truth about it. A row that got here on its own merit and ALSO carries another
- * session's change takes the "also" form, because the first would deny the reader's own edit.
- *
- * The direction is the HOST's (`lineageDirection`, computed from the recorded parent links), never inferred
- * here: this function's whole job is to turn a direction the host knows into a sentence. `mixed` — the owners
- * disagree, so no single relationship is true of the row — and an older host's silence both take the neutral
- * pair: naming a direction in either case would be a guess, which is the bug this field exists to fix.
- * @param file - one listed row.
- * @returns the locale key to draw, or `undefined` for a row with nothing to say.
- */
-function lineageNoteOf(file: PendingFileDiff): LineageNoteKey | undefined {
-  const only = file.viaLineage === true
-  if (!only && file.hasChildContribution !== true) return undefined
-  switch (file.lineageDirection) {
-    case 'child': return only ? 'row.fromChild' : 'row.fromChildShared'
-    case 'parent': return only ? 'row.fromParent' : 'row.fromParentShared'
-    case 'sibling': return only ? 'row.fromSibling' : 'row.fromSiblingShared'
-    // Non-requester owners of different directions: the row carries more than one relationship, so it gets
-    // the sentence that is true of all of them rather than an arbitrary member of the set.
-    case 'mixed': return only ? 'row.fromOther' : 'row.fromOtherShared'
-    // No direction at all: a host older than the field. The neutral sentence is the honest one — the client
-    // cannot walk a lineage, and must not pretend to (see `PendingFileDiff.lineageDirection`).
-    default: return only ? 'row.fromOther' : 'row.fromOtherShared'
-  }
-}
-
 /** One row of the file list: the clickable head in the left pane. */
-function PendingFileRow({ file, selected, picked, lineageNote, failedMessage, t, onSelect, onMenu }: PendingFileRowProps) {
+function PendingFileRow({ file, selected, picked, failedMessage, t, onSelect, onMenu }: PendingFileRowProps) {
   const stats = useMemo(
     () => computeWholeFileDiff(file.oldText, file.newText),
     [file.oldText, file.newText],
@@ -3911,24 +3859,6 @@ function PendingFileRow({ file, selected, picked, lineageNote, failedMessage, t,
             </svg>
           )}
           <span className={css.rowPath}>{basenameOf(file.path)}</span>
-          {lineageNote !== undefined && (
-            // A row another session in this lineage has a hand in — either ONLY that (it arrived through the
-            // merged view and this session never touched it) or that session's share of a row this session
-            // touched too. MARKED rather than moved either way, and actionable exactly like this session's
-            // own rows: the host resolves the owner for a keep or a revert. The sentence names the direction
-            // the HOST computed (child / ancestor / sibling / neutral) and never 队友/teammate, because a
-            // child's own header cannot tell a teammate from any other subagent child (see the host's
-            // `lineageView`). It never claims the comments or the undo history are merged either: those stay
-            // per-session.
-            <Tooltip label={t(lineageNote)} delayMs={500}>
-              <span className={css.rowChild} data-diff-child role="img" aria-label={t(lineageNote)}>
-                <svg width="9" height="9" viewBox="0 0 9 9" aria-hidden="true">
-                  <path d="M1.5 1 V5.2 A1.3 1.3 0 0 0 2.8 6.5 H6.6" fill="none" stroke="currentColor" strokeWidth="1.1" />
-                  <path d="M5.1 4.7 L6.9 6.5 L5.1 8.3" fill="none" stroke="currentColor" strokeWidth="1.1" />
-                </svg>
-              </span>
-            </Tooltip>
-          )}
           {failedMessage !== undefined && <span className={css.rowFailed} title={failedMessage}>{t('row.failed')}</span>}
           {(stats.added !== 0 || stats.removed !== 0) && (
             <span className={css.rowMeta}>
@@ -9747,12 +9677,6 @@ export function PendingPanel({
     <PendingFileRow
       key={entry.id}
       file={entry}
-      // The sentence this row's mark wears, from the HOST's answers alone: it scoped the row in through the
-      // lineage merge (`viaLineage`) or carries another session's share of it (`hasChildContribution`), and
-      // `lineageDirection` says which way that session stands. It is marked, not moved: the row keeps its
-      // owner and every decision on it works exactly as it does on one of this session's own — the host
-      // resolves the owner for those.
-      lineageNote={lineageNoteOf(entry)}
       selected={selected === entry.id}
       picked={pickedFiles.has(entry.id)}
       failedMessage={failed.get(entry.id)}

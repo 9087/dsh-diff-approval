@@ -99,39 +99,6 @@ export const zh = {
   'panel.key.coverTop': '浮窗：覆盖上方标题栏',
   'settings.tabLabel': '改动审批',
   'row.failed': '失败',
-  /**
-   * The mark on a row that arrived through the MERGED view: its owning session is in this session's
-   * lineage. Deliberately "child session", never 队友/teammate — a child's own header cannot tell a
-   * teammate from any other subagent child, so the copy must not claim more than the header knows.
-   */
-  'row.fromChild': '来自子会话的改动',
-  /**
-   * The mark on a row this session touched AND a child in its lineage touched too. Its own sentence, because
-   * "changed in a child session" would be wrong here: the reader changed it as well.
-   */
-  'row.fromChildShared': '也包含子会话的改动',
-  /**
-   * The same mark with the direction the HOST computed, not the reader's assumption: the other session is
-   * ABOVE this one (the host walks the recorded parent links, so this can be more than one hop up — 上级 is
-   * the unambiguous Chinese for exactly that, and the English "parent session" is written to mean ancestor).
-   * Both sentences, because a row the reader touched too must not deny the reader's own edit. Never
-   * 队友/teammate, for the same reason as the child pair above.
-   */
-  'row.fromParent': '来自上级会话的改动',
-  'row.fromParentShared': '也包含上级会话的改动',
-  /**
-   * …and with neither on the other's chain: both hang off a common ancestor (two teammates under one lead),
-   * which is neither a child's nor a parent's change.
-   */
-  'row.fromSibling': '来自同级会话的改动',
-  'row.fromSiblingShared': '也包含同级会话的改动',
-  /**
-   * The neutral pair: the non-requester owners carry DIFFERENT directions, so no single relationship is
-   * true of the row — or the host predates the direction field, in which case naming one would be a guess.
-   * "Another session"/"other sessions" is the one claim that holds in every one of those cases.
-   */
-  'row.fromOther': '来自其他会话的改动',
-  'row.fromOtherShared': '也包含其他会话的改动',
   'panel.unseen': '有新的改动还没看',
   'row.dismiss': '移出',
   'row.keepListed': '保留',
@@ -417,23 +384,6 @@ export const en = {
   'panel.key.coverTop': 'Float: cover the header above',
   'settings.tabLabel': 'Diff Approval',
   'row.failed': 'Failed',
-  /** See the Chinese block: "child session", never "teammate" — the header cannot tell them apart. */
-  'row.fromChild': 'Changed in a child session',
-  /** The shared row: "changed in a child session" alone would be wrong — the reader changed it too. */
-  'row.fromChildShared': 'Also includes changes from a child session',
-  /**
-   * The direction the host computed, in English: "parent session" here means an ANCESTOR — the host walks
-   * the recorded parent links, so it may be several hops up. 上级 (the Chinese) says that without ambiguity;
-   * this pair reads the same way and must not be narrowed to "the immediate parent". Never "teammate".
-   */
-  'row.fromParent': 'Changed in a parent session',
-  'row.fromParentShared': 'Also includes changes from a parent session',
-  /** Neither on the other's chain: two sessions hanging off a common ancestor. */
-  'row.fromSibling': 'Changed in a sibling session',
-  'row.fromSiblingShared': 'Also includes changes from a sibling session',
-  /** The owners' directions MIX, or an older host sent none: the one claim true in every such case. */
-  'row.fromOther': 'Changed in another session',
-  'row.fromOtherShared': 'Also includes changes from other sessions',
   'panel.unseen': 'Changes you have not looked at yet',
   'row.dismiss': 'Remove',
   'row.keepListed': 'Keep',

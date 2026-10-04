@@ -1,5 +1,7 @@
 // The merged view, read from the real host in a real browser: a row recorded by a CHILD session reaches the
-// parent session's list, and it is marked as such.
+// parent session's list as an ordinary row — same list, same actions, no glyph of its own. The mark that used
+// to sit beside the file name is gone by the reader's decision, while the fields behind it stay (`viaLineage`
+// still scopes the row in and the host tests pin the rest); what this spec proves is the READ.
 //
 // What makes the fixture small: the host's merge reads the lineage an entry RECORDED (see `listWithState`
 // and `lineageView`) before it asks the session registry, so the store only has to carry a child-owned row
@@ -33,15 +35,6 @@ const CHILD_SESSION = 'e2e-merged-view-child'
 const CHILD_COMMENT = 'e2e-merged-view-note'
 const CHILD_COMMENT_TEXT = 'note from the child seat'
 
-/** How the mark names itself, in whichever language the host drew (see `row.fromChild` in the locales). */
-const MARK_COPY = /来自子会话的改动|Changed in a child session/
-
-/**
- * The SHARED row's sentence, and it must NOT be the one above: that row carries the reader's own change too,
- * so "changed in a child session" alone would deny it (see `row.fromChildShared` in the locales).
- */
-const SHARED_COPY = /也包含子会话的改动|Also includes changes from a child session/
-
 let fixture: Fixture
 let browser: Browser
 let page: Page
@@ -51,7 +44,7 @@ let childPath: string
 
 test.describe.configure({ mode: 'serial' })
 
-test.describe('合并视图：子会话的行与它的标记', () => {
+test.describe('合并视图：子会话的行照常列出', () => {
   test.beforeAll(async () => {
     test.setTimeout(240_000)
     const dsh = resolveDsh()
@@ -118,7 +111,7 @@ test.describe('合并视图：子会话的行与它的标记', () => {
     fixture?.cleanup()
   })
 
-  test('m1. 两个会话的行都在，而标记只在子会话那一行上', async () => {
+  test('m1. 两个会话的行都在，而这一行不再有自己的标记', async () => {
     test.setTimeout(120_000)
     const own = page.locator(`[data-diff-file="${ownPath.replace(/\\/g, '\\\\')}"]`).first()
     const child = page.locator(`[data-diff-file="${childPath.replace(/\\/g, '\\\\')}"]`).first()
@@ -128,20 +121,11 @@ test.describe('合并视图：子会话的行与它的标记', () => {
     await expect(own).toBeVisible({ timeout: 30_000 })
     await expect(child).toBeVisible({ timeout: 30_000 })
 
-    // …and the child-owned row is the one that wears the mark.
-    await expect(child.locator('[data-diff-child]')).toHaveCount(1)
-    await expect(own.locator('[data-diff-child]')).toHaveCount(0)
-
-    // The mark names itself with the honest copy — "child session", never a claim about teammates. The host
-    // translates the key, so this matches the SENTENCE in either language rather than the key.
-    const mark = child.locator('[data-diff-child]').first()
-    await expect(mark).toHaveAttribute('aria-label', MARK_COPY)
-
-    // Hovering it raises a bubble saying the same thing. Filtered by text rather than counting bubbles: the
-    // row's own path tooltip wraps the same button, so what matters is that THIS sentence is on screen.
-    await mark.hover({ timeout: 20_000 })
-    await expect(page.locator('[role="tooltip"]:visible').filter({ hasText: MARK_COPY }))
-      .toHaveCount(1, { timeout: 20_000 })
+    // The merged row is an ORDINARY row now: it carries its own file name in the same list, and nothing
+    // draws a glyph for it — nor for the session's own row. The merge itself is what this asserts, and the
+    // fields behind the old mark stay pinned by the host and port tests rather than by a picture here.
+    await expect(child).toContainText('child.txt')
+    await expect(page.locator('[data-diff-child]')).toHaveCount(0, { timeout: 20_000 })
   })
 
   test('m3. 子会话的评论在父会话的面板里列出', async () => {
@@ -166,8 +150,9 @@ test.describe('合并视图：子会话的行与它的标记', () => {
  * seeds the two rows its own claim needs.
  *
  * The shape that makes it shared is `sessionIds: [child, thisSession]` — written by `alsoSessions`. The
- * session is therefore an OWNER of the row, so the host answers "not merged, but a child's change is in it",
- * which is the second sentence. The child's lineage record rides the same row, so no live child is needed.
+ * session is therefore an OWNER of the row, so the host answers "not merged, but a child's change is in it"
+ * (`hasChildContribution`, which no longer draws anything). The child's lineage record rides the same row, so
+ * no live child is needed.
  */
 test.describe('合并视图：与子会话共享的行', () => {
   let sharedFixture: Fixture
@@ -235,7 +220,7 @@ test.describe('合并视图：与子会话共享的行', () => {
     sharedFixture?.cleanup()
   })
 
-  test('m2. 与子会话共享的行说的是另一句，而本会话自己的行仍然没有标记', async () => {
+  test('m2. 与子会话共享的行也在同一个列表里，同样没有标记', async () => {
     test.setTimeout(120_000)
     const own = sharedPage.locator(`[data-diff-file="${sharedOwnPath.replace(/\\/g, '\\\\')}"]`).first()
     const shared = sharedPage.locator(`[data-diff-file="${sharedPath.replace(/\\/g, '\\\\')}"]`).first()
@@ -245,17 +230,10 @@ test.describe('合并视图：与子会话共享的行', () => {
     await expect(own).toBeVisible({ timeout: 30_000 })
     await expect(shared).toBeVisible({ timeout: 30_000 })
 
-    // It wears the mark, in the SHARED sentence: the row is the reader's own work as well, and the first
-    // sentence would deny that.
-    await expect(shared.locator('[data-diff-child]')).toHaveCount(1)
-    await expect(own.locator('[data-diff-child]')).toHaveCount(0)
-    await expect(shared.locator('[data-diff-child]').first()).toHaveAttribute('aria-label', SHARED_COPY)
-
-    // …and the sentence is on a RENDERED surface too, the way `m1` proves its own: hover the mark and a visible
-    // bubble carries it. Same technique, same locator shape, same nesting — only the sentence differs.
-    const mark = shared.locator('[data-diff-child]').first()
-    await mark.hover({ timeout: 20_000 })
-    await expect(sharedPage.locator('[role="tooltip"]:visible').filter({ hasText: SHARED_COPY }))
-      .toHaveCount(1, { timeout: 20_000 })
+    // Both are ordinary rows: each carries its own name and neither draws a glyph. The host's
+    // `hasChildContribution` answer that used to pick a second sentence still rides the row — the port and
+    // host tests pin it — but the list draws nothing from it.
+    await expect(shared).toContainText('shared.txt')
+    await expect(sharedPage.locator('[data-diff-child]')).toHaveCount(0, { timeout: 20_000 })
   })
 })
