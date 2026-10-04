@@ -172,16 +172,16 @@ describe('DiffApprovalHeaderEntry per-session count', () => {
     return (select) => select(state)
   }
 
-  it('counts the page\u2019s newest list when the shell names no session, rather than a dead zero', async () => {
-    // The shape `session-seat.ts` exists to support: the seat is handed no `sessionId` and the
-    // session-list state names no selection either — so the button is inert (nothing is selected) but
-    // its badge is still the page's list. `viewFor(undefined)` answers the newest read, the same view
-    // `getSnapshot()` answers; before the store fix it answered a slot no session read writes, and the
-    // badge read 0 for a page whose list was right there.
+  it('reads 0 when the shell names no session, rather than the page\u2019s newest list', async () => {
+    // The reader's rule: a seat with nothing to review says nothing. The page-wide list is still there —
+    // `viewFor(undefined)` answers the newest read, pinned in `store.client.spec.ts` for the whole-page
+    // readers the remap follows — but a SEAT is not a whole-page reader, and one wearing another session's
+    // number is what the reader reported (a brand-new blank session showing a pending count). With no
+    // workspace comparison anywhere in this client that number can even be another workspace's.
     const store = await storeOf({ a: [row('a1', 'a')], b: [row('b1', 'b'), row('b2', 'b'), row('b3', 'b')] })
     render(<DiffApprovalHeaderEntry t={(key: string) => key} {...faceFor(store)} useSessions={sessionsState({ current: null, byId: {} }) as never} />)
     expect(button().disabled).toBe(true)
-    expect(button().dataset.diffApprovalHeaderEntry).toBe('3')
+    expect(button().dataset.diffApprovalHeaderEntry).toBe('0')
   })
 
   it('counts its own session when the shell hands one over, never the one that read last', async () => {
@@ -198,10 +198,10 @@ describe('DiffApprovalHeaderEntry per-session count', () => {
     expect(button().disabled).toBe(false)
   })
 
-  it('keeps the badge on the page\u2019s list while the shell\u2019s blank session keeps the button inert', async () => {
-    // Two rules, two sources, and they must not be one: the count follows the session the seat named
-    // (none here, so the page's newest read), while the enabled state follows the shell's own blank
-    // session. The old cross-talk came from the count asking a session the blank check never named.
+  it('reads 0 while the shell\u2019s blank session keeps the button inert', async () => {
+    // One session, one answer: a blank session has nothing to review, so the button is inert AND its
+    // number is 0. This used to keep the page's newest count beside an inert button — two sources for one
+    // seat, which is what let a brand-new blank session show a pending count.
     const store = await storeOf({ a: [row('a1', 'a')], b: [row('b1', 'b'), row('b2', 'b'), row('b3', 'b')] })
     render(
       <DiffApprovalHeaderEntry
@@ -211,7 +211,7 @@ describe('DiffApprovalHeaderEntry per-session count', () => {
       />,
     )
     expect(button().disabled).toBe(true)
-    expect(button().dataset.diffApprovalHeaderEntry).toBe('3')
+    expect(button().dataset.diffApprovalHeaderEntry).toBe('0')
   })
 
   it('publishes the session the shell composed, so a root-scoped seat follows that same one', async () => {

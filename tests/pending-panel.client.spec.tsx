@@ -24,6 +24,7 @@ import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
 import { DiffApprovalHeaderEntry } from '../src/client/header-entry.tsx'
 import { DiffApprovalSettingsTab } from '../src/client/SettingsTab.tsx'
 import { createPendingDiffStore } from '../src/client/store.ts'
+import { publishSessionId } from '../src/client/session-seat.ts'
 import type { DiffApprovalPort } from '../src/client/port.ts'
 import { renderMarkdownPreview } from '../src/client/markdown-preview.ts'
 import { highlightWindow } from '../src/client/highlight.ts'
@@ -976,47 +977,86 @@ describe('PendingPanel', () => {
     expect(chords).toContain('action.closeHint')
   })
 
-  it('reads the page\u2019s newest view through pendingView when the seat names no session', async () => {
-    // The panel's own reader, as the plugin builds it: `pendingView(current, …)` straight onto the real
-    // store. With no session of its own (`current === undefined`) that call must REACH
-    // `store.viewFor(undefined)` — the newest read, the same view `getSnapshot()` answers — rather than a
-    // slot no session read ever writes; that empty slot is what made this seat's badge read 0 while the
-    // page's list sat behind it.
-    const real = createPendingDiffStore({
-      // Every session's list answers on demand: the drive-by session first, then the one that read last.
-      async list(sessionId: string): Promise<unknown> {
-        const files = sessionId === 'drive-by'
-          ? [entry({ id: 'drive-by-1', path: '/repo/x.txt', sessionId: 'drive-by' as SessionId })]
-          : [
-              entry({ id: 'page-1', path: '/repo/a.txt' }),
-              entry({ id: 'page-2', path: '/repo/b.txt' }),
-              entry({ id: 'page-3', path: '/repo/c.txt' }),
-            ]
-        return { files, comments: [], commentLines: {}, commentsRevision: 0, commentAnswers: {}, workspacePath: '/repo' }
-      },
-    } as unknown as DiffApprovalPort)
-    await real.refresh('drive-by' as never)
-    await real.refresh(S1)
-    // The page-wide answer really is the newest read (three), not the drive-by session's one.
-    expect(real.getSnapshot().files).toHaveLength(3)
-
+  it('draws NOTHING \u2014 count 0 \u2014 for a seat with no session, never the page\u2019s view', () => {
+    // The reader's rule for a seat with no session of its own. `viewFor(undefined)` answers the newest
+    // session read on the page — the whole-page contract `store.client.spec.ts` and `remap-sync` pin — and
+    // for a SEAT that is another session's list, from another workspace as readily as another session (the
+    // store's slots are keyed only by session id and nothing here compares workspaces).
+    //
+    // The number is the half that no per-row filter catches: `badgeCount` is `snapshot.count ?? files.length`
+    // and `count` is the host's answer for the view that was read, NOT filtered by `belongsToSession`. So an
+    // unnamed seat used to wear another session's count while drawing none of its rows — the reader's
+    // "the count should be 0".
+    const pageWideView = {
+      read: true,
+      // A lineage-merged row is taken as given for whatever session is current, so it is the row that a
+      // per-row filter cannot remove (see `belongsToSession`).
+      files: [{ ...entry({ id: 'foreign-1', path: '/repo/foreign.txt', sessionId: 'other' as SessionId }), viaLineage: true }],
+      comments: [], commentLines: {}, commentsRevision: 0, commentAnswers: {}, busy: new Set(), count: 5,
+    } as unknown as PendingDiffSnapshot
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
-    props.usePending = ((select: (state: PendingDiffSnapshot) => unknown) => select(real.getSnapshot())) as never
+    props.usePending = ((select: (state: PendingDiffSnapshot) => unknown) => select(pageWideView)) as never
     const askedFor: (SessionId | undefined)[] = []
     props.pendingView = ((sessionId: SessionId | undefined, select: (view: PendingDiffSnapshot) => unknown) => {
       askedFor.push(sessionId)
-      return select(real.viewFor(sessionId))
+      return select(pageWideView)
     }) as never
     props.useSessions = ((select: (state: { current: SessionId | undefined; byId: Record<string, { blank?: boolean }> }) => SessionId | undefined) =>
       select({ current: undefined, byId: {} })) as unknown as typeof props.useSessions
 
-    render(<PendingPanel {...props} />)
-    // The seat asked the page-wide question, and the store answered the newest read for it.
+    const badgeView = render(<PendingPanel {...props} />)
+    // The seat still asks the page-wide question — the hook must run — …
     expect(askedFor).toEqual([undefined])
-    expect(real.viewFor(askedFor[0]).files).toHaveLength(3)
-    // Nothing is selected, so the entry stays inert — the count is a reading, not an invitation.
     const badge = document.querySelector('[data-diff-approval-badge]') as HTMLButtonElement
+    // …but it draws NONE of the answer: not the count, and the entry is inert.
+    expect(badge.getAttribute('data-diff-approval-badge')).toBe('0')
     expect(badge.disabled).toBe(true)
+    // …and the list it draws is empty. The docked body is the mount that draws its list without being
+    // opened, so it is the one that proves which view reached the render.
+    badgeView.unmount()
+    render(<PendingPanel {...props} docked />)
+    expect(screen.getByText('panel.empty')).toBeDefined()
+    expect(screen.queryByText('foreign.txt')).toBeNull()
+  })
+
+  it('draws nothing for a session the shell says is blank, even when the page has another session\u2019s view', () => {
+    // THE READER'S BUG, as a test. A brand-new session is created and nothing has been said in it; on a
+    // shell whose store names no selection (0.1.7) the footer seat resolves its session through the
+    // PUBLISHED id, and the page-wide view still holds the previous session's rows. Two things leak without
+    // the fix, and this case stages both:
+    //   * the COUNT is not filtered by session at all (`badgeCount = snapshot.count ?? files.length`);
+    //   * a lineage-merged row is taken as given for WHATEVER session is current (`belongsToSession`), so
+    //     the row is drawn for a blank session too.
+    // The blank test itself used to read `sessionId ?? selectedSessionOf(state)` — never the published id —
+    // so on this exact seat shape it answered "not blank", the entry stayed ENABLED, and the panel drew the
+    // other session's list and number.
+    const blank = 'blank-one' as SessionId
+    const pageWideView = {
+      read: true,
+      files: [{ ...entry({ id: 'foreign-1', path: '/repo/foreign.txt', sessionId: 'other' as SessionId }), viaLineage: true }],
+      comments: [], commentLines: {}, commentsRevision: 0, commentAnswers: {}, busy: new Set(), count: 5,
+    } as unknown as PendingDiffSnapshot
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    props.usePending = ((select: (state: PendingDiffSnapshot) => unknown) => select(pageWideView)) as never
+    props.pendingView = ((_sessionId: SessionId | undefined, select: (view: PendingDiffSnapshot) => unknown) =>
+      select(pageWideView)) as never
+    props.useSessions = ((select: (state: { current: SessionId | undefined; byId: Record<string, { blank?: boolean }> }) => SessionId | undefined) =>
+      select({ current: undefined, byId: { [blank]: { blank: true } } })) as unknown as typeof props.useSessions
+    act(() => { publishSessionId(blank) })
+    try {
+      const badgeView = render(<PendingPanel {...props} />)
+      const badge = document.querySelector('[data-diff-approval-badge]') as HTMLButtonElement
+      // Count 0 and inert: the session exists but has nothing to review.
+      expect(badge.getAttribute('data-diff-approval-badge')).toBe('0')
+      expect(badge.disabled).toBe(true)
+      badgeView.unmount()
+      render(<PendingPanel {...props} docked />)
+      // And neither the row nor the page-wide list reaches the render.
+      expect(screen.getByText('panel.empty')).toBeDefined()
+      expect(screen.queryByText('foreign.txt')).toBeNull()
+    } finally {
+      act(() => { publishSessionId(undefined) })
+    }
   })
 
   it('disables the pending button while the current session is blank (a new session being created)', () => {

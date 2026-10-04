@@ -8,8 +8,9 @@
 
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
-import type { CommentRecord, DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue, DiffApprovalOpenAction, DiffApprovalRefreshValue, VcsImportValue } from '../types.ts'
+import type { DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue, DiffApprovalOpenAction, DiffApprovalRefreshValue, VcsImportValue } from '../types.ts'
 import type { PendingDiffSnapshot } from './slots.ts'
+import { EMPTY_PENDING_VIEW } from './slots.ts'
 import type { CommentDraft, DiffApprovalPort } from './port.ts'
 
 /** The observable the panel reads and the plugin body drives. */
@@ -134,29 +135,20 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   clearUndoNotice: () => void
 }
 
-/** An empty busy set reused as the snapshot's canonical absent value. */
-const EMPTY_BUSY: ReadonlySet<string> = new Set()
 /** An empty failure map reused as the snapshot's canonical absent value. */
 const EMPTY_FAILED: ReadonlyMap<string, string> = new Map()
-/** Empty comment state reused as the snapshot's canonical absent value. */
-const NO_COMMENTS: readonly CommentRecord[] = []
-const NO_ANSWERS: Readonly<Record<string, string>> = {}
-/** No resolved comment lines reused as the snapshot's canonical absent value. */
-const NO_COMMENT_LINES: Readonly<Record<string, { start: number; end: number }>> = {}
 /** How long a failed keep/revert hint stays visible before it auto-clears. */
 const FAILED_HINT_MS = 5000
 
-/** A fresh, never-read view: what a session with nothing published yet answers (and what `reset` leaves). */
+/**
+ * A fresh, never-read view: what a session with nothing published yet answers (and what `reset` leaves).
+ *
+ * The literal lives in `slots.ts` as `EMPTY_PENDING_VIEW`, shared with the seats that must draw NOTHING for
+ * a session that is absent or blank (see its own note); this returns a fresh object, because a slot's view
+ * is replaced by identity and two slots must never share one instance.
+ */
 function emptyView(): PendingDiffSnapshot {
-  return {
-    read: false,
-    files: [],
-    comments: NO_COMMENTS as CommentRecord[],
-    commentLines: NO_COMMENT_LINES,
-    commentsRevision: 0,
-    commentAnswers: NO_ANSWERS as Record<string, string>,
-    busy: EMPTY_BUSY,
-  }
+  return { ...EMPTY_PENDING_VIEW }
 }
 
 /**

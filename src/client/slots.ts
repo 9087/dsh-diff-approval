@@ -109,6 +109,45 @@ export function countOf(view: PendingDiffSnapshot): number {
   return view.count ?? view.files.length
 }
 
+/**
+ * The view a seat draws when it has NO reviewable session: a session that is absent, or one the shell has
+ * told us is blank — a brand-new session with nothing said in it yet.
+ *
+ * This exists because the page-wide fallback is the wrong answer for such a seat. `viewFor(undefined)`
+ * and `getSnapshot()` deliberately answer the newest session read on the page (the whole-page contract the
+ * remap follows), and with the store's slots keyed only by session id and no workspace comparison anywhere
+ * in this client, "the newest read" can be another session's list — even another workspace's. A seat that
+ * has nothing of its own to show must draw NOTHING, and this is the nothing: no rows (so `countOf` is 0),
+ * no comments, no workspace, and `read: false` because nothing has been read FOR this seat.
+ *
+ * Shared rather than re-spelled per seat: the panel's badge and body, the header entry's count and the
+ * dock chip all have to agree that "no reviewable session" means zero, and a second literal here is how
+ * they would drift. Frozen because it is handed to readers as a snapshot: nothing may write through it.
+ */
+export const EMPTY_PENDING_VIEW: PendingDiffSnapshot = Object.freeze({
+  read: false,
+  files: [],
+  comments: [],
+  commentLines: {},
+  commentsRevision: 0,
+  commentAnswers: {},
+  busy: new Set<string>(),
+})
+
+/**
+ * The view a seat DRAWS when there is nothing to review: the same emptiness as {@link EMPTY_PENDING_VIEW},
+ * but READ.
+ *
+ * The difference is what the panel draws: an unread view is a session whose list is still coming, so it
+ * shows the loading state, while this one says "no pending changes" — the truth for a session that is
+ * absent or blank. Using the unread view here would leave a docked panel spinning forever behind an entry
+ * that is disabled and can never be opened.
+ */
+export const NOTHING_TO_REVIEW_VIEW: PendingDiffSnapshot = Object.freeze({
+  ...EMPTY_PENDING_VIEW,
+  read: true,
+})
+
 /** Function shape of {@link PendingViewHooks.pendingView}; named so a seat can call it directly. */
 export type PendingViewReader = <T>(sessionId: SessionId | undefined, select: PendingViewSelector<T>) => T
 

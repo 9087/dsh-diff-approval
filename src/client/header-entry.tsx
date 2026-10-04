@@ -21,7 +21,7 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { IconListPenOutline16, Tooltip } from './dsh-icons.ts'
-import { publishSessionId, selectedSessionOf, sessionIsBlank } from './session-seat.ts'
+import { publishSessionId, selectedSessionOf, unreviewableSession } from './session-seat.ts'
 import type { HostObservable, InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { PendingDiffSnapshot, PendingViewHooks } from './slots.ts'
@@ -94,13 +94,6 @@ export function DiffApprovalHeaderEntry({ usePending, useSessions, useDock, pend
   // The `usePending` call is also the subscription that re-renders this button whenever anything
   // publishes, so the count tracks the list without a second store hook.
   const pageWide = usePending(snapshot => snapshot) as PendingDiffSnapshot
-  // The count the host last answered for this session when there is one, else the list's own length:
-  // `countOf` states that rule once, and it is what makes this entry live on the light read the footer
-  // badge polls with — an entry that only knew `files.length` would sit on a stale number while the panel
-  // is shut, because nothing is reading the list then (see `PendingDiffSnapshot.count`).
-  const count = pendingView === undefined
-    ? countOf(pageWide)
-    : pendingView(sessionId, countOf)
   // Whether the panel is showing *dock-side* is observable here; whether it is
   // showing as the overlay comes back as an event, from the mount that owns it.
   const dockShowing = useDock?.((state: DockSnapshot) => state.open) === true
@@ -118,10 +111,18 @@ export function DiffApprovalHeaderEntry({ usePending, useSessions, useDock, pend
   // did (the seat is the framework's, and demanding it would take the header cluster down).
   const noSession = useSessions === undefined
     ? false
-    : useSessions(state => {
-        const id = sessionId ?? selectedSessionOf(state)
-        return id === undefined || sessionIsBlank(state, id)
-      })
+    : useSessions(state => unreviewableSession(state, sessionId ?? selectedSessionOf(state)))
+  // The count the host last answered for this session when there is one, else the list's own length:
+  // `countOf` states that rule once, and it is what makes this entry live on the light read the footer
+  // badge polls with — an entry that only knew `files.length` would sit on a stale number while the panel
+  // is shut, because nothing is reading the list then (see `PendingDiffSnapshot.count`).
+  //
+  // A session with nothing to review reads 0 rather than "the page's list": an inert button wearing
+  // another session's number is the reader's complaint (a brand-new blank session showed a pending count),
+  // and the page-wide answer can even be another WORKSPACE's — nothing in this client compares workspaces.
+  const count = noSession
+    ? 0
+    : pendingView === undefined ? countOf(pageWide) : pendingView(sessionId, countOf)
   // This seat is session-scoped and is the one mount the shell tells; the footer mounts are handed no
   // id at all on 0.1.7 (`renderSlot('sidebar.footer.action', { wide })`), so what is shown here is
   // published for them. A shell that keeps the selection in the store needs no bridge: the footer
@@ -131,7 +132,15 @@ export function DiffApprovalHeaderEntry({ usePending, useSessions, useDock, pend
   // render-phase write let two mounts disagree about which session was showing (the value a render saw
   // depended on whether the other had already rendered), which is what put one session's list under
   // another's badge.
-  useEffect(() => { publishSessionId(sessionId) }, [sessionId])
+  //
+  // NOTHING is published for a session with nothing to review, and the value is cleared when this mount
+  // goes away: a root-scoped seat (the footer panel and its badge) resolves its session through this
+  // published id, so an id left behind by a session the page has left would keep drawing that session's
+  // rows — and its count — under whatever the page is showing now.
+  useEffect(() => {
+    publishSessionId(noSession ? undefined : sessionId)
+    return () => { publishSessionId(undefined) }
+  }, [noSession, sessionId])
   // What the tooltip says, decided once (see `chords.ts`): keycaps where this host draws them, the
   // pre-0.1.7-rc.2 glued label where it cannot. The accessible name keeps the chord on every host.
   const tip = summonTooltip(t)

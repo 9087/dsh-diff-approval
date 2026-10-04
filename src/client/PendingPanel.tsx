@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconEllipsisOutline16, IconFolderOpenOutline16, IconListPenOutline16, IconPanelLeftOutline16, IconPlusOutline16, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from './dsh-icons.ts'
 import type { MenuEntry } from './dsh-icons.ts'
-import { usePublishedSessionId, selectedSessionOf, sessionIsBlank } from './session-seat.ts'
+import { usePublishedSessionId, selectedSessionOf, unreviewableSession } from './session-seat.ts'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
@@ -15,6 +15,7 @@ import type {
 } from '../types.ts'
 import type { CommentDraft } from './port.ts'
 import type { PendingDiffSnapshot, PendingPanelFace, PendingViewHooks } from './slots.ts'
+import { NOTHING_TO_REVIEW_VIEW } from './slots.ts'
 import type { Translator } from './locales.ts'
 import { PathPicker, pathPickerOpen } from './PathPicker.tsx'
 import { PresentationMenu } from './presentation-menu.tsx'
@@ -8173,10 +8174,18 @@ export function PendingPanel({
   // here would keep whatever it was on this mount's first render and never follow a session switch.
   const published = usePublishedSessionId()
   const current = sessionId ?? storeSelected ?? published
-  // A newly created session is selected but still blank (no messages yet); it
-  // has nothing to review, so the entry is grayed out exactly like no session.
-  const currentBlank = useSessions(state => sessionIsBlank(state, sessionId ?? selectedSessionOf(state)))
-  const noSession = current === undefined || currentBlank
+  // A newly created session is blank (no messages yet), and a seat that can name no session at all is in
+  // the same position: nothing to review, so the entry is grayed out and this seat reads nothing — exactly
+  // like no session at all.
+  //
+  // THE TEST MUST NAME THE SAME SESSION THE VIEW DOES. It used to test `sessionId ?? selectedSessionOf(state)`
+  // while the view was read for `current`, which also falls back to the published id: on the seat shape that
+  // fallback exists for (a root-scoped footer/dock mount on a shell whose store names no selection) both
+  // halves were `undefined`, and `sessionIsBlank(state, undefined)` is false — so the entry stayed ENABLED on
+  // a blank session while this seat drew the PREVIOUS session's list, another workspace's as readily as its
+  // own (nothing in this client compares workspaces). Now both halves agree on `current`.
+  const currentBlank = useSessions(state => unreviewableSession(state, current))
+  const noSession = currentBlank
   /**
    * The list this seat draws: THIS session's own view, never another session's.
    *
@@ -8184,9 +8193,15 @@ export function PendingPanel({
    * per-session view and as the source of the change signal that re-renders this seat; what the panel
    * reads is `current`'s slot, so a poll another seat runs for another session cannot put its files
    * under this badge.
+   *
+   * `noSession` wins over that read: a session that is absent or blank has nothing to review, and
+   * `viewFor(undefined)` is the WRONG answer for it — the store's fallback deliberately answers the newest
+   * session read on the page (the whole-page contract the remap follows), which can be another session's
+   * list. Drawing it here is what put foreign rows (and `badgeCount > 0`) under a blank session's badge.
    */
   const pageWide = usePending(snapshot => snapshot)
-  const snapshot = useSessionView(pendingView, current, pageWide)
+  const sessionView = useSessionView(pendingView, current, pageWide)
+  const snapshot = noSession ? NOTHING_TO_REVIEW_VIEW : sessionView
   // Whether the panel is showing in the right sidebar's tab right now (absent
   // hook: this build has no right sidebar). The face is fixed per mount, so the
   // optional hook never appears mid-life: the call order stays stable.

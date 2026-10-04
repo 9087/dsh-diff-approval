@@ -231,9 +231,15 @@ describe('attachDiffDock', () => {
 
 describe('DiffDockTitle', () => {
   /** The chip as the seat draws it: our face plus the framework's tab hook.
-   *  Rendered as a component (not called as one) because it uses hooks. */
+   *  Rendered as a component (not called as one) because it uses hooks.
+   *
+   *  `sessionId` is set because that is the shape the chip's count is FOR: the tab belongs to a session
+   *  (the framework hands one over on the shells that keep the selection in the tab). These cases are about
+   *  the count being DRAWN; the unnamed shape — where the chip has no session of its own and must not wear
+   *  the page's newest number — has its own case below. */
   const chipProps = (count: number, close: () => void = () => {}) => ({
     t: (key: string) => key,
+    sessionId: 'session-1',
     usePending: ((select: (snapshot: PendingDiffSnapshot) => unknown) =>
       select({ files: new Array(count).fill({}) } as PendingDiffSnapshot)) as never,
     useTabInfo: () => ({ tab: { visible: true, actions: { close } } }),
@@ -286,12 +292,14 @@ describe('DiffDockTitle', () => {
     expect(screen.queryByText('panel.title · 7')).toBeNull()
   })
 
-  it('counts the page\u2019s newest list when it names no session, and follows a session publish at once', async () => {
+  it('counts nothing until it can name a session, then follows a session publish at once', async () => {
     // The 0.1.7 footer-style shape: the tab seat is handed no `sessionId` and the session-list store
     // names no selection, so `here` falls through to the published session (what the Session header
     // entry last showed). Two things have to hold:
-    //  1. with nothing published, the count is the page-wide newest view — `viewFor(undefined)`, the
-    //     same answer `getSnapshot()` gives — not a slot no session read ever writes (the store fix);
+    //  1. with nothing published, the chip has NOTHING to review: it reads 0 rather than the page-wide
+    //     newest view. That view is `viewFor(undefined)` — the store contract `store.client.spec.ts`
+    //     pins for whole-page readers — and for a seat it is another session's count (another
+    //     workspace's, too: nothing here compares workspaces), which is the reader's bug;
     //  2. a later `publishSessionId('pane-one')` moves the chip on its own: it reads the published id
     //     through the SUBSCRIBED hook, so no other publish or store poll is needed for it to catch up.
     const store = createPendingDiffStore({
@@ -307,8 +315,8 @@ describe('DiffDockTitle', () => {
       },
     } as unknown as DiffApprovalPort)
     // The session the header names gets read first, so the page-wide pointer ends up on the OTHER one:
-    // `viewFor(undefined)` must answer that newest read, while a publish of the named session must move
-    // the chip to the named session's own view (one file, not three).
+    // the chip must NOT wear that newest read's number, while a publish of the named session must move it
+    // to the named session's own view (one file).
     await store.refresh('pane-one' as never)
     await store.refresh('page-wide' as never)
     const chip = {
@@ -319,8 +327,10 @@ describe('DiffDockTitle', () => {
       useTabInfo: () => ({ tab: { visible: true, actions: { close: () => {} } } }),
     } as never
     render(<DiffDockTitle {...chip} />)
-    // Nothing published yet: the page's newest read (three files), not zero.
-    expect(screen.getByText('panel.title · 3')).not.toBeNull()
+    // Nothing published and no session in the store: the chip is a title with no number, not the page's
+    // newest list (three rows).
+    expect(screen.getByText('panel.title')).not.toBeNull()
+    expect(screen.queryByText('panel.title · 3')).toBeNull()
 
     // The header switches: the chip re-renders from the subscription alone and reads that session's view.
     act(() => { publishSessionId('pane-one' as never) })

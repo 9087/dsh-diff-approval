@@ -27,7 +27,7 @@ import { setPanelPresentation } from './settings.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
 import type { PendingDiffSnapshot, PendingViewHooks } from './slots.ts'
 import { countOf } from './slots.ts'
-import { usePublishedSessionId, selectedSessionOf } from './session-seat.ts'
+import { usePublishedSessionId, selectedSessionOf, unreviewableSession } from './session-seat.ts'
 
 /** The tab type's `kind`: what `openTab` names. */
 export const DIFF_DOCK_KIND = 'diff-approval'
@@ -356,6 +356,12 @@ export function DiffDockTitle(props: DiffDockBodyProps): ReactNode {
   // render and showed the previous session's count until something else happened to re-render it.
   const published = usePublishedSessionId()
   const here = sessionId ?? storeSelected ?? published
+  // The same rule the panel and the header entry apply: a session this chip cannot name, or one the shell
+  // says is blank (a brand-new session with nothing said in it yet), has nothing to review — its count is 0
+  // and it must not borrow the page's newest list. The blank test names the SAME id the count is read for,
+  // so the two cannot disagree (see `unreviewableSession`).
+  const blank = useSessions !== undefined && useSessions(state => unreviewableSession(state, here)) === true
+  const nothingToReview = here === undefined || blank
   // The page-wide read doubles as the subscription that re-renders this chip when anything publishes:
   // one call, made on every render, and its answer is the fallback for a face with no per-session reader.
   const pageWide = usePending?.((snapshot: PendingDiffSnapshot) => snapshot) as PendingDiffSnapshot | undefined
@@ -365,9 +371,11 @@ export function DiffDockTitle(props: DiffDockBodyProps): ReactNode {
     // `countOf` is the shared rule: the light count while one is the freshest number this session has,
     // else the length of the list the last full read carried. A chip that only knew `files.length` would
     // sit on a stale figure while the panel is shut — nothing re-reads the LIST then (see `countOf`).
-    count = pendingView !== undefined
-      ? pendingView(here, countOf)
-      : pageWide === undefined ? 0 : countOf(pageWide)
+    count = nothingToReview
+      ? 0
+      : pendingView !== undefined
+        ? pendingView(here, countOf)
+        : pageWide === undefined ? 0 : countOf(pageWide)
   } catch {
     count = 0
   }

@@ -112,6 +112,24 @@ export function sessionIsBlank(state: unknown, id: SessionId | undefined): boole
 }
 
 /**
+ * Whether a seat has NO reviewable session: it cannot name one at all, or the shell says the one it names
+ * is blank (a brand-new session with nothing said in it yet).
+ *
+ * The two halves are ONE question and must be asked of the SAME id — the id the seat would read its view
+ * for. Splitting them is what this helper exists to stop: a seat that drew its view for the published
+ * session while testing `sessionIsBlank` against a different (absent) id stayed enabled on a blank session
+ * and drew the previous session's list — from another workspace as readily as from its own, because nothing
+ * in this client compares workspaces.
+ *
+ * @param state - the session-list state handed to the selector.
+ * @param id - the session this seat would read its view for.
+ * @returns true when there is nothing to review.
+ */
+export function unreviewableSession(state: unknown, id: SessionId | undefined): boolean {
+  return id === undefined || sessionIsBlank(state, id)
+}
+
+/**
  * The session the PAGE is showing, resolved the way a whole-page reader has to resolve it: the
  * session-list store's own selection first, else what the Session header entry published.
  *
