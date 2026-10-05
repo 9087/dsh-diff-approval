@@ -4,6 +4,8 @@
 
 [![npm 版本](https://img.shields.io/npm/v/dsh-diff-approval)](https://www.npmjs.com/package/dsh-diff-approval)
 [![CI](https://img.shields.io/github/actions/workflow/status/9087/dsh-diff-approval/ci.yml)](https://github.com/9087/dsh-diff-approval/actions)
+[![发布](https://img.shields.io/github/actions/workflow/status/9087/dsh-diff-approval/release.yml?label=release)](https://github.com/9087/dsh-diff-approval/actions/workflows/release.yml)
+[![兼容性（比 latest 更新的已发布版本）](https://img.shields.io/github/actions/workflow/status/9087/dsh-diff-approval/compat-newer.yml?label=compat%20(newer))](https://github.com/9087/dsh-diff-approval/actions/workflows/compat-newer.yml)
 
 一个 DeepSeek Harness（DSH）待处理改动审核插件：自动跟踪每次成功的 `edit` / `write` / 编辑器（`str_replace_editor`）改动，在侧边栏整合为一个待处理列表，可逐个文件查看完整差异并保留 / 回退，也可以把工作区里版本控制仓库的本地改动一键导入（Git / SVN / Perforce）。
 

@@ -25,6 +25,17 @@ jobs:
       # element). A red test must stop the release rather than publish a tag.
       - run: pnpm test
       - run: pnpm run build
+      # The same compatibility gate CI runs, here because this is where it matters most: the suite
+      # proves THIS build's own behaviour, while the matrix proves every published release inside the
+      # declared peer range still mounts it. A red matrix must stop the tag rather than ship a version
+      # that cannot load in a release someone is already running. The per-release installs are cached
+      # the same way CI caches them, keyed on the script and the manifest.
+      - uses: actions/cache@v4
+        with:
+          path: .compat
+          key: compat-${{ runner.os }}-${{ hashFiles('scripts/dsh-compat.mjs', 'package.json') }}
+          restore-keys: compat-${{ runner.os }}-
+      - run: pnpm run compat
       - run: npm publish --provenance
       - uses: softprops/action-gh-release@v2
         with:
