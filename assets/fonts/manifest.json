@@ -15,7 +15,7 @@
   "seedGlyphs": 300,
   "capBytes": 120000,
   "order": "ranked-hanzi.txt",
-  "gatedBy": "settings switch: diff-approval:code-font (off by default)"
+  "gatedBy": "settings switch: diff-approval:mono-font (on by default; an explicit '0' turns it off)"
  },
  "slices": [
   {

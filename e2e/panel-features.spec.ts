@@ -634,6 +634,36 @@ test.describe('面板功能：搜索 / 跳转 / 视图 / 浮动列表 / 预览 /
   test('s14. 全部保留：清空列表', async () => {
     test.setTimeout(120_000)
     await page.locator('[data-diff-keep-all]').first().click({ timeout: 20_000 })
+
+    // THE BATCH DIALOG'S TITLE, measured — the tallest of the five the reader asked to be titled, and the one
+    // whose lists are longest (a `li` per file). It has to be visible where a title goes: the FIRST child of
+    // the card, above the ask and the lists. The card is also asserted to stay inside the viewport with its
+    // buttons in reach, which is the "内容多了就不怎么好看" half of the request: the file lists scroll inside
+    // their own 104px boxes (`.confirmList`), so no number of files can push the buttons off-screen.
+    const confirm = page.locator('[data-diff-batch-confirm]').first()
+    await expect(confirm).toBeVisible({ timeout: 20_000 })
+    const title = confirm.locator('[data-diff-batch-confirm-title]').first()
+    await expect(title).toBeVisible({ timeout: 20_000 })
+    // Either language: this GUI runs in Chinese here, and pinning one translation would make the case fail on
+    // a shell whose language differs from the assertion — which is the harness's, not the panel's, choice.
+    await expect(title).toHaveText(/^(批量操作|Bulk action)$/)
+    const measured = await confirm.evaluate((dialog) => {
+      const card = dialog.querySelector('[role="dialog"]') as HTMLElement
+      const heading = card.querySelector('[data-diff-batch-confirm-title]') as HTMLElement
+      const box = card.getBoundingClientRect()
+      return {
+        titleIsFirst: card.firstElementChild === heading,
+        cardTop: box.top,
+        cardBottom: box.bottom,
+        viewport: window.innerHeight,
+        goVisible: (dialog.querySelector('[data-diff-batch-confirm-go]') as HTMLElement).getBoundingClientRect().bottom,
+      }
+    })
+    expect(measured.titleIsFirst, 'the title is the card\'s first line').toBe(true)
+    expect(measured.cardTop).toBeGreaterThanOrEqual(0)
+    expect(measured.cardBottom, 'the card stays inside the viewport').toBeLessThanOrEqual(measured.viewport)
+    expect(measured.goVisible, 'the confirm button is inside the viewport too').toBeLessThanOrEqual(measured.viewport)
+
     await confirmIfAsked(page)
     await expect(page.locator('[data-diff-file]')).toHaveCount(0, { timeout: 30_000 })
     // …and the panel says so rather than drawing an empty list with a stale count: the empty state is the

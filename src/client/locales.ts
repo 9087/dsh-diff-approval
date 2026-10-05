@@ -27,6 +27,12 @@ export const zh = {
   'chip.copyPath': '复制文件路径',
   'chip.about': '关于此菜单',
   'chip.about.title': '关于此菜单',
+  // Titles for the two confirm dialogs and the About dialog, in the one shared shape (see
+  // `PendingPanel.module.css`'s `.confirmTitle` and the `data-diff-*-title` markers). Three overlays carry
+  // NO title element any more — the block confirm, the colour popover and the go-to popup — and name
+  // themselves with their own `aria-label` instead (2026-10-07, the reader's decision).
+  'panel.confirmFileTitle': '单文件操作',
+  'panel.batchConfirmTitle': '批量操作',
   // Four short paragraphs in ONE string, split at the blank line where it is drawn: the copy is frozen
   // prose rather than a template, so it reads here exactly as it reads to the reader.
   'chip.about.body': '这个菜单由插件 dsh-diff-approval（改动审批）注入，不是 DSH 自带的功能。\n\n它接管这些地方的按下：外壳「已编辑 / 产出文件」列表里的文件行、消息里的 @文件 引用与文件链接、以及本插件 Markdown 预览里的相对链接。普通网址与 # 锚点不受影响。\n\n想关掉它：设置 → 改动审批 → 关闭「文件菜单」。这些按下随即恢复 DSH 自己的行为。\n\n外壳文件行与消息链接上的第一项「默认方式打开」就是 DSH 原本的行为；Markdown 预览里的链接没有可重放的宿主行为，所以那一项不会出现在那里。',
@@ -54,7 +60,7 @@ export const zh = {
   'panel.mdPreview': 'Markdown 预览',
   'panel.mdPreviewDesc': '开启后，选中 Markdown 文件时默认以渲染后的预览视图展示（与「源码」切换），关闭则默认显示源码差异。',
   'panel.codeFont': '等宽 CJK 字体',
-  'panel.codeFontDesc': '代码区改用插件内置的「{link}」，汉字与拉丁同栅格，中文注释才能和代码对齐。开启后按 unicode-range 惰性加载 woff2 切片：普通中文约几十 KB，含生僻字时单片上限约 120 KB，纯英文仅 33 KB。默认关闭。',
+  'panel.codeFontDesc': '代码区改用插件内置的「{link}」，汉字与拉丁同栅格，中文注释才能和代码对齐。按 unicode-range 惰性加载 woff2 切片：普通中文约几十 KB，含生僻字时单片上限约 120 KB，纯英文仅 33 KB。「默认开启」，切片按需下载；关掉这个开关即可回到系统字体。',
   'panel.mdMaxWidth': 'Markdown 预览宽度',
   'panel.mdMaxWidthDesc': 'Markdown 预览内容的单栏最大宽度（像素，默认 800）；双栏为两倍宽度并居中，超过时限制超宽内容。',
   'panel.diffAddColor': '新增颜色',
@@ -321,6 +327,11 @@ export const en = {
   'chip.copyPath': 'Copy file path',
   'chip.about': 'About this menu',
   'chip.about.title': 'About this menu',
+  // Every overlay the panel raises wears a title (2026-10-06) — see the `panel.*` block above for the shape.
+  // See the `panel.*` block above: two confirm titles and About keep the shared title shape; the block
+  // confirm, the colour popover and the go-to popup name themselves with `aria-label` instead.
+  'panel.confirmFileTitle': 'Single-file action',
+  'panel.batchConfirmTitle': 'Bulk action',
   'chip.about.body': 'This menu is injected by the plugin dsh-diff-approval; it is not a DSH feature.\n\nIt takes over the press on: file rows in the shell\'s edited and produced lists, @file references and file links in messages, and relative links in this plugin\'s Markdown preview. Plain web links and #fragments are left alone.\n\nTo turn it off: Settings → Diff Approval → switch off "File menu". Those presses then go back to DSH\'s own behaviour.\n\nOn a shell file row or a message link, the first item, "Open as usual", is DSH\'s own behaviour; a link in the Markdown preview has no shell press to replay, so that item does not appear there.',
   'chip.about.ok': 'Got it',
   'chip.gone': 'That file chip is no longer on the page; try again',
@@ -346,7 +357,7 @@ export const en = {
   'panel.mdPreview': 'Markdown preview',
   'panel.mdPreviewDesc': 'When on, selecting a Markdown file shows the rendered preview view by default (toggle with "Source"); when off, it shows the source diff.',
   'panel.codeFont': 'Monospaced CJK font',
-  'panel.codeFontDesc': 'Renders the code column with the bundled "{link}", so hanzi share the code\'s grid and Chinese comments line up with it. When on, the woff2 slices load lazily by unicode-range: tens of KB for ordinary Chinese, at most ~120 KB per slice for a rare character, 33 KB for pure ASCII. Off by default.',
+  'panel.codeFontDesc': 'Renders the code column with the bundled "{link}", so hanzi share the code\'s grid and Chinese comments line up with it. The woff2 slices load lazily by unicode-range: tens of KB for ordinary Chinese, at most ~120 KB per slice for a rare character, 33 KB for pure ASCII. On by default — the slices download on demand rather than shipping with the page — and turning this switch off returns the code to the system font.',
   'panel.mdMaxWidth': 'Markdown preview width',
   'panel.mdMaxWidthDesc': 'The single-column max width of the Markdown preview content, in pixels (default 800); the double-column view uses twice this and centres it.',
   'panel.diffAddColor': 'Added color',

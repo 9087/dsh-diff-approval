@@ -23,19 +23,22 @@ const LANG_BY_SUFFIX_KEY = 'diff-approval:lang-by-suffix'
 const PRESENTATION_KEY = 'diff-approval:presentation'
 const FLOAT_COVER_KEY = 'diff-approval:float-cover'
 const FILE_LIST_FLOAT_KEY = 'diff-approval:file-list-float'
-// TEMPORARY, and deliberately NOT the field's final name. Comment mode ships off for now
-// and is expected to default ON once it has seen some use. A value stored under the final
-// key would outlive that flip — for anyone who toggled it, and for any surface that writes
-// a preference out eagerly — leaving them stuck off with no way to notice. Parking it under
-// a `-preview` key keeps the future field empty for everybody, so its default decides, and
-// whoever opted into the preview lands on the same answer that default gives.
-//
-// When the mode becomes the default: DELETE this constant, its getter and its setter, and
-// add the real field — do not rename them. Renaming would carry the preview's stored answer
-// over as if the user had chosen it under the new default.
-const COMMENT_MODE_PREVIEW_KEY = 'diff-approval:comment-mode-preview'
+// Comment mode is the DEFAULT now, so the preview parking described in earlier revisions of this file is
+// over: the real field is below and the `-preview` key is not read, written or migrated. Migrating it would
+// be the one thing worse than dropping it — an old opt-in or opt-out would be carried over as if it were a
+// choice made under this default, when every existing profile is meant to land ON. An explicit `'0'` under
+// the key below is the only thing that turns the mode off.
+const COMMENT_MODE_KEY = 'diff-approval:comment-mode'
 const WRAP_PREFIX = 'diff-approval:wrap:'
-const CODE_FONT_KEY = 'diff-approval:code-font'
+// A NEW FIELD, not a versioned one: `diff-approval:mono-font` keeps the short-noun style this file's other
+// keys use (`comment-mode`, `tab-size`, `md-preview`). It exists because the old `diff-approval:code-font`
+// was read as `=== '1'` — absent meant OFF — while this one is read as `!== '0'`, so absent means ON. Moving
+// the field is what carries existing profiles along, which is what the reader asked for
+// (「老用户看能不能也统一开启，比如设置数据换个字段」).
+// THE TRADE-OFF, recorded where the field is defined because it is a decision and not a side effect: an
+// explicit OFF stored under the OLD key is dropped rather than honoured — a reader who had turned the bundled
+// font off before today comes back with it on. Turning it off AFTER this change writes `'0'` here and stays off.
+const CODE_FONT_KEY = 'diff-approval:mono-font'
 
 /** Where the review panel shows: floating over the app, or docked as a tab in the
  *  app's right sidebar. What the floating panel covers is a separate setting —
@@ -449,22 +452,26 @@ export function setChipMenuEnabled(value: boolean): void {
 
 /**
  * Whether commenting on a diff range is offered: the selection frame's comment button,
- * and the chord that stands for it. Defaults to off while the mode is a preview (see
- * {@link COMMENT_MODE_PREVIEW_KEY}); only an explicit `'1'` enables it. This gates
- * STARTING a thread, not the threads themselves — one already written keeps rendering,
- * so turning the mode off never hides work or interrupts an answer on its way back.
+ * and the chord that stands for it. **Defaults to ON** — comment mode is the mode now,
+ * not a preview — so only an explicit `'0'` turns it off (the `chipMenuEnabled` idiom a
+ * few lines up), and an absent field means on for every profile that predates the flip.
+ * This gates STARTING a thread, not the threads themselves — one already written keeps
+ * rendering, so turning the mode off never hides work or interrupts an answer on its way
+ * back.
  * @returns whether comment mode is on.
  */
 export function commentModeEnabled(): boolean {
-  return localStorage.getItem(COMMENT_MODE_PREVIEW_KEY) === '1'
+  return localStorage.getItem(COMMENT_MODE_KEY) !== '0'
 }
 
-/** Window event: comment mode was toggled (see {@link setCommentModeEnabled}). */
-export const COMMENT_MODE_CHANGED_EVENT = 'diff-approval:comment-mode'
+/** Window event: comment mode was toggled (see {@link setCommentModeEnabled}). A DIFFERENT string from
+ *  {@link COMMENT_MODE_KEY} on purpose: a key literal and an event literal that read the same make every
+ *  grep a guess (the hazard this file already names for the file-menu key at the top). */
+export const COMMENT_MODE_CHANGED_EVENT = 'diff-approval:comment-mode-changed'
 
-/** Persist the comment-mode preference. */
+/** Persist the comment-mode preference (`'1'` on, `'0'` off — see {@link commentModeEnabled}). */
 export function setCommentModeEnabled(value: boolean): void {
-  localStorage.setItem(COMMENT_MODE_PREVIEW_KEY, value ? '1' : '0')
+  localStorage.setItem(COMMENT_MODE_KEY, value ? '1' : '0')
   // The panel and the Settings section are separate mounts, so the event is how a switch
   // flipped in one reaches the other straight away — the same hand-off the cover uses.
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(COMMENT_MODE_CHANGED_EVENT))
@@ -473,19 +480,23 @@ export function setCommentModeEnabled(value: boolean): void {
 /**
  * Whether the diff's code uses the font this plugin bundles.
  *
- * Defaults to **off**: the bundled face is JetBrains Maple Mono subset and
- * sliced into 138 woff2 files, and a page pulls the slices its characters land
- * in — tens of kilobytes for a comment, up to ~120 KB for a rare character. That
- * is real traffic, so it is the reader's decision, not a default they discover.
- * Only an explicit `'1'` enables it.
+ * **Defaults to ON**, like comment mode: absent means on, and only an explicit `'0'` turns
+ * it off. The old field's answer is deliberately NOT carried over (see the constant): a
+ * reader who had turned the bundled face off before this change comes back with it on, which
+ * is the one behaviour the reader asked for. The cost is real and worth naming where the
+ * switch is: the face is a JetBrains Maple Mono subset sliced into 138 woff2 files, and a
+ * page pulls only the slices its characters land in — tens of kilobytes for a comment, up to
+ * ~120 KB for a rare character — downloaded on demand rather than shipped.
  * @returns whether the bundled code font is enabled.
  */
 export function codeFontEnabled(): boolean {
-  return localStorage.getItem(CODE_FONT_KEY) === '1'
+  return localStorage.getItem(CODE_FONT_KEY) !== '0'
 }
 
-/** Window event: the bundled code font was turned on or off (see {@link setCodeFontEnabled}). */
-export const CODE_FONT_CHANGED_EVENT = 'diff-approval:code-font'
+/** Window event: the bundled code font was turned on or off (see {@link setCodeFontEnabled}). A DIFFERENT
+ *  string from {@link CODE_FONT_KEY} on purpose — they used to be the same literal, which made a grep for
+ *  either one a guess (the hazard this file names for the file-menu key at the top). */
+export const CODE_FONT_CHANGED_EVENT = 'diff-approval:code-font-changed'
 
 /** Persist the bundled-code-font preference. */
 export function setCodeFontEnabled(value: boolean): void {

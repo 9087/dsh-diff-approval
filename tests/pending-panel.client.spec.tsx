@@ -53,10 +53,11 @@ afterEach(resetPanelMemory)
 // only: the panel focuses the first one it finds, so a leftover would silently
 // redirect the next test's caret assertion.
 afterEach(() => { for (const stale of document.querySelectorAll('[data-composer-input]')) stale.remove() })
-// Comment mode is a preview that ships OFF (see `commentModeEnabled`). The commenting
-// tests are about what the mode does once it is on, so the suite switches it on here; the
-// default and the off-state behaviour are asserted on their own below.
-beforeEach(() => { localStorage.setItem('diff-approval:comment-mode-preview', '1') })
+// Comment mode is ON by default (see `commentModeEnabled`), and the commenting tests are about what the
+// mode does once it is on. The suite pins that starting point explicitly — the mode is a real preference
+// now, so a test that switches it OFF would otherwise leak into the next one — and the off-state behaviour
+// is asserted on its own below.
+beforeEach(() => { localStorage.setItem('diff-approval:comment-mode', '1') })
 
 beforeAll(() => {
   // jsdom has no scrolling; the jump effect centers rows through it.
@@ -1445,7 +1446,7 @@ describe('PendingPanel', () => {
       fireEvent.click(bulkButton('revert-all'))
       // The ask is whichever text the dialog renders; read it off the element so a renamed key still fails
       // loudly rather than silently matching nothing.
-      const ask = (document.querySelector('[data-diff-batch-confirm] p') as HTMLElement).textContent ?? ''
+      const ask = (document.querySelector('[data-diff-batch-ask]') as HTMLElement).textContent ?? ''
       const deletes = document.querySelector('[data-diff-batch-deletes]') !== null
       view.unmount()
       return { label, ask, deletes }
@@ -1783,7 +1784,7 @@ describe('PendingPanel', () => {
       const view = render(<PendingPanel {...panelProps({ read: true, files, busy: new Set() })} />)
       fireEvent.click(screen.getByLabelText('panel.aria'))
       fireEvent.click(bulkButton('revert-all'))
-      const ask = (document.querySelector('[data-diff-batch-confirm] p') as HTMLElement).textContent ?? ''
+      const ask = (document.querySelector('[data-diff-batch-ask]') as HTMLElement).textContent ?? ''
       const named = document.querySelector('[data-diff-batch-deletes]') === null ? [] : deleteWarning().names
       view.unmount()
       return { ask, names: named }
@@ -10563,10 +10564,11 @@ describe('PendingPanel', () => {
   })
 
   it('offers no comment at all until comment mode is switched on', () => {
-    // Comment mode ships OFF (it is a preview, see `commentModeEnabled`): no comment button
-    // and no chord behind it - and, for a range whose only action would have been the
+    // Comment mode is ON by default now, so the OFF state is reached by the value a reader's own switch
+    // writes — `'0'` under the real key (see `commentModeEnabled`); removing the key would mean ON. No
+    // comment button and no chord behind it - and, for a range whose only action would have been the
     // comment, no frame at all. Keep/revert over change blocks is untouched.
-    localStorage.removeItem('diff-approval:comment-mode-preview')
+    localStorage.setItem('diff-approval:comment-mode', '0')
     const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [multi], busy: new Set() })
     render(<PendingPanel {...props} />)
@@ -11798,7 +11800,9 @@ describe('PendingPanel', () => {
     // how a reader checks which face this is.
     const codeFont = document.querySelector('[data-diff-code-font]') as HTMLButtonElement
     expect(codeFont).not.toBeNull()
-    expect(codeFont.getAttribute('aria-checked')).toBe('false')
+    // ON by default since 2026-10-06 (see `codeFontEnabled`): the switch reports its real state, so a reader
+    // who never touched it sees it checked. The OFF state is pinned in `settings.client.spec.ts`.
+    expect(codeFont.getAttribute('aria-checked')).toBe('true')
     const upstream = document.querySelector('a[href^="https://github.com/SpaceTimee/"]') as HTMLAnchorElement
     expect(upstream).not.toBeNull()
     expect(upstream.textContent).toBe('JetBrains Maple Mono')
@@ -14471,4 +14475,110 @@ describe('PendingPanel: the rows a comment covers', () => {
     expect(document.querySelectorAll('[data-diff-child]')).toHaveLength(0)
   })
 
+})
+
+describe('dialog titles', () => {
+  // Titles survive on the two confirm dialogs and About (2026-10-07, the reader's decision): every overlay
+  // carried one from 2026-10-06, and the block confirm, the colour popover and the go-to popup had theirs
+  // REMOVED — each names itself another way instead, and NOTHING may point at a removed id. What is left
+  // wears the same shape: a `<p>` with the shared `.confirmTitle` class, a `data-diff-<name>-title` marker, an
+  // id, and a card that names itself by that id (`aria-labelledby`). The add-path picker keeps its own title
+  // (its numbers — 13px / 500 / 20px — are the ones `.confirmTitle` copied).
+  const DIALOGS = [
+    { name: 'confirm-file', key: 'panel.confirmFileTitle' },
+    { name: 'batch-confirm', key: 'panel.batchConfirmTitle' },
+    { name: 'about', key: 'chip.about.title' },
+  ] as const
+  /** The three whose titles went away: their markers, their ids, and their keys must all be gone. */
+  const REMOVED = [
+    { name: 'confirm', file: 'PendingPanel.tsx', key: 'panel.confirmBlockTitle' },
+    { name: 'color', file: 'SettingsTab.tsx', key: 'panel.colorTitle' },
+    { name: 'goto', file: 'PendingPanel.tsx', key: 'action.gotoTitle' },
+  ] as const
+  const sourceOf = (file: string): string => readFileSync(join(process.cwd(), 'src', 'client', file), 'utf8')
+
+  it('wires each remaining dialog to a title element, in the one shared shape', () => {
+    // A SOURCE pin, and said so: these three are reached through three different flows (a whole-file press, a
+    // bulk press, the About entry), and a case per flow would re-test the flows other cases already own. What
+    // is pinned is the wiring a missing title breaks — the element, its marker, its class, its id, the key it
+    // renders, and the card's `aria-labelledby` pointing at that id.
+    const source = sourceOf('PendingPanel.tsx')
+    for (const dialog of DIALOGS) {
+      const id = `diff-approval-${dialog.name}-title`
+      expect(source, `${dialog.name}: title element`).toContain(`id="${id}"`)
+      expect(source, `${dialog.name}: title marker`).toContain(`data-diff-${dialog.name}-title`)
+      expect(source, `${dialog.name}: key rendered`).toContain(`{t('${dialog.key}')}`)
+      expect(source, `${dialog.name}: card names itself by the title`).toContain(`aria-labelledby="${id}"`)
+    }
+    // …and each of them carries exactly ONE labelledby (no dialog left naming itself twice or not at all).
+    for (const dialog of DIALOGS) {
+      const card = source.split('aria-labelledby="').filter(part => part.startsWith(`diff-approval-${dialog.name}-title`))
+      expect(card, `${dialog.name}: labelled once`).toHaveLength(1)
+    }
+    // The picker's title predates the family; it is where the family's numbers came from.
+    expect(sourceOf('PathPicker.tsx')).toContain('css.pickerTitle')
+  })
+
+  it('leaves the three removed titles out for good, and names those dialogs another way', () => {
+    const panel = sourceOf('PendingPanel.tsx')
+    const settings = sourceOf('SettingsTab.tsx')
+    for (const removed of REMOVED) {
+      const source = removed.file === 'SettingsTab.tsx' ? settings : panel
+      expect(source, `${removed.name}: the title element is gone`).not.toContain(`data-diff-${removed.name}-title`)
+      expect(source, `${removed.name}: the key is gone`).not.toContain(`'${removed.key}'`)
+    }
+    // No id survives either: an `aria-labelledby` pointing at a removed one would name nothing at all.
+    expect(panel, 'the block confirm id is gone').not.toContain('diff-approval-confirm-title')
+    expect(panel, 'the go-to id is gone').not.toContain('diff-approval-goto-title')
+    expect(settings, 'the popover id derivation is gone').not.toContain('popover-title')
+    expect(settings, 'the popover title prop is gone').not.toContain('popoverTitle')
+
+    // Each of the three still carries a name it can honestly hold: the block confirm asks its own question
+    // (which is the line the card is about), the go-to popup is the chord's own label, the popover the row's.
+    const goto = panel.slice(0, panel.indexOf('data-diff-goto-dialog')).slice(-600)
+    expect(goto, 'the go-to popup names itself').toContain("aria-label={t('action.goto')}")
+    expect(goto, 'the go-to popup points at no title').not.toContain('aria-labelledby')
+    expect(panel, 'the block confirm names itself by its question')
+      .toContain(`aria-modal="true" aria-label={t('panel.resolvedAsk'`)
+    expect(settings, 'the colour popover names itself by its row').toContain('role="dialog" aria-label={title}')
+  })
+
+  it('has the remaining keys in BOTH dictionaries — and NONE of the three removed ones', () => {
+    for (const dialog of DIALOGS) {
+      for (const [language, dictionary] of [['zh', zh], ['en', en]] as const) {
+        const text = dictionary[dialog.key as keyof typeof zh]
+        expect(text, `${language}.${dialog.key} exists`).toBeTruthy()
+        expect(String(text).trim().length, `${language}.${dialog.key} says something`).toBeGreaterThan(0)
+      }
+    }
+    // The rename the reader agreed to: this one pairs with the batch dialog's title.
+    expect(zh['panel.confirmFileTitle']).toBe('单文件操作')
+    expect(en['panel.confirmFileTitle']).toBe('Single-file action')
+    // …and the batch title is deliberately untouched.
+    expect(zh['panel.batchConfirmTitle']).toBe('批量操作')
+    expect(en['panel.batchConfirmTitle']).toBe('Bulk action')
+    // A REMOVED title key would be a dead string: gone from both dictionaries, not left behind for a reader.
+    for (const removed of REMOVED) {
+      expect(removed.key in zh, `zh still carries ${removed.key}`).toBe(false)
+      expect(removed.key in en, `en still carries ${removed.key}`).toBe(false)
+    }
+  })
+
+  it('renders the colour popover as a dialog that names itself by its ROW, with no title element', () => {
+    // The one of the three without a title reachable without duplicating a flow: the picker's own trigger.
+    const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
+    render(<DiffApprovalSettingsTab {...props} />)
+    // The colour rows live in the folded diff-view group, so it is opened first — the same flow the settings
+    // cases above take.
+    fireEvent.click(document.querySelector('[data-diff-view-toggle]') as HTMLButtonElement)
+    const trigger = document.querySelector('[data-diff-add-color]') as HTMLElement
+    fireEvent.click(trigger)
+    expect(document.querySelector('[data-diff-color-title]'), 'the popover still carries a title element').toBeNull()
+    const dialog = document.querySelector('[role="dialog"]') as HTMLElement
+    expect(dialog).not.toBeNull()
+    expect(dialog.getAttribute('aria-labelledby')).toBeNull()
+    // Its name is the ROW's own label — what the trigger's row is about — not a shared "custom colour".
+    expect(dialog.getAttribute('aria-label')).toBe((trigger.closest('[class*="settingsRow"]')?.querySelector('[class*="settingsRowTitle"]')?.textContent ?? '').trim())
+    expect(dialog.getAttribute('aria-label')).not.toBe('')
+  })
 })

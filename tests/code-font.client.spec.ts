@@ -97,13 +97,16 @@ describe('the injected code font rules', () => {
 })
 
 describe('the code font switch', () => {
-  it('is off by default and fetches nothing until it is on', async () => {
-    const fetchStub = stubFetch({ slices: SLICES })
+  it('is ON by default, and an explicit OFF still fetches nothing', async () => {
+    // The default flipped to ON on 2026-10-06 (see the constant in `settings.ts`): absent means on, so the
+    // first `attach` DOES fetch. "Off" is now something the reader chooses, and it must still mean nothing is
+    // fetched at all — no manifest request, no `@font-face`, no rule.
+    expect(codeFontEnabled()).toBe(true)
+    setCodeFontEnabled(false)
     expect(codeFontEnabled()).toBe(false)
+    const fetchStub = stubFetch({ slices: SLICES })
     attach()
     await settle()
-    // The default panel must be exactly what it was before the font existed:
-    // no manifest request, no @font-face, no rule.
     expect(fetchStub).not.toHaveBeenCalled()
     expect(injected()).toBeNull()
   })
@@ -192,7 +195,10 @@ describe('the code font stack', () => {
 // panel, so it is pinned: a rename here without renaming the listener would
 // leave the switch doing nothing until a page reload.
 describe('the switch event', () => {
-  it('is the one the panel listens for', () => {
-    expect(CODE_FONT_CHANGED_EVENT).toBe('diff-approval:code-font')
+  it('is the one the panel listens for, and is NOT the storage key', () => {
+    // The second assertion is the one added on 2026-10-06: event and storage key used to be the same literal,
+    // which made a grep for either one a guess (the hazard `settings.ts` already names for the file-menu key).
+    expect(CODE_FONT_CHANGED_EVENT).toBe('diff-approval:code-font-changed')
+    expect(CODE_FONT_CHANGED_EVENT).not.toBe('diff-approval:mono-font')
   })
 })

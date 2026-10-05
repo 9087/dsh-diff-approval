@@ -1401,6 +1401,20 @@
   box-shadow: var(--dsw-shadow-lv3);
 }
 
+/* ONE title shape for every dialog this panel raises (2026-10-06): the reader asked for a title on each of
+   them, and a collection of titles only reads as one family when they are the same element wearing the same
+   class. The numbers are the add-path picker's own title (`.pickerTitle`), which was already the panel's one
+   real title: 13px at weight 500 on a 20px line. */
+.confirmTitle {
+  margin: 0;
+  flex: none;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  color: var(--dsw-alias-label-primary);
+  overflow-wrap: anywhere;
+}
+
 .confirmText {
   margin: 0;
   font: var(--dsw-font-caption);
@@ -2298,17 +2312,28 @@
   z-index: 29;
 }
 
+/* The popup's box: the row it has always been (`.gotoRow`) and the room the box needs around it. It held a
+   title from 2026-10-06 until 2026-10-07, when the reader had it removed again — the dialog names itself by
+   the chord's own label now, so the box is the row's wrapper and no longer a column of two things. */
 .gotoBox {
   position: relative;
   z-index: 1;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 4px;
   padding: 4px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 10px;
   background: var(--dsw-alias-markdown-code-block);
   box-shadow: var(--dsw-shadow-lv1);
+}
+
+/* The field and its two buttons, in the row they have always been. */
+.gotoRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .gotoInput {

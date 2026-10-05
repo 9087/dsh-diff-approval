@@ -4273,7 +4273,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   const [hScrollbarPx, setHScrollbarPx] = useState(0)
   const [hoveredBlock, setHoveredBlock] = useState<number | undefined>(undefined)
   const [selection, setSelection] = useState<RowRange | undefined>(undefined)
-  // Comment mode (a preview that ships off — see `commentModeEnabled`): whether the panel
+  // Comment mode (ON by default — see `commentModeEnabled`): whether the panel
   // offers to comment on a range at all. The event below is what re-renders the panel when
   // the Settings section flips it, since the two are separate mounts.
   const [commentMode, setCommentMode] = useState(commentModeEnabled)
@@ -6670,6 +6670,10 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
             setGotoOpen(false)
           }}
         >
+          {/* NO title element (2026-10-07, the reader's decision): the popup names itself by the chord's own
+              label (`action.goto`, the same words the input carries), so the box no longer repeats it above
+              the field. The row below is the whole box again, as it was before the titles. */}
+          <div className={css.gotoRow}>
           <input
             className={css.gotoInput}
             data-diff-goto-input
@@ -6708,6 +6712,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
           >
             {t('action.gotoCancel')}
           </button>
+          </div>
         </div>
       </div>
     </>
@@ -10857,8 +10862,8 @@ export function PendingPanel({
           and an Escape, not a new species of modal. */}
       {aboutOpen && createPortal(
         <div className={`${css.confirmBackdrop} ${css.confirmBackdropFixed}`} data-diff-about>
-          <div className={css.confirmCard} role="dialog" aria-modal="true" aria-label={t('chip.about.title')}>
-            <p className={css.confirmText} data-diff-about-title>{t('chip.about.title')}</p>
+          <div className={css.confirmCard} role="dialog" aria-modal="true" aria-labelledby="diff-approval-about-title">
+            <p className={css.confirmTitle} id="diff-approval-about-title" data-diff-about-title>{t('chip.about.title')}</p>
             {t('chip.about.body').split('\n\n').map(paragraph => (
               <p key={paragraph} className={css.confirmText}>{paragraph}</p>
             ))}
@@ -11104,7 +11109,11 @@ export function PendingPanel({
           )}
           {blockPrompt !== null && promptFile !== undefined && (
             <div className={css.confirmBackdrop} data-diff-confirm>
-              <div className={css.confirmCard} role="dialog" aria-modal="true">
+              <div className={css.confirmCard} role="dialog" aria-modal="true" aria-label={t('panel.resolvedAsk', { file: basenameOf(promptFile.path) })}>
+                {/* NO title element (2026-10-07, the reader's decision): the block confirm names itself by
+                    the question it asks, which is the one line it already carries — a heading over a
+                    one-sentence card only repeated it. The two confirm dialogs that kept a title wear the
+                    family's shared shape (`.confirmTitle` + a `data-diff-*-title` marker). */}
                 <p className={css.confirmText}>{t('panel.resolvedAsk', { file: basenameOf(promptFile.path) })}</p>
                 {/* A block action that resolved the whole file is about to drop it, and dropping it deletes
                     its comments on the host: the same line the other removal dialogs carry. */}
@@ -11175,7 +11184,12 @@ export function PendingPanel({
           )}
           {filePrompt !== null && promptEntry !== undefined && (
             <div className={css.confirmBackdrop} data-diff-confirm-file>
-              <div className={css.confirmCard} role="dialog" aria-modal="true">
+              <div className={css.confirmCard} role="dialog" aria-modal="true" aria-labelledby="diff-approval-confirm-file-title">
+                {/* The family's title shape: see the block confirm above for why it is this element, this
+                    class and this marker pattern. */}
+                <p className={css.confirmTitle} id="diff-approval-confirm-file-title" data-diff-confirm-file-title>
+                  {t('panel.confirmFileTitle')}
+                </p>
                 <p className={css.confirmText}>
                   {t(filePrompt.action === 'keep' ? 'panel.fileKeptAsk' : 'panel.fileRevertedAsk', { file: basenameOf(promptEntry.path) })}
                 </p>
@@ -11236,8 +11250,16 @@ export function PendingPanel({
           )}
           {batchPrompt !== null && (
             <div className={css.confirmBackdrop} data-diff-batch-confirm>
-              <div className={css.confirmCard} role="dialog" aria-modal="true">
-                <p className={css.confirmText}>
+              <div className={css.confirmCard} role="dialog" aria-modal="true" aria-labelledby="diff-approval-batch-confirm-title">
+                {/* The family's title shape, and here it earns its keep: this dialog can carry two long
+                    lists, so a reader who opened it without a title had no line saying what the box was
+                    about. The lists themselves were already bounded and scrollable (`.confirmList`, 104px
+                    with its own scrollbar and a stable gutter), so the buttons in `.confirmActions` stay
+                    where they are however many files a press would touch. */}
+                <p className={css.confirmTitle} id="diff-approval-batch-confirm-title" data-diff-batch-confirm-title>
+                  {t('panel.batchConfirmTitle')}
+                </p>
+                <p className={css.confirmText} data-diff-batch-ask>
                   {batchAskOf(batchPrompt)}
                 </p>
                 {/* The file's comments go with it: the host DELETES them when the entry leaves the list

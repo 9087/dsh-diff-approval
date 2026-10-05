@@ -10,7 +10,7 @@ import {
   currentDiffAddColor, currentDiffDelColor,
   diffAddColor, diffDelColor, diffFontScale, diffLineHeight, fileListFloat, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, quickSummonKey,
   panelCover, panelPresentation,
-  commentModeEnabled, setCommentModeEnabled,
+  commentModeEnabled, setCommentModeEnabled, COMMENT_MODE_CHANGED_EVENT,
   codeFontEnabled, setCodeFontEnabled, CODE_FONT_CHANGED_EVENT,
   setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setFileListFloat, setLanguageForSuffix, setMdMaxWidth, setMdPreviewEnabled, setQuickSummonKey, setTabWidth, tabWidth,
   setPanelCover, setPanelPresentation,
@@ -32,18 +32,31 @@ const LANG_BY_SUFFIX_KEY = 'diff-approval:lang-by-suffix'
 describe('settings.commentMode', () => {
   beforeEach(() => localStorage.clear())
 
-  it('ships off, under a key meant to be replaced rather than renamed', () => {
-    // The value lives under a `-preview` key on purpose (see `settings.ts`): the mode is
-    // expected to default ON later, and an answer stored under the field's final name would
-    // keep everyone who ever ran this version off, with nothing to notice. The last
-    // assertion is the guard: the eventual key must still be untouched.
+  it('defaults ON, and only an explicit 0 turns it off', () => {
+    // Comment mode is the DEFAULT now, and this is the field's real name: the `-preview` parking described
+    // in `settings.ts` is over, and the old key is not read at all. So every profile that predates the flip
+    // has NO value here and must read as on — that is the whole mechanism for bringing existing users along
+    // — while a reader who turns it off AFTER this ships keeps `'0'` and stays off.
+    expect(commentModeEnabled()).toBe(true)
+    setCommentModeEnabled(false)
+    expect(localStorage.getItem('diff-approval:comment-mode')).toBe('0')
     expect(commentModeEnabled()).toBe(false)
     setCommentModeEnabled(true)
+    expect(localStorage.getItem('diff-approval:comment-mode')).toBe('1')
     expect(commentModeEnabled()).toBe(true)
-    expect(localStorage.getItem('diff-approval:comment-mode-preview')).toBe('1')
-    expect(localStorage.getItem('diff-approval:comment-mode')).toBeNull()
-    setCommentModeEnabled(false)
-    expect(commentModeEnabled()).toBe(false)
+    // The preview key is dead: nothing writes it, and a stale `'0'` under it changes nothing.
+    expect(localStorage.getItem('diff-approval:comment-mode-preview')).toBeNull()
+    localStorage.setItem('diff-approval:comment-mode-preview', '0')
+    localStorage.removeItem('diff-approval:comment-mode')
+    expect(commentModeEnabled()).toBe(true)
+  })
+
+  it('does not spell the storage key and its change event the same way', () => {
+    // A key literal that reads like an event literal makes every grep a guess — the hazard `settings.ts`
+    // already names for the file-menu key — so the pair is asserted apart for BOTH settings.
+    expect(COMMENT_MODE_CHANGED_EVENT).not.toBe('diff-approval:comment-mode')
+    expect(COMMENT_MODE_CHANGED_EVENT).toBe('diff-approval:comment-mode-changed')
+    expect(CODE_FONT_CHANGED_EVENT).not.toBe('diff-approval:mono-font')
   })
 })
 
@@ -127,15 +140,27 @@ describe('settings.chipMenu', () => {
 describe('settings.codeFont', () => {
   beforeEach(() => localStorage.clear())
 
-  it('defaults to off: the bundled slices are traffic the reader opts into', () => {
+  it('defaults ON, and only an explicit 0 under the current key turns it off', () => {
+    // The field MOVED (2026-10-06) rather than being versioned: the new name is what makes absent mean ON, so
+    // every profile that predates the change comes back with the font on — the reader asked for exactly that
+    // — and the older `diff-approval:code-font` key is not read at all.
+    expect(codeFontEnabled()).toBe(true)
+    setCodeFontEnabled(false)
+    expect(localStorage.getItem('diff-approval:mono-font')).toBe('0')
     expect(codeFontEnabled()).toBe(false)
+    setCodeFontEnabled(true)
+    expect(codeFontEnabled()).toBe(true)
+    // The old field is dead: a `'1'` or a `'0'` left under it changes nothing.
+    localStorage.setItem('diff-approval:code-font', '0')
+    localStorage.removeItem('diff-approval:mono-font')
+    expect(codeFontEnabled()).toBe(true)
   })
 
-  it('describes the traffic cost, and marks the font name as the link', () => {
+  it('describes the traffic cost as ON-DEMAND, and marks the font name as the link', () => {
     // The row's copy carries the numbers a reader needs to decide, and the
     // `{link}` token is what the settings row turns into an anchor around the
     // font name. Losing the token would silently drop the upstream link.
-    for (const [dictionary, phrase] of [[zh, '默认关闭'], [en, 'Off by default']] as const) {
+    for (const [dictionary, phrase] of [[zh, '默认开启'], [en, 'On by default']] as const) {
       expect(dictionary['panel.codeFontDesc']).toContain('{link}')
       expect(dictionary['panel.codeFontDesc']).toContain(phrase)
       expect(dictionary['panel.codeFontDesc']).toContain('KB')
@@ -150,7 +175,7 @@ describe('settings.codeFont', () => {
 
   it('persists the opt-in and reads it back', () => {
     setCodeFontEnabled(true)
-    expect(localStorage.getItem('diff-approval:code-font')).toBe('1')
+    expect(localStorage.getItem('diff-approval:mono-font')).toBe('1')
     expect(codeFontEnabled()).toBe(true)
     setCodeFontEnabled(false)
     expect(codeFontEnabled()).toBe(false)

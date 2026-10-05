@@ -26,20 +26,15 @@ export const CLOSE_COMMENT = ['关闭评论', 'Close comment']
 export const NEW_SESSION = ['新建会话', 'New session']
 
 /**
- * A GUI page with the panel's comment mode on.
+ * A GUI page with the panel's comment mode available.
  *
- * Comment mode ships OFF (a preview, see `commentModeEnabled` in the client's settings),
- * and with it off the panel draws no comments tab at all — so a test of the comments list
- * would otherwise be asserting against a feature the build deliberately hides. The panel's
- * own settings switch writes exactly this localStorage key and then fires its change event;
- * seeding it at page start is the same state, reached without a click that could land on a
- * switch the panel has not drawn yet.
+ * Comment mode is ON by default now (see `commentModeEnabled` in the client's settings), so nothing has to
+ * be seeded for the comments tab to exist — the init script that used to write the preview key is gone with
+ * that key. Left as a function because every spec reaches the page through one place, and a future default
+ * that needs seeding belongs here rather than in fifteen call sites.
  */
 export async function newGuiPage(browser: Browser): Promise<Page> {
   const context = await browser.newContext({ viewport: { width: 1400, height: 900 } })
-  await context.addInitScript(() => {
-    window.localStorage.setItem('diff-approval:comment-mode-preview', '1')
-  })
   return context.newPage()
 }
 

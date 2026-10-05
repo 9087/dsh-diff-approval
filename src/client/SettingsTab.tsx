@@ -350,7 +350,10 @@ function ColorRow({
         {open && (
           <>
             <div className={css.colorBackdrop} onClick={() => { setOpen(false) }} />
-            <div className={css.colorPickerPopover}>
+            <div className={css.colorPickerPopover} role="dialog" aria-label={title}>
+              {/* NO title element (2026-10-07, the reader's decision): the popover names itself by the ROW it
+                  belongs to — the label this component already passes down — instead of a heading that said
+                  only "custom colour" for both rows. */}
               <ColorPicker
                 value={value}
                 onChange={onChange}
@@ -417,8 +420,8 @@ function DiffViewPreview({ fontScale, lineHeight, addColor, delColor, tabSize, t
  */
 export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const [pasteOnCopy, setPasteOnCopyState] = useState(pasteOnCopyEnabled)
-  // Comment mode is a preview that ships off (see `commentModeEnabled`); the row is here,
-  // and not in the diff-view group, because it is about the commenting feature itself.
+  // Comment mode is ON by default (see `commentModeEnabled`); the row is here, and not in the diff-view
+  // group, because it is about the commenting feature itself.
   const [commentMode, setCommentModeState] = useState(commentModeEnabled)
   const [discussionRounds, setDiscussionRoundsState] = useState(discussionRoundLimit)
   const [includeUntracked, setIncludeUntrackedState] = useState(includeUntrackedEnabled)

@@ -77,14 +77,16 @@ shell's stack>}`. `.lines` is the diff's code table, so the grid lands on the co
 and nothing else — comment bubbles, the file list and the panel's chrome keep the
 shell's font stack.
 
-**Off until asked for.** The switch is in the plugin's DSH Settings section
-(`等宽 CJK 字体` / "Monospaced CJK font"), stored as `diff-approval:code-font`, and
-it defaults to off because the slices are traffic the reader pays for: tens of
-kilobytes for ordinary Chinese, at most ~120 KB per slice for a rare character,
-33 KB for pure ASCII. Off means nothing is fetched at all — no manifest request,
-no `@font-face` — so the default panel is exactly what it was before this
-existed. A browser fetches a `@font-face` only when a rule uses it, which is what
-keeps an enabled pure-ASCII file down to the one Latin slice.
+**ON by default, and the switch still turns it off.** The switch is in the plugin's DSH Settings section
+(`等宽 CJK 字体` / "Monospaced CJK font"), stored as `diff-approval:mono-font`, and it defaults to ON
+(2026-10-06): the reader asked for existing profiles to be brought along rather than left off, and the cost
+is traffic that arrives ON DEMAND rather than with the page — tens of kilobytes for ordinary Chinese, at
+most ~120 KB per slice for a rare character, 33 KB for pure ASCII. Only an explicit `'0'` turns it off;
+the older `diff-approval:code-font` key is not read at all, so a profile that had turned the font off before
+that change comes back with it on (deliberate, recorded at the constant in `src/client/settings.ts`). Off
+means nothing is fetched at
+all — no manifest request, no `@font-face`. A browser fetches a `@font-face` only when a rule uses it, which
+is what keeps an enabled pure-ASCII file down to the one Latin slice.
 
 `font-display: swap` rather than `block`: the code is readable in the system font
 immediately, and swapping when the slices land changes the column width, never
