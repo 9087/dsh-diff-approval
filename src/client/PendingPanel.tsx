@@ -176,7 +176,7 @@ const FILE_LIST_FOLD_MS = 140
  * each carry their own answer (see `path-match.ts`).
  */
 export { diffPathsMatch, normalizeDiffPath } from './path-match.ts'
-import { diffPathsMatch } from './path-match.ts'
+import { diffPathsMatch, directoryOfPath, resolveMarkdownHref } from './path-match.ts'
 
 /**
  * Whether one pending row belongs to a session's own view.
@@ -1323,6 +1323,15 @@ interface PendingDiffProps {  file: PendingFileDiff
    * way of opening a file uses.
    */
   onAddTypedPath: (path: string) => Promise<{ openPath?: string } | undefined>
+  /**
+   * Raise this panel's file menu for a link the reader pressed inside the Markdown PREVIEW.
+   *
+   * The preview renders into `dangerouslySetInnerHTML`, so an anchor has no handler of its own; the click
+   * is caught on the preview body, the href is resolved to an absolute path THERE (that is where the
+   * previewed file's own path and the workspace root live), and the menu is the panel's — see
+   * `openPreviewLink` for what is or is not a file link.
+   */
+  onPreviewLink: (path: string, x: number, y: number) => void
 }
 
 /** The diff body's row class per line kind. */
@@ -3947,7 +3956,7 @@ export function inlineItemCount(widths: readonly number[], available: number, ga
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, landingLine, landingOld, landingComment, landingCard, onLanded, failedMessage, commentSkill, comments, commentAnswers, commentsRevision, commentLines, onCommentAdd, onCommentRemove, onCommentAsk, onCommentSeen, onPasteReference, onToast, t, onAddTypedPath, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
+function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, landingLine, landingOld, landingComment, landingCard, onLanded, failedMessage, commentSkill, comments, commentAnswers, commentsRevision, commentLines, onCommentAdd, onCommentRemove, onCommentAsk, onCommentSeen, onPasteReference, onToast, t, onAddTypedPath, onPreviewLink, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
   // The same five search-bar tooltips as the split view, plus the copy-reference button, decided once
   // (see `chords.ts`): this host's keycaps where it can draw them, the pre-0.1.7-rc.2 glued label
   // where it cannot. The toolbar's own items decide per item, in their map below.
@@ -4012,6 +4021,48 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   // so everything below that asks "is the preview showing?" asks this, not
   // `mdPreview`.
   const previewActive = mdPreview && lang === 'markdown'
+  /**
+   * A link pressed inside the Markdown PREVIEW is a file reference, not a navigation.
+   *
+   * The preview is rendered HTML, so an anchor has no handler of its own; this catches the click on the
+   * preview body and answers it. What is left alone: `http:`/`https:`/`mailto:` and every other scheme, and
+   * a pure `#fragment` — the preview is not a router and must not swallow those (a browser default that
+   * navigates or scrolls is exactly right for them). Everything else is a FILE, which is what the reader
+   * reported: a relative link like `../src/foo.ts` used to navigate the page to a URL that does not exist,
+   * because the press bridge deliberately stands down inside this panel (`OWN_SURFACE_SELECTOR`) and
+   * nothing else claimed the press.
+   *
+   * A file link NEVER navigates, whatever happens next: the href is resolved against the PREVIEWED FILE's
+   * own directory — Markdown means the document, not the page's URL — and the panel either raises its menu
+   * for the resolved path or says why it cannot. So a resolution failure is reported, not silently
+   * swallowed, and the page stays where it is either way.
+   *
+   * @param event - the click on the preview body.
+   */
+  const openPreviewLink = (event: ReactMouseEvent<HTMLDivElement>): void => {
+    const target = event.target
+    if (!(target instanceof Element)) return
+    const anchor = target.closest('a[href]')
+    if (anchor === null) return
+    const href = anchor.getAttribute('href')?.trim() ?? ''
+    // Not a file: an external URL, a mail link, any other scheme, an in-page anchor, or a NETWORK-PATH
+    // reference (`//host/share/x`, RFC 3986 §4.2) — the last is a URL the browser resolves against the
+    // page's own scheme, not a file name, so it is the browser's to open like any other link.
+    if (href === '' || href.startsWith('#') || href.startsWith('//')) return
+    if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(href) && !/^[A-Za-z]:[\\/]/.test(href)) return
+    // From here on the press is ours: a file link must not navigate, even when nothing can be opened.
+    event.preventDefault()
+    // The base is the previewed file's own directory. Only when that path is unknown does the workspace
+    // root stand in for it (reported as its own case, since the resolution then means something different).
+    const base = directoryOfPath(file.path) ?? workspacePath
+    const resolved = resolveMarkdownHref(base, href)
+    if (resolved === undefined) {
+      onToast(t('panel.addMissing'))
+      return
+    }
+    const rect = anchor.getBoundingClientRect()
+    onPreviewLink(resolved, rect.left, rect.bottom)
+  }
   // The preview body element, for the post-render local-image resolution pass.
   const mdPreviewBodyRef = useRef<HTMLDivElement>(null)
   // The single-column preview's diff-ruler markers, measured from the rendered
@@ -7670,6 +7721,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
               data-diff-md-preview-body
               data-diff-md-mode={splitView ? 'double' : 'single'}
               ref={mdPreviewBodyRef}
+              onClick={openPreviewLink}
               onScroll={(event) => {
                 // Move the frames in this very frame, without a React render: the
                 // preview's markdown re-render is far too heavy to run per scroll
@@ -8687,7 +8739,7 @@ export function PendingPanel({
   const [commentMenu, setCommentMenu] = useState<{ id: string; fileId: string; x: number; y: number; picked: boolean } | null>(null)
   /** The produced-file chip whose menu is open, and where that chip is: the press on a pending file's
    *  chip is the panel's (see produced-diff.ts), so the panel answers it with the two ways to open it. */
-  const [chipMenu, setChipMenu] = useState<{ path: string; x: number; y: number; held: boolean } | null>(null)
+  const [chipMenu, setChipMenu] = useState<{ path: string; x: number; y: number; held: boolean; fromLink?: boolean } | null>(null)
   /** Whether the add-path dialog is open. One dialog covers both shapes: what
    *  the browser settles on decides whether a file or a directory is added. */
   const [addOpen, setAddOpen] = useState(false)
@@ -9999,11 +10051,14 @@ export function PendingPanel({
    * An item that NEEDED a listed entry (keep, revert, a comment) would have to be hidden or disabled
    * unless `chipMenu.held`, because pressing it for an unheld file can only fail.
    */
-  const chipMenuItems = useMemo<MenuEntry[]>(() => [
-    { id: 'default', label: t('chip.openDefault') },
-    { id: 'review', label: t('chip.reviewInPanel') },
-    { id: 'copy-path', label: t('chip.copyPath') },
-  ], [t])
+  const chipMenuItems = useMemo<MenuEntry[]>(() => {
+    // The default-open row is DSH's own press, replayed. A Markdown PREVIEW link has no press of ours to
+    // replay — the anchor is this panel's own rendered HTML, and replaying it would just navigate the page
+    // to the href — so the row is deliberately ABSENT for a link, not disabled: there is nothing behind it.
+    const items: MenuEntry[] = chipMenu?.fromLink === true ? [] : [{ id: 'default', label: t('chip.openDefault') }]
+    items.push({ id: 'review', label: t('chip.reviewInPanel') }, { id: 'copy-path', label: t('chip.copyPath') })
+    return items
+  }, [t, chipMenu?.fromLink])
   /** Open the produced file the chip menu was raised for, the way the reader chose. */
   const runChipMenu = (id: string): void => {
     const target = chipMenu
@@ -10025,6 +10080,20 @@ export function PendingPanel({
       return
     }
     if (id !== 'review') return
+    // A MARKDOWN PREVIEW LINK takes the add-if-needed route ALWAYS: the link names a FILE (not a change the
+    // shell is presenting), so the host is asked to list it with `includeUnchanged` TRUE — the same request
+    // the path field makes — and its own verdict is what the reader is told. `duplicate` answers the id of
+    // the entry it already holds, which is the same file, so a link to a file the panel is showing opens
+    // without a second entry. `missing`, `not-a-file` (a directory), `outside` and `empty` all report
+    // through `addTypedPath`'s existing wording instead of doing nothing.
+    if (target.fromLink === true) {
+      void addTypedPath(target.path, true).then((added) => {
+        const open = added?.openPath
+        if (open === undefined) return
+        window.dispatchEvent(new CustomEvent(OPEN_FILE_EVENT, { detail: { path: open } }))
+      })
+      return
+    }
     // HELD: the row is already in the list — open it, exactly as this item always has.
     if (target.held) {
       window.dispatchEvent(new CustomEvent(OPEN_FILE_EVENT, { detail: { path: target.path } }))
@@ -10889,6 +10958,11 @@ export function PendingPanel({
                     onToast={showCopyToast}
                     t={t}
                     onAddTypedPath={addTypedPath}
+                    // A file link in the preview raises THE SAME menu, marked `fromLink`: no press of ours
+                    // to replay (so no default-open row) and the add-if-needed route for the resolved path.
+                    // `held` is left false for a link — that row's add answers `duplicate` for a file the
+                    // host already lists and opens it, which is the same outcome with one honest request.
+                    onPreviewLink={(path, x, y) => { setChipMenu({ path, x, y, held: false, fromLink: true }) }}
                     onKeep={keepWithPrompt}
                     onRevert={revertWithPrompt}
                     onRefreshVcs={(entry) => { void runRefreshVcs(entry) }}

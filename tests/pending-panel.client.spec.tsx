@@ -24,6 +24,7 @@ import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
 import { DiffApprovalHeaderEntry } from '../src/client/header-entry.tsx'
 import { DiffApprovalSettingsTab } from '../src/client/SettingsTab.tsx'
 import { createPendingDiffStore } from '../src/client/store.ts'
+import { directoryOfPath, resolveMarkdownHref } from '../src/client/path-match.ts'
 import { publishSessionId } from '../src/client/session-seat.ts'
 import type { DiffApprovalPort } from '../src/client/port.ts'
 import { renderMarkdownPreview } from '../src/client/markdown-preview.ts'
@@ -12477,6 +12478,147 @@ describe('PendingPanel', () => {
     // body after the preview took over it, so the rows are not blank until a
     // scroll). The view toggle left split view on, so either row type is fine.
     expect(document.querySelectorAll('[data-diff-row], [data-diff-split-row]').length).toBeGreaterThan(0)
+  })
+
+  /**
+   * Stage a Markdown file whose NEW side carries these links, select it and show its rendered preview.
+   *
+   * `prepare` runs before the panel renders, which is where a test overrides `onAddPath` — the panel binds
+   * that prop at render time, so an override applied afterwards would not reach `addTypedPath`.
+   *
+   * @param markdown - the link lines to put in the file's new text.
+   * @param prepare - mutate the props before the first render.
+   * @returns the props and the preview's rendered content element.
+   */
+  const previewWithLinks = (
+    markdown: string,
+    prepare?: (props: ReturnType<typeof panelProps>) => void,
+  ): { props: ReturnType<typeof panelProps>; content: HTMLElement } => {
+    const file = entry({
+      id: 'entry-md-links',
+      path: '/repo/docs/README.md',
+      oldText: '# Title\n',
+      newText: `# Title\n${markdown}\n`,
+    })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    prepare?.(props)
+    // Start from the preview OFF and turn it on, rather than assuming the stored setting: other tests in
+    // this file leave it ON, and a toggle that then switched it OFF would leave no preview to click (the
+    // filtered run masked that — the full suite is where it showed).
+    localStorage.setItem('diff-approval:md-preview', '0')
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+    return { props, content: document.querySelector('[data-diff-md-preview-content]') as HTMLElement }
+  }
+
+  it('resolves a Markdown link against the previewed file\u2019s own directory', () => {
+    // The resolution IS the fix, so it is pinned on its own: a link in a document means the DOCUMENT's
+    // directory — `../src/foo.ts` in `docs/README.md` is `src/foo.ts` at the root, not relative to the
+    // page's URL — and the panel's own click handler and these tests share this one implementation.
+    expect(directoryOfPath('/repo/docs/a.md')).toBe('/repo/docs')
+    expect(directoryOfPath('C:/repo/docs/a.md')).toBe('C:/repo/docs')
+    // A bare name has no directory of its own: the caller's fallback (the workspace root) is its base.
+    expect(directoryOfPath('README.md')).toBeUndefined()
+    expect(directoryOfPath(undefined)).toBeUndefined()
+
+    expect(resolveMarkdownHref('/repo/docs', '../src/foo.ts')).toBe('/repo/src/foo.ts')
+    expect(resolveMarkdownHref('/repo/docs', './a.md')).toBe('/repo/docs/a.md')
+    expect(resolveMarkdownHref('/repo/docs', 'sub/../b.ts')).toBe('/repo/docs/b.ts')
+    expect(resolveMarkdownHref('/repo/docs', 'sub\\..\\b.ts')).toBe('/repo/docs/b.ts')
+    expect(resolveMarkdownHref('/repo/docs', 'a%20b.md')).toBe('/repo/docs/a b.md')
+    expect(resolveMarkdownHref('/repo/docs', 'a.md#L24')).toBe('/repo/docs/a.md')
+    expect(resolveMarkdownHref('/repo/docs', 'a.md?plain=1')).toBe('/repo/docs/a.md')
+    // Already absolute: no base is needed, and one must not be pasted on.
+    expect(resolveMarkdownHref('/repo/docs', '/abs/x.ts')).toBe('/abs/x.ts')
+    expect(resolveMarkdownHref('/repo/docs', 'C:/abs/x.ts')).toBe('C:/abs/x.ts')
+    // A `..` chain that leaves the root is clamped there rather than kept as a segment.
+    expect(resolveMarkdownHref('/repo', '../../x.ts')).toBe('/x.ts')
+    // No base and a relative href: there is no honest path to name.
+    expect(resolveMarkdownHref(undefined, 'a.md')).toBeUndefined()
+  })
+
+  it('opens the file a relative Markdown link names, and never navigates for it', () => {
+    const { props, content } = previewWithLinks('[x](../src/foo.ts)')
+    const link = content.querySelector('a[href]') as HTMLAnchorElement
+    expect(link.getAttribute('href')).toBe('../src/foo.ts')
+
+    // A file link is OURS: the browser must not navigate, whatever happens next. `fireEvent.click`
+    // answers false exactly when the event was default-prevented.
+    expect(fireEvent.click(link)).toBe(false)
+
+    // The menu is the file menu with the items a LINK can use — and pointedly without the default-open
+    // row, which would replay a press that does not exist here (the anchor is this panel's own HTML) and
+    // would only navigate the page to the href.
+    const items = [...document.querySelectorAll('[role="menuitem"]')].map(row => row.textContent)
+    expect(items).toEqual(['chip.reviewInPanel', 'chip.copyPath'])
+
+    // Viewing it asks the host to add the RESOLVED absolute path — the same verb the chip menu and the
+    // path field drive (`includeUnchanged` true: a link names a FILE, not a change the shell is showing).
+    fireEvent.click(screen.getByText('chip.reviewInPanel'))
+    return waitFor(() => {
+      expect(props.onAddPath).toHaveBeenCalledWith(S1, '/repo/src/foo.ts', true, true)
+    })
+  })
+
+  it('resolves a `./` link, and leaves an https link, a `#fragment` and a `//host` URL to the browser', () => {
+    const { props, content } = previewWithLinks(
+      '[rel](./a.md) [web](https://example.com/x.ts) [here](#section) [share](//host/share/x.ts)',
+    )
+    const [rel, web, here, share] = [...content.querySelectorAll('a[href]')] as HTMLAnchorElement[]
+
+    // Not ours: an external URL, an in-page anchor, and a NETWORK-PATH reference (`//host/…`, RFC 3986 — a
+    // URL the browser resolves against the page's own scheme, not a file name) keep the browser's own
+    // behaviour: no preventDefault, no menu. The page navigates or scrolls exactly as it always did.
+    expect(fireEvent.click(web!)).toBe(true)
+    expect(fireEvent.click(here!)).toBe(true)
+    expect(fireEvent.click(share!)).toBe(true)
+    expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
+
+    // Ours: the `./` link resolves against the previewed file's directory.
+    expect(fireEvent.click(rel!)).toBe(false)
+    fireEvent.click(screen.getByText('chip.reviewInPanel'))
+    return waitFor(() => {
+      expect(props.onAddPath).toHaveBeenCalledWith(S1, '/repo/docs/a.md', true, true)
+    })
+  })
+
+  it('says through the existing notices why a link\u2019s target cannot be opened', async () => {
+    // One case per way a link can fail to name an openable file: the host's own verdict, in the wording
+    // the path field and the browse dialog already use — never a silent no-op.
+    const cases: Array<[string, string]> = [['missing', 'panel.addMissing'], ['not-a-file', 'panel.addNotAFile']]
+    for (const [outcome, expected] of cases) {
+      const { props, content } = previewWithLinks('[x](../src/foo.ts)', (props) => {
+        ;(props.onAddPath as unknown as { mockResolvedValueOnce: (v: unknown) => void })
+          .mockResolvedValueOnce({ outcome, added: 0, duplicates: 0 })
+      })
+      const link = content.querySelector('a[href]') as HTMLAnchorElement
+      // The press is still ours: a target we cannot open is reported, not navigated to.
+      expect(fireEvent.click(link)).toBe(false)
+      fireEvent.click(screen.getByText('chip.reviewInPanel'))
+      await waitFor(() => { expect(screen.getByText(expected)).not.toBeNull() })
+      // Nothing was opened on the host's refusal, and the preview is where the reader still is.
+      expect(props.onAddPath).toHaveBeenCalledWith(S1, '/repo/src/foo.ts', true, true)
+      cleanup()
+    }
+  })
+
+  it('does not let the produced-file press bridge take the preview\u2019s own link press', () => {
+    // The preview is THIS plugin's surface, so the bridge must stand down (`OWN_SURFACE_SELECTOR`) and the
+    // panel's own handler must be the only one that answers: two menus from one press would be a bug.
+    const onMenu = vi.fn()
+    const stop = startProducedChipMenu({ isPending: () => true, onMenu })
+    try {
+      const { content } = previewWithLinks('[x](../src/foo.ts)')
+      const link = content.querySelector('a[href]') as HTMLAnchorElement
+      expect(fireEvent.click(link)).toBe(false)
+      expect(onMenu).not.toHaveBeenCalled()
+      // …and our menu — not the bridge's — is the one that appeared.
+      expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(2)
+    } finally {
+      stop()
+    }
   })
 
   it('does not offer the Markdown preview toggle for a non-Markdown file', () => {

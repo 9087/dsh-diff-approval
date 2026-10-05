@@ -31,7 +31,9 @@ const FILES: SeededFile[] = [
   {
     name: 'notes.md',
     oldText: '# Notes\n\nplain paragraph\n',
-    newText: '# Notes\n\n**bold** paragraph\n',
+    // The relative link is what `s15` presses: Markdown resolves it against THIS document, so
+    // `../alpha.txt` means `alpha.txt` at the workspace root — and the panel, not the browser, answers it.
+    newText: '# Notes\n\n**bold** paragraph\n\n[x](../alpha.txt)\n',
   },
 ]
 
@@ -264,6 +266,49 @@ test.describe('面板功能：搜索 / 跳转 / 视图 / 浮动列表 / 预览 /
     await toggle.click({ timeout: 20_000 })
     await expect(page.locator('[data-diff-md-preview-body]')).toHaveCount(0, { timeout: 20_000 })
     await expect(page.locator('[data-diff-body]').first()).toBeVisible({ timeout: 20_000 })
+  })
+
+  test('s15. markdown 预览里的相对链接：弹出文件菜单，页面不跳转', async () => {
+    // The reader's failure was the BROWSER NAVIGATING a relative link, which jsdom can only assert as
+    // "the default was prevented". Here the real Chromium says whether the URL moved, so (b) below is the
+    // assertion this case exists for.
+    //
+    // It sits here, right after the preview case and BEFORE the destructive keep-all (s14), for the reason
+    // that one is last: it empties the list, and a case that needs `notes.md` selectable cannot run after it.
+    test.setTimeout(120_000)
+    await row(page, paths['notes.md'] as string).click({ timeout: 20_000 })
+    const toggle = page.locator('[data-diff-md-preview]').first()
+    await expect(toggle).toBeVisible({ timeout: 20_000 })
+    await toggle.click({ timeout: 20_000 })
+    const body = page.locator('[data-diff-md-preview-body]').first()
+    await expect(body).toBeVisible({ timeout: 30_000 })
+
+    // The fixture's `[x](../alpha.txt)` is rendered as an anchor carrying its RAW relative href — that is
+    // what the panel has to resolve, against THIS document's own directory.
+    const link = body.locator('a[href="../alpha.txt"]').first()
+    await expect(link).toBeVisible({ timeout: 20_000 })
+    const before = page.url()
+    await link.click({ timeout: 20_000 })
+
+    // (a) OUR menu, with the two items a link can use — and pointedly NO default-open row, which for a link
+    // could only replay the anchor and navigate the page. Labels are matched in both locales, the way this
+    // file's other menu cases do.
+    const items = page.locator('[role="menuitem"]')
+    await expect(items).toHaveCount(2, { timeout: 20_000 })
+    await expect(items.filter({ hasText: /在审批面板中查看|View in the review panel/ })).toHaveCount(1)
+    await expect(items.filter({ hasText: /复制文件路径|Copy file path/ })).toHaveCount(1)
+    await expect(items.filter({ hasText: /默认方式打开|Open as usual/ })).toHaveCount(0)
+
+    // (b) THE PAGE DID NOT NAVIGATE — the reader's actual bug, and the reason this case is in a browser. A
+    // file link is ours; the URL must be exactly what it was, and the preview must still be the page.
+    expect(page.url(), 'a file link in the preview must not navigate the page').toBe(before)
+    await expect(body).toBeVisible({ timeout: 20_000 })
+
+    // Close the menu and leave the panel the way the next case expects it: back on the source diff.
+    await page.keyboard.press('Escape')
+    await expect(items).toHaveCount(0, { timeout: 20_000 })
+    await toggle.click({ timeout: 20_000 })
+    await expect(page.locator('[data-diff-md-preview-body]')).toHaveCount(0, { timeout: 20_000 })
   })
 
   test('s6. 设置入口：齿轮把读者交给设置区，Escape 之后能回到列表', async () => {
