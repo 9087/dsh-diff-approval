@@ -54,7 +54,7 @@ import type { PanelFileDetail, PanelStateDetail } from './dock.tsx'
 import { forgetPlacedThreadsNotIn, lastPanelFile, panelFileOffset, quietenRemovalAsk, rememberPlacedThreads, rememberThreads, rememberedPlacedThreads, rememberedThreads, rememberPanelView, removalAskQuiet } from './panel-memory.ts'
 import type { PlacedThread, ThreadLocal } from './panel-memory.ts'
 import { composerCoveredByPanel, leaveComposerCaret } from './composer-cover.ts'
-import { commentModeEnabled, COMMENT_MODE_CHANGED_EVENT, confirmFileRemoveEnabled, COVER_CHANGED_EVENT, discussionRoundLimit, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
+import { chipMenuEnabled, commentModeEnabled, COMMENT_MODE_CHANGED_EVENT, confirmFileRemoveEnabled, COVER_CHANGED_EVENT, discussionRoundLimit, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
 import { matchRangesOf } from './search.ts'
 import type { SearchOptions } from './search.ts'
@@ -4050,6 +4050,11 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     // page's own scheme, not a file name, so it is the browser's to open like any other link.
     if (href === '' || href.startsWith('#') || href.startsWith('//')) return
     if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(href) && !/^[A-Za-z]:[\\/]/.test(href)) return
+    // …and the file menu itself can be switched off entirely (see `chipMenuEnabled`). Then this handler does
+    // not claim the press either, and the browser's own navigation is what happens to a relative link — the
+    // honest consequence of asking this plugin to keep its hands off, and exactly what the setting promises.
+    // Read per press rather than latched, because the setting can be switched while the page is open.
+    if (!chipMenuEnabled()) return
     // From here on the press is ours: a file link must not navigate, even when nothing can be opened.
     event.preventDefault()
     // The base is the previewed file's own directory. Only when that path is unknown does the workspace
@@ -8740,6 +8745,8 @@ export function PendingPanel({
   /** The produced-file chip whose menu is open, and where that chip is: the press on a pending file's
    *  chip is the panel's (see produced-diff.ts), so the panel answers it with the two ways to open it. */
   const [chipMenu, setChipMenu] = useState<{ path: string; x: number; y: number; held: boolean; fromLink?: boolean } | null>(null)
+  /** Whether the file menu's "关于此菜单" dialog is open: one block of prose and one button (see `chipMenuItems`). */
+  const [aboutOpen, setAboutOpen] = useState(false)
   /** Whether the add-path dialog is open. One dialog covers both shapes: what
    *  the browser settles on decides whether a file or a directory is added. */
   const [addOpen, setAddOpen] = useState(false)
@@ -10057,6 +10064,13 @@ export function PendingPanel({
     // to the href — so the row is deliberately ABSENT for a link, not disabled: there is nothing behind it.
     const items: MenuEntry[] = chipMenu?.fromLink === true ? [] : [{ id: 'default', label: t('chip.openDefault') }]
     items.push({ id: 'review', label: t('chip.reviewInPanel') }, { id: 'copy-path', label: t('chip.copyPath') })
+    // A divider, then the row that explains the menu itself. The separator is the MENU'S OWN affordance
+    // (`MenuSeparator`, drawn as a hairline with `role="separator"`) — the same one the row context menu
+    // uses to group its actions — not a blank entry, so it reads as a group boundary rather than a gap.
+    // Both the divider and About are in EVERY invocation, including a preview link's, where `default` is
+    // deliberately absent.
+    items.push({ type: 'separator', id: 'about-separator' })
+    items.push({ id: 'about', label: t('chip.about') })
     return items
   }, [t, chipMenu?.fromLink])
   /** Open the produced file the chip menu was raised for, the way the reader chose. */
@@ -10064,6 +10078,12 @@ export function PendingPanel({
     const target = chipMenu
     setChipMenu(null)
     if (target === null) return
+    if (id === 'about') {
+      // The row BELOW the divider: it explains the menu instead of acting on the file, so it opens the
+      // panel's one-button dialog and nothing else. It carries no path and needs none.
+      setAboutOpen(true)
+      return
+    }
     if (id === 'default') {
       // The press is looked up by path rather than kept: the row is React's and may have re-rendered
       // between the press and this pick, and a stale element would swallow the press in silence.
@@ -10616,6 +10636,13 @@ export function PendingPanel({
     if (!open || docked) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
+      // The About dialog this menu raised is the innermost dismissible while it is up: this press closes
+      // IT, and the panel behind it stands. It is the panel's own dialog (not the shell's Menu), so it has
+      // no listener of its own — this handler, in the capture phase, is where its Escape is honoured.
+      if (aboutOpen) {
+        setAboutOpen(false)
+        return
+      }
       // The add-path modal closes itself: this press is not the panel's.
       if (pathPickerOpen()) return
       // The detail header's path field keeps its own Escape — it puts the shown path back —       // so this press belongs to the field and never to the panel behind it.
@@ -10646,7 +10673,23 @@ export function PendingPanel({
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
-  }, [open, docked, batchPrompt])
+  }, [open, docked, batchPrompt, aboutOpen])
+
+  // The About dialog's own Escape. It cannot live in the handler above: that one is not even mounted while the
+  // panel is CLOSED, and this dialog is raised by the file menu, which the shell's lists and a message's file
+  // link raise exactly then. So it listens for itself, in the capture phase, and takes the press from
+  // everything else — one press closes the dialog and nothing behind it.
+  useEffect(() => {
+    if (!aboutOpen) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      setAboutOpen(false)
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true) }
+  }, [aboutOpen])
 
   /**
    * Drag the list's width, from a mouse *or* a finger. Pointer events rather than
@@ -10777,6 +10820,32 @@ export function PendingPanel({
           getAnchorRect={() => new DOMRect(chipMenu.x, chipMenu.y, 0, 0)}
           anchor={<span className={css.rowMenuAnchor} />}
         />
+      )}
+      {/* The menu's own explanation, raised by the row BELOW the divider. It is a sibling of the menu, and a
+          portal for the menu's own reason: this menu can be raised over a CLOSED panel, so a dialog drawn
+          inside the panel's frame would be pressed for and never appear. Its shape is the panel's existing
+          confirm dialog — backdrop, card, actions — because this is the same kind of question, one button
+          and an Escape, not a new species of modal. */}
+      {aboutOpen && createPortal(
+        <div className={`${css.confirmBackdrop} ${css.confirmBackdropFixed}`} data-diff-about>
+          <div className={css.confirmCard} role="dialog" aria-modal="true" aria-label={t('chip.about.title')}>
+            <p className={css.confirmText} data-diff-about-title>{t('chip.about.title')}</p>
+            {t('chip.about.body').split('\n\n').map(paragraph => (
+              <p key={paragraph} className={css.confirmText}>{paragraph}</p>
+            ))}
+            <div className={css.confirmActions}>
+              <button
+                type="button"
+                className={`${css.action} ${css.actionPrimary}`}
+                data-diff-about-ok
+                onClick={() => { setAboutOpen(false) }}
+              >
+                {t('chip.about.ok')}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
       )}
       {/* Covering everything keeps an 8px inset, so a layer painted with the
           sidebar's fill hides the app behind those seams instead of letting it

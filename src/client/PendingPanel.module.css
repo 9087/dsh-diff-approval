@@ -1377,6 +1377,16 @@
   background: color-mix(in srgb, var(--dsw-alias-bg-base) 55%, transparent);
 }
 
+/* The About dialog is the one confirm this panel raises with the panel CLOSED (a shell row, a message link),
+   so it is portaled to the document instead of living in the panel's frame — and a body-level child with
+   `position: absolute` would size itself against the document rather than the viewport. Composed with
+   `.confirmBackdrop`, so the card itself is the same one every other confirm in this panel draws; only the
+   box it covers and its own stacking step above the panel (30) are its own. */
+.confirmBackdropFixed {
+  position: fixed;
+  z-index: 60;
+}
+
 .confirmCard {
   max-width: 340px;
   display: flex;

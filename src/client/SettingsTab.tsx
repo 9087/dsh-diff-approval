@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconChevronDownOutline14, IconRefreshOutline14, Menu } from './dsh-icons.ts'
-import { DEFAULT_KEYBINDINGS, DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, COVER_CHANGED_EVENT, codeFontEnabled, commentModeEnabled, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, discussionRoundLimit, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, pasteOnCopyEnabled, quickSummonKey, setCodeFontEnabled, setCommentModeEnabled, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setDiscussionRoundLimit, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPanelCover, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN,
+import { DEFAULT_KEYBINDINGS, DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, COVER_CHANGED_EVENT, chipMenuEnabled, codeFontEnabled, commentModeEnabled, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, discussionRoundLimit, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, pasteOnCopyEnabled, quickSummonKey, setChipMenuEnabled, setCodeFontEnabled, setCommentModeEnabled, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setDiscussionRoundLimit, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPanelCover, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN,
   DISCUSSION_ROUNDS_MAX, DISCUSSION_ROUNDS_MIN } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
 import type { DiffApprovalKey } from './locales.ts'
@@ -427,6 +427,9 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const [tabOpen, setTabOpen] = useState(false)
   const [split, setSplitState] = useState(splitMode)
   const [mdPreview, setMdPreviewState] = useState(mdPreviewEnabled)
+  // ON by default (see `chipMenuEnabled`): this controls whether the plugin's file menu is mounted at all,
+  // so the reader who never opens Settings keeps the menu they have always had.
+  const [chipMenu, setChipMenuState] = useState(chipMenuEnabled)
   const [mdWidth, setMdWidthState] = useState(mdMaxWidth)
   const [lead, setLeadState] = useState(navLeadRows)
   // Diff-view customization defaults to the current values (100% font size =
@@ -505,6 +508,10 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   const setMdPreview = (value: boolean): void => {
     setMdPreviewState(value)
     setMdPreviewEnabled(value)
+  }
+  const setChipMenu = (value: boolean): void => {
+    setChipMenuState(value)
+    setChipMenuEnabled(value)
   }
   const setMdWidth = (value: number): void => {
     setMdWidthState(value)
@@ -635,6 +642,14 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
               value={mdPreview}
               onSelect={setMdPreview}
               dataAttribute="data-diff-md-preview-select"
+              t={t}
+            />
+            <PreferenceRow
+              title={t('settings.chipMenu')}
+              description={t('settings.chipMenu.help')}
+              value={chipMenu}
+              onSelect={setChipMenu}
+              dataAttribute="data-diff-chip-menu-select"
               t={t}
             />
             <StepperRow

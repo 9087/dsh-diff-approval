@@ -134,6 +134,17 @@ export interface ProducedChipBridge {
   isPending: (path: string) => boolean
   /** A pending file's press was taken over: open the menu the press asked for. */
   onMenu: (detail: ProducedChipMenuDetail) => void
+  /**
+   * Whether this plugin's file menu is MOUNTED at all — the reader's setting, read at press time.
+   *
+   * `false` leaves every press exactly as DSH has it: no menu, no `preventDefault`, not even a path lookup,
+   * so the plugin's presence is indistinguishable from it never having loaded. It is read per press rather
+   * than latched, because the setting can be switched while the page is open.
+   *
+   * ABSENT means enabled: a host, or a test, that offers no setting keeps the behaviour this bridge has
+   * always had.
+   */
+  enabled?: (() => boolean) | undefined
 }
 
 /** Everything before a `#line` or `?query` suffix: what a path is compared as. */
@@ -234,6 +245,11 @@ export function replayFilePress(path: string): boolean {
  */
 export function startProducedChipMenu(bridge: ProducedChipBridge): () => void {
   const onClick = (event: MouseEvent): void => {
+    // THE SETTING, FIRST: with the file menu switched off this plugin touches nothing at all — no path
+    // lookup, no `preventDefault`, no menu — so DSH's own behaviour runs exactly as if the plugin were not
+    // loaded. Read before every other guard because "off" has to mean off for every press shape, including
+    // this plugin's own preview (where a relative link then navigates, which is the honest consequence).
+    if (bridge.enabled !== undefined && !bridge.enabled()) return
     // A modified press is not this bridge's: it is a gesture the harness may give its own meaning,
     // and the plugin has no menu to offer it (see the file's own doc).
     if (event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return

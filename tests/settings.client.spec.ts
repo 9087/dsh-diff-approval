@@ -14,6 +14,7 @@ import {
   codeFontEnabled, setCodeFontEnabled, CODE_FONT_CHANGED_EVENT,
   setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setFileListFloat, setLanguageForSuffix, setMdMaxWidth, setMdPreviewEnabled, setQuickSummonKey, setTabWidth, tabWidth,
   setPanelCover, setPanelPresentation,
+  chipMenuEnabled, setChipMenuEnabled,
 } from '../src/client/settings.ts'
 import { en, zh } from '../src/client/locales.ts'
 
@@ -24,6 +25,7 @@ const DIFF_LINE_HEIGHT_KEY = 'diff-approval:diff-line-height'
 const DIFF_ADD_COLOR_KEY = 'diff-approval:diff-add-color'
 const DIFF_DEL_COLOR_KEY = 'diff-approval:diff-del-color'
 const MD_PREVIEW_KEY = 'diff-approval:md-preview'
+const CHIP_MENU_KEY = 'diff-approval:file-menu'
 const MD_MAX_WIDTH_KEY = 'diff-approval:md-max-width'
 const LANG_BY_SUFFIX_KEY = 'diff-approval:lang-by-suffix'
 
@@ -90,6 +92,35 @@ describe('settings.mdPreview', () => {
     setMdPreviewEnabled(true)
     expect(localStorage.getItem(MD_PREVIEW_KEY)).toBe('1')
     expect(mdPreviewEnabled()).toBe(true)
+  })
+})
+
+describe('settings.chipMenu', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('defaults ON: the setting gates MOUNTING the menu, so the reader who never opens Settings keeps it', () => {
+    expect(chipMenuEnabled()).toBe(true)
+  })
+
+  it('is off only for an explicit 0: an unreadable or cleared store leaves the menu working', () => {
+    // The default is the interesting half here (unlike `mdPreviewEnabled`, whose default is off), because
+    // this key decides whether the plugin takes presses over at all: any other value means "no opinion",
+    // and "no opinion" has to mean the menu still mounts.
+    localStorage.setItem(CHIP_MENU_KEY, '')
+    expect(chipMenuEnabled()).toBe(true)
+    localStorage.setItem(CHIP_MENU_KEY, '1')
+    expect(chipMenuEnabled()).toBe(true)
+    localStorage.setItem(CHIP_MENU_KEY, '0')
+    expect(chipMenuEnabled()).toBe(false)
+  })
+
+  it('persists a chosen value and reads it back', () => {
+    setChipMenuEnabled(false)
+    expect(localStorage.getItem(CHIP_MENU_KEY)).toBe('0')
+    expect(chipMenuEnabled()).toBe(false)
+    setChipMenuEnabled(true)
+    expect(localStorage.getItem(CHIP_MENU_KEY)).toBe('1')
+    expect(chipMenuEnabled()).toBe(true)
   })
 })
 
@@ -413,5 +444,70 @@ describe('settings.panelCover', () => {
     localStorage.setItem('diff-approval:presentation', 'fullscreen')
     setPanelCover({ top: false, left: false, right: false, composer: false })
     expect(panelCover()).toEqual({ top: false, left: false, right: false, composer: false })
+  })
+})
+
+describe('chip.about copy', () => {
+  // The four things the reader asked this dialog to say: which plugin injects the menu, which presses it
+  // takes over, how to switch it off, and that the first item is DSH's own behaviour. The wording is frozen
+  // prose — the panel renders the key, so nothing else in the suite can catch a paragraph going missing.
+  const bodies: Array<[string, Record<string, string>]> = [['zh', zh], ['en', en]]
+
+  it('names the plugin that injects the menu, in both languages', () => {
+    for (const [, dictionary] of bodies) expect(dictionary['chip.about.body']).toContain('dsh-diff-approval')
+  })
+
+  it('names all three surfaces it takes over, and what it leaves alone', () => {
+    const [zhBody, enBody] = bodies.map(([, dictionary]) => dictionary['chip.about.body'] as string)
+    // The shell's lists, a message's file link, this plugin's own preview.
+    expect(zhBody).toContain('外壳')
+    expect(zhBody).toContain('消息')
+    expect(zhBody).toContain('预览')
+    expect(enBody).toContain("shell's")
+    expect(enBody).toContain('messages')
+    expect(enBody).toContain('preview')
+    // …and the URLs it does NOT take.
+    expect(zhBody).toContain('# 锚点')
+    expect(enBody).toContain('#fragments')
+  })
+
+  it('says how to switch it off, naming the setting row the reader will look for', () => {
+    for (const [locale, dictionary] of bodies) {
+      expect(dictionary['chip.about.body']).toContain(dictionary['settings.chipMenu'] as string)
+      expect(dictionary['chip.about.body']).toContain(locale === 'zh' ? '关掉' : 'turn it off')
+    }
+  })
+
+  it('keeps the default-open row honest: named only for the surfaces that carry it, never as always-available', () => {
+    const [zhParagraphs, enParagraphs] = bodies.map(([, dictionary]) => (dictionary['chip.about.body'] as string).split('\n\n'))
+    const [zhFourth, enFourth] = [zhParagraphs[3] as string, enParagraphs[3] as string]
+    // The reassurance is TRUE where the row exists: a shell file row and a message link replay DSH's own
+    // press, so that row is DSH's own behaviour.
+    expect(zhFourth).toContain(zh['chip.openDefault'] as string)
+    expect(enFourth).toContain(en['chip.openDefault'] as string)
+    // …and it is TRUE where it does not: `chipMenuItems` starts at `review` when `fromLink` is set, so a
+    // preview link's menu has no default-open row, and the copy says so instead of promising one.
+    expect(zhFourth).toContain('预览')
+    expect(enFourth).toContain('preview')
+
+    // THE OVERCLAIM THIS REPLACES, pinned as a NEGATIVE so it cannot come back: the old paragraph 4 said
+    // the row was available 「任何时候」/ "always", which is false on the preview-link surface and would
+    // mislead the one reader who reads no more than this dialog.
+    for (const [, dictionary] of bodies) {
+      const body = dictionary['chip.about.body'] as string
+      expect(body).not.toContain('任何时候都可以用')
+      expect(body).not.toContain('always available')
+      expect(dictionary['chip.about.title']).toBe(dictionary['chip.about'])
+      expect(dictionary['chip.about.ok']?.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('draws the body as FOUR short paragraphs, however it is split', () => {
+    for (const [, dictionary] of bodies) {
+      const paragraphs = (dictionary['chip.about.body'] as string).split('\n\n')
+      expect(paragraphs).toHaveLength(4)
+      // Short means short: none of them is a wall of text in a single-button dialog.
+      for (const paragraph of paragraphs) expect(paragraph.length).toBeLessThan(300)
+    }
   })
 })

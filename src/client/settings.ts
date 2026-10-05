@@ -9,6 +9,10 @@ const SEARCH_WORD_KEY = 'diff-approval:search-word'
 const TAB_WIDTH_KEY = 'diff-approval:tab-size'
 const SPLIT_MODE_KEY = 'diff-approval:split-mode'
 const MD_PREVIEW_KEY = 'diff-approval:md-preview'
+/** Whether this plugin mounts its file menu at all (see `chipMenuEnabled`; the default is ON). Deliberately
+ *  NOT `diff-approval:chip-menu`: that string is the name of the press bridge's own CustomEvent
+ *  (`CHIP_MENU_EVENT`), and one string meaning two things makes every grep a guess. */
+const CHIP_MENU_KEY = 'diff-approval:file-menu'
 const MD_MAX_WIDTH_KEY = 'diff-approval:md-max-width'
 const NAV_LEAD_KEY = 'diff-approval:nav-lead-rows'
 const DIFF_FONT_SCALE_KEY = 'diff-approval:diff-font-scale'
@@ -417,6 +421,30 @@ export function mdPreviewEnabled(): boolean {
 /** Persist the Markdown-preview default preference. */
 export function setMdPreviewEnabled(value: boolean): void {
   localStorage.setItem(MD_PREVIEW_KEY, value ? '1' : '0')
+}
+
+/**
+ * Whether this plugin MOUNTS its own file menu at all — the press bridge that takes over a file press in
+ * the shell's lists, a file link in a message, and a relative link in the Markdown preview.
+ *
+ * Default ON, and the default is the interesting half: only an explicit `'0'` turns it off, so a reader who
+ * never touches the setting keeps the menu they have always had (and a storage that cannot be read — a
+ * privacy mode, a cleared profile — leaves the plugin working rather than silently disabled).
+ *
+ * Off means the bridge does not take the press over AT ALL: no menu, and the shell's own behaviour runs
+ * exactly as if this plugin were not installed. That includes this plugin's own preview, where a relative
+ * link therefore goes back to the browser's own navigation — which is the honest consequence of asking this
+ * plugin to keep its hands off, not a bug to special-case.
+ *
+ * @returns whether the file menu is enabled.
+ */
+export function chipMenuEnabled(): boolean {
+  return localStorage.getItem(CHIP_MENU_KEY) !== '0'
+}
+
+/** Persist the file-menu preference (see {@link chipMenuEnabled}). */
+export function setChipMenuEnabled(value: boolean): void {
+  localStorage.setItem(CHIP_MENU_KEY, value ? '1' : '0')
 }
 
 /**

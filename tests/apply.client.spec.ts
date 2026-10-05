@@ -6,6 +6,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { DIFF_DOCK_ID } from '../src/client/dock.tsx'
 import { apply } from '../src/client/index.ts'
+import { CHIP_MENU_EVENT } from '../src/client/produced-diff.ts'
 
 /** A client context just real enough for `apply`: services it reads, and a slot
  *  service that records every registration and fires `inject` callbacks (the real
@@ -14,8 +15,14 @@ import { apply } from '../src/client/index.ts'
 function fakeContext() {
   const registrations: { config: Record<string, unknown>; component: unknown }[] = []
   const injections: string[] = []
+  /** Every cleanup `apply` hands back through `ctx.effect` — the produced-file bridge's document listener
+   *  among them, which a test that boots the real entry has to be able to take down again. */
+  const effects: (() => void)[] = []
   const ctx = {
-    effect: (callback: () => unknown) => callback(),
+    effect: (callback: () => unknown) => {
+      const result = callback()
+      if (typeof result === 'function') effects.push(result as () => void)
+    },
     on: () => {},
     get: (name: string) => (name === 'connection' ? { rpc: {} } : undefined),
     locale: { register: () => {}, bind: () => (key: string) => key },
@@ -30,10 +37,59 @@ function fakeContext() {
     // applies — the optionality the compat matrix depends on.
     inject: () => {},
   }
-  return { ctx, registrations, injections }
+  return { ctx, registrations, injections, effects }
 }
 
 describe('plugin apply', () => {
+  it('lets the reader switch the SHELL\'s own file press off, through the real entry point', () => {
+    // THE WIRING, PINNED. `apply` is the only place that hands the produced-file bridge its answer
+    // (`enabled: () => chipMenuEnabled()`, index.ts). Without this test, deleting that argument leaves the
+    // whole suite green: the bridge's own spec passes `enabled` in itself, and the preview half of the
+    // setting (jsdom + E2E s16) is the panel's own handler. The setting would then silently stop affecting
+    // the two surfaces the reader actually uses — a file row in the shell's lists and a file link in a
+    // message — which no browser fixture in this repo can stage. So: boot the real entry, press a real
+    // chip, and read the difference the setting makes.
+    const { ctx, effects } = fakeContext()
+    const row = document.createElement('div')
+    row.setAttribute('data-produced-files-row', '')
+    const chip = document.createElement('button')
+    chip.type = 'button'
+    chip.setAttribute('title', '/repo/a.txt')
+    const opened = vi.fn()
+    chip.addEventListener('click', opened)
+    row.appendChild(chip)
+    document.body.appendChild(row)
+    const menus: unknown[] = []
+    const onMenu = (event: Event): void => { menus.push((event as CustomEvent).detail) }
+    window.addEventListener(CHIP_MENU_EVENT, onMenu)
+    /** A press a browser would deliver, and `false` exactly when it was default-prevented (the shell's own
+     *  behaviour suppressed) — `dispatchEvent` reports that, which a bare `.click()` does not. */
+    const press = (): boolean => chip.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    try {
+      localStorage.setItem('diff-approval:file-menu', '0')
+      apply(ctx as never)
+
+      // OFF: the press is DSH's own — its handler ran, the press was NOT taken over, and no menu appeared.
+      expect(press(), 'with the file menu off the shell press must not be taken over').toBe(true)
+      expect(opened).toHaveBeenCalledTimes(1)
+      expect(menus).toHaveLength(0)
+
+      // ON: the same press, through the same booted entry, is the bridge's — suppressed for the shell, with
+      // the menu event raised for the panel. Both halves are asserted, because a bridge that merely stopped
+      // preventing the default without raising a menu would be a worse bug than either.
+      localStorage.setItem('diff-approval:file-menu', '1')
+      expect(press(), 'with the file menu on the press is ours').toBe(false)
+      expect(opened).toHaveBeenCalledTimes(1)
+      expect(menus).toHaveLength(1)
+      expect(menus[0]).toMatchObject({ path: '/repo/a.txt' })
+    } finally {
+      for (const cleanup of effects) cleanup()
+      window.removeEventListener(CHIP_MENU_EVENT, onMenu)
+      row.remove()
+      localStorage.clear()
+    }
+  })
+
   it('fills every seat it knows about, keyed ones by key', () => {
     const { ctx, registrations, injections } = fakeContext()
     apply(ctx as never)

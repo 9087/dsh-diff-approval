@@ -290,25 +290,144 @@ test.describe('面板功能：搜索 / 跳转 / 视图 / 浮动列表 / 预览 /
     const before = page.url()
     await link.click({ timeout: 20_000 })
 
-    // (a) OUR menu, with the two items a link can use — and pointedly NO default-open row, which for a link
+    // (a) OUR menu, with the three rows a link can use — and pointedly NO default-open row, which for a link
     // could only replay the anchor and navigate the page. Labels are matched in both locales, the way this
     // file's other menu cases do.
     const items = page.locator('[role="menuitem"]')
-    await expect(items).toHaveCount(2, { timeout: 20_000 })
+    await expect(items).toHaveCount(3, { timeout: 20_000 })
     await expect(items.filter({ hasText: /在审批面板中查看|View in the review panel/ })).toHaveCount(1)
     await expect(items.filter({ hasText: /复制文件路径|Copy file path/ })).toHaveCount(1)
     await expect(items.filter({ hasText: /默认方式打开|Open as usual/ })).toHaveCount(0)
+    // The third row explains the menu itself, and it is here for a LINK too — under the menu component's own
+    // hairline (`role="separator"`, the same group boundary the row context menu draws), not as one more row.
+    await expect(items.filter({ hasText: /关于此菜单|About this menu/ })).toHaveCount(1)
+    await expect(page.locator('[role="menu"] [role="separator"]')).toHaveCount(1)
 
     // (b) THE PAGE DID NOT NAVIGATE — the reader's actual bug, and the reason this case is in a browser. A
     // file link is ours; the URL must be exactly what it was, and the preview must still be the page.
     expect(page.url(), 'a file link in the preview must not navigate the page').toBe(before)
     await expect(body).toBeVisible({ timeout: 20_000 })
 
+    // (c) About, in a real browser: the dialog names the plugin that injects this menu, and it carries exactly
+    // ONE button — an acknowledgement, not a choice. The copy itself is pinned by the unit tests in both
+    // locales; what only a browser can say is that it is on screen, is one button, and closes on it.
+    await items.filter({ hasText: /关于此菜单|About this menu/ }).first().click({ timeout: 20_000 })
+    const about = page.locator('[data-diff-about]')
+    await expect(about).toBeVisible({ timeout: 20_000 })
+    await expect(about).toContainText('dsh-diff-approval')
+    const aboutOk = about.locator('button')
+    await expect(aboutOk).toHaveCount(1)
+    await aboutOk.click({ timeout: 20_000 })
+    await expect(about).toHaveCount(0, { timeout: 20_000 })
+    // Explaining the menu is not acting on the link: the reader is still exactly where they were.
+    expect(page.url(), 'closing the About dialog must not navigate either').toBe(before)
+    await expect(body).toBeVisible({ timeout: 20_000 })
+
+    // (d) Escape is the dialog's other way out, then the menu's own: raise the menu, open About, Escape it
+    // away, and check the preview survived both.
+    await link.click({ timeout: 20_000 })
+    await expect(items).toHaveCount(3, { timeout: 20_000 })
+    await items.filter({ hasText: /关于此菜单|About this menu/ }).first().click({ timeout: 20_000 })
+    await expect(page.locator('[data-diff-about]')).toBeVisible({ timeout: 20_000 })
+    await page.keyboard.press('Escape')
+    await expect(page.locator('[data-diff-about]')).toHaveCount(0, { timeout: 20_000 })
+    await expect(body).toBeVisible({ timeout: 20_000 })
+
     // Close the menu and leave the panel the way the next case expects it: back on the source diff.
+    await link.click({ timeout: 20_000 })
+    await expect(items).toHaveCount(3, { timeout: 20_000 })
     await page.keyboard.press('Escape')
     await expect(items).toHaveCount(0, { timeout: 20_000 })
     await toggle.click({ timeout: 20_000 })
     await expect(page.locator('[data-diff-md-preview-body]')).toHaveCount(0, { timeout: 20_000 })
+  })
+
+  test('s16. 设置关掉「文件菜单」：预览里的相对链接不再被接管，打开后恢复', async () => {
+    test.setTimeout(180_000)
+    // The reader's own route to the setting — the panel's gear, the diff-view group, this row — because the
+    // whole point of the row is that a reader can switch the menu off without knowing a storage key.
+    const menuRow = async () => {
+      await page.locator('[data-diff-approval-settings]').first().click({ timeout: 20_000 })
+      const settings = page.locator('[data-diff-settings]').first()
+      try {
+        await expect(settings).toBeVisible({ timeout: 30_000 })
+      } catch (error: unknown) {
+        throw new Error(`${String(error)}\n--- what the panel is saying ---\n${await panelSaid(page)}`)
+      }
+      await settings.locator('[data-diff-view-toggle]').first().click({ timeout: 20_000 })
+      const chipRow = settings.locator('[data-diff-chip-menu-select]').first()
+      await expect(chipRow).toBeVisible({ timeout: 20_000 })
+      return chipRow
+    }
+
+    // The panel's own opener is a TOGGLE (`openPanel` clicks the footer badge, so pressing it on an open
+    // panel shuts it and its assertion can never be met). This case really does start in two different
+    // states — s15 leaves the panel OPEN on the preview, and each visit to the shell's settings dialog
+    // closes the panel again — so "the panel is on screen" has to be an idempotent step here rather than a
+    // press. `openPanel` is left alone (other cases rely on its press semantics); this checks for the
+    // panel's own surface first and presses the badge only when it is absent, then asserts what s16 needs:
+    // the panel on screen (either presentation) and its list drawn. Nothing is weakened.
+    const panelOnScreen = async (): Promise<void> => {
+      const panelSurface = page.locator('[data-diff-approval-panel], [data-diff-approval-dock]')
+      if (await panelSurface.count() === 0) {
+        await openPanel(page)
+      }
+      await expect(panelSurface.first()).toBeVisible({ timeout: 20_000 })
+      await expect(page.locator('[data-diff-file]').first()).toBeVisible({ timeout: 20_000 })
+    }
+
+    await panelOnScreen()
+    const chipRow = await menuRow()
+    // ON by default: the reader who never opens Settings keeps the menu they have always had.
+    await expect(chipRow).toHaveAttribute('aria-checked', 'true', { timeout: 20_000 })
+    await chipRow.click({ timeout: 20_000 })
+    await expect(chipRow).toHaveAttribute('aria-checked', 'false', { timeout: 20_000 })
+    await page.keyboard.press('Escape')
+
+    // Back in the panel, on the same preview: with the menu switched off NOTHING of ours may take the press.
+    // The press and the count happen in ONE evaluation, and the browser's own navigation is cancelled after
+    // the fact — "no menu" is the assertion here, and what the browser would do instead is the honest
+    // consequence of the setting, not this case's business (it is asserted in the jsdom test as "the default
+    // was not prevented").
+    await panelOnScreen()
+    await row(page, paths['notes.md'] as string).click({ timeout: 20_000 })
+    const previewToggle = page.locator('[data-diff-md-preview]').first()
+    await expect(previewToggle).toBeVisible({ timeout: 20_000 })
+    if (await page.locator('[data-diff-md-preview-body]').count() === 0) {
+      await previewToggle.click({ timeout: 20_000 })
+    }
+    await expect(page.locator('[data-diff-md-preview-body]').first()).toBeVisible({ timeout: 30_000 })
+    const menusWhenOff = await page.evaluate(() => {
+      const link = document.querySelector('[data-diff-md-preview-body] a[href="../alpha.txt"]') as HTMLAnchorElement
+      link.addEventListener('click', event => { event.preventDefault() }, { once: true })
+      link.click()
+      return document.querySelectorAll('[role="menuitem"]').length
+    })
+    expect(menusWhenOff, 'with the file menu switched off, no menu may appear').toBe(0)
+
+    // Back ON through the same row, and the very next press is ours again.
+    const rowAgain = await menuRow()
+    await rowAgain.click({ timeout: 20_000 })
+    await expect(rowAgain).toHaveAttribute('aria-checked', 'true', { timeout: 20_000 })
+    await page.keyboard.press('Escape')
+    await panelOnScreen()
+    // The panel is remounted here, so the rendered preview is not guaranteed to be the one the first half
+    // was looking at — the file it was closed on is remembered, the toolbar toggle is not. Selecting the
+    // file and opening the preview ONLY if it is not already open is the same idempotent step as above.
+    await row(page, paths['notes.md'] as string).click({ timeout: 20_000 })
+    const previewToggleAgain = page.locator('[data-diff-md-preview]').first()
+    await expect(previewToggleAgain).toBeVisible({ timeout: 20_000 })
+    if (await page.locator('[data-diff-md-preview-body]').count() === 0) {
+      await previewToggleAgain.click({ timeout: 20_000 })
+    }
+    const link = page.locator('[data-diff-md-preview-body] a[href="../alpha.txt"]').first()
+    await expect(link).toBeVisible({ timeout: 20_000 })
+    const before = page.url()
+    await link.click({ timeout: 20_000 })
+    await expect(page.locator('[role="menuitem"]')).toHaveCount(3, { timeout: 20_000 })
+    expect(page.url(), 'and once again the link does not navigate').toBe(before)
+    await page.keyboard.press('Escape')
+    await expect(page.locator('[role="menuitem"]')).toHaveCount(0, { timeout: 20_000 })
   })
 
   test('s6. 设置入口：齿轮把读者交给设置区，Escape 之后能回到列表', async () => {

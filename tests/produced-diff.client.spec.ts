@@ -434,4 +434,51 @@ describe('startProducedChipMenu', () => {
     expect(opened).toHaveBeenCalledTimes(1)
     expect(onMenu).toHaveBeenCalledTimes(1)
   })
+
+  // The reader's setting: "文件菜单" off means this plugin mounts no menu at all, so the bridge must leave
+  // the press exactly as DSH has it. `enabled` is asked at EVERY press rather than latched, because the
+  // reader can switch the setting while the page is open.
+  it('leaves the press entirely alone while the file menu is switched off, and takes it back once it is on', () => {
+    const row = mountRow()
+    const opened = vi.fn()
+    const a = chip(row, '/repo/a.txt', opened)
+    const onMenu = vi.fn()
+    const isPending = vi.fn(() => true)
+    let enabled = false
+    const stop = startProducedChipMenu({ isPending, onMenu, enabled: () => enabled })
+
+    a.click()
+    // The shell's own press ran, untouched — this is the same click a browser with the plugin uninstalled
+    // would deliver — and the plugin did not even look at what the press named.
+    expect(opened).toHaveBeenCalledTimes(1)
+    expect(onMenu).not.toHaveBeenCalled()
+    expect(isPending).not.toHaveBeenCalled()
+
+    // Switched back on, the very next press is the menu's again: the gate is read per press, not at start.
+    enabled = true
+    a.click()
+    expect(opened).toHaveBeenCalledTimes(1)
+    expect(onMenu).toHaveBeenCalledWith({ path: '/repo/a.txt', x: 0, y: 0, held: true })
+
+    // ...and off again stops it mid-life, the same way.
+    enabled = false
+    a.click()
+    expect(opened).toHaveBeenCalledTimes(2)
+    expect(onMenu).toHaveBeenCalledTimes(1)
+    stop()
+  })
+
+  it('is enabled when the host offers no setting at all: absent means the menu this bridge always had', () => {
+    const row = mountRow()
+    const opened = vi.fn()
+    const a = chip(row, '/repo/a.txt', opened)
+    const onMenu = vi.fn()
+    const stop = startProducedChipMenu({ isPending: () => false, onMenu })
+
+    a.click()
+
+    expect(opened).not.toHaveBeenCalled()
+    expect(onMenu).toHaveBeenCalledWith({ path: '/repo/a.txt', x: 0, y: 0, held: false })
+    stop()
+  })
 })

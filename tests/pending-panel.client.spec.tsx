@@ -19,7 +19,7 @@ import { codeFontCss } from '../src/client/code-font.ts'
 import { actionTooltip, closeShortcut, shortcutOf, withChord } from '../src/client/chords.ts'
 import { zh, en } from '../src/client/locales.ts'
 import { lastPanelFile, panelFileOffset, rememberedPlacedThreads, rememberedThreads, removalAskQuiet, resetPanelMemory } from '../src/client/panel-memory.ts'
-import { diffLineHeight, navLeadRows, setCommentModeEnabled, setConfirmFileRemoveEnabled } from '../src/client/settings.ts'
+import { chipMenuEnabled, diffLineHeight, navLeadRows, setCommentModeEnabled, setConfirmFileRemoveEnabled } from '../src/client/settings.ts'
 import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
 import { DiffApprovalHeaderEntry } from '../src/client/header-entry.tsx'
 import { DiffApprovalSettingsTab } from '../src/client/SettingsTab.tsx'
@@ -5465,7 +5465,7 @@ describe('PendingPanel', () => {
       }))
     })
     const items = [...document.querySelectorAll('[role="menuitem"]')]
-    expect(items.map(item => item.textContent)).toEqual(['chip.openDefault', 'chip.reviewInPanel', 'chip.copyPath'])
+    expect(items.map(item => item.textContent)).toEqual(['chip.openDefault', 'chip.reviewInPanel', 'chip.copyPath', 'chip.about'])
 
     // The first row is DSH's own press, run on the chip itself: and the panel does NOT open.
     fireEvent.click(items[0]!)
@@ -5517,7 +5517,7 @@ describe('PendingPanel', () => {
     // The item set does not change with `held`: every row of this menu is safe for a file the list does not
     // hold (an open, an add-then-open, a copy). An item that NEEDED an entry would have to gate on `held`.
     const items = [...document.querySelectorAll('[role="menuitem"]')]
-    expect(items.map(item => item.textContent)).toEqual(['chip.openDefault', 'chip.reviewInPanel', 'chip.copyPath'])
+    expect(items.map(item => item.textContent)).toEqual(['chip.openDefault', 'chip.reviewInPanel', 'chip.copyPath', 'chip.about'])
     fireEvent.click(items[1]!)
 
     // The add is asked for the path the press named, with `includeUnchanged` FALSE — the shell is showing
@@ -5584,7 +5584,7 @@ describe('PendingPanel', () => {
       }))
     })
     const items = [...document.querySelectorAll('[role="menuitem"]')]
-    expect(items.map(item => item.textContent)).toEqual(['chip.openDefault', 'chip.reviewInPanel', 'chip.copyPath'])
+    expect(items.map(item => item.textContent)).toEqual(['chip.openDefault', 'chip.reviewInPanel', 'chip.copyPath', 'chip.about'])
 
     fireEvent.click(items[2]!)
     // Exactly what the shell handed the menu, with nothing converted on the way out: the menu knows no
@@ -5634,11 +5634,107 @@ describe('PendingPanel', () => {
     try {
       act(() => { fireEvent.click(link) })
       expect([...document.querySelectorAll('[role="menuitem"]')].map(item => item.textContent))
-        .toEqual(['chip.openDefault', 'chip.reviewInPanel', 'chip.copyPath'])
+        .toEqual(['chip.openDefault', 'chip.reviewInPanel', 'chip.copyPath', 'chip.about'])
     } finally {
       stop()
       link.remove()
     }
+  })
+
+  it('draws the menu\'s own divider, then About, under every invocation of the menu', () => {
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+    // The entries IN ORDER, with the menu's separator read as its own thing: `role="separator"` is the
+    // affordance the shell's Menu draws for a `MenuSeparator` — the same hairline the row context menu uses
+    // to group its actions — so this asserts a GROUP BOUNDARY before the row that explains the menu, not a
+    // blank row that happens to be there.
+    const entries = (): string[] => [...document.querySelectorAll('[role="menu"] [role="menuitem"], [role="menu"] [role="separator"]')]
+      .map(entry => entry.getAttribute('role') === 'separator' ? 'separator' : (entry.textContent ?? ''))
+    const open = (held: boolean): void => {
+      act(() => {
+        window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
+          detail: { path: FILE.path, x: 10, y: 20, held },
+        }))
+      })
+    }
+
+    open(true)
+    expect(entries()).toEqual(['chip.openDefault', 'chip.reviewInPanel', 'chip.copyPath', 'separator', 'chip.about'])
+    // …and the tail does not depend on the label: a file the list does NOT hold gets the same divider and
+    // the same About row. Only the first row's meaning depends on `held`.
+    open(false)
+    expect(entries()).toEqual(['chip.openDefault', 'chip.reviewInPanel', 'chip.copyPath', 'separator', 'chip.about'])
+    expect(document.querySelectorAll('[role="menu"] [role="separator"]')).toHaveLength(1)
+  })
+
+  it('explains the menu in the panel\'s one-button dialog: the plugin, what it takes over, how to switch off', () => {
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
+        detail: { path: FILE.path, x: 10, y: 20, held: true },
+      }))
+    })
+
+    fireEvent.click(screen.getByText('chip.about'))
+
+    // Picking it closes the menu and raises the panel's own confirm-shaped dialog. The COPY is frozen in
+    // `locales.ts` (and pinned there, in both languages) — here the point is the shape: a titled body and
+    // exactly ONE button, so the reader has nothing to choose, only something to acknowledge.
+    expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
+    const about = document.querySelector('[data-diff-about]') as HTMLElement
+    expect(about).not.toBeNull()
+    const dialog = about.querySelector('[role="dialog"]') as HTMLElement
+    expect(dialog).not.toBeNull()
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+    expect(dialog.textContent).toContain('chip.about.title')
+    expect(dialog.textContent).toContain('chip.about.body')
+
+    const buttons = [...dialog.querySelectorAll('button')]
+    expect(buttons).toHaveLength(1)
+    expect(buttons[0]!.textContent).toBe('chip.about.ok')
+
+    fireEvent.click(buttons[0]!)
+    expect(document.querySelector('[data-diff-about]')).toBeNull()
+  })
+
+  it('closes the About dialog on Escape, leaving the panel behind it standing', () => {
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+    // The panel OPEN, so "the panel stands" is a real assertion rather than a closed panel staying closed.
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
+        detail: { path: FILE.path, x: 10, y: 20, held: true },
+      }))
+    })
+    fireEvent.click(screen.getByText('chip.about'))
+    expect(document.querySelector('[data-diff-about]')).not.toBeNull()
+
+    // The dialog is the innermost dismissible: Escape closes IT, not the panel that raised it.
+    fireEvent.keyDown(window, { key: 'Escape' })
+
+    expect(document.querySelector('[data-diff-about]')).toBeNull()
+    expect(document.querySelector('[data-diff-approval-panel]')).not.toBeNull()
+  })
+
+  it('raises and closes About over a CLOSED panel, which is where a shell row and a message link raise it', () => {
+    // The reader's own route: a press on a file row in the shell's lists happens with the panel SHUT. The
+    // menu appears over a closed panel, so About must too — and its Escape cannot depend on the panel's own
+    // handler, which is not mounted in this state.
+    render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
+        detail: { path: FILE.path, x: 10, y: 20, held: true },
+      }))
+    })
+
+    fireEvent.click(screen.getByText('chip.about'))
+    expect(document.querySelector('[data-diff-about]')).not.toBeNull()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(document.querySelector('[data-diff-about]')).toBeNull()
+    // …and the panel was never opened by any of it: About explains the menu, it does not open the panel.
+    expect(document.querySelector('[data-diff-approval-panel]')).toBeNull()
   })
 
   it('records the docked tab\'s place as its tab closes', () => {
@@ -11265,6 +11361,34 @@ describe('PendingPanel', () => {
     expect(toggle().getAttribute('aria-checked')).toBe('true')
   })
 
+  it('the DSH Settings tab toggles the file menu, and the choice survives a fresh render', () => {
+    // This row is what MOUNTS the plugin's file menu (see `chipMenuEnabled`), so the two things worth
+    // pinning are the default (`true`: silence means "keep the menu I have") and that a re-mounted row reads
+    // the choice back from the same storage the preview toggle uses.
+    const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
+    const view = render(<DiffApprovalSettingsTab {...props} />)
+    // The row lives in the diff-view group, which opens folded.
+    fireEvent.click(document.querySelector('[data-diff-view-toggle]') as HTMLButtonElement)
+    const toggle = () => document.querySelector('[data-diff-chip-menu-select]') as HTMLButtonElement
+    expect(toggle()).not.toBeNull()
+    expect(toggle().getAttribute('aria-checked')).toBe('true')
+
+    fireEvent.click(toggle())
+    expect(localStorage.getItem('diff-approval:file-menu')).toBe('0')
+    expect(toggle().getAttribute('aria-checked')).toBe('false')
+    expect(chipMenuEnabled()).toBe(false)
+
+    // A FRESH render — the same read a reloaded page makes — still says off.
+    view.unmount()
+    render(<DiffApprovalSettingsTab {...props} />)
+    fireEvent.click(document.querySelector('[data-diff-view-toggle]') as HTMLButtonElement)
+    expect(toggle().getAttribute('aria-checked')).toBe('false')
+
+    fireEvent.click(toggle())
+    expect(localStorage.getItem('diff-approval:file-menu')).toBe('1')
+    expect(chipMenuEnabled()).toBe(true)
+  })
+
   it('the DSH Settings tab steps the block-jump lead rows and clamps to the bounds', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)
@@ -12552,7 +12676,7 @@ describe('PendingPanel', () => {
     // row, which would replay a press that does not exist here (the anchor is this panel's own HTML) and
     // would only navigate the page to the href.
     const items = [...document.querySelectorAll('[role="menuitem"]')].map(row => row.textContent)
-    expect(items).toEqual(['chip.reviewInPanel', 'chip.copyPath'])
+    expect(items).toEqual(['chip.reviewInPanel', 'chip.copyPath', 'chip.about'])
 
     // Viewing it asks the host to add the RESOLVED absolute path — the same verb the chip menu and the
     // path field drive (`includeUnchanged` true: a link names a FILE, not a change the shell is showing).
@@ -12560,6 +12684,48 @@ describe('PendingPanel', () => {
     return waitFor(() => {
       expect(props.onAddPath).toHaveBeenCalledWith(S1, '/repo/src/foo.ts', true, true)
     })
+  })
+
+  it('offers About on a preview link too, under the divider and still without the default-open row', () => {
+    const { content } = previewWithLinks('[x](../src/foo.ts)')
+    const link = content.querySelector('a[href]') as HTMLAnchorElement
+    expect(fireEvent.click(link)).toBe(false)
+
+    // A preview link's menu is the SHORTEST one — no default open, because the anchor is this panel's own
+    // HTML and replaying its press would only navigate the page — but the divider and About are here exactly
+    // as they are on every other invocation. Neither is conditional on the press shape.
+    expect([...document.querySelectorAll('[role="menu"] [role="menuitem"], [role="menu"] [role="separator"]')]
+      .map(entry => entry.getAttribute('role') === 'separator' ? 'separator' : entry.textContent))
+      .toEqual(['chip.reviewInPanel', 'chip.copyPath', 'separator', 'chip.about'])
+    expect(screen.queryByText('chip.openDefault')).toBeNull()
+
+    fireEvent.click(screen.getByText('chip.about'))
+    const dialog = document.querySelector('[data-diff-about] [role="dialog"]') as HTMLElement
+    expect(dialog).not.toBeNull()
+    expect([...dialog.querySelectorAll('button')]).toHaveLength(1)
+    // About explains; it does not act on the link, so the preview the reader was reading is still there.
+    expect(document.querySelector('[data-diff-md-preview-body]')).not.toBeNull()
+    fireEvent.click(dialog.querySelector('button') as HTMLButtonElement)
+    expect(document.querySelector('[data-diff-about]')).toBeNull()
+  })
+
+  it('leaves a preview link to the browser entirely while the file menu is switched off', () => {
+    // "Off" has to mean off on THIS surface too: the preview's own handler belongs to this plugin, so it must
+    // stand down as well, or the setting would only hide the menu on the shell's rows. The honest consequence
+    // — and what this pins — is that the press is NOT default-prevented, so the browser navigates exactly as
+    // it would with the plugin uninstalled.
+    const { content } = previewWithLinks('[x](../src/foo.ts)')
+    const link = content.querySelector('a[href]') as HTMLAnchorElement
+    localStorage.setItem('diff-approval:file-menu', '0')
+
+    expect(fireEvent.click(link)).toBe(true)
+    expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
+    expect(document.querySelector('[data-diff-about]')).toBeNull()
+
+    // Switched back on, the very next press is ours again: the gate is read per press, not latched.
+    localStorage.setItem('diff-approval:file-menu', '1')
+    expect(fireEvent.click(link)).toBe(false)
+    expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(3)
   })
 
   it('resolves a `./` link, and leaves an https link, a `#fragment` and a `//host` URL to the browser', () => {
@@ -12615,7 +12781,7 @@ describe('PendingPanel', () => {
       expect(fireEvent.click(link)).toBe(false)
       expect(onMenu).not.toHaveBeenCalled()
       // …and our menu — not the bridge's — is the one that appeared.
-      expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(2)
+      expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(3)
     } finally {
       stop()
     }

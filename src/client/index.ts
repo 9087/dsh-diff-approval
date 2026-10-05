@@ -24,6 +24,7 @@ import { attachDiffDock, createDockState, DIFF_DOCK_ID, DiffDockBody, DiffDockTi
 import type { DockHostContext } from './dock.tsx'
 import { DiffApprovalHeaderEntry } from './header-entry.tsx'
 import { attachCodeFont } from './code-font.ts'
+import { chipMenuEnabled } from './settings.ts'
 import { en, NS, zh } from './locales.ts'
 
 export type { PendingPanelProps } from './PendingPanel.tsx'
@@ -375,6 +376,9 @@ export function apply(ctx: ClientContext): void {
       // re-reads the list while every surface is shut), and it is exactly the newest row the reader
       // presses; a stale answer here under-offers review actions for a file the host would have accepted.
       isPending: (path) => panelHolds(store.views(), path),
+      // The reader's setting, read at every press: with the file menu switched off the bridge stands down
+      // before it looks at anything (see `ProducedChipBridge.enabled`).
+      enabled: () => chipMenuEnabled(),
       onMenu: (detail) => {
         window.dispatchEvent(new CustomEvent(CHIP_MENU_EVENT, { detail }))
       },
