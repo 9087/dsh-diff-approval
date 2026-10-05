@@ -320,10 +320,17 @@ export function seedPending(
   fixture: Fixture,
   sessionId: string,
   files: readonly SeededFile[],
-  commentOn: readonly string[],
+  /**
+   * Which files get a comment, by name — or an object naming the file, the class of annotation to give that
+   * comment (`category`, the field `diff_approval_annotate` writes and the panel paints a dot from), and the
+   * comment's own `text` (`text`, for a case that needs a title long enough to be clamped). A bare name is
+   * the ordinary case and means "no class, the default note", so every existing call site is unchanged.
+   */
+  commentOn: readonly (string | { name: string; category?: string | undefined; text?: string | undefined })[],
 ): { entries: { id: string; path: string }[]; comments: { id: string; entryId: string }[] } {
   const entries: Record<string, unknown>[] = []
   const comments: Record<string, unknown>[] = []
+  const wanted = commentOn.map(entry => typeof entry === 'string' ? { name: entry } : entry)
   for (const file of files) {
     const path = join(fixture.workspace, file.name)
     writeFileSync(path, file.newText)
@@ -349,7 +356,8 @@ export function seedPending(
         },
       }),
     })
-    if (!commentOn.includes(file.name)) continue
+    const wantedComment = wanted.find(entry => entry.name === file.name)
+    if (wantedComment === undefined) continue
     // The quote is the file's own last line, which is what makes the comment placeable
     // in the current content: the panel draws an unplaceable thread from its anchor instead.
     const quote = file.newText.trimEnd().split('\n').at(-1) ?? file.newText
@@ -360,9 +368,12 @@ export function seedPending(
       path,
       anchor: { startLine: 2, endLine: 2 },
       quote,
-      text: `review note for ${file.name}`,
+      text: wantedComment.text ?? `review note for ${file.name}`,
       createdAt: Date.now(),
       updatedAt: Date.now(),
+      // The class of annotation, when the caller named one: absent (no key at all) is the ordinary
+      // case, which is what every existing call site and every reader-written comment looks like.
+      ...(wantedComment.category === undefined ? {} : { category: wantedComment.category }),
     })
   }
   const pendingDir = join(fixture.home, 'diff-approval', 'workspaces')
@@ -403,6 +414,9 @@ export function seedCommentFile(
     quote: string
     text: string
     anchor?: { startLine: number; endLine: number }
+    /** The class of annotation, when the caller wants one (see `seedPending`). Optional, so every
+     *  existing caller keeps writing a record with no class at all. */
+    category?: string | undefined
   }[],
 ): void {
   const dir = join(fixture.home, 'diff-approval', 'comments')

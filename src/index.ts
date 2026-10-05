@@ -708,14 +708,15 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         ctx.logger.error(`diff-approval: loading persisted state failed, so the list starts empty: ${errorMessage(error)}`)
       }
       try {
-        // The orphan sweep at load: an entry absent here was removed while this host
-        // was running, so a comment still pointing at it is a crash's leftover
-        // (see `CommentStore.retain`). Run before anything can read, which is what
-        // makes an entry re-added later unable to resurrect its old comments.
-        // Skipped when any file could not be read: the comments that file held are
-        // absent from the store, and sweeping on that incomplete set would delete the
-        // good files' orphans too — a corrupt file must not be able to destroy data it
-        // never touched (the bad file itself is moved aside, see `CommentStore.loadAll`).
+        // The orphan sweep at load: an entry the store does not hold here may have been removed while this
+        // host was running, or its add may simply not have reached `pending.json` (an entry is folded in
+        // memory and its file write rides a later flush — `foldBatch` now awaits it, see
+        // `listFileForAnnotation`). The two are indistinguishable at boot, and the second one must not cost
+        // the reader a comment, so `retain` prunes the VIEW and never writes: a boot that does see the
+        // entry brings its comments back instead of finding them erased. Skipped when any file could not be
+        // read: the comments that file held are absent from the store, and sweeping on that incomplete set
+        // would hide the good files' orphans too — a corrupt file must not be able to destroy data it never
+        // touched (the bad file itself is moved aside, see `CommentStore.loadAll`).
         const loaded = await comments.loadAll()
         if (loaded > 0 && comments.skippedFiles().length === 0) {
           comments.retain(new Set(store.all().map(entry => entry.id)))
@@ -801,7 +802,14 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       // row is news. The reader's own add-path goes through `add-path` instead and lights nothing.
       unseen: true,
     }], true)
+    // The fold above awaited its write: by the time this returns, the entry that the caller is about to
+    // hang a comment on is readable at the next boot (see `foldBatch` and `persistSession`).
     const landed = store.list(sessionId).find(entry => pathIdentity(entry.path) === pathIdentity(absolute))
+    // `undefined` here means the insert did NOT apply — the store already held an identical entry for this
+    // path, and that entry is another session's row, so this session's list still does not show the file.
+    // The answer stays "not listed" rather than claiming an add that did not happen: the tool refuses
+    // (see `unlistedText`) and writes no card, which is the safe half of this seam — a comment is only
+    // ever hung on an entry this session's list actually carries.
     return landed === undefined ? { kind: 'missing' } : { kind: 'listed', entry: landed, added: true }
   }
 
@@ -1157,7 +1165,13 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       }
     }
     if (folded === 0) return 0
-    persistSession(true)
+    // AWAITED on purpose. The entries are in memory now, and the caller (the annotate tool's add) is
+    // about to write a comment NAMING one of them: letting the tool answer before this write has landed
+    // is what let a restart leave the comment on disk and its entry not, after which the load-time sweep
+    // hid the comment (see `CommentStore.retain`). The fold's own bookkeeping is synchronous; only the
+    // durability waits here. `persistSession` never rejects — a write that fails is logged, not thrown —
+    // so an unwritable directory cannot turn an accepted fold into a failed tool call.
+    await persistSession(true)
     const after = new Map(store.list(sessionId).map(entry => [entry.path, entry]))
     const batchBefore: DiffApprovalUndoState[] = []
     const batchAfter: DiffApprovalUndoState[] = []
@@ -2328,26 +2342,40 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
 
   /** Mark the store dirty and schedule one throttled, coalesced write. Pass
    * `force` to write immediately (user actions need durable, immediate results). */
-  function persistSession(force = false): void {
+  /**
+   * Mark the list dirty and start its write. The throttle is for the panel's own churn; `force` writes
+   * NOW and, since 2026-10-06, RETURNS the write's promise.
+   *
+   * That return value is a durability guarantee, not a convenience: a caller that is about to write
+   * something NAMING an entry — the annotate tool's comment — has to know the entry is readable at the
+   * next boot first. Folded in memory and written on a later flush, an entry can be lost to a host that
+   * stops in between, and the load-time sweep then hides (and used to delete) the comments that named
+   * it. Awaiting here is what makes "the comment exists" imply "its entry was on disk first".
+   *
+   * @param force - write immediately rather than on the throttle's schedule.
+   * @returns a promise that settles when the write this call started has finished (never rejects: a
+   * failure is logged and reported through `persistFailureReported`, because a store that cannot write
+   * must keep answering reads).
+   */
+  function persistSession(force = false): Promise<void> {
     persistDirty = true
     if (force) {
       if (persistScheduled) { clearTimeout(persistTimer); persistScheduled = false }
-      void flushPersist()
-      return
+      return flushPersist()
     }
-    if (persistScheduled) return
+    if (persistScheduled) return Promise.resolve()
     const delay = PERSIST_THROTTLE_MS - (Date.now() - lastPersistAt)
     if (delay <= 0) {
-      void flushPersist()
-    } else {
-      persistScheduled = true
-      persistTimer = setTimeout(() => {
-        persistScheduled = false
-        void flushPersist()
-      }, delay)
-      // Do not hold the process open just for this timer.
-      persistTimer.unref?.()
+      return flushPersist()
     }
+    persistScheduled = true
+    persistTimer = setTimeout(() => {
+      persistScheduled = false
+      void flushPersist()
+    }, delay)
+    // Do not hold the process open just for this timer.
+    persistTimer.unref?.()
+    return Promise.resolve()
   }
 
   ctx.on('tools/result', (exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>) => {
@@ -2380,9 +2408,12 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // ONE view for the whole read: the merge, the comment scope and the undo keys are the same
         // question, and `lineageView` walks the store to answer it — so it is built here and handed on.
         const view = lineageView(entries)
-        // The sweep on every read, so a comment a crash left behind its entry is gone
-        // before any client can be handed it; removing the entry already took its
-        // comments with it (`dropEntry`), so this normally removes nothing.
+        // The sweep on every read, so a comment a crash left behind its entry is gone before any client can
+        // be handed it. It prunes the VIEW only: removing the entry already took its comments with it
+        // (`dropEntry` → `removeForEntry`, the erase), and this normally removes nothing. Writing the prune
+        // here is what made a restart permanent for a card whose entry had never reached `pending.json` —
+        // the boot hid it and this read would have erased it — so erasure stays with the explicit removal
+        // (see `CommentStore.retain`).
         if (comments.retain(new Set(entries.map(entry => entry.id))) > 0) {
           // What it did remove may have lines cached against content it never hung off.
           forgetOrphanedCommentLines()

@@ -307,6 +307,10 @@ function commentOf(value: unknown): CommentRecord | undefined {
   // only door a comment record comes through on this side, so a field it does not copy is a field the
   // panel never sees — the card would be drawn as the reader's own words, in the reader's own bubble.
   const author = row.author === 'agent' ? 'agent' as const : undefined
+  // The class of annotation the agent named (see `CommentRecord.category`), validated like every other
+  // field: this is the only door a comment record comes through on this side, and the dot the reader
+  // sees is built from this value — a field not copied here is a field the panel never sees.
+  const category = typeof row.category === 'string' ? row.category.trim() : ''
   return {
     id,
     sessionId: sessionId as SessionId,
@@ -321,6 +325,7 @@ function commentOf(value: unknown): CommentRecord | undefined {
     // can never draw, exactly as `author` above is a card drawn in the wrong voice.
     ...(row.unseen === true ? { unseen: true } : {}),
     ...(author === undefined ? {} : { author }),
+    ...(category === '' ? {} : { category }),
     ...(typeof context === 'string' && context !== '' ? { quoteContext: context } : {}),
     ...(quoteLines.length > 0 ? { quoteLines } : {}),
     ...(asks.length > 0 ? { asks } : {}),

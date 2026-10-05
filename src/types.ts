@@ -499,6 +499,18 @@ export interface CommentRecord {
    * something the reader said would put words in their mouth. Absent means the reader.
    */
   author?: 'agent' | undefined
+  /**
+   * Which CLASS of annotation this one belongs to, as the calling agent named it (see
+   * `annotate-tool.ts`'s `category` argument).
+   *
+   * The panel draws it as a coloured round dot on the comment list's row, so an agent that annotates
+   * several passes or topics can be told apart at a glance. OPAQUE to every reader of this record: the
+   * panel hashes the string to pick a colour and shows the string itself in the mark's own label, and
+   * nothing parses it, orders it or validates its shape. Absent means "no class, no dot" — which is
+   * every comment the reader writes themselves, and every annotation written before this field existed.
+   * Short by construction (the tool trims it and caps it at `MAX_ANNOTATION_CATEGORY_CHARS`).
+   */
+  category?: string | undefined
   /** Epoch milliseconds the comment was written. */
   createdAt: number
   /** Epoch milliseconds of the last change to this record. */

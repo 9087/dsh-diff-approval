@@ -98,6 +98,12 @@ function commentOf(value: unknown): CommentRecord | undefined {
   // the only door a stored row comes back through, so a field it does not copy is a field that survives
   // exactly until the next host restart — the card would come back drawn as the reader's own words.
   const author = row.author === 'agent' ? 'agent' as const : undefined
+  // The class the calling agent named for this annotation (see `CommentRecord.category`), validated like
+  // every other field: this function is the only door a stored row comes back through, so a field it does
+  // not copy is a field that survives exactly until the next host restart — the reader's dot would
+  // vanish on the first reload, while the annotation it belongs to stayed. Trimmed here as well as in the
+  // tool rule, so a hand-edited store with padding reads the same colour on every side.
+  const category = typeof row.category === 'string' ? row.category.trim() : ''
   const asks = asksOf(row.asks)
   const answerSeen = answersOf(row.answerSeen)
   const answerNow = answersOf(row.answerNow)
@@ -115,6 +121,7 @@ function commentOf(value: unknown): CommentRecord | undefined {
     // `true` raises one, and a file written before they existed simply has neither.
     ...(row.unseen === true ? { unseen: true } : {}),
     ...(author === undefined ? {} : { author }),
+    ...(category === '' ? {} : { category }),
     ...(typeof context === 'string' && context !== '' ? { quoteContext: context } : {}),
     ...(quoteLines.length > 0 ? { quoteLines } : {}),
     ...(asks.length > 0 ? { asks } : {}),
@@ -740,31 +747,38 @@ export class CommentStore {
   }
 
   /**
-   * The orphan sweep: drop every comment whose entry is not in `entryIds`.
+   * The orphan sweep: prune every comment whose entry is not in `entryIds`, in MEMORY ONLY.
    *
-   * The explicit `removeForEntry` is the primary path; this is the backstop that
-   * catches a comment left behind by a crash between the two writes. Run it when
-   * the store loads and on every list read, and the one race it could lose — an
-   * entry re-added after its comments were already swept — cannot happen: entries
-   * only leave through this host, so an entry absent at load time was removed
-   * while the host was running, and the sweep at load runs before anything can
-   * add it back.
+   * The explicit `removeForEntry` is the primary path and the ONLY one that erases; this is the view
+   * filter that guarantees no read is ever handed a comment naming a file the list does not carry. Run it
+   * when the store loads and on every list read.
+   *
+   * WHY IT DOES NOT SAVE (2026-10-06, a data loss measured on the live host). The sweep used to write the
+   * pruned state to the files, on the assumption that an entry absent here had been removed while the host
+   * was running. That is only one of two ways an entry can be missing; the other is that its ADD never
+   * reached `pending.json` — a pending entry is folded in memory and persisted on a later flush — and then
+   * the sweep deleted the comments hanging on it AND saved the deletion. Three real annotations were gone
+   * from the disk after a restart, not merely hidden: the reader's cards were written first and their
+   * entries never landed. An entry that exists but is not on disk yet is not an orphan.
+   *
+   * A write would not even help the case it was added for. A second client must never be handed a comment
+   * naming a file the same read no longer lists — that is a VIEW requirement, and the prune satisfies it.
+   * Erasure belongs to the paths where a removal was actually ASKED FOR: `removeForEntry` (what the panel's
+   * own drop calls, and it removes the comments in the same tick), and `remove`/`removeMany` for one
+   * thread. A genuine orphan therefore stays on the disk, hidden, until the next boot that sees the entry
+   * again — a row nobody reads is a smaller price than a reader's annotation nobody can recover.
+   *
    * @param entryIds - every entry id the pending store currently holds.
-   * @returns how many orphaned comments were dropped.
+   * @returns how many comments the view dropped.
    */
   retain(entryIds: ReadonlySet<string>): number {
-    const sessions = new Set<SessionId>()
     let removed = 0
     for (const comment of [...this.byId.values()]) {
       if (entryIds.has(comment.entryId)) continue
       this.byId.delete(comment.id)
-      sessions.add(comment.sessionId)
       removed += 1
     }
-    if (removed > 0) {
-      this.revision += 1
-      for (const sessionId of sessions) this.save(sessionId)
-    }
+    if (removed > 0) this.revision += 1
     return removed
   }
 

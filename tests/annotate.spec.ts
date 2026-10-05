@@ -1,9 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import {
-  MAX_ANNOTATION_CHARS, MAX_ANNOTATION_LINES, annotateLines, annotationQuote, refusalSummary,
+  MAX_ANNOTATION_CATEGORY_CHARS, MAX_ANNOTATION_CHARS, MAX_ANNOTATION_LINES, annotateLines, annotationQuote,
+  normalizeCategory, refusalSummary,
 } from '../src/annotate.ts'
-import { ANNOTATE_TOOL_NAME, annotateRun, annotateToolDefinition, foldPath, lookupEntry, refusalText, unlistedText } from '../src/annotate-tool.ts'
+import {
+  ANNOTATE_TOOL_DESCRIPTION, ANNOTATE_TOOL_NAME, ANNOTATE_TOOL_PARAMETERS, annotateRun,
+  annotateToolDefinition, foldPath, lookupEntry, refusalText, unlistedText,
+} from '../src/annotate-tool.ts'
 import type { ListFileOutcome } from '../src/annotate-tool.ts'
 import { ANNOTATE_SKILL, ANNOTATE_SKILL_NAME } from '../src/annotate-skill.ts'
 import type { CommentRecord, PendingEntry } from '../src/types.ts'
@@ -182,7 +187,7 @@ describe('the annotate tool', () => {
     expect(definition.name).toBe(ANNOTATE_TOOL_NAME)
     expect(definition.description).toContain('is added to it')
     expect(definition.parameters.required).toEqual(['path', 'startLine', 'note'])
-    expect(Object.keys(definition.parameters.properties ?? {})).toEqual(['path', 'startLine', 'endLine', 'note', 'quote'])
+    expect(Object.keys(definition.parameters.properties ?? {})).toEqual(['path', 'startLine', 'endLine', 'note', 'quote', 'category'])
     expect(definition.output.schema).toEqual({ type: 'string' })
     expect(definition.output.render({}, 'done')).toEqual([{ type: 'text', text: 'done' }])
   })
@@ -354,5 +359,123 @@ describe('the annotating skill', () => {
   it('keeps the two skills distinct, so the catalog can tell them apart', () => {
     expect(S2).toBe(SessionId('session-2'))
     expect(ANNOTATE_SKILL_NAME).not.toBe('dsh-diff-approval-comment')
+  })
+
+  it('tells the agent what a category is for, and what is true about the round dot it gets', () => {
+    // The model-facing half of the feature: an id it does not know to repeat groups nothing. The body has to
+    // carry the same-id rule, the fact that OMITTING it draws nothing, and the cap.
+    expect(ANNOTATE_SKILL.content).toContain('category')
+    expect(ANNOTATE_SKILL.content).toContain('彩色圆点')
+    expect(ANNOTATE_SKILL.content).toContain('不传')
+    expect(ANNOTATE_SKILL.content).toContain(String(MAX_ANNOTATION_CATEGORY_CHARS))
+    // …and the two things it must NOT claim, both of which were true of an earlier draft and are not true of
+    // twelve hash buckets: that the reader can COUNT the classes from the colours, and that the id is printed
+    // on screen. The id is in `title`/`aria-label` (hover / assistive tech), and two ids can collide.
+    expect(ANNOTATE_SKILL.content).toContain('撞成同一个颜色')
+    expect(ANNOTATE_SKILL.content).toContain('aria-label')
+    expect(ANNOTATE_SKILL.content).not.toContain('一眼就能看出你分了几类')
+    expect(ANNOTATE_SKILL.content).not.toContain('原样显示')
+  })
+
+  it('says the same-id rule and the no-category consequence in the description the model reads', () => {
+    // The description is a routing line, not prose to be admired: a model that never learns to REUSE an id
+    // groups nothing, and one that never learns it is optional may pass a class it does not have. Both
+    // sentences are pinned — not the whole string, which would fail on any wording change.
+    expect(ANNOTATE_TOOL_DESCRIPTION).toContain('same `category` id')
+    expect(ANNOTATE_TOOL_DESCRIPTION).toContain('a different id for another kind')
+    expect(ANNOTATE_TOOL_DESCRIPTION).toContain('Omit `category` and no dot is drawn at all')
+  })
+})
+
+describe('the annotation\'s category', () => {
+  it('trims it and stores it on the record', () => {
+    const result = annotateLines({
+      sessionId: S1, entry: entry(), startLine: 2, note: 'n', category: '  pass-1  ',
+    }, [])
+    expect(result.outcome).toBe('annotated')
+    // Trimmed on the way in, so ' pass-1 ' and 'pass-1' are one class and get one colour.
+    expect(result.outcome === 'annotated' ? result.comment.category : undefined).toBe('pass-1')
+  })
+
+  it('leaves the field ABSENT when there is no class, rather than storing an empty string', () => {
+    // The one spelling of "no class, no square": a `category: ''` would be a value the panel has to reason
+    // about, and the round-trip below is what would lose the difference.
+    for (const category of [undefined, '', '   ']) {
+      const result = annotateLines({ sessionId: S1, entry: entry(), startLine: 2, note: 'n', category }, [])
+      expect(result.outcome).toBe('annotated')
+      expect(result.outcome === 'annotated' && 'category' in result.comment).toBe(false)
+    }
+  })
+
+  it('cuts an over-long id to the cap instead of refusing the annotation', () => {
+    // TRUNCATED, not refused: the id is hashed for a colour and shown in the mark's label, so an over-long one
+    // still groups its class consistently — every call of that class is cut in the same place — while refusing
+    // would fail the whole annotation over a cosmetic detail. 200 characters is the case a model actually
+    // produces (a pasted id, a whole sentence), and what it gets back is the annotation PLUS a 64-character id.
+    const long = 'x'.repeat(200)
+    const result = annotateLines({ sessionId: S1, entry: entry(), startLine: 2, note: 'n', category: long }, [])
+    expect(result.outcome).toBe('annotated')
+    const stored = result.outcome === 'annotated' ? result.comment.category : undefined
+    expect(stored).toBe('x'.repeat(MAX_ANNOTATION_CATEGORY_CHARS))
+    expect(normalizeCategory(long)).toHaveLength(MAX_ANNOTATION_CATEGORY_CHARS)
+    // The two layers must agree on ONE behaviour, and the schema is the one that runs first: with a cap in
+    // the schema the harness could refuse a 200-character id before this rule ever saw it, and the answer a
+    // model gets would depend on which layer noticed. There is no cap in the schema — the cut is the rule.
+    expect(ANNOTATE_TOOL_PARAMETERS.properties.category).not.toHaveProperty('maxLength')
+  })
+
+  it('declares the parameter in the schema the plugin hands the registry', () => {
+    // THE WIRING, as far as this repository can prove it: the definition the plugin registers is what the
+    // harness reads, so a schema that drops `category` (or stops declaring the object closed) is a parameter
+    // no model can set — and every other test here would stay green, because they all call `annotateRun`
+    // with an args object they built themselves. What this CANNOT prove is a harness that validates or
+    // forwards differently; see the note in the report.
+    const definition = annotateToolDefinition()
+    const parameters = definition.parameters
+    const properties = parameters.properties as Record<string, { type?: string; description?: string }>
+    expect(properties.category?.type).toBe('string')
+    expect(properties.category?.description).toMatch(/same/i)
+    expect(properties.category?.description).toMatch(/omit/i)
+    expect(parameters.additionalProperties).toBe(false)
+    expect(parameters.required).not.toContain('category')
+    // …and the registry's own validation is what `additionalProperties: false` bites: an argument the schema
+    // does not name is refused, which is why the field has to be DECLARED rather than merely forwarded.
+    expect(Object.keys(properties)).toContain('category')
+
+    // THE REAL PATH, not a shape check of my own: the harness's own JSON-Schema walker over the very
+    // parameters this definition hands the registry. A model's 200-character id must come back VALID (the
+    // cut is this plugin's rule and there is no schema cap to refuse it first), the argument may be left
+    // out entirely, and both an unknown argument and a non-string category are refused.
+    const violations = (args: unknown): string[] => validateJsonSchemaValue(definition.parameters as never, args, 'args')
+    expect(violations({ path: 'C:\\repo\\a.ts', startLine: 2, note: 'n', category: 'x'.repeat(200) })).toEqual([])
+    expect(violations({ path: 'C:\\repo\\a.ts', startLine: 2, note: 'n' })).toEqual([])
+    expect(violations({ path: 'C:\\repo\\a.ts', startLine: 2, note: 'n', category: 5 }).length).toBeGreaterThan(0)
+    expect(violations({ path: 'C:\\repo\\a.ts', startLine: 2, note: 'n', notes: 'typo' }).length).toBeGreaterThan(0)
+  })
+
+  it('carries the parameter through one tool call into the stored record', () => {
+    const added: CommentRecord[] = []
+    const run = annotateRun({
+      ready: async () => {},
+      entriesOf: () => [entry()],
+      listFile: async () => ({ kind: 'missing' }),
+      commentsOf: () => [],
+      addComment: (record) => { added.push(record) },
+    })
+    return run(
+      { path: 'C:\\repo\\a.ts', startLine: 3, note: '这一行', category: ' pass-2 ' },
+      { sessionId: S1, signal: undefined },
+    ).then(async () => {
+      expect(added).toHaveLength(1)
+      expect(added[0]?.category).toBe('pass-2')
+      // Still absent when the call names no class: the pass-through must not invent one.
+      await expect(annotateRun({
+        entriesOf: () => [entry()],
+        listFile: async () => ({ kind: 'missing' }),
+        commentsOf: () => [],
+        addComment: (record) => { added.push(record) },
+      })({ path: 'C:\\repo\\a.ts', startLine: 5, note: '那两行' }, { sessionId: S1, signal: undefined }))
+        .resolves.toContain('annotated')
+    })
   })
 })

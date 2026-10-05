@@ -46,6 +46,10 @@ export const ANNOTATE_TOOL_DESCRIPTION = 'Annotate a few lines of a file in the 
   + 'showing yet is added to it, so this works whether or not anything in that file has changed. '
   + 'The card shows exactly the text you write, so how the note is worded — including any numbering the '
   + 'user needs to read it in order — is yours. '
+  + 'Give every annotation of one kind the same `category` id, and a different id for another kind (one '
+  + 'pass, one topic, one round of review): the panel paints a coloured round dot beside each of those '
+  + 'comments from it, which is how one class of annotation is told from another. Omit `category` and no '
+  + 'dot is drawn at all. '
   + 'The lines must not already be inside an existing card: that case is refused, and the refusal names '
   + 'the card holding them, so say it in your reply instead of annotating those lines again.'
 
@@ -59,6 +63,13 @@ export interface AnnotateToolArgs {
   endLine?: number | undefined
   /** What the card says. Kept short: the card is drawn line by line beside the code. */
   note: string
+  /**
+   * Optional class of annotation — the same id for every annotation of one kind, a different one for the
+   * next. The panel draws a coloured round dot from it (see `category-color.ts`), so an agent's several
+   * passes over the same review are tellable apart at a glance. Opaque: hashed for the colour and shown
+   * back to the reader as written. Trimmed, and cut to 64 characters.
+   */
+  category?: string | undefined
   /** Optional guard: the exact text the caller believes those lines hold (newline-joined). */
   quote?: string | undefined
 }
@@ -112,6 +123,19 @@ export const ANNOTATE_TOOL_PARAMETERS = {
       description: 'Optional guard: the exact text you believe those lines hold (newline-joined). A '
         + 'mismatch is refused with the text that is actually there, which catches a file that moved '
         + 'between your read and this call.',
+    },
+    category: {
+      type: 'string',
+      // NO `maxLength`: the rule TRUNCATES an over-long id rather than refusing it (see
+      // `normalizeCategory`), and a schema cap would make the harness refuse the whole call before this
+      // rule ever ran — two behaviours for one id, which is exactly the ambiguity this comment closes.
+      description: 'Optional class for this annotation. Pass the SAME short id for every annotation that '
+        + 'belongs to one kind (one pass, one topic, one review round) and a DIFFERENT one for the next: '
+        + 'the panel paints a coloured round dot beside these comments from it, so two classes can be told '
+        + 'apart. OMIT this argument and no dot is drawn at all — it is optional, and the mark exists '
+        + 'only for a class. Opaque: a uuid is fine, it is hashed for the colour and shown to the user in '
+        + 'the mark\'s own label (hover, or a screen reader) as you wrote it. Trimmed, and an id longer '
+        + 'than 64 characters is cut to 64 rather than refused.',
     },
   },
 } as const
@@ -339,6 +363,7 @@ export function annotateRun(deps: AnnotateRunDeps): AnnotateToolRun {
         endLine: args.endLine,
         note: args.note,
         quote: args.quote,
+        category: args.category,
       },
       deps.commentsOf(sessionId),
     )

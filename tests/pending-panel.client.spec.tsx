@@ -15,6 +15,7 @@ import { OPEN_PANEL_FILE_EVENT, PendingPanel, fittingItems, frameInsets, inlineI
 import { startProducedChipMenu } from '../src/client/produced-diff.ts'
 import { computeWholeFileDiff } from '../src/client/whole-file-diff.ts'
 import panelCss from '../src/client/PendingPanel.module.css'
+import { categoryColor } from '../src/client/category-color.ts'
 import { codeFontCss } from '../src/client/code-font.ts'
 import { actionTooltip, closeShortcut, shortcutOf, withChord } from '../src/client/chords.ts'
 import { zh, en } from '../src/client/locales.ts'
@@ -2346,11 +2347,12 @@ describe('PendingPanel', () => {
     }
   })
 
-  it('wears the unseen dot on the comment\'s row in the comments tab, so a comment on a file the reader is not looking at still says an answer arrived', () => {
-    // The card's dot is drawn by the code view, and the code view renders the SELECTED file alone: a
-    // comment on any other file has no card on screen, so its dot had nowhere to appear and the reader
-    // saw nothing at all when the answer arrived. The comments tab's row is always rendered — it is the
-    // reader's way to the card — so it is what carries the mark for a reader who is somewhere else.
+  it('draws NO unseen dot on the comment\'s row in the comments tab, and keeps the state on the card', () => {
+    // The reader's crowding fix (2026-10-06): this row used to carry the unread dot so that a comment on a
+    // file the reader was not looking at still said an answer arrived (the code view renders the SELECTED
+    // file alone, so such a card has nowhere to draw its own dot). The dot is gone from this row — beside
+    // the category dot it read as crowding — and the STATE is untouched: the record still lights the
+    // CARD's dot, which is the walk this case takes. What the row draws now is nothing at all.
     act(() => { setCommentModeEnabled(true) })
     const elsewhere = entry({ id: 'entry-elsewhere', path: '/repo/elsewhere.txt', earlierVersion: 'none', oldText: '', newText: 'x\n' })
     const file = entry({ id: 'entry-list-dot', path: '/repo/list-dot.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\n' })
@@ -2364,67 +2366,61 @@ describe('PendingPanel', () => {
       ],
     })} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
-    // The reader opens ANOTHER file before switching to the tab — the situation the card's dot cannot
-    // answer. The commented file's card is then not rendered at all, which is what makes the row's own
-    // dot the only thing that can speak here.
+    // The reader opens ANOTHER file before switching to the tab, so the commented file's card is not
+    // rendered at all: whatever mark the row drew would be the only one on screen.
     fireEvent.click(screen.getByText('elsewhere.txt'))
     fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
     expect(document.querySelector('[data-diff-discussion-id="d-row-lit"]')).toBeNull()
 
     const rowOf = (id: string): HTMLElement => document.querySelector(`[data-diff-comment-link="${id}"]`) as HTMLElement
-    const lit = rowOf('d-row-lit')
-    const quiet = rowOf('d-row-quiet')
-    // With no card on screen, the whole document holds exactly one comment dot, and it is the row's.
-    const dots = document.querySelectorAll('[data-diff-comment-unseen]')
-    expect(dots).toHaveLength(1)
-    const dot = dots[0]!
-    expect(lit.contains(dot)).toBe(true)
-    // It names itself, so colour is never the only cue (an SVG carries its name on `aria-label` / a
-    // `<title>` child — it has no `title` attribute)…
-    expect(dot.getAttribute('aria-label')).toBe('panel.unseen')
-    expect(dot.querySelector('title')?.textContent).toBe('panel.unseen')
-    // …it sits to the LEFT of the row's own content, the way the card's dot sits left of its header…
-    expect(dot.compareDocumentPosition(lit.querySelector('[data-diff-comment-title]')!))
-      .toBe(Node.DOCUMENT_POSITION_FOLLOWING)
-    // …and a row whose comment the host has said nothing about wears none.
-    expect(quiet.querySelector('[data-diff-comment-unseen]')).toBeNull()
+    // Both rows are present — the unread thread and the read one — so this is the real situation…
+    expect(rowOf('d-row-lit')).not.toBeNull()
+    expect(rowOf('d-row-quiet')).not.toBeNull()
+    // …and NOT ONE comment dot exists anywhere: the row no longer draws the mark, and the card is off screen.
+    expect(document.querySelectorAll('[data-diff-comment-unseen]')).toHaveLength(0)
+    expect(rowOf('d-row-lit').querySelector('[data-diff-comment-unseen]')).toBeNull()
+    expect(rowOf('d-row-quiet').querySelector('[data-diff-comment-unseen]')).toBeNull()
 
-    // It takes no room in the row, and the row is its containing block: jsdom lays nothing out, so the
-    // two rules are compared in the sheet (`position: absolute` against the row's own `position`).
+    // THE STATE STILL WORKS, on the surface that keeps the mark: open the commented file and the card's own
+    // dot is there for the unread thread, with its name, and absent for the thread that was read.
+    fireEvent.click(document.querySelector('[data-diff-list-tab="pending"]') as HTMLElement)
+    fireEvent.click(screen.getByText('list-dot.txt'))
+    const cardOf = (id: string): HTMLElement => document.querySelector(`[data-diff-discussion-id="${id}"]`) as HTMLElement
+    const litDot = cardOf('d-row-lit').querySelector('[data-diff-comment-unseen]') as HTMLElement
+    expect(litDot).not.toBeNull()
+    // It names itself, so colour is never the only cue (an SVG carries its name on `aria-label` / a
+    // `<title>` child — it has no `title` attribute).
+    expect(litDot.getAttribute('aria-label')).toBe('panel.unseen')
+    expect(litDot.querySelector('title')?.textContent).toBe('panel.unseen')
+    expect(cardOf('d-row-quiet').querySelector('[data-diff-comment-unseen]')).toBeNull()
+
+    // The mark takes no room, and the card is its containing block: jsdom lays nothing out, so the two rules
+    // are compared in the sheet (`position: absolute` against the card's own `position`).
     const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const rule = (name: string): string => new RegExp(`^\\.${name} \\{([^}]*)\\}`, 'm').exec(sheet)?.[1] ?? ''
     expect(rule('unseenDot')).toContain('position: absolute')
     expect(rule('commentRow')).toContain('position: relative')
+    // …and the class that stepped a row mark aside for the category dot went with it: nothing in the sheet
+    // moves a mark out of this anchor any more.
+    expect(sheet).not.toContain('unseenDotAfterCategory')
 
-    // DELIBERATE — the row does NOT get the card's local read, and this pins that: the card's mark
-    // clears the moment the card's own observer reports it (`useSeenOnView`'s `dotOff`), because the
-    // reader is looking straight at the card when that happens. This row is the opposite case: it is
-    // the "you are elsewhere" mark for a card with no observer of its own (a card off screen, or on the
-    // comments tab where no card is drawn at all). Clearing it before the host confirms would take away
-    // the only thing telling the reader an answer arrived on a comment they have not opened — a lie the
-    // card cannot commit, because the card's dot only goes when the card itself has been read.
+    // The card's mark is STILL suppressed locally — the reader looking at it is what `dotOff` means — and no
+    // row mark may come back: exactly ONE mark is left in the panel's code, and it is the card's.
     const source = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.tsx'), 'utf8')
-    // Only the CODE, not the prose: several comments in this file mention the attribute by name, and the
-    // first of those would otherwise be mistaken for a mark. Comments are blanked rather than removed, so
-    // the text still reads exactly where it is.
+    // Only the CODE, not the prose: comments in this file mention the attribute by name, and the first of
+    // those would otherwise be mistaken for a mark. Comments are blanked rather than removed, so the text
+    // still reads exactly where it is.
     const code = source.replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' '))
-    // Both marks carry the same svg, and the card's is written first (the card is defined above the
-    // panel's own row lists). So the FIRST occurrence is the card's and the SECOND is the row's.
     const cardDotAt = code.indexOf('data-diff-comment-unseen')
-    const rowDotAt = code.indexOf('data-diff-comment-unseen', cardDotAt + 1)
     expect(cardDotAt).toBeGreaterThan(-1)
-    expect(rowDotAt).toBeGreaterThan(cardDotAt)
-    // Exactly two: a third mark would make this locator wrong and the case would have to be revisited.
-    expect(code.indexOf('data-diff-comment-unseen', rowDotAt + 1)).toBe(-1)
-    // The lines that OPEN a mark, read from the code in front of it rather than from an offset: the
-    // condition is the `{` expression the mark hangs under, and nothing between them but whitespace.
-    const opens = (dotAt: number): string => code.slice(dotAt - 200, dotAt).replace(/\s+/g, ' ').trim()
-    // The card's mark IS suppressed locally: the reader looking at it is what `dotOff` means.
-    expect(opens(cardDotAt)).toContain('{discussion.unseen === true && !dotOff && (')
-    // The row's own condition names the host's record and nothing local — its whole test is `unseen`.
-    expect(opens(rowDotAt)).toContain('{entry.unseen === true && (')
-    const rowOpens = opens(rowDotAt)
-    expect(rowOpens).not.toMatch(/dotOff|useSeenOnView|seenLocally|reported|!selected/)
+    // Exactly one: a second occurrence would be a mark on a row, which is what this change removed.
+    expect(code.indexOf('data-diff-comment-unseen', cardDotAt + 1)).toBe(-1)
+    // The line that OPENS it, read from the code in front of it rather than from an offset: the condition is
+    // the `{` expression the mark hangs under, and nothing between them but whitespace.
+    const opens = code.slice(cardDotAt - 200, cardDotAt).replace(/\s+/g, ' ').trim()
+    expect(opens).toContain('{discussion.unseen === true && !dotOff && (')
+    // …and the row's own condition is gone from the code outright.
+    expect(code).not.toContain('{entry.unseen === true && (')
   })
 
   it('labels the whole-file button Delete when there is no earlier version, and tags nothing on the row', () => {
@@ -3345,9 +3341,9 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-comment-lost]')).toBeNull()
     expect(items[1]!.textContent).toContain('这段代码已经不在了')
     expect(items[1]!.querySelector('[data-diff-comment-label]')?.textContent).toBe('[8]')
-    // Where it sits and what was asked are the row's one line: both live in the same flex row, so nothing
-    // stacks a title under a reference any more — and the title comes first, with the line numbers last,
-    // which is what puts them against the row's right edge.
+    // Where it sits and what was asked are ONE flex row — the title first, the line numbers last, which is
+    // what puts them against the row's right edge. The title may wrap to three lines inside that row (see
+    // the clamp pins below); what must not come back is a title stacked under a reference in a second row.
     const row = items[0]!.firstElementChild as HTMLElement
     expect(row.children).toHaveLength(2)
     expect(row.firstElementChild?.hasAttribute('data-diff-comment-title')).toBe(true)
@@ -3366,6 +3362,12 @@ describe('PendingPanel', () => {
     expect(blank.getAttribute('data-diff-comment-empty')).toBe('')
     expect(blank.className).not.toBe(items[0]!.querySelector('[data-diff-comment-title]')?.className)
     expect(items[0]!.querySelector('[data-diff-comment-title]')?.getAttribute('data-diff-comment-empty')).toBeNull()
+    // The clamp below can only ever HIDE text, so the span carries the whole title in a native `title`
+    // attribute: hover and assistive tech get what the ellipsis dropped. Asserted against the element's own
+    // text, which is the string the CSS is allowed to cut.
+    const titled = items[0]!.querySelector('[data-diff-comment-title]') as HTMLElement
+    expect(titled.getAttribute('title')).toBe(titled.textContent)
+    expect(blank.getAttribute('title')).toBe(blank.textContent)
     // …and the cascade really does tell the two apart, rather than the item merely wearing another class:
     // the empty one resolves to the input placeholder's own tone, the written one to the content colour.
     const normalTitle = items[0]!.querySelector('[data-diff-comment-title]') as HTMLElement
@@ -3394,18 +3396,20 @@ describe('PendingPanel', () => {
     const pathRule = ruleOf('rowPath')
     expect(declared(pathRule, 'margin-left')).not.toBe('')
     expect(declared(ruleOf('commentTitle'), 'margin-left')).toBe(declared(pathRule, 'margin-left'))
-    // The line numbers never shrink and the first sentence is the only thing that gives way: the row is
-    // one line even when the column is narrow. Titles read from the left, the numbers sit on the right.
+    // The line numbers never shrink and the first sentence is the only thing that gives way — to THREE
+    // lines now (see the clamp pins below), not one. Titles read from the left, the numbers sit on the right.
     const labelRule2 = ruleOf('commentLabel')
     expect(labelRule2).toContain('flex: none')
     expect(labelRule2).toContain('text-align: right')
     // …and those numbers are the row's right-hand FIGURE, so they wear the file row's own figure
-    // treatment (`rowMeta`) — 12px on a 16px line, the metadata tone, tabular figures, the app font (no
-    // `font-family` of its own) and no weight of its own. Read off that rule rather than repeated here,
-    // so the two cannot drift apart. The add/del HUES are the one part they do not copy: those say
-    // "added" and "removed", and a line range says neither.
+    // treatment (`rowMeta`) — 12px, the metadata tone, tabular figures, the app font (no `font-family` of
+    // its own) and no weight of its own. Read off that rule rather than repeated here, so the two cannot
+    // drift apart. TWO parts they do not copy: the add/del HUES (those say "added"/"removed", and a line
+    // range says neither), and the line-height — the label is top-aligned beside a title that can wrap, so
+    // it takes the TITLE's own line-height and lands on the title's first baseline instead of a pixel above
+    // it. Both exceptions are asserted, the second against `commentTitle` rather than repeated as a number.
     const metaRule = ruleOf('rowMeta')
-    for (const property of ['color', 'font-size', 'line-height', 'font-variant-numeric']) {
+    for (const property of ['color', 'font-size', 'font-variant-numeric']) {
       expect(declared(metaRule, property), property).not.toBe('')
       expect(declared(labelRule2, property), property).toBe(declared(metaRule, property))
     }
@@ -3416,6 +3420,26 @@ describe('PendingPanel', () => {
     expect(title).toContain('flex: 1')
     expect(title).toContain('text-align: left')
     expect(title).toContain('text-overflow: ellipsis')
+    // The label's line and the title's first line are the same line, which is what makes the top alignment
+    // read as alignment rather than a 2px slip.
+    expect(declared(labelRule2, 'line-height')).toBe(declared(title, 'line-height'))
+    // THE CLAMP — the reader's ask (2026-10-06): at most three lines, and an ellipsis for what still does not
+    // fit. jsdom does not lay out, so these are RULE pins; the browser case is where the clamp is measured.
+    expect(title).toContain('display: -webkit-box')
+    expect(title).toContain('-webkit-box-orient: vertical')
+    expect(title).toContain('-webkit-line-clamp: 3')
+    expect(title).toContain('overflow: hidden')
+    // …and `nowrap` must NOT be here: it forbids the wrapping the clamp counts in lines, so its return would
+    // silently turn the three-line clamp back into the single line this replaced.
+    expect(title).not.toContain('white-space: nowrap')
+    // Long unbroken content (a URL, a long identifier) has no space to break at, so it must be allowed to
+    // break anywhere — the treatment the panel already gives long paths elsewhere.
+    expect(title).toContain('overflow-wrap: anywhere')
+    // The label sits with the FIRST line, not the last: top-aligned, on that line's height. Baseline
+    // alignment would drop the figure to the third line and read it as a tail of the title.
+    const headRule = ruleOf('commentHead')
+    expect(headRule).toContain('align-items: flex-start')
+    expect(headRule).not.toContain('align-items: baseline')
     // The empty item's tone is the input's own placeholder tone, read off that rule rather than repeated
     // here, so the two cannot drift apart.
     const inputPlaceholder = /^\.discussionInput::placeholder \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
@@ -3988,6 +4012,129 @@ describe('PendingPanel', () => {
     expect([...document.querySelectorAll('[data-diff-comment-link]')].map(item => item.getAttribute('data-diff-comment-link'))).toEqual(['d-one'])
     expect(document.querySelectorAll('[data-diff-discussion]').length).toBe(1)
     expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
+  })
+
+  it('draws a comment\'s category as a round dot, in the colour its id maps to', () => {
+    // The reader's own ask: one class of annotation is tellable from another by a coloured dot, at the same
+    // anchor and in the same 3x3 shape as the unread mark (2026-10-06 — it was a square, and the reader asked
+    // for one kind of dot rather than two shapes). The colour comes from the id alone (see
+    // `category-color.ts`), and the id is in the mark's own label, so colour is a fast cue rather than the
+    // only one.
+    const file = entry({ id: 'entry-cat', path: '/repo/cat.txt', oldText: 'a\n', newText: 'a\nb\n' })
+    const props = panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [
+        comment({ id: 'c-classed', entryId: file.id, text: '第一类', category: 'pass-1', anchor: { startLine: 1, endLine: 1 } }),
+        comment({ id: 'c-plain', entryId: file.id, text: '没有类别', anchor: { startLine: 2, endLine: 2 } }),
+      ],
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+
+    const dot = document.querySelector('[data-diff-comment-link="c-classed"] [data-diff-comment-category]') as HTMLElement
+    expect(dot).not.toBeNull()
+    expect(dot.getAttribute('data-diff-comment-category')).toBe('pass-1')
+    // The mapped colour, on the element itself. jsdom normalises the palette's hex to `rgb(...)`, so the
+    // expected string is built from the mapping rather than written out — the tie to `categoryColor` is
+    // what this asserts, not the literal.
+    const rgbOf = (hex: string): string => {
+      const value = parseInt(hex.slice(1), 16)
+      return `rgb(${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255})`
+    }
+    expect(dot.getAttribute('style')).toContain(rgbOf(categoryColor('pass-1')))
+    // The id in words, behind the localised prefix and untranslated itself.
+    expect(dot.getAttribute('title')).toBe('panel.commentCategory pass-1')
+    expect(dot.getAttribute('aria-label')).toBe('panel.commentCategory pass-1')
+    // No class, no dot: an ordinary comment's row carries no such mark.
+    expect(document.querySelector('[data-diff-comment-link="c-plain"] [data-diff-comment-category]')).toBeNull()
+
+    // Geometry and the non-interactive promise live in the one rule the dot wears: a FULL CIRCLE in the dot's
+    // own size family (3x3, radius half the box — the same shape as the unread dot), nothing selectable and
+    // no press of its own — a press must reach the row, which is what jumps. jsdom has no layout, so this
+    // reads that rule; the browser case asserts the computed values.
+    const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const rule = new RegExp('\\.categoryDot \\{([^}]*)\\}').exec(sheet)?.[1] ?? ''
+    expect(rule).toContain('width: 3px;')
+    expect(rule).toContain('height: 3px;')
+    expect(rule).toContain('border-radius: 50%;')
+    expect(rule).toContain('left: 5px;')
+    expect(rule).toContain('user-select: none;')
+    expect(rule).toContain('pointer-events: none;')
+    // …and the class is named for what it draws: the sheet must not still carry the old square.
+    expect(sheet).not.toContain('categorySquare')
+    // FIRST-LINE anchor, not row-centre (the reader's ask, 2026-10-06): the dot must not carry the old
+    // 50%/translate pair, and its offset is the `calc` that names the parts — the row's padding-top, the
+    // half line the first title line's centre sits at, and half the dot. jsdom lays nothing out, so this is
+    // a rule pin; the browser case measures both centres and asserts the dot does not move when the title
+    // grows from one line to three.
+    expect(rule).not.toContain('translateY')
+    expect(rule).not.toContain('top: 50%')
+    expect(rule).toContain('top: calc(6px + (18px / 2) - (3px / 2));')
+  })
+
+  it('draws the category dot at the anchor and NO unread dot on the row, however unread the thread is', () => {
+    // The reader's crowding fix (2026-10-06): the comment list row draws the category dot ONLY. Its own
+    // unread dot is not rendered here any more — beside the dot it read as crowding — while the STATE is
+    // untouched, which the next test pins from the card's side. So this asserts both halves: the dot is
+    // exactly where it always was (the anchor), and the row carries no `data-diff-comment-unseen` at all.
+    const file = entry({ id: 'entry-both', path: '/repo/both.txt', oldText: 'a\n', newText: 'a\nb\n' })
+    const props = panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [comment({
+        id: 'c-both', entryId: file.id, text: '又新又分类', category: 'pass-2', unseen: true,
+        anchor: { startLine: 1, endLine: 1 },
+      })],
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+
+    const row = document.querySelector('[data-diff-comment-link="c-both"]') as HTMLElement
+    const dot = row.querySelector('[data-diff-comment-category]') as HTMLElement
+    expect(dot).not.toBeNull()
+    expect(dot.className).toContain(panelCss.categoryDot)
+    expect(row.querySelector('[data-diff-comment-unseen]')).toBeNull()
+    // The anchor is unchanged: with the unread dot gone there is nothing to shift away from, and the dot
+    // rule still says `left: 5px` (read from the sheet, since jsdom lays nothing out) — the note above keeps
+    // saying why.
+    const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const rule = new RegExp('\\.categoryDot \\{([^}]*)\\}').exec(sheet)?.[1] ?? ''
+    expect(rule).toContain('left: 5px;')
+    expect(rule).toContain('border-radius: 50%;')
+    expect(sheet).not.toContain('unseenDotAfterCategory')
+  })
+
+  it('leaves an uncategorised row with no marks at all, and keeps the unread STATE reaching the card', () => {
+    // The other half of the crowding fix: a row with no class draws nothing now — not even the dot it used
+    // to — while `unseen` still means what it meant. This is the pin that stops the display change being
+    // read as "the unread feature was deleted": the same record still lights the CARD's own dot.
+    const file = entry({ id: 'entry-plain-dot', path: '/repo/plain.txt', oldText: 'a\n', newText: 'a\nb\n' })
+    const props = panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [comment({
+        id: 'c-plain-dot', entryId: file.id, text: '只有新', unseen: true, anchor: { startLine: 1, endLine: 1 },
+      })],
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    // Open the file the thread hangs off, so its CARD is on screen: the mark this change did NOT touch.
+    fireEvent.click(screen.getByText('plain.txt'))
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+
+    const row = document.querySelector('[data-diff-comment-link="c-plain-dot"]') as HTMLElement
+    expect(row.querySelector('[data-diff-comment-category]')).toBeNull()
+    expect(row.querySelector('[data-diff-comment-unseen]')).toBeNull()
+    // …and the state is still observable, on the surface that keeps the mark: the card's own dot.
+    const card = document.querySelector('[data-diff-discussion-id="c-plain-dot"]') as HTMLElement
+    expect(card).not.toBeNull()
+    expect(card.querySelector('[data-diff-comment-unseen]')).not.toBeNull()
   })
 
   it('picks comments with Ctrl-click instead of jumping, and any other click ends the pick', () => {

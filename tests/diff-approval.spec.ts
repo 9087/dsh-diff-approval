@@ -17,6 +17,7 @@ import { COMMENT_SKILL, COMMENT_SKILL_NAME } from '../src/comment-skill.ts'
 import { ANNOTATE_SKILL, ANNOTATE_SKILL_NAME } from '../src/annotate-skill.ts'
 import { ANNOTATE_TOOL_NAME } from '../src/annotate-tool.ts'
 import { commentsDirFor } from '../src/comments.ts'
+import { CommentStore } from '../src/comments.ts'
 import { resolveCommentLines } from '../src/comment-lines.ts'
 import { en, zh } from '../src/client/locales.ts'
 import { PendingPersistence } from '../src/persist.ts'
@@ -401,6 +402,56 @@ describe('the comment-answering skill', () => {
     expect(second).toContain('already inside')
     expect(second).toContain(comments[0]!.id)
     expect(await listEntries(handle, 'session-1')).toHaveLength(1)
+  })
+
+  it('has the added entry ON DISK before the tool answers, so a restart cannot orphan the card', async () => {
+    // THE ORDERING INVARIANT (2026-10-06, this bug measured on the live host): a card is written the
+    // moment the tool answers, but the entry it hangs on used to reach `pending.json` on a later,
+    // unawaited flush. A host that stopped in between came back with a store that did not know the path;
+    // the load-time sweep then hid the card and SAVED the hiding, and three real annotations were gone
+    // from the disk. So the add awaits its write: after this call returns, the entry is readable at the
+    // next boot — asserted here with no waiting of any kind, on the file itself.
+    type Definition = { name?: string; execute?: (args: unknown, exec: unknown) => Promise<string> }
+    const definitions: Definition[] = []
+    const root = process.platform === 'win32' ? 'C:\\repo' : '/repo'
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-diff-approval-'))
+    tempDirs.push(storageDir)
+    const first = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: root,
+      storageDir,
+      prepare: (ctx) => {
+        ctx.provide('tools', {
+          register: (definition: unknown) => { definitions.push(definition as Definition); return () => {} },
+        } as never)
+      },
+    })
+    const path = join(root, 'src', 'oracle.ts')
+    first.fs.readText.mockResolvedValue('one\ntwo\n')
+    const answer = await definitions[0]!.execute!(
+      { path: 'src/oracle.ts', startLine: 1, endLine: 1, note: '1. 这一行是入口。' },
+      { agent: { id: SessionId('session-1') }, signal: signal() },
+    )
+    expect(answer).toContain('annotated')
+    expect(answer).toContain('added to the list')
+
+    // NOT `vi.waitFor`: the point is that this is already true when the call returns. A file that is not
+    // there yet, or that does not name the entry, is the bug — and no amount of waiting may be used to
+    // paper over it, which is exactly what the previous, unawaited flush needed.
+    const pendingFile = join(storageDir, 'pending.json')
+    const persisted = JSON.parse(await readFile(pendingFile, 'utf8')) as { entries?: { id?: string }[] }
+    expect(persisted.entries?.map(entry => entry.id)).toContain(path)
+
+    // …and the invariant is the whole point, so walk it: a SECOND harness over the same directory is the
+    // restart, and both halves must still be there — the entry in the list, and the card on its lines.
+    const second = await harness({ sessionIds: [SessionId('session-1')], workspacePath: root, storageDir })
+    second.fs.readText.mockResolvedValue('one\ntwo\n')
+    expect((await listEntries(second.handle, 'session-1')).map(entry => entry.path)).toEqual([path])
+    const read = await second.handle('list', { sessionId: 'session-1' }, signal())
+    if (!read.ok) throw new Error('list failed')
+    const comments = (read.value as { comments: CommentRecord[] }).comments
+    expect(comments.map(entry => entry.id)).toHaveLength(1)
+    expect(comments[0]).toMatchObject({ entryId: path, anchor: { startLine: 1, endLine: 1 } })
   })
 
   it('is the skill the comment prompt tells the agent to load', () => {
@@ -1165,6 +1216,43 @@ describe('live file state', () => {
 })
 
 describe('persistence', () => {
+  it('keeps a card whose entry was never persisted, hidden, across the boot and the read that hides it', async () => {
+    // THE INCIDENT ITSELF, at the layer that decides it (2026-10-06): three cards were on the disk while the
+    // entries they hang on were not, and the next boot's sweep deleted them AND saved the deletion — and the
+    // FIRST LIST READ after that boot would have written the same deletion again, so a fix confined to the
+    // load path would still lose the card. This case writes the comment file by hand with NO `pending.json`
+    // beside it, boots a harness over that directory, reads the list (the sweep on every read), and then
+    // asserts the card is still on the disk: hidden from the view, not erased. Erasure belongs to the paths
+    // where a removal was asked for (`removeForEntry` → `dropEntry`).
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-diff-approval-'))
+    tempDirs.push(storageDir)
+    const commentsDir = commentsDirFor(storageDir)
+    await mkdir(commentsDir, { recursive: true })
+    const card = {
+      id: 'c-unpersisted', sessionId: 'session-1', entryId: '/repo/a.txt', path: '/repo/a.txt',
+      anchor: { startLine: 1, endLine: 1 }, quote: 'v1', text: '这张卡片所在的条目从未写进 pending.json。',
+      createdAt: 1, updatedAt: 1,
+    }
+    const commentFile = join(commentsDir, 'session-1.json')
+    await writeFile(commentFile, JSON.stringify({ version: 1, comments: [card] }), 'utf8')
+
+    const booted = await harness({ sessionIds: [SessionId('session-1')], storageDir })
+    // No entry for the path, so no row lists it: the comment is not handed to any read…
+    const read = await booted.handle('list', { sessionId: 'session-1' }, signal())
+    if (!read.ok) throw new Error('list failed')
+    expect((read.value as { comments: CommentRecord[] }).comments).toEqual([])
+
+    // …and it is STILL THERE on the disk afterwards. This is the assertion the incident failed.
+    const onDisk = JSON.parse(await readFile(commentFile, 'utf8')) as { comments?: { id?: string }[] }
+    expect(onDisk.comments?.map(comment => comment.id)).toEqual(['c-unpersisted'])
+
+    // A SECOND boot over the same directory — the next restart — still reads it, so the entry coming back
+    // later is a card that comes back with it rather than one that was thrown away.
+    const again = new CommentStore(commentsDir)
+    expect(await again.loadAll()).toBe(1)
+    expect(again.get('c-unpersisted')).toBeDefined()
+  })
+
   it('persists an operation and hydrates it into a fresh harness', async () => {
     const storageDir = await mkdtemp(join(tmpdir(), 'dsh-diff-approval-'))
     tempDirs.push(storageDir)

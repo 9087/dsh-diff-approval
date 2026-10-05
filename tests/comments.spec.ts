@@ -102,6 +102,34 @@ describe('loadAll', () => {
     expect(reader).not.toHaveProperty('author')
   })
 
+  it('keeps the CATEGORY an annotation was given, and leaves it absent when there was none', async () => {
+    // The same door as `author` above, for the same reason: the panel draws a coloured dot from this
+    // field, so a record whose category `commentOf` did not copy would lose its dot on the first host
+    // restart while the annotation itself stayed — the reader's cue would vanish, not the card.
+    const first = await store()
+    first.add(comment({ id: 'c-classed', category: 'pass-1' }))
+    first.add(comment({ id: 'c-plain' }))
+    await first.settled()
+    const second = new CommentStore(root)
+    await expect(second.loadAll()).resolves.toBe(2)
+    expect(second.list(only(S1)).find(row => row.id === 'c-classed')?.category).toBe('pass-1')
+    // No class, no dot: the key must not come back as an empty string or a present-but-undefined field.
+    const plain = second.list(only(S1)).find(row => row.id === 'c-plain')
+    expect(plain).toEqual(comment({ id: 'c-plain' }))
+    expect(plain).not.toHaveProperty('category')
+  })
+
+  it('keeps the category through a re-add, which is how an undo pair restores a thread', async () => {
+    // A restore is an ordinary `add` of a snapshot record (see `mergeOf`), so a merge that dropped the
+    // field would silently strip the dot from every thread the reader brings back with Ctrl+Z.
+    const comments = await store()
+    comments.add(comment({ id: 'c-undo', category: 'pass-3' }))
+    comments.add(comment({ id: 'c-undo', category: 'pass-3' }))
+    await comments.settled()
+    const stored = comments.list(only(S1)).find(row => row.id === 'c-undo')
+    expect(stored?.category).toBe('pass-3')
+  })
+
   it('lights the dot for an agent\'s own annotation and for nothing the reader wrote', async () => {
     // Which direction a card came from is what decides whether its arrival is news: an agent's
     // annotation lands on code the reader was not looking at (see `annotate-tool.ts`), while the
@@ -437,18 +465,51 @@ describe('the two guards against a comment outliving its entry', () => {
     expect(second.list(only(S1)).map(entry => entry.id)).toEqual(['c3'])
   })
 
-  it('sweeps the orphans of entries that are not in the list at all', async () => {
+  it('sweeps the orphans of entries that are not in the list at all, without erasing them', async () => {
     const comments = await store()
     comments.add(comment())
     comments.add(comment({ id: 'c2', entryId: '/repo/b.txt', path: '/repo/b.txt' }))
-    // The backstop for a crash between the entry's removal and the comments': the
-    // entry set is the authority on what may still have comments.
+    // The view filter: the entry set is the authority on what a read may be handed. It is NOT the authority
+    // on what may be deleted — an entry missing from the list can be one whose add never reached the disk
+    // (2026-10-06) — so this prune stays in memory and `removeForEntry` is what erases.
     expect(comments.retain(new Set(['/repo/b.txt']))).toBe(1)
     expect(comments.list(only(S1)).map(entry => entry.id)).toEqual(['c2'])
     await comments.settled()
+    // A second client sees the same pruned view… and the swept comment is still on the disk, hidden: it
+    // comes back if its entry does.
     const second = new CommentStore(root)
     await second.loadAll()
-    expect(second.list(only(S1)).map(entry => entry.id)).toEqual(['c2'])
+    expect(second.list(only(S1)).map(entry => entry.id)).toEqual(['c1', 'c2'])
+  })
+
+  it('HIDES the comments of an entry that was never persisted, and does not erase them', async () => {
+    // THE DATA LOSS (2026-10-06, measured on the live host): the card is written the moment the agent
+    // annotates, while the entry it hangs on reaches `pending.json` on a later flush (`foldBatch` now
+    // awaits that write — see the index spec). A restart in between came back with a store that did not
+    // hold the path, and the load-time sweep deleted the cards AND saved the deletion: three real
+    // annotations were gone from the disk, not merely hidden. The load-time sweep is therefore a view
+    // filter; only a removal that was asked for is written.
+    const comments = await store()
+    comments.add(comment({ id: 'c-orphan', entryId: '/repo/never-persisted.txt', path: '/repo/never-persisted.txt' }))
+    await comments.settled()
+
+    // The restart: a fresh store over the same directory, swept with the entries that DID reach the disk.
+    const second = new CommentStore(root)
+    await second.loadAll()
+    expect(second.list(only(S1)).map(entry => entry.id)).toEqual(['c-orphan'])
+    expect(second.retain(new Set(['/repo/known.txt']))).toBe(1)
+    // The view is pruned — nothing may be handed out naming a file the list does not hold…
+    expect(second.list(only(S1))).toEqual([])
+    // …and the erase, if this sweep still wrote one, must have landed before the next store reads the file:
+    // without this the third store could win the race and the case would pass against a destructive sweep.
+    await second.settled()
+
+    // …and a THIRD store still finds the card, because the sweep did not write the deletion. This is the
+    // assertion that was false before: the card was on the disk and is still on it.
+    const third = new CommentStore(root)
+    await third.loadAll()
+    expect(third.list(only(S1)).map(entry => entry.id)).toEqual(['c-orphan'])
+    expect(third.get('c-orphan')).toBeDefined()
   })
 
   it('leaves everything alone when every entry is still listed', async () => {

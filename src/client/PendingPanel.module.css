@@ -1901,13 +1901,17 @@
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
-/* One comment: what was asked and where it sits in the file, on the row's single line — the title from
-   the left, the line numbers against the right edge. The item is one line the way a file row is, and it
-   is spaced the way a file row is: the gap is the file row's own 8px (see `.rowHead`) between its name
-   and its counts, so the room before the right-hand figure is the same in both lists. */
+/* One comment: what was asked and where it sits in the file — the title from the left, the line numbers
+   against the right edge. The title may now run to THREE lines (see `commentTitle`), so the two are aligned
+   at the TOP of the row instead of on a shared baseline: baseline alignment would drag the right-hand figure
+   down to the LAST line, where it reads as a tail of that line rather than as the figure for the whole
+   comment. `commentLabel` carries the title's own 18px line-height, which is what puts the numbers on the
+   FIRST line's baseline now that both start at the row's content top. The gap is the file row's own 8px (see
+   `.rowHead`) between its name and its counts, so the room before the right-hand figure is the same in both
+   lists. */
 .commentHead {
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   gap: 8px;
   min-width: 0;
 }
@@ -1915,32 +1919,44 @@
 /* The lines the comment names, last on the row and held to its right edge: `path:lines` is the panel's
    own vocabulary for "there", and with the path gone (the group above IS that file) the numbers are the
    whole label — bracketed, so it reads as a marker. It is the row's right-hand FIGURE, so it wears the
-   file row's own figure treatment (see `.rowMeta` / `.addCount`): the app font at 12px on a 16px line,
-   in the metadata tone, tabular so a file's comments line up down that edge, and no weight of its own —
-   the add/del counts beside a file name are plain too, and the code face at 700 made this the loudest
-   thing on the row. The ONE part of that treatment it does not copy is the hue: the add/del colours say
-   "added" and "removed", and a line range says neither. */
+   file row's own figure treatment (see `.rowMeta` / `.addCount`): the app font at 12px, in the metadata
+   tone, tabular so a file's comments line up down that edge, and no weight of its own — the add/del counts
+   beside a file name are plain too, and the code face at 700 made this the loudest thing on the row. TWO
+   parts of that treatment it does not copy. The hue: the add/del colours say "added" and "removed", and a
+   line range says neither. And the line-height: this label is top-aligned beside a title that can wrap to
+   three lines, so it takes the title's own 18px line — 16px here would sit its text a pixel above the
+   title's first line, which is exactly the misalignment the figure must not have. */
 .commentLabel {
   flex: none;
   white-space: nowrap;
   text-align: right;
   color: var(--dsw-alias-label-tertiary);
   font-size: 12px;
-  line-height: 16px;
+  line-height: 18px;
   font-variant-numeric: tabular-nums;
 }
 
-/* The first sentence of what was asked: the one item on the row that takes the room that is left, and
-   the only one that is ever cut short. It reads from the left, so every title starts on one column —
-   and that column is the file name's own: the row's 8px inset plus the same 4px lead-in `.rowPath`
-   takes, which is what keeps a title clear of the unseen dot at 5px. Same 12px on an 18px line as the
-   file name, too. */
+/* The first sentence of what was asked: the one item on the row that takes the room that is left, and the
+   only one that is ever cut short — to THREE lines, with the ellipsis the clamp itself draws at the end of
+   the third. Three is the reader's number: two hides the shape of a longer note, and the row still stays
+   close to its old height for the short titles that are the common case. `white-space: nowrap` is
+   deliberately GONE — it forbids the wrapping the clamp counts — and `overflow-wrap: anywhere` is here
+   because a title can be one unbroken run (a URL, a long identifier) with no space to break at, the same
+   treatment the panel gives long paths elsewhere. The clamp is a truncation, so the WHOLE string stays
+   reachable on hover and to assistive tech through the `title` attribute the markup sets from
+   `entry.title` — the clamp only ever hides it. It reads from the left, so every title starts on one
+   column — and that column is the file name's own: the row's 8px inset plus the same 4px lead-in
+   `.rowPath` takes, which is what keeps a title clear of the unseen dot at 5px. Same 12px on an 18px line
+   as the file name, too. */
 .commentTitle {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
   margin-left: 4px;
   text-align: left;
   color: var(--dsw-alias-label-primary);
@@ -2066,6 +2082,35 @@
   align-self: center;
   transform: translateY(-50%);
   overflow: visible;
+}
+
+/* The annotation's class: a coloured ROUND DOT in the comment list row — the same 3x3 shape as the unread
+   mark the file row and the card head still draw (the reader asked for one kind of dot, not two shapes,
+   2026-10-06) — told apart by COLOUR, hashed from the category id (set inline by the panel's own markup, see
+   `category-color.ts`), plus the `title`/`aria-label` it carries, so colour is never the only cue.
+   ITS ANCHOR IS THE FIRST TITLE LINE, not the middle of the row (the reader asked for exactly that, same
+   day: 「未读点应该放在多行的第一行位置，而不是整体居中」). This row can hold a THREE-LINE title, and a mark
+   centred on the whole row drifts down into the block as the title grows. So the offset is computed from the
+   parts that decide where the first line sits, each one named in the expression:
+     6px          `.commentRow`'s padding-top — where the row's content, and so the title's first line, starts
+     + 18px / 2   half of `.commentTitle`'s 18px line box, which is the first line's centre
+     − 3px / 2    back off half the dot, because `top` places the dot's TOP edge
+   = 13.5px, and NO `transform` afterwards: the offset is the whole answer, so nothing has to be undone. If
+   the row's padding or the title's line-height changes, this number has to change with it — visibly, here.
+   A marker, not a control: `pointer-events: none` keeps every press on the ROW underneath (which is what
+   jumps to the comment), because a press landing on a 3px mark and doing nothing is the dead end a
+   decorative mark must never create. Nothing here is selectable text, and the panel's chrome is
+   `user-select: none` besides. */
+.categoryDot {
+  position: absolute;
+  top: calc(6px + (18px / 2) - (3px / 2));
+  left: 5px;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* A file whose keep/revert just failed: error-red tag on the list row, with

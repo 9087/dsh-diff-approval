@@ -54,6 +54,7 @@ import type { PanelFileDetail, PanelStateDetail } from './dock.tsx'
 import { forgetPlacedThreadsNotIn, lastPanelFile, panelFileOffset, quietenRemovalAsk, rememberPlacedThreads, rememberThreads, rememberedPlacedThreads, rememberedThreads, rememberPanelView, removalAskQuiet } from './panel-memory.ts'
 import type { PlacedThread, ThreadLocal } from './panel-memory.ts'
 import { composerCoveredByPanel, leaveComposerCaret } from './composer-cover.ts'
+import { categoryColor } from './category-color.ts'
 import { chipMenuEnabled, commentModeEnabled, COMMENT_MODE_CHANGED_EVENT, confirmFileRemoveEnabled, COVER_CHANGED_EVENT, discussionRoundLimit, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
 import { matchRangesOf } from './search.ts'
@@ -9994,6 +9995,10 @@ export function PendingPanel({
             // in the code view, which renders the selected file alone, and the file row's is about the
             // file rather than about the thread.
             ...(record.unseen === true ? { unseen: true } : {}),
+            // The class of annotation the agent named, carried through untouched like the dot above: the
+            // row draws a coloured round dot from it (see `category-color.ts`). Opaque here too — the panel
+            // hashes it and shows it back in the mark's own label, and nothing else reads it.
+            ...(record.category === undefined ? {} : { category: record.category }),
           }
         }),
       }))
@@ -10378,29 +10383,53 @@ export function PendingPanel({
                               jumpToComment(entry.fileId, entry.line, entry.id, entry.oldSide)
                             }}
                           >
-                            {/* The card's own dot, on the row that is always there to carry it: the code
-                                view renders the SELECTED file alone, so a comment on a file the reader is
-                                not looking at has no card on screen — and with no card there is nowhere for
-                                its dot to appear. This row is that place. Same mark as the card's, out of
-                                flow to the LEFT of the row's own content (the row is the containing block,
-                                see `.commentRow`), naming itself on `aria-label` / a `<title>` child —
-                                an SVG has no `title` attribute. What clears it is unchanged: this row is
-                                how the reader reaches the card, and the card coming into view is what
+                            {/* The annotation's CLASS: a coloured ROUND DOT, the same 3x3 shape as the unread
+                                mark the file row and the card head still draw — the reader asked for one kind
+                                of dot rather than two shapes (2026-10-06). Its anchor is this row's FIRST
+                                TITLE LINE, not the middle of the row: the row can now hold a three-line
+                                title, and a mark centred on the whole row drifts into the block as the title
+                                grows (the reader asked for that the same day). `.categoryDot` computes the
+                                offset from the row's padding and the title's line-height, so both numbers
+                                are visible where they are used. This row draws no unread dot of its own any
+                                more, so there is no second circle beside it to be mistaken for: the class is
+                                told apart by COLOUR, hashed from the category id (`category-color.ts`), so
+                                every annotation of one kind carries the same one, on any host and after any
+                                reload — and by the `title`/`aria-label` the mark carries, so colour is never
+                                the only cue. It is a marker, not a control: no text of its own, nothing
+                                selectable, and `pointer-events` is off (see `.categoryDot`) so a press lands
+                                on the row underneath — which is the row that jumps.
+                                THE ROW'S OWN UNREAD DOT IS DELIBERATELY NOT DRAWN (2026-10-06): beside that
+                                dot it read as crowding, and the reader asked for the dot to be removed from
+                                THIS row only. The STATE is untouched — `CommentRecord.unseen`, the host's
+                                lighting, the seen-on-view clearing and the payload field all stay exactly as
+                                they were — and the two other surfaces still draw it: the card's own dot
+                                (`.discussionHead .unseenDot`) and the FILE row's (`[data-diff-unseen]`). Nor
+                                does anything about this row's clearing change: opening the card is still what
                                 tells the host the attention is spent. */}
-                            {entry.unseen === true && (
-                              <svg className={css.unseenDot} data-diff-comment-unseen width="3" height="3" viewBox="0 0 3 3" role="img" aria-label={t('panel.unseen')}>
-                                <title>{t('panel.unseen')}</title>
-                                <circle cx="1.5" cy="1.5" r="1.5" fill="var(--dsw-alias-state-business-primary)" />
-                              </svg>
+                            {entry.category !== undefined && (
+                              <span
+                                className={css.categoryDot}
+                                data-diff-comment-category={entry.category}
+                                style={{ background: categoryColor(entry.category) }}
+                                role="img"
+                                aria-label={`${t('panel.commentCategory')} ${entry.category}`}
+                                title={`${t('panel.commentCategory')} ${entry.category}`}
+                              />
                             )}
-                            {/* One line: what was asked, then where in the file it sits — the title takes
-                                the room and reads from the left, the line numbers sit at the row's right
-                                edge, so a file's comments line up on the side the eye scans them by. */}
+                            {/* What was asked, then where in the file it sits — the title takes the room and
+                                reads from the left, the line numbers sit at the row's right edge, so a file's
+                                comments line up on the side the eye scans them by. The title is clamped to
+                                THREE lines (`commentTitle`) and the clamp hides the rest, so the span also
+                                carries the whole string in a `title`: hover, and assistive tech, get what the
+                                ellipsis dropped. It is a native attribute, not the panel's own `Tooltip`, so
+                                nothing is added to the layout and nothing appears in the accessibility tree
+                                as a live tooltip — the row itself remains the control. */}
                             <span className={css.commentHead}>
                               <span
                                 className={entry.empty ? `${css.commentTitle} ${css.commentTitleEmpty}` : css.commentTitle}
                                 data-diff-comment-title
                                 data-diff-comment-empty={entry.empty ? '' : undefined}
+                                title={entry.title}
                               >{entry.title}</span>
                               <span className={css.commentLabel} data-diff-comment-label>{entry.label}</span>
                             </span>

@@ -49,6 +49,32 @@ export const MAX_ANNOTATION_LINES = 60
  */
 export const MAX_ANNOTATION_CHARS = 1000
 
+/**
+ * The most characters a category id may carry.
+ *
+ * The id is a grouping key, not prose: it is hashed for a colour and shown back in the mark's own label,
+ * so anything past this is noise the reader would never see. Longer ids are TRUNCATED rather than
+ * refused (see {@link normalizeCategory}).
+ */
+export const MAX_ANNOTATION_CATEGORY_CHARS = 64
+
+/**
+ * The category id as it is stored: trimmed, and cut to {@link MAX_ANNOTATION_CATEGORY_CHARS}.
+ *
+ * TRUNCATED rather than refused: the id is only ever hashed into a colour and echoed in the mark's label,
+ * so an over-long one still groups its annotations consistently — every call of that class is cut in the
+ * same place — while refusing would fail an entire annotation over a cosmetic detail. Absent, empty and
+ * whitespace-only all mean the same thing: no class, so no dot (see `CommentRecord.category`).
+ *
+ * @param value - the id the caller passed, if any.
+ * @returns the id to store, or `undefined` when there is none.
+ */
+export function normalizeCategory(value: string | undefined): string | undefined {
+  const trimmed = value?.trim() ?? ''
+  if (trimmed === '') return undefined
+  return trimmed.slice(0, MAX_ANNOTATION_CATEGORY_CHARS)
+}
+
 /** What the agent asked for, once the tool layer has resolved which pending entry it means. */
 export interface AnnotationRequest {
   /** The session the annotation belongs to, i.e. the one whose panel will draw it. */
@@ -64,6 +90,14 @@ export interface AnnotationRequest {
   endLine?: number | undefined
   /** The annotation itself: the card's first turn, written by the agent. */
   note: string
+  /**
+   * Optional class of annotation: the same id for every annotation of one kind, a different one for the
+   * next. Opaque to the host and to the panel — hashed into a colour and shown back to the reader in the
+   * mark's label — so an agent annotating several passes can be told apart at a glance. Normalised by
+   * {@link normalizeCategory}: trimmed, empty means absent, cut to
+   * {@link MAX_ANNOTATION_CATEGORY_CHARS}.
+   */
+  category?: string | undefined
   /**
    * Optional guard: the text the caller believes those lines read, newline-joined.
    *
@@ -194,6 +228,7 @@ export function annotateLines(
     return { outcome: 'already-annotated', comment, start: range.start, end: range.end }
   }
   const now = request.now ?? Date.now()
+  const category = normalizeCategory(request.category)
   const record: CommentRecord = {
     id: request.id ?? randomUUID(),
     sessionId: request.sessionId,
@@ -206,6 +241,9 @@ export function annotateLines(
     createdAt: now,
     updatedAt: now,
     author: 'agent',
+    // Absent rather than empty when the caller named no class: a record with `category: ''` would be a
+    // dot the panel has to reason about, and `undefined` is the one spelling of "no class".
+    ...(category === undefined ? {} : { category }),
     ...annotationQuote(lines, start, end),
   }
   return { outcome: 'annotated', comment: record }
