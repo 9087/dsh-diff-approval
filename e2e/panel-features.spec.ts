@@ -16,11 +16,11 @@ import {
   type Fixture, type Host, type SeededFile,
 } from './helpers/host.ts'
 import {
-  beginSession, chooseMenuItem, confirmIfAsked, dismissNotices, ensurePanelList, newGuiPage, openPanel,
-  openSession, pressRedo, pressUndo, row,
+  beginSession, chooseMenuItem, CLOSE_COMMENT, commentRow, confirmIfAsked, dismissNotices, ensurePanelList,
+  newGuiPage, openListTab, openPanel, openSession, pressRedo, pressUndo, row,
 } from './helpers/gui.ts'
 
-import { dockPanel, dockedPanel, floatCard, openFloatList, setViewport } from './helpers/panel.ts'
+import { dockPanel, dockedPanel, floatCard, openFloatList, setViewport, writeComment } from './helpers/panel.ts'
 
 /** Four changed text files plus a markdown one, so every feature below has something of its own. */
 const FILES: SeededFile[] = [
@@ -428,6 +428,85 @@ test.describe('面板功能：搜索 / 跳转 / 视图 / 浮动列表 / 预览 /
     expect(page.url(), 'and once again the link does not navigate').toBe(before)
     await page.keyboard.press('Escape')
     await expect(page.locator('[role="menuitem"]')).toHaveCount(0, { timeout: 20_000 })
+  })
+
+  test('s17. 选择范围：文件行的名字与评论自己的文字不可选，代码与输入框可选', async () => {
+    test.setTimeout(180_000)
+    // THE READER'S REQUEST, measured the way the browser decides it: `getComputedStyle(el).userSelect`
+    // on the elements themselves, never the text of a stylesheet rule. This repo has been bitten by a
+    // CSS test that compared rule text for a class nothing rendered (the 0.29.0 code-font rule), so the
+    // assertion is what the element resolves to on screen. Both halves are asserted: the chrome must be
+    // `none`, and the code and the fields must stay `text`, so this cannot be "fixed" by turning
+    // selection off everywhere.
+    const of = async (selector: string): Promise<string> => await page.evaluate(
+      (sel) => {
+        const node = document.querySelector(sel)
+        return node === null ? '(missing)' : getComputedStyle(node).userSelect
+      },
+      selector,
+    )
+    /** The same read for the CURSOR: a text beam is a promise of a selection, so it is measured on the
+     *  element too rather than trusted from the rule that declares it. */
+    const cursorOf = async (selector: string): Promise<string> => await page.evaluate(
+      (sel) => {
+        const node = document.querySelector(sel)
+        return node === null ? '(missing)' : getComputedStyle(node).cursor
+      },
+      selector,
+    )
+
+    await row(page, paths['alpha.txt'] as string).click({ timeout: 20_000 })
+
+    // The `text` half FIRST, so that turning selection off everywhere fails this case at its first
+    // assertion — the cheap "fix" has to be visible as a failure, not hidden behind the `none` ones.
+    // The code is what commenting is built on, and it stays selectable.
+    expect(await of('[data-diff-code]'), 'the diff\'s code must stay selectable').toBe('text')
+    // …and so does a field: a caret in a field whose text cannot be selected is the trap the
+    // stylesheet's own comment warns about.
+    await page.locator('[data-diff-search-toggle]').first().click({ timeout: 20_000 })
+    const search = page.locator('[data-diff-search-input]').first()
+    await expect(search).toBeVisible({ timeout: 20_000 })
+    expect(await of('[data-diff-search-input]'), 'a field must keep selection').toBe('text')
+    // …and the CURSOR, which is a promise of its own: the code and the field wear the I-beam, so "take the
+    // beam away everywhere" fails here too. The unit test pins the rules; this is what the browser resolves.
+    expect(await cursorOf('[data-diff-code]'), 'the code\'s I-beam must stay').toBe('text')
+    expect(await cursorOf('[data-diff-search-input]'), 'a field\'s I-beam must stay').toBe('text')
+    await page.locator('[data-diff-search-close]').first().click({ timeout: 20_000 })
+
+    // The file row's NAME: the literal text a drag used to select ("alpha.txt").
+    expect(await of('[data-diff-file] [class*="_rowPath"]'), 'a file row\'s name must not be selectable').toBe('none')
+
+    // A comment item's own text needs a comment: stage one the way a reviewer does, through the panel's
+    // own select-comment-send route (the helper the comments spec uses), then read the parts that used to
+    // be selectable — the reader's own turn, and the comment LIST's title. The turn is the HOST's answer
+    // being read back, so this waits for it rather than assuming a send is already on screen.
+    //
+    // NOT STAGED HERE: `[data-diff-quote-text]`, the code a comment quotes. It renders only for an
+    // OUTDATED thread (`discussion.lost`, PendingPanel.tsx:1753) — the quote is what the block shows once
+    // the lines it named are gone — and making a thread outdated means rewriting a file this file's own
+    // later cases revert to a known text. The selector is pinned by the unit test's negative list instead.
+    const written = await writeComment(page, 1, 2, 'e2e: 选区探针')
+    expect(written).toContain('e2e:')
+    const userTurn = page.locator('[data-diff-discussion-user]').first()
+    await expect(userTurn).toBeVisible({ timeout: 30_000 })
+    expect(await of('[data-diff-discussion-user]'), 'a comment\'s own words must not be selectable').toBe('none')
+    // Cursor: asserted as a NEGATIVE, not one exact value — a beam is what it must not wear, while `default`
+    // from `.discussion` and an inherited `auto` are both legitimate ways for chrome to read.
+    expect(await cursorOf('[data-diff-discussion-user]'), 'a comment\'s own words must not wear a text beam').not.toBe('text')
+    await openListTab(page, 'comments')
+    await expect(page.locator('[data-diff-comment-title]').first()).toBeVisible({ timeout: 20_000 })
+    expect(await of('[data-diff-comment-title]'), 'a comment-list title must not be selectable').toBe('none')
+
+    // Leave the store and the pane as the following cases expect them: the comment this case staged is
+    // closed again (the list is the host's, so its row is the proof it was really there), and the pane
+    // goes back to the file list.
+    const id = await page.locator('[data-diff-comment-link]').first().getAttribute('data-diff-comment-link')
+    if (id === null) throw new Error(`the staged comment never reached the list.\n${await panelSaid(page)}`)
+    await chooseMenuItem(page, commentRow(page, id), CLOSE_COMMENT)
+    await confirmIfAsked(page)
+    await expect(page.locator('[data-diff-comment-link]')).toHaveCount(0, { timeout: 20_000 })
+    await openListTab(page, 'pending')
+    await expect(page.locator('[data-diff-file]').first()).toBeVisible({ timeout: 20_000 })
   })
 
   test('s6. 设置入口：齿轮把读者交给设置区，Escape 之后能回到列表', async () => {

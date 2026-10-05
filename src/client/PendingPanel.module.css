@@ -271,19 +271,21 @@
   -webkit-user-select: none;
 }
 
-/* The panel's content, and the only things a reader can select: the code (the diff's rows and
-   the code a comment quotes), the rendered Markdown preview, the thread's own turns — what the
-   user said and what the agent answered — and the file paths, which are values a reader copies
-   out by hand as often as by the row's own copy action. Fields keep it too, always: a caret in a
-   field whose text cannot be selected is a worse trap than an accidental selection, and the
-   panel holds both our own fields and the kit's. */
+/* What a reader copies OUT of this panel, and the only things it lets them select: the diff's code,
+   the rendered Markdown preview, and fields. Everything else is chrome, including two things that
+   used to be listed here — a file row's NAME and a comment's own text (the reader's turn, the agent's
+   answer, and the code the comment quotes). The reader asked for that: those are things to read and
+   press, and a drag across them should only ever be a drag (a stray selection also wakes the
+   browser's selection UI). Fields keep selection BY DEFAULT — `input`, `textarea`,
+   `[contenteditable]`, and the detail header's path field named explicitly below — because a caret in a
+   field whose text cannot be selected is a worse trap than an accidental selection, and the panel holds
+   both our own fields and the kit's. Two transient seals override even a field, both deliberately, each
+   for as long as one gesture lasts: a touch press holding one column of the split view (`.splitSealed`
+   and `.splitSealed *`, further down) and a float-list resize drag (`document.body.style.userSelect =
+   'none'` while the drag runs, restored when it ends). */
 .panel .code,
 .panel .mdPreviewBody,
-.panel .discussionUser,
-.panel .discussionAnswer,
-.panel .quoteText,
 .panel .diffPath,
-.panel .rowPath,
 .panel input,
 .panel textarea,
 .panel [contenteditable] {
@@ -2865,8 +2867,6 @@
   line-height: 22px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  /* Selectable text, so the beam: see the whitelist in `.panel` and the arrow on `.discussion`. */
-  cursor: text;
 }
 
 /* What the user said, as a bubble: the chat's own bubble fill, but square and a
@@ -2912,8 +2912,6 @@
   line-height: 22px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  /* Selectable text, so the beam: see the whitelist in `.panel` and the arrow on `.discussion`. */
-  cursor: text;
 }
 
 /* Inline code in a turn: the conversation's own inline code, declaration for declaration. The
@@ -3081,9 +3079,6 @@
   display: block;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  /* The quoted code is in the selectability whitelist (see `.panel`), so it takes the beam;
-     the line numbers beside it are chrome and keep the block's arrow. */
-  cursor: text;
 }
 
 /* Wrap off, as in the file's own rows: a quoted line is one line, however long, and it is cut
