@@ -19,3 +19,10 @@ jobs:
       - run: pnpm run typecheck
       - run: pnpm test
       - run: pnpm run build
+      # The bundle must be a function of the SOURCE: build it again and compare the bytes. Nothing in
+      # the unit suite can see a step that reintroduces per-run bytes — the one that did lived in the
+      # build helper's CSS-module mapping (see build/css-class-map.ts) and made every build of identical
+      # sources differ, which quietly invalidates any hash a later check compares. A script, so the
+      # same check runs here and locally with no coreutils flags in the middle.
+      - name: the build is reproducible
+        run: node scripts/check-reproducible-build.mjs

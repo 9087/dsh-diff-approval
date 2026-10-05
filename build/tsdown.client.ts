@@ -17,6 +17,7 @@ import { basename, dirname, relative, resolve as resolvePath, sep } from 'node:p
 import { fileURLToPath } from 'node:url'
 import type { UserConfig } from 'tsdown'
 import { transform } from 'lightningcss'
+import { cssClassMap } from './css-class-map.ts'
 import { PLATFORM_MODULES } from './platform.ts'
 
 /**
@@ -231,8 +232,7 @@ function clientConfig(id: string, entry: string): UserConfig {
           cssModules: { pattern: '[hash]_[local]' },
           minify: true,
         })
-        const classMap: Record<string, string> = {}
-        for (const [local, exp] of Object.entries(cssExports ?? {})) classMap[local] = exp.name
+        const classMap = cssClassMap(cssExports)
         // One <style data-plugin> per module file; idempotent under re-evaluation.
         return [
           `const css = ${JSON.stringify(code.toString())};`,
