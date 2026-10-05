@@ -1,0 +1,43 @@
+name: Compat (supported releases)
+
+# The GATING matrix: every published release inside the declared peer range has to mount this build.
+#
+# It runs on pushes to main and on pull requests, and the Release workflow CALLS it as a job it depends
+# on — so a red matrix stops a tag instead of shipping a version that cannot load in a release someone
+# is already running. That dependency is the point: the gate is a job `publish` needs, not a step
+# someone could reorder.
+#
+# Not to be confused with compat-newer.yml, which probes releases NEWER than the one we ship and never
+# gates anything: a newer release that does not mount is something to discuss, not to block on.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The probe boots the real build from `lib/`, so the build has to exist first.
+      - run: pnpm run build
+      # Per-release installs are reused between runs. The script installs a version only when its
+      # directory is missing or the release's own cordis pin changed (it records that pin beside the
+      # install), so a release published since the cache was written is installed here and probed like
+      # the rest rather than being skipped.
+      - uses: actions/cache@v4
+        with:
+          path: .compat
+          key: compat-${{ runner.os }}-${{ hashFiles('scripts/dsh-compat.mjs', 'package.json') }}
+          restore-keys: compat-${{ runner.os }}-
+      - run: pnpm run compat
