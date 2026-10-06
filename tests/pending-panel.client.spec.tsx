@@ -9658,9 +9658,25 @@ describe('PendingPanel', () => {
     // Both columns hold, one gutter along from each other.
     const second = /\.line > \.gutter \+ \.gutter \{([^}]*)\}/.exec(css)?.[1] ?? ''
     expect(second).toContain('left: 44px')
-    // The code view's own surface, and the two washes a row can wear: without them the pinned
-    // column reads as a different shade beside its own row.
-    expect(pinned).toContain('background-color: var(--dsw-alias-markdown-code-block)')
+    // The column is its OWN surface, brighter than the code's — not the code's surface repeated, which left
+    // the numbers told apart from the code only by a changed row's tint. The requirement it serves: the
+    // line-number column reads as its own ground beside the code area, so the two are not one surface.
+    expect(pinned).toContain('background-color: var(--diff-gutter-surface)')
+    // The fill alone, and it is the PANEL's own surface: the numbers' column is whiter than the code block
+    // (the shell's light theme paints the block `#f9fafb`), with no line or edge around it — an edge was
+    // tried and the reader rejected it. The declaration is shared with `.diffPreview`, because the settings
+    // preview reuses these cells and lives in the shell's settings dialog, outside the panel.
+    const surface = /(?:^\.panel,\n\.diffPreview \{)([^}]*)\}/m.exec(css)?.[1] ?? ''
+    expect(surface).toContain('--diff-gutter-surface: var(--dsw-alias-bg-base)')
+    expect(surface).not.toContain('--diff-gutter-edge')
+    expect(pinned).not.toContain('box-shadow')
+    // OPAQUE: both ends of the mix are opaque and the mix adds no transparency — anything else would let
+    // the code show through the pinned column as it slides under it.
+    expect(surface).not.toContain('transparent')
+    // The quoted frame a thread draws for itself draws the file's own columns, so its numbers wear the same
+    // surface: a quote of these rows reads as these rows, not as a plain two-column table beside them.
+    expect(/\.gutter\[data-diff-quote-gutter\] \{([^}]*)\}/.exec(css)?.[1] ?? '')
+      .toContain('background-color: var(--diff-gutter-surface)')
     expect(pinned).toContain('--diff-row-tint')
     expect(pinned).toContain('--diff-row-wash')
     const discussed = /\.rowDiscussed \{([^}]*)\}/.exec(css)?.[1] ?? ''
@@ -14912,7 +14928,7 @@ describe('settings group headers', () => {
     // RULE and SOURCE text again — jsdom neither lays out nor has a ResizeObserver, so the browser case in
     // `e2e/panel-settings.spec.ts` is the proof that the two sticky boxes no longer overlap.
     const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
-    const preview = /^\.diffPreview \{([^}]*)\}/m.exec(css)?.[1] ?? ''
+    const preview = /^\.diffPreview \{(?=[^}]*position: sticky)([^}]*)\}/m.exec(css)?.[1] ?? ''
     expect(preview).toContain('position: sticky')
     // NOT `top: 0`: the group header is sticky at that same offset, so a preview there parked exactly behind
     // it (measured: 75px of overlap, the header's whole height). The offset is the header's measured height.

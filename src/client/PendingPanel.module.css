@@ -244,6 +244,19 @@
    seat (z-index 7) and markdown code-block sticky banners (z-index 6) in
    ConversationRoot.module.css — if the harness raises its own stacking above
    30, this panel can be overlapped. */
+/* The line-number column's own surface: the PANEL's surface, not the code's, so the column reads as the
+   page's strip beside the code block — white against the shell light theme's `#f9fafb` code, which is the
+   brighter column the numbers sit on. No line, no edge, nothing else: the fill alone is the distinction.
+   Declared ONCE for every surface that draws the reader's rows: the panel (the file view's own
+   `.line > .gutter` cells, and the quoted frame a thread's card draws for itself) and the settings
+   preview, which reuses the file view's classes but lives in the shell's own settings dialog, OUTSIDE
+   `.panel` — a variable scoped to the panel alone would leave its numbers with no surface at all.
+   Opaque, so the code sliding under the pinned column can never show through it. */
+.panel,
+.diffPreview {
+  --diff-gutter-surface: var(--dsw-alias-bg-base);
+}
+
 .panel {
   position: fixed;
   left: 8px;
@@ -3597,12 +3610,17 @@
   position: sticky;
   left: 0;
   z-index: 1;
-  /* The code view's own surface — the same token `.diff` paints, not the panel's: a pinned column
-     is only invisible while it is holding still if it matches what is behind the code. */
-  background-color: var(--dsw-alias-markdown-code-block);
+  /* The line-number column's own surface is the PANEL's, not the code block's: on the shell's light
+     theme that is white against the code's `#f9fafb`. The colour comes from `--diff-gutter-surface`
+     (see `.panel`), so no theme's colour is written down here, and it is opaque — the code sliding
+     under the pinned column can never show through it. No line and no edge: the fill is the whole
+     distinction, which is what was asked for. */
+  background-color: var(--diff-gutter-surface);
   /* ...and whatever its row is wearing: the diff's tint, and the wash that marks the rows being
      commented on. These cells paint over their row's own backgrounds, so a pinned column that did
-     not carry them itself would read as a different shade beside its own row. */
+     not carry them itself would read as a different shade beside its own row. Both layers stay OVER
+     the column's own colour — the image paints above the background-color, and dropping or reversing
+     either would take the changed row's tint (or the comment wash) off its own numbers. */
   background-image:
     linear-gradient(var(--diff-row-tint, transparent), var(--diff-row-tint, transparent)),
     linear-gradient(var(--diff-row-wash, transparent), var(--diff-row-wash, transparent));
@@ -3613,6 +3631,16 @@
    ones instead of standing beside them. The step is `.gutter`'s own width. */
 .line > .gutter + .gutter {
   left: 44px;
+}
+
+/* A thread's own quoted frame (the card of a thread whose lines are gone or rewritten) draws the file's
+   columns so the quote can be looked up, and its numbers wear the file's surface for the same reason the
+   file's do: a quote of these rows should read as these rows, not as a plain two-column table beside them.
+   Not pinned — the frame sits at the block's left edge, which the block pins for it — so only the colour
+   is shared, not `.line > .gutter`'s sticky position. The file's tint and wash layers do not come here
+   either: the quote paints its own row tints on the code side (`.quoteAdd` / `.quoteDel`). */
+.gutter[data-diff-quote-gutter] {
+  background-color: var(--diff-gutter-surface);
 }
 
 .code {
