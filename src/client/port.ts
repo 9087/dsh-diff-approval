@@ -12,7 +12,7 @@ import type {
   DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue,
   DiffApprovalListCountValue,
   DiffApprovalListValue,
-  DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue, PendingFileDiff, VcsImportValue,
+  DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue, DiffApprovalUpdateValue, PendingFileDiff, VcsImportValue,
 } from '../types.ts'
 
 /** The channel the host half registers and this port calls. */
@@ -119,6 +119,17 @@ export interface DiffApprovalPort {
   commentAsk(sessionId: SessionId, id: string, prompt: string, text: string): Promise<DiffApprovalCommentAskValue>
   /** Tell the host the reader is looking at a comment: the card's unseen dot goes out. */
   commentSeen(sessionId: SessionId, id: string): Promise<void>
+  /**
+   * Ask whether a newer release of this plugin is published, and what changed since the
+   * installed one.
+   *
+   * No session is named: the answer is about the PACKAGE, not about a review. The host owns
+   * the whole question — it reads its own `package.json`, reaches the registry (a browser
+   * may not: no CORS header there) and decides `newer` — so a caller only has to render the
+   * answer. A host that predates the endpoint answers `unknown endpoint "update-check"`, and
+   * the caller is expected to ignore that failure exactly as it ignores a network one.
+   */
+  checkUpdate(): Promise<DiffApprovalUpdateValue>
 }
 
 /** Build the port over one generic RPC caller.
@@ -126,6 +137,11 @@ export interface DiffApprovalPort {
  * @returns the typed port.
  */
 export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPort {
+  // The page's ONE update probe. This port is built once per page (`apply` in `index.ts`) and every panel
+  // seat closes over that same port, so the promise below is what keeps a second mount — the footer entry
+  // and the right sidebar's docked tab are separate mounts — from asking the host twice. The host caches
+  // its own answer too; this just means the question is asked once in the first place.
+  let updateProbe: Promise<DiffApprovalUpdateValue> | undefined
   return {
     async list(sessionId) {
       return listValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'list', { sessionId }))
@@ -134,6 +150,13 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
       // The same channel and the same payload shape as `list`: a host that has one has the other, and a
       // host that does not answers `unknown endpoint` here rather than inventing a number.
       return countValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'list-count', { sessionId }))
+    },
+    checkUpdate() {
+      // No payload: the question is about the package, not about anything the client knows. A refused
+      // answer (an older host, a transport failure) is part of this promise, and a caller ignores it —
+      // the panel draws no chip, which is also what a failed check should look like.
+      updateProbe ??= (async () => updateValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'update-check', {})))()
+      return updateProbe
     },
     async keep(sessionId, id, keepListed) {
       // Omit the field entirely when unset, so the wire payload keeps its shape.
@@ -455,6 +478,35 @@ function countValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>):
     throw new Error('list-count returned a malformed count')
   }
   return { count }
+}
+
+/**
+ * Narrow the update answer. The one field the caller ACTS on is `newer`, so that is the one
+ * that must be a real boolean; `current` is a required string because the dialog names it.
+ * `latest` may be absent — that is a host that could not reach the registry, an ordinary
+ * answer rather than a failure.
+ */
+function updateValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffApprovalUpdateValue {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+  const value: unknown = result.value
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('update-check returned a malformed value')
+  }
+  const record = value as Record<string, unknown>
+  const { current, latest, newer } = record
+  if (typeof newer !== 'boolean' || typeof current !== 'string') {
+    throw new Error('update-check returned a malformed value')
+  }
+  if (latest !== undefined && typeof latest !== 'string') {
+    throw new Error('update-check returned a malformed latest')
+  }
+  // Only these fields are carried, whatever else a host chose to send: the panel draws nothing but the
+  // versions, so a `url` or a `notes` on the wire has no way back into the answer.
+  return {
+    current,
+    newer,
+    ...(latest === undefined ? {} : { latest }),
+  }
 }
 
 /** Narrow one action endpoint's value; a malformed wire value is an action failure. */

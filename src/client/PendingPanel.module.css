@@ -2414,6 +2414,10 @@
   font-size: 12px;
   line-height: 18px;
   cursor: pointer;
+  /* An action can be an `<a>` — the notice's two page doors are — and an anchor brings the browser's own
+     underline along with it. These are button-shaped chips either way, so the label carries no decoration:
+     the shape comes from the border and the hover fill, which both tags already share. */
+  text-decoration: none;
   /* Keep / Revert / 移出 and the rest are single words in a fixed-height chip: a wrap would make
      one button two lines tall and drag the whole row's height with it. */
   white-space: nowrap;

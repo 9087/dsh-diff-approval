@@ -258,6 +258,46 @@ export function quietenRemovalAsk(sessionId: string | undefined): void {
   quietSessions.add(sessionId)
 }
 
+/**
+ * "Which release the reader has already said 知道了 to", for THIS page.
+ *
+ * A VERSION rather than a boolean, for the reason the notice exists: it is there to tell the reader about a
+ * release they have not seen, so dismissing one must not hide the NEXT one — a newer release shows again even
+ * within the same page.
+ *
+ * And page-local, exactly like the quiet answer above, because the reader changed their mind about being
+ * remembered: the notice comes back on the next client lifetime, while this page keeps it out of the way. It
+ * is a fact about this visit, not a preference — nothing here is the host's to keep.
+ */
+let dismissedUpdate = ''
+
+/**
+ * Window event a dismissal dispatches, so every mounted seat hears it.
+ *
+ * The notice's chip lives in the open file's status bar, and the panel that draws it can be mounted more than
+ * once (the footer seat and the right sidebar's docked tab are separate mounts): the state above is the fact,
+ * and this event is how the OTHER mount learns about it NOW rather than at its next mount. One state, one
+ * event — so whichever seat is on screen cannot disagree about whether the reader has said "got it".
+ */
+export const UPDATE_DISMISSED_EVENT = 'diff-approval:update-dismissed'
+
+/**
+ * The release whose notice the reader dismissed on this page.
+ * @returns the dismissed version, or `''` when none has been dismissed here.
+ */
+export function dismissedUpdateVersion(): string {
+  return dismissedUpdate
+}
+
+/**
+ * Remember that the reader dismissed the notice for one version on this page, and tell the other mounts.
+ * @param version - the version that notice was about.
+ */
+export function dismissUpdate(version: string): void {
+  dismissedUpdate = version
+  window.dispatchEvent(new CustomEvent(UPDATE_DISMISSED_EVENT, { detail: version }))
+}
+
 /** This session's record, created on first use. */
 function viewOf(sessionId: string): SessionView {
   let view = views.get(sessionId)
@@ -317,4 +357,5 @@ export function resetPanelMemory(): void {
   localThreads.clear()
   placedThreads.clear()
   quietSessions.clear()
+  dismissedUpdate = ''
 }

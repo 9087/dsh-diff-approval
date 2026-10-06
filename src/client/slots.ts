@@ -7,7 +7,7 @@ import type { CommentDraft } from './port.ts'
 import type { CommentLineRange } from '../comment-lines.ts'
 import type {
   CommentRecord, DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalCommentAddValue,
-  DiffApprovalCommentAskValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue, DiffApprovalOpenAction, DiffApprovalRefreshValue, PendingFileDiff, VcsImportValue,
+  DiffApprovalCommentAskValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue, DiffApprovalOpenAction, DiffApprovalRefreshValue, DiffApprovalUpdateValue, PendingFileDiff, VcsImportValue,
 } from '../types.ts'
 
 /** What the panel reads and drives: the pending list plus in-flight entries. */
@@ -204,6 +204,16 @@ export interface PendingPanelFace extends PendingViewHooks {
   /** Close the docked tab now, when one exists (the quick-summon chord's job
    *  while the panel lives in the sidebar). */
   closeDock?: (() => void) | undefined
+  /**
+   * Ask the host whether a newer release of this plugin is published.
+   *
+   * Optional, and deliberately so: a seat that is not given one (an older shell wiring, or a
+   * harness that does not stage it) simply draws no update chip. The panel calls it ONCE, after
+   * mount, and never waits on it — a host that cannot answer, or has no answer to give, leaves the
+   * chip's site exactly as it was. The answer is drawn in ONE place (the open file's status bar, at
+   * the panel's bottom edge) out of one piece of panel state.
+   */
+  onCheckUpdate?: (() => Promise<DiffApprovalUpdateValue>) | undefined
   /** Read the pending list for the current session into the snapshot. */
   onRefresh: (sessionId: SessionId | undefined) => void
   /**

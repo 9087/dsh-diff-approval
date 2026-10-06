@@ -214,6 +214,85 @@ describe('list-count', () => {
   })
 })
 
+describe('update-check', () => {
+  it('asks with no payload and narrows the whole answer', async () => {
+    const seam = fakeRpc({
+      'update-check': { ok: true, value: { current: '0.30.1', latest: '0.31.0', newer: true } },
+    })
+    await expect(createDiffApprovalPort(seam.rpc).checkUpdate()).resolves.toEqual({
+      current: '0.30.1', latest: '0.31.0', newer: true,
+    })
+    // The question is about the PACKAGE, so no session is named and there is no payload at all.
+    expect(seam.call).toHaveBeenCalledWith('/diff-approval', 'update-check', {})
+  })
+
+  it('accepts a host that could not reach the registry, and invents nothing it did not send', async () => {
+    // An absent `latest` is the offline answer, not an error: the panel then draws no chip. The narrowed
+    // value carries no `latest` key at all, so a caller cannot mistake a missing version for a present one.
+    const seam = fakeRpc({ 'update-check': { ok: true, value: { current: '0.30.1', newer: false } } })
+    await expect(createDiffApprovalPort(seam.rpc).checkUpdate()).resolves.toEqual({
+      current: '0.30.1', newer: false,
+    })
+  })
+
+  it('drops anything a host sends beyond the three fields the panel draws', async () => {
+    // THE NEGATIVE PIN: the dialog shows the versions and a button, so `url` and the changelog fields are
+    // gone from the value entirely. A host that still sends them must not put them back on the wire — the
+    // exact equality below fails the moment one of them is carried through again.
+    const seam = fakeRpc({
+      'update-check': {
+        ok: true,
+        value: {
+          current: '0.30.1',
+          latest: '0.31.0',
+          newer: true,
+          url: 'https://github.com/9087/dsh-diff-approval',
+          notes: 'a changelog that no longer has a home',
+          notesTruncated: true,
+        },
+      },
+    })
+    const answer = await createDiffApprovalPort(seam.rpc).checkUpdate()
+    expect(answer).toEqual({ current: '0.30.1', latest: '0.31.0', newer: true })
+    expect(Object.keys(answer).sort()).toEqual(['current', 'latest', 'newer'])
+  })
+
+  it('rejects a malformed answer rather than trusting it', async () => {
+    // `newer` is the one field the panel acts on, so a non-boolean there is a refusal, not a "false".
+    const wrongFlag = fakeRpc({ 'update-check': { ok: true, value: { current: '0.30.1', newer: 'yes' } } })
+    await expect(createDiffApprovalPort(wrongFlag.rpc).checkUpdate()).rejects.toThrow('malformed value')
+    const noCurrent = fakeRpc({ 'update-check': { ok: true, value: { newer: true } } })
+    await expect(createDiffApprovalPort(noCurrent.rpc).checkUpdate()).rejects.toThrow('malformed value')
+    const badLatest = fakeRpc({ 'update-check': { ok: true, value: { current: '0.30.1', newer: true, latest: 7 } } })
+    await expect(createDiffApprovalPort(badLatest.rpc).checkUpdate()).rejects.toThrow('malformed latest')
+  })
+
+  it('asks ONCE per port, however many panel seats ask it', async () => {
+    // The page builds one port (`apply` in `index.ts`) and every seat closes over it: the footer entry and
+    // the right sidebar's docked tab are separate mounts that both want this answer, and this is what keeps
+    // them from asking the host twice. The second caller gets the FIRST promise, not a second request.
+    const seam = fakeRpc({
+      'update-check': { ok: true, value: { current: '0.30.1', latest: '0.31.0', newer: true } },
+    })
+    const port = createDiffApprovalPort(seam.rpc)
+    const first = port.checkUpdate()
+    const second = port.checkUpdate()
+    await expect(first).resolves.toMatchObject({ latest: '0.31.0' })
+    await expect(second).resolves.toMatchObject({ latest: '0.31.0' })
+    expect(seam.call).toHaveBeenCalledTimes(1)
+  })
+
+  it('folds the unknown-endpoint answer of an older host into a rejection the caller can ignore', async () => {
+    // What a host built before this endpoint answers. The panel swallows it exactly as it swallows a network
+    // failure, so the message has to survive the port unchanged for a caller to match on.
+    const seam = fakeRpc({
+      'update-check': { ok: false, error: { code: 'internal', message: 'unknown endpoint "update-check"', details: {} } },
+    })
+    await expect(createDiffApprovalPort(seam.rpc).checkUpdate())
+      .rejects.toThrow('internal: unknown endpoint "update-check"')
+  })
+})
+
 describe('keep and revert', () => {
   it('narrows each action outcome and validates it', async () => {
     const seam = fakeRpc({

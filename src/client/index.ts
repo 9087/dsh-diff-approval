@@ -150,7 +150,10 @@ export function apply(ctx: ClientContext): void {
   const t = ctx.locale.bind(NS)
 
   const connection = ctx.get('connection') as ConnectionHandle
-  const store = createPendingDiffStore(createDiffApprovalPort(connection.rpc))
+  // Kept as its own binding as well as being handed to the store: the update check is about the
+  // PACKAGE rather than about a session, so it does not belong in the store's own verbs.
+  const port = createDiffApprovalPort(connection.rpc)
+  const store = createPendingDiffStore(port)
 
   // The sessions service, read only for the store's own selected session: the other half of "which
   // session is the page showing" is what the Session header entry published (`session-seat.ts`). This is
@@ -275,6 +278,10 @@ export function apply(ctx: ClientContext): void {
       onCommentAdd: (sessionId, comment) => store.commentAdd(sessionId, comment),
       onCommentRemove: (sessionId, id) => store.commentRemove(sessionId, id),
       onCommentRemoveMany: (sessionId, ids) => store.commentRemoveMany(sessionId, ids),
+      // The one check that is not about a review: whether a newer RELEASE of this plugin is
+      // published. Straight to the port — the store answers about pending entries, and this answers
+      // about the package — and the panel asks it once per mount, in the background.
+      onCheckUpdate: () => port.checkUpdate(),
       onCommentAsk: (sessionId, id, prompt, text) => store.commentAsk(sessionId, id, prompt, text),
       onCommentSeen: (sessionId, id) => { void store.commentSeen(sessionId, id) },
       onAckRedoCleared: () => store.clearRedoCleared(),

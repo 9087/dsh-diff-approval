@@ -37,6 +37,15 @@ export const zh = {
   // prose rather than a template, so it reads here exactly as it reads to the reader.
   'chip.about.body': '这个菜单由插件 dsh-diff-approval（改动审批）注入，不是 DSH 自带的功能。\n\n它接管这些地方的按下：外壳「已编辑 / 产出文件」列表里的文件行、消息里的 @文件 引用与文件链接、以及本插件 Markdown 预览里的相对链接。普通网址与 # 锚点不受影响。\n\n想关掉它：设置 → 改动审批 → 关闭「文件菜单」。这些按下随即恢复 DSH 自己的行为。\n\n外壳文件行与消息链接上的第一项「默认方式打开」就是 DSH 原本的行为；Markdown 预览里的链接没有可重放的宿主行为，所以那一项不会出现在那里。',
   'chip.about.ok': '知道了',
+  // The "a newer release is published" notice: a chip in the open file's status bar — the panel's bottom edge —
+  // and the dialog it opens. The chip names the version; the dialog has NO title — its one body line says the
+  // whole thing, names BOTH versions, and is also the dialog's accessible name. Its two links open the
+  // package's own pages, and only 知道了 dismisses the notice.
+  'update.chip': '有新版本 {version}',
+  'update.body': '有新版本 {latest} 可用（当前 {current}）',
+  'update.npm': '打开 NPM 页面',
+  'update.github': '打开 GitHub 页面',
+  'update.dismiss': '知道了',
   'chip.gone': '这个文件按钮已经不在页面上了，请再点一次',
   'panel.fileNotPending': '该文件不在待处理差异列表中',
   'panel.selectHint': '点击文件列表项目查看差异',
@@ -337,6 +346,12 @@ export const en = {
   'panel.batchConfirmTitle': 'Bulk action',
   'chip.about.body': 'This menu is injected by the plugin dsh-diff-approval; it is not a DSH feature.\n\nIt takes over the press on: file rows in the shell\'s edited and produced lists, @file references and file links in messages, and relative links in this plugin\'s Markdown preview. Plain web links and #fragments are left alone.\n\nTo turn it off: Settings → Diff Approval → switch off "File menu". Those presses then go back to DSH\'s own behaviour.\n\nOn a shell file row or a message link, the first item, "Open as usual", is DSH\'s own behaviour; a link in the Markdown preview has no shell press to replay, so that item does not appear there.',
   'chip.about.ok': 'Got it',
+  // The "a newer release is published" notice (see the zh block for what each line is for).
+  'update.chip': 'Version {version} available',
+  'update.body': 'Version {latest} is available (you have {current})',
+  'update.npm': 'Open the NPM page',
+  'update.github': 'Open the GitHub page',
+  'update.dismiss': 'Got it',
   'chip.gone': 'That file chip is no longer on the page; try again',
   'panel.fileNotPending': 'This file is not in the pending diff list',
   'panel.selectHint': 'Click a file in the list to review its diff',

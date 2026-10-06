@@ -223,6 +223,25 @@ export interface DiffApprovalListCountValue {
   count: number
 }
 
+/**
+ * Value returned by the channel's `update-check` endpoint: whether a newer release of
+ * this package is published, and what changed since the installed one.
+ *
+ * The comparison itself is the HOST's (`src/version.ts`): it is the side that knows the
+ * installed version, and the only side that can reach the registry (the browser cannot —
+ * `registry.npmjs.org` sends no CORS header). `newer` is therefore an ANSWER, not a hint:
+ * the client never re-derives it, so exactly one rule decides "is this newer".
+ */
+export interface DiffApprovalUpdateValue {
+  /** The installed version as this host read it; empty when it could not be read at all. */
+  current: string
+  /** The published version; absent when the registry was unreachable or answered nonsense. */
+  latest?: string | undefined
+  /** Whether `latest` is STRICTLY newer than `current`; always false when either is unparsable. */
+  newer: boolean
+}
+
+
 /** What the open endpoint asks the OS to do with a file. */
 export type DiffApprovalOpenAction = 'open' | 'reveal'
 

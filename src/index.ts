@@ -66,6 +66,8 @@ import { FONT_ASSET_DIR, FONT_ROUTE } from './font-slices.ts'
 import type { FontSlice } from './font-slices.ts'
 import { detectVcsRoot, listVcsChanges } from './vcs.ts'
 import type { VcsChange, VcsImportInput, ShellExecutorLike } from './vcs.ts'
+import { createUpdateCheck } from './version.ts'
+import type { DiffApprovalUpdateValue } from './types.ts'
 import type {
   DiffApprovalActionValue, DiffApprovalAddOutcome, DiffApprovalAddValue, DiffApprovalBlockTarget, DiffApprovalBrowseEntry, DiffApprovalBrowseValue,
   DiffApprovalBulkValue, DiffApprovalListCountValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue,
@@ -521,6 +523,37 @@ function imageMimeOf(path: string): string {
  */
 function rpcError(message: string): RpcResult<unknown> {
   return { ok: false, error: { code: 'internal', message, details: {} } }
+}
+
+/** The process's one update check: see {@link checkForUpdate}. */
+let updateCheck: (() => Promise<DiffApprovalUpdateValue>) | undefined
+
+/**
+ * Whether a newer release of this package is published — the answer behind the channel's
+ * `update-check` endpoint.
+ *
+ * ONE CHECK PER PROCESS, and what it caches is the REMOTE half only (`createUpdateCheck` in `version.ts`):
+ * the registry's latest version, held for a short TTL, while the INSTALLED version is read from the manifest
+ * on every call. So an upgrade, a reinstall or a downgrade under a running host is reflected immediately,
+ * and a release published while the host runs appears within the TTL rather than at the next restart.
+ *
+ * NEVER THROWS and never rejects: the endpoint must not be able to turn a network
+ * problem into an error in the reader's status bar. A failure to read the version at
+ * all (a stripped install with no `package.json`) answers `newer: false`.
+ *
+ * The registry URL can be overridden by environment — `DSH_DIFF_APPROVAL_UPDATE_REGISTRY_URL` — because
+ * the end-to-end case must not depend on the public internet. It is read HERE, on the first call, which is
+ * after a test has set it and before the host answers anything. It is the ONLY such override.
+ *
+ * @returns what the panel needs to decide about its notice.
+ */
+function checkForUpdate(): Promise<DiffApprovalUpdateValue> {
+  updateCheck ??= createUpdateCheck({
+    ...(process.env.DSH_DIFF_APPROVAL_UPDATE_REGISTRY_URL === undefined
+      ? {}
+      : { registryUrl: process.env.DSH_DIFF_APPROVAL_UPDATE_REGISTRY_URL }),
+  })
+  return updateCheck()
 }
 
 /**
@@ -2395,6 +2428,14 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
 
   const handle: ConnectionRpcHandler = async (endpoint, payload, signal): Promise<RpcResult<unknown>> => {
     switch (endpoint) {
+      case 'update-check': {
+        // Session-independent, so no payload is read and no session is required: the panel
+        // asks once per page, gets the cached answer, and draws a chip only when it says a
+        // newer release exists (see `checkForUpdate`).
+        void payload
+        void signal
+        return { ok: true, value: await checkForUpdate() }
+      }
       case 'list': {
         const sessionId = sessionOf(payload)
         if (sessionId === undefined) return rpcError('sessionId must be a non-empty string')

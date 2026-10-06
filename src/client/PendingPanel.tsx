@@ -11,7 +11,7 @@ import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-cli
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {
   CommentQuoteLine, CommentRecord, DiffApprovalBlockRange, DiffApprovalCommentAddValue, DiffApprovalCommentAskValue,
-  DiffApprovalCommentRemoveValue, DiffApprovalOpenAction, DiffApprovalRefreshOutcome, PendingFileDiff,
+  DiffApprovalCommentRemoveValue, DiffApprovalOpenAction, DiffApprovalRefreshOutcome, DiffApprovalUpdateValue, PendingFileDiff,
 } from '../types.ts'
 import type { CommentDraft } from './port.ts'
 import type { PendingDiffSnapshot, PendingPanelFace, PendingViewHooks } from './slots.ts'
@@ -51,7 +51,7 @@ import type { ProducedChipMenuDetail } from './produced-diff.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
 import { OPEN_PANEL_FILE_EVENT, PANEL_STATE_EVENT, SHOW_PANEL_EVENT, TOGGLE_PANEL_EVENT } from './dock.tsx'
 import type { PanelFileDetail, PanelStateDetail } from './dock.tsx'
-import { forgetPlacedThreadsNotIn, lastPanelFile, panelFileOffset, quietenRemovalAsk, rememberPlacedThreads, rememberThreads, rememberedPlacedThreads, rememberedThreads, rememberPanelView, removalAskQuiet } from './panel-memory.ts'
+import { dismissedUpdateVersion, dismissUpdate, forgetPlacedThreadsNotIn, lastPanelFile, panelFileOffset, quietenRemovalAsk, rememberPlacedThreads, rememberThreads, rememberedPlacedThreads, rememberedThreads, rememberPanelView, removalAskQuiet, UPDATE_DISMISSED_EVENT } from './panel-memory.ts'
 import type { PlacedThread, ThreadLocal } from './panel-memory.ts'
 import { composerCoveredByPanel, leaveComposerCaret } from './composer-cover.ts'
 import { categoryColor } from './category-color.ts'
@@ -134,6 +134,18 @@ const SCROLL_SELECTOR = '[data-conversation-scroll]'
 const SEAT_SELECTOR = '[data-composer-seat]'
 /** The chat composer's own editable box, where a closed panel hands the caret. */
 const COMPOSER_INPUT_SELECTOR = '[data-composer-input]'
+
+/**
+ * Where the newer-release notice sends a reader who wants the package itself: the registry page, and the
+ * repository page.
+ *
+ * Written down here rather than fetched, because these are facts about the PACKAGE and not about the version
+ * being announced — the same two addresses as `package.json`'s `homepage` and `repository` — and the notice
+ * has to be able to offer them precisely when nothing could be reached. A host that could not answer the
+ * registry check still leaves these two doors open.
+ */
+const NPM_PAGE = 'https://www.npmjs.com/package/dsh-diff-approval'
+const GITHUB_PAGE = 'https://github.com/9087/dsh-diff-approval'
 
 /**
  * Hand the caret back to the chat composer. Closing the review panel is a "done
@@ -1334,6 +1346,14 @@ interface PendingDiffProps {  file: PendingFileDiff
   onOpen: (sessionId: SessionId, id: string, action: DiffApprovalOpenAction) => Promise<void>
   /** Inline one workspace image as a base64 data URI for the Markdown preview. */
   onPreviewImage: (sessionId: SessionId, path: string) => Promise<string | undefined>
+  /**
+   * The newer-release chip to draw at this pane's bottom edge, or absent when there is nothing to say.
+   *
+   * The STATE is the panel's, not this view's (see `PendingPanel`): this view only renders what it is handed,
+   * and pressing the chip opens the panel's one dialog. There is ONE chip in the panel — this pane's status
+   * bar — so the list pane stays a list.
+   */
+  releaseChip?: { readonly version: string; readonly open: () => void } | undefined
   /**
    * Open the path typed into the header field: false when it could not be opened.
    *
@@ -3976,7 +3996,7 @@ export function inlineItemCount(widths: readonly number[], available: number, ga
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, landingLine, landingOld, landingComment, landingCard, onLanded, failedMessage, commentSkill, comments, commentAnswers, commentsRevision, commentLines, onCommentAdd, onCommentRemove, onCommentAsk, onCommentSeen, onPasteReference, onToast, t, onAddTypedPath, onPreviewLink, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage }: PendingDiffProps) {
+function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, landingLine, landingOld, landingComment, landingCard, onLanded, failedMessage, commentSkill, comments, commentAnswers, commentsRevision, commentLines, onCommentAdd, onCommentRemove, onCommentAsk, onCommentSeen, onPasteReference, onToast, t, onAddTypedPath, onPreviewLink, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, releaseChip }: PendingDiffProps) {
   // The same five search-bar tooltips as the split view, plus the copy-reference button, decided once
   // (see `chords.ts`): this host's keycaps where it can draw them, the pre-0.1.7-rc.2 glued label
   // where it cannot. The toolbar's own items decide per item, in their map below.
@@ -8187,6 +8207,16 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
           </Tooltip>
         )}
         <span className={css.flexSpacer} />
+        {releaseChip !== undefined && (
+          <button
+            type="button"
+            className={css.statusAction}
+            data-diff-update-chip
+            onClick={releaseChip.open}
+          >
+            {t('update.chip', { version: releaseChip.version })}
+          </button>
+        )}
         {!previewActive && (
           <>
             <Menu
@@ -8242,8 +8272,79 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
   wide, useSessions, sessionId, usePending, pendingView, showing = true, onRefresh, onRefreshCount, onMarkSeen, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onCommentAdd, onCommentRemove, onCommentRemoveMany, onCommentAsk, onCommentSeen, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onKeepMany, onRevertMany, onAckRedoCleared, onAckUndoNotice, collapseSidebar, t,
-  docked = false, dockHost, onOpenDock, closeDock, useDock,
+  docked = false, dockHost, onOpenDock, closeDock, useDock, onCheckUpdate,
 }: PendingPanelProps) {
+  // Whether a NEWER RELEASE of this plugin is published, and whether the reader has already said "got it".
+  //
+  // The check is the HOST's (`onCheckUpdate`) and the state is HERE, in the panel, because the chip is drawn
+  // inside the open file's status bar — the panel's bottom edge — and the dialog is the panel's too. There is
+  // ONE chip and ONE dialog: the list pane stays a list, and `releaseChip` is the single fact behind both.
+  //
+  // One probe per page: the PORT holds the page's single promise (`checkUpdate` in `port.ts`), so a second
+  // mount (the docked tab beside the footer seat) reuses this answer instead of asking the host again.
+  const [release, setRelease] = useState<DiffApprovalUpdateValue | undefined>(undefined)
+  /** The version already dismissed, in state so that pressing 确定 takes the chip out at once. */
+  const [releaseSeen, setReleaseSeen] = useState(() => dismissedUpdateVersion())
+  /** Whether the release dialog is up. */
+  const [releaseOpen, setReleaseOpen] = useState(false)
+  useEffect(() => {
+    if (onCheckUpdate === undefined) return
+    let live = true
+    // No rejection path to handle here: the PORT swallows a failed check and answers `undefined`, which
+    // draws nothing. Rejections are still handled so that a caller-supplied check cannot crash a render.
+    onCheckUpdate().then(
+      (answer) => { if (live) setRelease(answer) },
+      () => {},
+    )
+    return () => { live = false }
+  }, [onCheckUpdate])
+  // Another mount's dismissal reaches this one here. The two seats are separate React trees, so the
+  // page-local record is the fact and this event is how the other seat hears it NOW rather than at its
+  // next mount — without it, dismissing in the docked tab would leave the footer seat's chip standing.
+  useEffect(() => {
+    const onDismissed = (): void => { setReleaseSeen(dismissedUpdateVersion()) }
+    window.addEventListener(UPDATE_DISMISSED_EVENT, onDismissed)
+    return () => { window.removeEventListener(UPDATE_DISMISSED_EVENT, onDismissed) }
+  }, [])
+  // The version the chip names, or nothing to say: strictly newer — the HOST's verdict, never re-derived
+  // on this side — and not the version the reader dismissed. What is stored is a VERSION, so a release
+  // newer than the dismissed one passes and shows again.
+  const releaseVersion = release?.newer === true ? release.latest : undefined
+  const releaseWaiting = releaseVersion !== undefined && releaseVersion !== releaseSeen
+  /** What the status bar draws: the version to name, and how to open the panel's one dialog. */
+  const releaseChip = releaseVersion !== undefined && releaseWaiting
+    ? { version: releaseVersion, open: (): void => { setReleaseOpen(true) } }
+    : undefined
+  /**
+   * The dialog's ONE line — and, because there is no title element, its accessible name too.
+   *
+   * The sentence names the release AND the version the reader is running, so nothing about the notice needs a
+   * heading to be understood. `aria-label` below is spelled from THIS string rather than a second one, so the
+   * name a screen reader reads and the words on screen cannot drift apart.
+   */
+  const releaseSentence = t('update.body', { current: release?.current ?? '', latest: release?.latest ?? '' })
+  /** Remember this version's dismissal and close: the chips go out for this release, and it alone. */
+  const dismissRelease = (): void => {
+    if (releaseVersion !== undefined) {
+      dismissUpdate(releaseVersion)
+      setReleaseSeen(releaseVersion)
+    }
+    setReleaseOpen(false)
+  }
+  // The release dialog's own Escape. It can be raised while the panel is a DOCKED sidebar tab and while the
+  // panel itself is closed, so it listens for itself, in the capture phase, and takes the press from
+  // everything else — the About dialog's shape, for the About dialog's reason.
+  useEffect(() => {
+    if (!releaseOpen) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      setReleaseOpen(false)
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true) }
+  }, [releaseOpen])
   // The two tooltips that name a way out of the panel, decided once (see `chords.ts`): this host's
   // keycaps where it can draw them, the pre-0.1.7-rc.2 glued label where it cannot.
   const closeTip = closeTooltip(t)
@@ -10712,6 +10813,13 @@ export function PendingPanel({
         setAboutOpen(false)
         return
       }
+      // The release dialog is the innermost dismissible while it is up, and it is raised from the LIST
+      // PANE too — where the panel behind it is the only thing there is. Its own listener below closes it;
+      // this press must not take the panel with it.
+      if (releaseOpen) {
+        setReleaseOpen(false)
+        return
+      }
       // The add-path modal closes itself: this press is not the panel's.
       if (pathPickerOpen()) return
       // The detail header's path field keeps its own Escape — it puts the shown path back —       // so this press belongs to the field and never to the panel behind it.
@@ -10742,7 +10850,7 @@ export function PendingPanel({
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => { window.removeEventListener('keydown', onKeyDown, true) }
-  }, [open, docked, batchPrompt, aboutOpen])
+  }, [open, docked, batchPrompt, aboutOpen, releaseOpen])
 
   // The About dialog's own Escape. It cannot live in the handler above: that one is not even mounted while the
   // panel is CLOSED, and this dialog is raised by the file menu, which the shell's lists and a message's file
@@ -10916,9 +11024,51 @@ export function PendingPanel({
         </div>,
         document.body,
       )}
-      {/* Covering everything keeps an 8px inset, so a layer painted with the
-          sidebar's fill hides the app behind those seams instead of letting it
-          show through. It sits just below the panel's z-index. */}
+      {/* What the status bar's chip opens, and the one place the dismissal lives. A portal for the About
+          dialog's reason (it can be raised while the panel is a docked sidebar tab), and the panel's existing
+          confirm shape, because it is the same kind of question: read this, then say you are done with it. */}
+      {releaseOpen && release !== undefined && createPortal(
+        <div className={`${css.confirmBackdrop} ${css.confirmBackdropFixed}`} data-diff-update>
+          {/* NO title element and NO `aria-labelledby`, and the name is not missing because of it: a dialog
+              still has to be named, and this card is about ONE sentence — so `aria-label` IS that sentence,
+              spelled from the same string the body draws (see `releaseSentence`). A heading would repeat it. */}
+          <div className={css.confirmCard} role="dialog" aria-modal="true" aria-label={releaseSentence}>
+            <p className={css.confirmText} data-diff-update-body>{releaseSentence}</p>
+            <div className={css.confirmActions}>
+              {/* Two doors out of the notice, and the way out OF it. The doors open a page in a new tab and
+                  therefore change nothing here — the notice stays until 知道了 says the reader is done with
+                  it, so nobody loses the announcement by going to read about the release. */}
+              <a
+                className={css.action}
+                data-diff-update-npm
+                href={NPM_PAGE}
+                target="_blank"
+                rel="noreferrer noopener"
+              >
+                {t('update.npm')}
+              </a>
+              <a
+                className={css.action}
+                data-diff-update-github
+                href={GITHUB_PAGE}
+                target="_blank"
+                rel="noreferrer noopener"
+              >
+                {t('update.github')}
+              </a>
+              <button
+                type="button"
+                className={`${css.action} ${css.actionPrimary}`}
+                data-diff-update-dismiss
+                onClick={dismissRelease}
+              >
+                {t('update.dismiss')}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
       {(docked || open) && createPortal(
         <>
           {!docked && cover.top && cover.left && cover.right && cover.composer
@@ -11108,6 +11258,7 @@ export function PendingPanel({
                     onBlockRevert={blockRevertWithPrompt}
                     onOpen={onOpen}
                     onPreviewImage={onPreviewImage}
+                    releaseChip={releaseChip}
                   />
                 )}
               </div>

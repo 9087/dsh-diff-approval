@@ -10,7 +10,7 @@ import { Component, useSyncExternalStore } from 'react'
 import type { ComponentProps, ReactNode } from 'react'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import { createDiffApprovalPort } from '../src/client/port.ts'
-import type { CommentRecord, PendingFileDiff } from '../src/types.ts'
+import type { CommentRecord, DiffApprovalUpdateValue, PendingFileDiff } from '../src/types.ts'
 import { OPEN_PANEL_FILE_EVENT, PendingPanel, fittingItems, frameInsets, inlineItemCount, makeMeasurer, rowOfLine, wrapChipRows, MIN_LIST_WIDTH_PX } from '../src/client/PendingPanel.tsx'
 import { startProducedChipMenu } from '../src/client/produced-diff.ts'
 import { computeWholeFileDiff } from '../src/client/whole-file-diff.ts'
@@ -19,7 +19,7 @@ import { categoryColor } from '../src/client/category-color.ts'
 import { codeFontCss } from '../src/client/code-font.ts'
 import { actionTooltip, closeShortcut, shortcutOf, withChord } from '../src/client/chords.ts'
 import { zh, en } from '../src/client/locales.ts'
-import { lastPanelFile, panelFileOffset, rememberedPlacedThreads, rememberedThreads, removalAskQuiet, resetPanelMemory } from '../src/client/panel-memory.ts'
+import { dismissedUpdateVersion, lastPanelFile, panelFileOffset, rememberedPlacedThreads, rememberedThreads, removalAskQuiet, resetPanelMemory } from '../src/client/panel-memory.ts'
 import { chipMenuEnabled, diffLineHeight, navLeadRows, setCommentModeEnabled, setConfirmFileRemoveEnabled } from '../src/client/settings.ts'
 import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
 import { DiffApprovalHeaderEntry } from '../src/client/header-entry.tsx'
@@ -15001,5 +15001,209 @@ describe('an agent-placed card\'s thread', () => {
       asks: [{ requestId: 'rq1', text: '标注' }, { requestId: 'rq2', text: '第二问' }],
     })], { rq1: 'ra1', rq2: 'ra2' })
     expect(segmentsOf(cardOf('t-reader'))).toEqual(['U:标注', 'A:ra1', 'U:第二问', 'A:ra2'])
+  })
+})
+
+describe('the newer-release notice', () => {
+  /** What the host answers when a newer release is published. */
+  const NEWER: DiffApprovalUpdateValue = {
+    current: '0.30.1',
+    latest: '0.31.0',
+    newer: true,
+  }
+
+  /**
+   * Open the panel with one host answer.
+   *
+   * The notice has ONE home — the file view's status bar — so a case only has to open the panel; the reader's
+   * correction was that the list pane must NOT carry a second one (see the negative pin below).
+   * @param answer - what the host says; `undefined` is a seat with no check wired at all.
+   * @param options - `files` overrides the pending list; `file: false` leaves the file row unclicked (the
+   *   panel auto-selects the first pending file, so the status bar is on screen either way).
+   */
+  function openWith(
+    answer: DiffApprovalUpdateValue | undefined,
+    options: { file?: boolean; files?: PendingFileDiff[] } = {},
+  ): void {
+    render(
+      <PendingPanel
+        {...panelProps({ read: true, files: options.files ?? [FILE], busy: new Set() })}
+        {...(answer === undefined ? {} : { onCheckUpdate: async () => answer })}
+      />,
+    )
+    // Open the panel's own list first: the seat starts as the badge. The status bar comes with the file view.
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    if (options.file !== false) clickFileRow('a.txt')
+  }
+
+  /** The first chip anywhere, or null when the notice is (rightly) not drawn. */
+  const chip = (): HTMLElement | null => document.querySelector('[data-diff-update-chip]')
+  /** Every chip on screen. There is exactly ONE site — the status bar — so this is 1 or 0, never 2. */
+  const chips = (): HTMLElement[] => [...document.querySelectorAll('[data-diff-update-chip]')] as HTMLElement[]
+  /** How many chips the LIST PANE carries. It must be none: the notice is not the list's business. */
+  const listChips = (): number =>
+    document.querySelectorAll('[data-diff-approval-file-list] [data-diff-update-chip]').length
+
+  it('draws exactly ONE chip, in the status bar, and the list pane carries none', async () => {
+    // NOTHING is clicked on a file row here: the panel auto-selects the first pending file (`pick = … ??
+    // files[0]?.id` in PendingPanel), so the file view — and with it the status bar — is on screen as soon as
+    // the panel is. That is the ONE site.
+    openWith(NEWER, { file: false })
+    await waitFor(() => {
+      expect(document.querySelector('[data-diff-status-bar] [data-diff-update-chip]'), 'the status bar\'s chip')
+        .not.toBeNull()
+    })
+    // THE NEGATIVE PIN, first so a list-pane regression names THIS assertion: the reader corrected us here —
+    // the notice belongs in the status bar, NOT under the file list.
+    expect(listChips(), 'the list pane must carry no notice').toBe(0)
+    // …and it is the only one.
+    expect(chips().length, 'exactly one chip').toBe(1)
+    expect(chip()?.textContent).toContain('0.31.0')
+    // One dismissal clears the one site.
+    fireEvent.click(chip() as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-update-dismiss]') as HTMLButtonElement)
+    expect(chips()).toEqual([])
+    expect(listChips()).toBe(0)
+  })
+
+  it('shows the chip for a strictly newer release the reader has not dismissed', async () => {
+    openWith(NEWER)
+    await waitFor(() => { expect(chip()).not.toBeNull() })
+    // The version is what the chip says, and it is the status bar's chip — the only one there is.
+    expect(chip()?.textContent).toContain('0.31.0')
+    expect(chips().length).toBe(1)
+    expect(document.querySelector('[data-diff-status-bar] [data-diff-update-chip]')).not.toBeNull()
+    expect(listChips(), 'and still nothing in the list pane').toBe(0)
+  })
+
+  it('keeps the chip away for equal, older, failed, and unwired checks', async () => {
+    // The client acts on the HOST's verdict alone, so each of these is one answer to react to.
+    openWith({ ...NEWER, latest: '0.30.1', newer: false })
+    await act(async () => {})
+    expect(chip(), 'an equal version is not newer').toBeNull()
+    cleanup()
+    openWith({ ...NEWER, latest: '0.29.0', newer: false })
+    await act(async () => {})
+    expect(chip(), 'an older version is not newer').toBeNull()
+    cleanup()
+    openWith(undefined)
+    await act(async () => {})
+    expect(chip(), 'a seat with no check draws nothing').toBeNull()
+  })
+
+  it('draws nothing when the check itself fails', async () => {
+    render(
+      <PendingPanel
+        {...panelProps({ read: true, files: [FILE], busy: new Set() })}
+        onCheckUpdate={async () => { throw new Error('unknown endpoint "update-check"') }}
+      />,
+    )
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    clickFileRow('a.txt')
+    await act(async () => {})
+    // The rejection is swallowed: no chip, and no error anywhere in the panel's own bar.
+    expect(chip()).toBeNull()
+  })
+
+  it('names itself with its one body line, which carries both versions', async () => {
+    openWith(NEWER)
+    await waitFor(() => { expect(chip()).not.toBeNull() })
+    fireEvent.click(chip() as HTMLElement)
+
+    const dialog = document.querySelector('[data-diff-update] [role="dialog"]') as HTMLElement
+    expect(dialog).not.toBeNull()
+    // NO title element, and nothing for `aria-labelledby` to point at: the reader asked for a dialog with no
+    // heading, so the body line is what names the card.
+    expect(dialog.getAttribute('aria-labelledby'), 'nothing to label by').toBeNull()
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+    expect(document.querySelector('[data-diff-update-title]')).toBeNull()
+    expect(document.getElementById('diff-approval-update-title')).toBeNull()
+    // The body sentence IS the accessible name — the same string, not a second one that could drift.
+    const body = dialog.querySelector('[data-diff-update-body]') as HTMLElement
+    expect(body, 'the one body line').not.toBeNull()
+    expect(dialog.getAttribute('aria-label')).toBe(body.textContent)
+    // Both versions in that one sentence: what is offered, and what the reader is running.
+    expect(body.textContent, 'the version on offer').toContain('0.31.0')
+    expect(body.textContent, 'the version being run').toContain('0.30.1')
+    // One way out, and it is the dismissal.
+    expect(dialog.querySelector('[data-diff-update-dismiss]')?.textContent).toBe('update.dismiss')
+  })
+
+  it('offers exactly two doors — NPM and GitHub — and nothing the reader cut', async () => {
+    // The reader asked for two buttons that open the package's own pages. This case is about BOTH halves:
+    // the two anchors are there with the right targets, and none of the blocks that were removed earlier
+    // (the changelog, the old single GitHub link, the title) has crept back in.
+    openWith(NEWER)
+    await waitFor(() => { expect(chip()).not.toBeNull() })
+    fireEvent.click(chip() as HTMLElement)
+
+    const dialog = document.querySelector('[data-diff-update]') as HTMLElement
+    expect(dialog).not.toBeNull()
+    // `querySelectorAll` hands back a NodeList, which is never array-equal — its LENGTH is the assertion.
+    const links = [...dialog.querySelectorAll('a')] as HTMLAnchorElement[]
+    expect(links.length, 'exactly the two doors').toBe(2)
+    const hrefs = links.map(link => link.getAttribute('href'))
+    expect(hrefs).toEqual([
+      'https://www.npmjs.com/package/dsh-diff-approval',
+      'https://github.com/9087/dsh-diff-approval',
+    ])
+    // Both open in a new tab and neither can reach back into this page through `window.opener`.
+    for (const link of links) {
+      expect(link.getAttribute('target')).toBe('_blank')
+      expect(link.getAttribute('rel')).toBe('noreferrer noopener')
+    }
+    // The markers, so a future edit cannot quietly re-point the wrong button at the wrong page.
+    expect(dialog.querySelector('[data-diff-update-npm]')).toBe(links[0])
+    expect(dialog.querySelector('[data-diff-update-github]')).toBe(links[1])
+    for (const marker of ['[data-diff-update-link]', '[data-diff-update-open]', '[data-diff-update-notes]', '[data-diff-update-title]']) {
+      expect(document.querySelector(marker), `${marker} must be gone`).toBeNull()
+    }
+  })
+
+  it('keeps the notice up when a reader follows one of the two links', async () => {
+    // A door is not a decision: only 知道了 dismisses. Nothing in the two anchors touches this state.
+    openWith(NEWER)
+    await waitFor(() => { expect(chip()).not.toBeNull() })
+    fireEvent.click(chip() as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-update-npm]') as HTMLAnchorElement)
+
+    expect(document.querySelector('[data-diff-update]'), 'the notice stands').not.toBeNull()
+    expect(chips().length, 'the chip stands').toBe(1)
+    expect(listChips()).toBe(0)
+  })
+
+  it('keeps the dismissal for THIS PAGE, and a fresh page shows the same release again', async () => {
+    openWith(NEWER)
+    await waitFor(() => { expect(chip()).not.toBeNull() })
+    fireEvent.click(chip() as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-update-dismiss]') as HTMLButtonElement)
+
+    // The chips go out at once, the dialog closes, and the version is remembered for this page…
+    expect(chips()).toEqual([])
+    expect(document.querySelector('[data-diff-update]')).toBeNull()
+    // …in PAGE memory, not in anything a reload would carry: the durable key the reader asked us to drop is
+    // gone, and nothing writes it any more.
+    expect(localStorage.getItem('diff-approval:update-dismissed')).toBeNull()
+    expect(dismissedUpdateVersion()).toBe('0.31.0')
+
+    // A later MOUNT in the same page still knows: the state is page-local, not per component.
+    cleanup()
+    openWith(NEWER)
+    await act(async () => {})
+    expect(chip(), 'a dismissed version must not come back on this page').toBeNull()
+
+    // But a NEWER release is not hidden by that older dismissal, even within one page.
+    cleanup()
+    openWith({ ...NEWER, latest: '0.32.0' })
+    await waitFor(() => { expect(chip()).not.toBeNull() })
+    expect(chip()?.textContent).toContain('0.32.0')
+
+    // THE PAGE-LIFETIME HALF: a fresh page — what `resetPanelMemory` is for, and what a reload does by
+    // itself — shows the notice again for the SAME version, because nothing durable remembers it.
+    cleanup()
+    resetPanelMemory()
+    openWith(NEWER)
+    await waitFor(() => { expect(chip()).not.toBeNull() })
+    expect(chip()?.textContent, 'the same version comes back on the next client lifetime').toContain('0.31.0')
   })
 })
