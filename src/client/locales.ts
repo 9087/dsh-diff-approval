@@ -6,7 +6,7 @@ export const NS = 'diff-approval'
 export const zh = {
   'panel.title': '待处理改动',
   'panel.empty': '列表中暂无文件',
-  'panel.dockGuide': '在右侧边栏中打开待处理改动面板',
+  'panel.dockGuide': '逐条审查改动，可保留、回退或评论',
   'panel.dockUnavailable': '这个环境没有可停靠的右侧边栏',
   'panel.dockFailed': '右侧边栏现在还不能接收面板',
   'panel.loading': '读取中…',
@@ -309,7 +309,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 export const en = {
   'panel.title': 'Pending changes',
   'panel.empty': 'No files in the list yet',
-  'panel.dockGuide': 'Open the pending-changes panel in the right sidebar',
+  'panel.dockGuide': 'Review each change: keep, revert, or comment',
   'panel.dockUnavailable': 'This build has no right sidebar to dock into',
   'panel.dockFailed': 'The right sidebar cannot take the panel yet',
   'panel.loading': 'Reading…',
