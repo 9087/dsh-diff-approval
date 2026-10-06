@@ -354,6 +354,21 @@
   border-bottom: 1px solid var(--dsw-alias-border-l2);
 }
 .settingsGroupHeader {
+  /* PARKED AT THE TOP OF THE SETTINGS SCROLLER, the way the code-style preview above already is.
+     The scroller is the shell's own dialog body (`VOzbGW_options`: overflow-y auto, 746px tall here,
+     1062px of scroll), and NOTHING of the shell's chrome is pinned inside it — measured: the only
+     sticky things in that scrollport are this page's own preview card (top 0, z-index 2) and its
+     gutter spans (z-index 1). So the header parks at the scrollport's own top edge — `top: 0` — and
+     its z-index only has to clear this group's rows and that preview card, which must slide UNDER it
+     (the whole card is sticky, so it would otherwise ride over the header's border). */
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  /* OPAQUE, because rows have to be hidden while they pass under it: the scrollport's own background
+     is transparent (measured `rgba(0, 0, 0, 0)`) and the painted surface is the dialog's, which is
+     this plugin's own surface token — the same one the floating panel paints itself with. Not
+     `transparent`, and not `none`. */
+  background: var(--dsw-alias-bg-base);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -362,7 +377,6 @@
      header's spacing above and below its text reads like every other row's. */
   padding: 16px 0;
   border: none;
-  background: none;
   color: var(--dsw-alias-label-primary);
   font: inherit;
   cursor: pointer;
@@ -669,7 +683,14 @@
    the 16px vertical rhythm of the preference rows below it. */
 .diffPreview {
   position: sticky;
-  top: 0;
+  /* BELOW the group's parked header, not under it. The header is sticky at the same scrollport top, so a
+     preview at `top: 0` parked exactly behind it and was covered (measured: a 75px overlap, the header's
+     whole height). The header's own height is published as `--settings-header-h` on the group by
+     `SettingsTab`, because it is not a constant: the four headers measure 75/74/74/92px at the standard
+     width (the cover group's longer description wraps) and the dialog's width, the language and the
+     reader's font size all move it. The fallback is the diff-view header's measured height, for the instant
+     before the first measurement lands. */
+  top: var(--settings-header-h, 76px);
   z-index: 2;
   margin: 16px 0 8px;
   padding: 8px;

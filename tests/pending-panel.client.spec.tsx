@@ -14799,3 +14799,46 @@ describe('a chip press that belongs to another session', () => {
     expect(screen.queryByText('panel.addOtherSession')).toBeNull()
   })
 })
+
+describe('settings group headers', () => {
+  it('are sticky, opaque, and parked at the scrollport\'s own top', () => {
+    // RULE TEXT, not layout: jsdom does not lay out, so this says the rule is what it must be and the
+    // browser case in `e2e/panel-settings.spec.ts` is the proof that a header actually parks.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const rule = /^\.settingsGroupHeader \{([^}]*)\}/m.exec(css)?.[1] ?? ''
+    expect(rule).not.toBe('')
+    expect(rule).toContain('position: sticky')
+    // Measured in the real GUI: the scroller is the shell's dialog body (`VOzbGW_options`, overflow-y
+    // auto), and NOTHING of the shell's chrome is pinned inside it — so `top: 0` parks the header flush
+    // with the scrollport's edge, exactly where this page's sticky preview card already parks.
+    expect(rule).toMatch(/top:\s*0;/)
+    // Above this group's rows (auto) and above the sticky code-style preview card (z-index 2, measured),
+    // which has to slide UNDER the header; far below the shell's dialog overlay (z-index 1000).
+    expect(rule).toMatch(/z-index:\s*3;/)
+    // Opaque, because rows passing under the header have to be hidden: the scrollport's own background is
+    // transparent (measured `rgba(0, 0, 0, 0)`) and the painted surface is the dialog's own token.
+    expect(rule).toMatch(/background:\s*var\(--dsw-alias-bg-base\)/)
+    expect(rule).not.toMatch(/background:\s*(none|transparent)/)
+    // One rule for all four groups: they share the class (the settings page renders four of them).
+    expect((css.match(/^\.settingsGroupHeader \{/gm) ?? []).length).toBe(1)
+  })
+
+  it('park the diff preview BELOW the header, at the height that header publishes', () => {
+    // RULE and SOURCE text again — jsdom neither lays out nor has a ResizeObserver, so the browser case in
+    // `e2e/panel-settings.spec.ts` is the proof that the two sticky boxes no longer overlap.
+    const css = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const preview = /^\.diffPreview \{([^}]*)\}/m.exec(css)?.[1] ?? ''
+    expect(preview).toContain('position: sticky')
+    // NOT `top: 0`: the group header is sticky at that same offset, so a preview there parked exactly behind
+    // it (measured: 75px of overlap, the header's whole height). The offset is the header's measured height.
+    expect(preview).not.toMatch(/top:\s*0;/)
+    expect(preview).toMatch(/top:\s*var\(--settings-header-h, 76px\)/)
+
+    // The variable is published per group by the settings section and re-published when a header is re-laid
+    // out — the four headers differ (75/74/74/92px at the standard width), so one constant cannot serve them.
+    const tab = readFileSync(join(process.cwd(), 'src', 'client', 'SettingsTab.tsx'), 'utf8')
+    expect(tab).toContain("setProperty('--settings-header-h'")
+    expect(tab).toContain('new ResizeObserver(write)')
+    expect(tab).toMatch(/useLayoutEffect\(\(\) => \{/)
+  })
+})

@@ -1,6 +1,6 @@
 /** DSH Settings top-level section for this plugin's preferences. */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconChevronDownOutline14, IconRefreshOutline14, Menu } from './dsh-icons.ts'
@@ -544,8 +544,47 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
     setDelColorState(value)
     setDiffDelColor(value)
   }
+  /** The settings page, so the header heights below can be published from it. */
+  const settingsPageRef = useRef<HTMLDivElement | null>(null)
+  /**
+   * PUBLISH EVERY GROUP'S OWN HEADER HEIGHT as `--settings-header-h` on that group, so a sticky thing inside
+   * the group's body can park BELOW the header instead of sliding under it. `DiffViewPreview` is the one case
+   * today: its card is sticky, and its `top` is that variable (see `.diffPreview`), because the group header
+   * is sticky at the same scrollport and would otherwise cover it (measured: a 75px overlap).
+   *
+   * The height is MEASURED rather than assumed: at the standard width the four headers are 75/74/74/92px — the
+   * cover group's longer description wraps — and the dialog's width, the language and the reader's font size
+   * all move it, so one constant could not serve every group. `useLayoutEffect` writes the first value before
+   * the paint (no frame with the preview over the header) and a ResizeObserver keeps it true. Nothing here
+   * touches the DOM structure or any other behaviour; a group whose header is not laid out yet keeps the
+   * CSS fallback.
+   */
+  useLayoutEffect(() => {
+    const page = settingsPageRef.current
+    if (page === null) return
+    const observers: ResizeObserver[] = []
+    const groupClass = css.settingsGroup
+    if (groupClass === undefined) return
+    for (const node of [...page.children]) {
+      if (!(node instanceof HTMLElement) || !node.classList.contains(groupClass)) continue
+      const header = node.querySelector(':scope > button')
+      if (header === null) continue
+      const group = node
+      const write = (): void => {
+        group.style.setProperty('--settings-header-h', `${Math.round(header.getBoundingClientRect().height)}px`)
+      }
+      write()
+      // jsdom has no ResizeObserver (the layout tests fake one where they need it): the one-shot write
+      // above still publishes a value, so nothing here can throw in a test environment.
+      if (typeof ResizeObserver === 'undefined') continue
+      const observer = new ResizeObserver(write)
+      observer.observe(header)
+      observers.push(observer)
+    }
+    return () => { for (const observer of observers) observer.disconnect() }
+  }, [])
   return (
-    <div className={css.settingsPage} data-diff-settings>
+    <div className={css.settingsPage} data-diff-settings ref={settingsPageRef}>
       <div className={css.settingsGroup} data-open={diffOpen || undefined}>
         <button
           type="button"
