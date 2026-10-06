@@ -228,36 +228,34 @@ export function forgetPlacedThreadsNotIn(sessionId: string | undefined, listed: 
 }
 
 /**
- * The files this page has been told to stop asking about, by session.
+ * The sessions this page has been told to stop asking about, for this visit.
  *
- * Keeping or reverting a file asks whether the row should leave the list, and a reader working
- * through one file's blocks answers that the same way every time. The dialog's keep-and-stop-asking
- * button is that whole answer; what it records here is a fact about this visit rather than a
- * preference — it is not the host's to keep, and a reload starts clean, exactly like the thread
- * state above.
+ * Keeping or reverting a file asks whether the row should leave the list, and a reader working through
+ * one session's files answers that the same way every time — the answer is about the WORK, not about
+ * one file. The dialog's 不移出/keep-and-stop-asking button is that whole answer, and it covers every
+ * file in the session from then on. What it records is a fact about this visit rather than a
+ * preference — it is not the host's to keep, and a reload starts clean, exactly like the thread state
+ * above.
  */
-const quietRemovals = new Map<string, Set<string>>()
+const quietSessions = new Set<string>()
 
 /**
- * Whether the reader asked not to be asked again about removing one file.
+ * Whether the reader asked not to be asked again about rows leaving THIS session's list.
  * @param sessionId - the session the panel is reviewing; nothing is quiet without one.
- * @param fileId - the pending entry the question was about.
  * @returns true when the action should run without the question.
  */
-export function removalAskQuiet(sessionId: string | undefined, fileId: string): boolean {
-  return sessionId === undefined ? false : quietRemovals.get(sessionId)?.has(fileId) === true
+export function removalAskQuiet(sessionId: string | undefined): boolean {
+  return sessionId !== undefined && quietSessions.has(sessionId)
 }
 
 /**
- * Stop asking whether one file should leave the list, for the rest of this page.
+ * Stop asking whether rows should leave the list, for the rest of this page: the whole session, every
+ * file in it.
  * @param sessionId - the session the panel is reviewing; nothing is recorded without one.
- * @param fileId - the pending entry the question was about.
  */
-export function quietenRemovalAsk(sessionId: string | undefined, fileId: string): void {
+export function quietenRemovalAsk(sessionId: string | undefined): void {
   if (sessionId === undefined) return
-  const files = quietRemovals.get(sessionId)
-  if (files === undefined) quietRemovals.set(sessionId, new Set([fileId]))
-  else files.add(fileId)
+  quietSessions.add(sessionId)
 }
 
 /** This session's record, created on first use. */
@@ -318,5 +316,5 @@ export function resetPanelMemory(): void {
   views.clear()
   localThreads.clear()
   placedThreads.clear()
-  quietRemovals.clear()
+  quietSessions.clear()
 }

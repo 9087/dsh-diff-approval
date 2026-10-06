@@ -2537,13 +2537,13 @@ describe('PendingPanel', () => {
     expect(props.onRevert).toHaveBeenCalledWith(FILE.sessionId, FILE.id, true)
   })
 
-  it('stops asking whether a file should leave the list, once the prompt is answered that way', () => {
+  it('stops asking whether rows should leave the list, for the WHOLE session', () => {
     // Keeping or reverting a file asks whether the row should go, and a reader working through one
-    // file's blocks answers that the same way every time. The third answer is that whole sentence as
-    // one button — keep the row AND stop asking — rather than the tick this dialog used to carry,
-    // which read as a modifier of whichever of the two buttons was pressed.
+    // session's files answers that the same way every time — the answer is about the WORK, not about one
+    // file. The third answer is that whole sentence as one button, and it covers the session.
     resetPanelMemory()
-    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const second = entry({ id: 'entry-b', path: '/repo/b.txt' })
+    const props = panelProps({ read: true, files: [FILE, second], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
@@ -2552,26 +2552,107 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-file-confirm-quiet]')).toBeNull()
     const quiet = document.querySelector('[data-diff-file-confirm-keep-quiet]') as HTMLButtonElement
     expect(quiet).not.toBeNull()
-    // What "for now" is — the client's lifetime, not the session's — is the hover hint.
-    expect(quiet.getAttribute('title')).toBe('panel.keepInListQuietHint')
+    // What "for now" is — the session, this page visit only — is the hover hint, and it is the HOUSE
+    // tooltip: no native `title` (the browser's grey bubble is not this panel's chrome), and the kit's own
+    // `role="tooltip"` element carries the text once the button is focused.
+    expect(quiet.getAttribute('title'), 'the quiet button fell back to the browser tooltip').toBeNull()
+    fireEvent.focus(quiet)
+    expect(screen.getByRole('tooltip').textContent).toBe('panel.keepInListQuietHint')
     fireEvent.click(quiet)
     expect(props.onKeep).toHaveBeenCalledWith(FILE.sessionId, FILE.id, true)
 
-    // The next keep on that file runs straight through — no dialog — and still leaves the row listed.
+    // THE CROSS-FILE HALF: the same keep on ANOTHER file of that session runs straight through — no
+    // dialog — and still leaves the row listed.
+    fireEvent.click(screen.getByText('b.txt'))
     fireEvent.click(screen.getByText('action.keep'))
     expect(document.querySelector('[data-diff-confirm-file]')).toBeNull()
-    expect(props.onKeep).toHaveBeenCalledTimes(2)
-    expect(props.onKeep).toHaveBeenLastCalledWith(FILE.sessionId, FILE.id, true)
+    expect(props.onKeep).toHaveBeenLastCalledWith(FILE.sessionId, second.id, true)
 
-    // It is the page's memory of THE SESSION's answer, not a preference of the panel's: quiet for
-    // this session's file, nothing for another session's, and a fresh page asks all over again.
-    expect(removalAskQuiet(S1, FILE.id)).toBe(true)
-    expect(removalAskQuiet('another-session', FILE.id)).toBe(false)
+    // …and it is this page's memory of the session's answer: another session is untouched, and a fresh
+    // page asks all over again.
+    expect(removalAskQuiet(S1)).toBe(true)
+    expect(removalAskQuiet('another-session')).toBe(false)
     resetPanelMemory()
-    expect(removalAskQuiet(S1, FILE.id)).toBe(false)
+    expect(removalAskQuiet(S1)).toBe(false)
     fireEvent.click(screen.getByText('action.keep'))
     expect(document.querySelector('[data-diff-confirm-file]')).not.toBeNull()
     fireEvent.click(document.querySelector('[data-diff-file-confirm-keep]') as HTMLButtonElement)
+  })
+
+  it('does not carry one session\'s quiet answer into another session', () => {
+    // The scope is the session, so the SAME press in a different session still asks. This is the half a
+    // session-wide flag must not get wrong.
+    resetPanelMemory()
+    const first = render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    fireEvent.click(screen.getByText('action.keep'))
+    fireEvent.click(document.querySelector('[data-diff-file-confirm-keep-quiet]') as HTMLButtonElement)
+    expect(removalAskQuiet(S1)).toBe(true)
+    first.unmount()
+
+    // A row of ITS OWN session: the panel draws the list of the session it is showing.
+    const second = entry({ id: 'entry-s2', path: '/repo/a.txt', sessionId: 'session-2' as SessionId })
+    render(<PendingPanel {...panelProps({ read: true, files: [second], busy: new Set() }, null, 'session-2' as SessionId)} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    fireEvent.click(screen.getByText('action.keep'))
+    expect(document.querySelector('[data-diff-confirm-file]')).not.toBeNull()
+    expect(removalAskQuiet('session-2')).toBe(false)
+    expect(removalAskQuiet(S1)).toBe(true)
+    fireEvent.click(document.querySelector('[data-diff-file-confirm-keep]') as HTMLButtonElement)
+  })
+
+  it('still asks about comments in a session it has stopped asking about', () => {
+    // DELIBERATE: the quiet answer is about the ROW leaving the list — not about losing the reader's words.
+    // A file whose comments would die with it is confirmed even in a quieted session, exactly as the rule
+    // three lines below the old condition already stated for the confirm-first setting.
+    resetPanelMemory()
+    const annotated = entry({ id: 'entry-annotated', path: '/repo/annotated.txt' })
+    const props = panelProps({
+      read: true,
+      files: [annotated],
+      busy: new Set(),
+      comments: [comment({ id: 'cm-annotated', entryId: 'entry-annotated', text: '一', anchor: { startLine: 1, endLine: 1 } })],
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('annotated.txt'))
+
+    // Quiet the session through the whole-file dialog's third answer…
+    fireEvent.click(screen.getByText('action.keep'))
+    fireEvent.click(document.querySelector('[data-diff-file-confirm-keep-quiet]') as HTMLButtonElement)
+    expect(removalAskQuiet(S1)).toBe(true)
+    expect(props.onKeep).toHaveBeenCalledWith(S1, annotated.id, true)
+
+    // …and the row menu's 移出 still asks about the comments it would take with it.
+    fireEvent.contextMenu(document.querySelector('[data-diff-file="entry-annotated"]') as HTMLElement, { clientX: 10, clientY: 12 })
+    fireEvent.click(([...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[])[1]!)
+    expect(screen.getByText('panel.removeCommentsOne {"file":"annotated.txt","count":1}')).toBeDefined()
+    expect(document.querySelector('[data-diff-batch-confirm]')).not.toBeNull()
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-cancel]') as HTMLElement)
+  })
+
+  it('names the answer as "don\'t remove" and the scope as the session, in both dictionaries', () => {
+    // The reader's words: 「不移出」 / "Don't remove", and the quiet answer is about the SESSION.
+    expect(zh['panel.keepInList']).toBe('不移出')
+    expect(en['panel.keepInList']).toBe('Don\'t remove')
+    expect(zh['panel.keepInListQuiet']).toBe('不移出且近期不再询问')
+    expect(en['panel.keepInListQuiet']).toBe('Don\'t remove and stop asking for now')
+
+    // The hint must claim exactly what the code does: the whole session, and this page visit only (a
+    // reload asks again). Both claims are checked in both languages, so a hint that drifts back to
+    // per-file scope — or to the client's lifetime — fails here.
+    expect(zh['panel.keepInListQuietHint']).toContain('不移出列表中的这一行')
+    expect(zh['panel.keepInListQuietHint']).toContain('本次会话')
+    expect(zh['panel.keepInListQuietHint']).toContain('刷新页面后会重新询问')
+    expect(zh['panel.keepInListQuietHint']).not.toContain('该文件')
+    expect(zh['panel.keepInListQuietHint']).not.toContain('客户端生命周期')
+    expect(en['panel.keepInListQuietHint']).toContain('stops asking whether files should leave it')
+    expect(en['panel.keepInListQuietHint']).toContain('this session')
+    expect(en['panel.keepInListQuietHint']).toContain('a reload asks again')
+    expect(en['panel.keepInListQuietHint']).not.toContain('this file')
+    expect(en['panel.keepInListQuietHint']).not.toContain('lifetime of this client')
   })
 
   it('ends the selection when the press lands on a row it already covers', () => {
@@ -6620,7 +6701,11 @@ describe('PendingPanel', () => {
     fireEvent.click(document.querySelector('[data-diff-block-keep]') as HTMLElement)
     expect(document.querySelector('[data-diff-confirm-quiet]')).toBeNull()
     const quiet = document.querySelector('[data-diff-confirm-keep-quiet]') as HTMLButtonElement
-    expect(quiet.getAttribute('title')).toBe('panel.keepInListQuietHint')
+    // The block dialog's twin carries the same house tooltip: no native `title`, and the hint is the kit's
+    // own `role="tooltip"` element once the button is focused.
+    expect(quiet.getAttribute('title'), 'the block quiet button fell back to the browser tooltip').toBeNull()
+    fireEvent.focus(quiet)
+    expect(screen.getByRole('tooltip').textContent).toBe('panel.keepInListQuietHint')
     fireEvent.click(quiet)
     expect(props.onBlockKeep).toHaveBeenLastCalledWith(S1, FILE.id, block, false)
 

@@ -9156,10 +9156,10 @@ export function PendingPanel({
   const blockKeepWithPrompt: PendingPanelFace['onBlockKeep'] = (sessionId, id, block, removeWhenResolved) => {
     const file = files.find(entry => entry.id === id)
     if (removeWhenResolved === undefined && file !== undefined && blockResolvesWholeFile(file, block)) {
-      // The reader has already answered this question for this file (the keep-and-stop-asking
+      // The reader has already answered this question for THIS SESSION (the keep-and-stop-asking
       // button in the dialog): run the action with the row left in the list, for them to take out
       // by hand when they are done.
-      if (removalAskQuiet(current, id)) return onBlockKeep(sessionId, id, block, false)
+      if (removalAskQuiet(current)) return onBlockKeep(sessionId, id, block, false)
       setBlockPrompt({ action: 'keep', sessionId, id, block })
       return Promise.resolve()
     }
@@ -9168,7 +9168,7 @@ export function PendingPanel({
   const blockRevertWithPrompt: PendingPanelFace['onBlockRevert'] = (sessionId, id, block, removeWhenResolved) => {
     const file = files.find(entry => entry.id === id)
     if (removeWhenResolved === undefined && file !== undefined && blockResolvesWholeFile(file, block)) {
-      if (removalAskQuiet(current, id)) return onBlockRevert(sessionId, id, block, false)
+      if (removalAskQuiet(current)) return onBlockRevert(sessionId, id, block, false)
       setBlockPrompt({ action: 'revert', sessionId, id, block })
       return Promise.resolve()
     }
@@ -9183,16 +9183,18 @@ export function PendingPanel({
   const keepWithPrompt: PendingPanelFace['onKeep'] = (sessionId, id, keepListed) => {
     // An explicit `false` is the detail view's own 移出 (the one a file with no diff left offers): it DROPS
     // the entry, and a dropped entry takes its comments with it — so a file that has any is confirmed
-    // first. The keep-and-stop-asking button in the dialog is the reader's answer to exactly this
-    // question, so pressing it silences this one too.
-    if (keepListed === false && commentsOn([id]).count > 0 && !removalAskQuiet(current, id)) {
+    // first. That confirmation is asked ALWAYS, even in a session the reader has quieted: the quiet answer
+    // is about "should this row leave the list" (which file it is does not matter, the whole session is
+    // covered), while losing their words is a different question the setting was never about. So no
+    // `removalAskQuiet` term here — that would silence exactly the loss the reader most needs to see.
+    if (keepListed === false && commentsOn([id]).count > 0) {
       setBatchPrompt({ sessionId, kind: 'remove-one', ids: [id], doomed: [] })
       return Promise.resolve()
     }
     // The confirm-first SETTING governs asking about the row; a file whose comments would die with it is
     // asked about regardless, because that loss is not something the setting was ever about.
     if (keepListed === undefined && (confirmFileRemoveEnabled() || commentsOn([id]).count > 0)) {
-      if (removalAskQuiet(current, id)) return onKeep(sessionId, id, true)
+      if (removalAskQuiet(current)) return onKeep(sessionId, id, true)
       setFilePrompt({ action: 'keep', sessionId, id })
       return Promise.resolve()
     }
@@ -9200,7 +9202,9 @@ export function PendingPanel({
   }
   const revertWithPrompt: PendingPanelFace['onRevert'] = (sessionId, id, keepListed) => {
     if (keepListed === undefined && (confirmFileRemoveEnabled() || commentsOn([id]).count > 0)) {
-      if (removalAskQuiet(current, id)) return onRevert(sessionId, id, true)
+      // The quiet answer covers the whole session: it is about rows leaving the list, not about comments
+      // dying, and the `keepListed === false` path above asks about those whatever this says.
+      if (removalAskQuiet(current)) return onRevert(sessionId, id, true)
       setFilePrompt({ action: 'revert', sessionId, id })
       return Promise.resolve()
     }
@@ -11181,29 +11185,34 @@ export function PendingPanel({
                     {t('panel.keepInList')}
                   </button>
                   {/* The third answer, and the only one that is about the questions STILL TO COME: keep
-                      the row listed and stop asking about this file. It is a button rather than the tick
-                      this dialog used to carry, because a tick beside two buttons reads as a modifier of
-                      whichever one is pressed — so "yes, and stop asking" had to be spelled as an answer
-                      of its own. The title carries what "for now" is: the client's own lifetime, not the
-                      session's (see `quietenRemovalAsk`). */}
-                  <button
-                    type="button"
-                    className={css.action}
-                    data-diff-confirm-keep-quiet
-                    title={t('panel.keepInListQuietHint')}
-                    onClick={() => {
-                      setBlockPrompt(null)
-                      const { action, sessionId, id, block } = blockPrompt
-                      quietenRemovalAsk(current, id)
-                      // Not removed, exactly as the button above: the difference is only what the file
-                      // is told about the questions that follow (see `removalAskQuiet`).
-                      void (action === 'keep'
-                        ? onBlockKeep(sessionId, id, block, false)
-                        : onBlockRevert(sessionId, id, block, false))
-                    }}
-                  >
-                    {t('panel.keepInListQuiet')}
-                  </button>
+                      the row listed and stop asking about removals for the whole SESSION. It is a button
+                      rather than the tick this dialog used to carry, because a tick beside two buttons
+                      reads as a modifier of whichever one is pressed — so "yes, and stop asking" had to be
+                      spelled as an answer of its own. The hint carries what "for now" is (the whole
+                      session, this page visit only — see `quietenRemovalAsk`), in the HOUSE tooltip rather
+                      than a raw `title`: the browser's own bubble is not this panel's chrome. `side="top"`
+                      because this action row sits at the bottom of a card the height of the viewport, and
+                      500ms is the delay every neighbouring hint uses. The button's text stays its
+                      accessible name; the kit's tooltip ADDS the hint as a `role="tooltip"` element. */}
+                  <Tooltip label={t('panel.keepInListQuietHint')} side="top" delayMs={500}>
+                    <button
+                      type="button"
+                      className={css.action}
+                      data-diff-confirm-keep-quiet
+                      onClick={() => {
+                        setBlockPrompt(null)
+                        const { action, sessionId, id, block } = blockPrompt
+                        quietenRemovalAsk(current)
+                        // Not removed, exactly as the button above: the difference is only what the rest of
+                        // this session is told about the questions that follow (see `removalAskQuiet`).
+                        void (action === 'keep'
+                          ? onBlockKeep(sessionId, id, block, false)
+                          : onBlockRevert(sessionId, id, block, false))
+                      }}
+                    >
+                      {t('panel.keepInListQuiet')}
+                    </button>
+                  </Tooltip>
                 </div>
               </div>
             </div>
@@ -11254,22 +11263,24 @@ export function PendingPanel({
                     {t('panel.keepInList')}
                   </button>
                   {/* The same third answer the block dialog carries, on the whole-file question: keep the
-                      row and stop asking about this file. The scope is the page's memory — this client's
-                      lifetime, not the session's — which the title spells out (see `quietenRemovalAsk`). */}
-                  <button
-                    type="button"
-                    className={css.action}
-                    data-diff-file-confirm-keep-quiet
-                    title={t('panel.keepInListQuietHint')}
-                    onClick={() => {
-                      setFilePrompt(null)
-                      const { action, sessionId, id } = filePrompt
-                      quietenRemovalAsk(current, id)
-                      void (action === 'keep' ? onKeep(sessionId, id, true) : onRevert(sessionId, id, true))
-                    }}
-                  >
-                    {t('panel.keepInListQuiet')}
-                  </button>
+                      row and stop asking about removals for this SESSION. The scope is this page's memory
+                      of that answer — the session, for this client's visit, not the host's state — which
+                      the hint spells out (see `quietenRemovalAsk`), in the house tooltip like its twin. */}
+                  <Tooltip label={t('panel.keepInListQuietHint')} side="top" delayMs={500}>
+                    <button
+                      type="button"
+                      className={css.action}
+                      data-diff-file-confirm-keep-quiet
+                      onClick={() => {
+                        setFilePrompt(null)
+                        const { action, sessionId, id } = filePrompt
+                        quietenRemovalAsk(current)
+                        void (action === 'keep' ? onKeep(sessionId, id, true) : onRevert(sessionId, id, true))
+                      }}
+                    >
+                      {t('panel.keepInListQuiet')}
+                    </button>
+                  </Tooltip>
                 </div>
               </div>
             </div>
