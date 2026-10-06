@@ -2136,8 +2136,8 @@
    mark the file row and the card head still draw (the reader asked for one kind of dot, not two shapes,
    2026-10-06) — told apart by COLOUR, hashed from the category id (set inline by the panel's own markup, see
    `category-color.ts`), plus the `title`/`aria-label` it carries, so colour is never the only cue.
-   ITS ANCHOR IS THE FIRST TITLE LINE, not the middle of the row (the reader asked for exactly that, same
-   day: 「未读点应该放在多行的第一行位置，而不是整体居中」). This row can hold a THREE-LINE title, and a mark
+   ITS ANCHOR IS THE FIRST TITLE LINE, not the middle of the row: the mark belongs on the line the title
+   STARTS on, not on the row's centre. This row can hold a THREE-LINE title, and a mark
    centred on the whole row drifts down into the block as the title grows. So the offset is computed from the
    parts that decide where the first line sits, each one named in the expression:
      6px          `.commentRow`'s padding-top — where the row's content, and so the title's first line, starts

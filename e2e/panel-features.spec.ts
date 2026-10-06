@@ -638,7 +638,7 @@ test.describe('面板功能：搜索 / 跳转 / 视图 / 浮动列表 / 预览 /
     // THE BATCH DIALOG'S TITLE, measured — the tallest of the five the reader asked to be titled, and the one
     // whose lists are longest (a `li` per file). It has to be visible where a title goes: the FIRST child of
     // the card, above the ask and the lists. The card is also asserted to stay inside the viewport with its
-    // buttons in reach, which is the "内容多了就不怎么好看" half of the request: the file lists scroll inside
+    // buttons in reach, which is the other half of the requirement: the file lists scroll inside
     // their own 104px boxes (`.confirmList`), so no number of files can push the buttons off-screen.
     const confirm = page.locator('[data-diff-batch-confirm]').first()
     await expect(confirm).toBeVisible({ timeout: 20_000 })

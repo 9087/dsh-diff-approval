@@ -1,7 +1,7 @@
 // The quiet button's hint is the HOUSE tooltip, not the browser's own bubble.
 //
 // The button used to carry a raw `title` attribute, so hovering it drew whatever grey bubble the platform
-// draws — the reader's report (「怎么是系统默认样式」). It is now the primitives' `Tooltip`, and this is the
+// draws. It is now the primitives' `Tooltip`, and this is the
 // measurement that proves which of the two is on screen: NO `title` attribute on the button, and the kit's
 // own `role="tooltip"` element carrying the hint text after a real hover.
 

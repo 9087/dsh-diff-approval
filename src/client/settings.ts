@@ -33,8 +33,8 @@ const WRAP_PREFIX = 'diff-approval:wrap:'
 // A NEW FIELD, not a versioned one: `diff-approval:mono-font` keeps the short-noun style this file's other
 // keys use (`comment-mode`, `tab-size`, `md-preview`). It exists because the old `diff-approval:code-font`
 // was read as `=== '1'` — absent meant OFF — while this one is read as `!== '0'`, so absent means ON. Moving
-// the field is what carries existing profiles along, which is what the reader asked for
-// (「老用户看能不能也统一开启，比如设置数据换个字段」).
+// the field is what carries existing profiles along: a profile written before this change must land with
+// the mode ON rather than keeping a choice that was made about a different key.
 // THE TRADE-OFF, recorded where the field is defined because it is a decision and not a side effect: an
 // explicit OFF stored under the OLD key is dropped rather than honoured — a reader who had turned the bundled
 // font off before today comes back with it on. Turning it off AFTER this change writes `'0'` here and stays off.

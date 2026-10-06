@@ -2634,7 +2634,7 @@ describe('PendingPanel', () => {
   })
 
   it('names the answer as "don\'t remove" and the scope as the session, in both dictionaries', () => {
-    // The reader's words: 「不移出」 / "Don't remove", and the quiet answer is about the SESSION.
+    // The label the change settled on — 不移出 / "Don't remove" — and the quiet answer scoped to the SESSION.
     expect(zh['panel.keepInList']).toBe('不移出')
     expect(en['panel.keepInList']).toBe('Don\'t remove')
     expect(zh['panel.keepInListQuiet']).toBe('不移出且近期不再询问')
