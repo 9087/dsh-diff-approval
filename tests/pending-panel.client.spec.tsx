@@ -14582,3 +14582,176 @@ describe('dialog titles', () => {
     expect(dialog.getAttribute('aria-label')).not.toBe('')
   })
 })
+
+describe('a chip press that belongs to another session', () => {
+  // THE READER'S BUG (measured): the first press of 在审批面板中查看 answered 「路径不在当前工作区内」 and the
+  // second one worked. Mechanism, proved here: the bridge carried no session, so the panel asked the session
+  // IT was showing to add a path that lies in another session's workspace — the host resolved it against that
+  // workspace and refused. By the second press the panel had followed the shell's selection.
+  const OTHER = 'session-1' as SessionId
+  const SHOWN = 'session-2' as SessionId
+  /** A host that resolves a path against the workspace of the session it was ASKED about. */
+  const hostFor = (workspaces: Record<string, string>) => async (session: unknown, path: unknown) => (
+    String(path).startsWith(workspaces[String(session)] ?? '\u0000-not-a-workspace')
+      ? { outcome: 'added', added: 1, duplicates: 0, id: String(path) }
+      : { outcome: 'outside', added: 0, duplicates: 0 }
+  )
+
+  /** A produced-files chip, optionally inside a session-identified surface (the ancestor route). */
+  const chipInside = (session: string | undefined, path: string, attr = 'data-row-key'): HTMLElement => {
+    const row = session === undefined
+      ? document.body
+      : (() => { const node = document.createElement('div'); node.setAttribute(attr, session); document.body.appendChild(node); return node })()
+    const card = document.createElement('div')
+    card.setAttribute('data-produced-files-row', '')
+    const chip = document.createElement('button')
+    chip.setAttribute('title', path)
+    card.appendChild(chip)
+    row.appendChild(card)
+    return chip
+  }
+
+  it('reads the session from the press\'s own surface, and invents none when there is none', () => {
+    const details: { sessionId?: string }[] = []
+    const stop = startProducedChipMenu({ enabled: () => true, isPending: () => false, onMenu: (d) => { details.push(d) } })
+
+    // The session-LIST item's spelling: right for a press raised inside the sidebar.
+    const inside = chipInside('session:session-1', '/repo-a/x.txt')
+    fireEvent.click(inside)
+    expect(details[0]).toMatchObject({ path: '/repo-a/x.txt', sessionId: 'session-1' })
+
+    // THE LIVE-SHELL SPELLING, and the one the reader's press actually meets: the conversation body carries
+    // `data-conversation-session` — measured on a real page — while the sidebar's `data-row-key` is NOT an
+    // ancestor of a message chip. Without this case the fix could be inert and every pin would still pass.
+    const live = chipInside('session-869fd38a-live', '/repo-a/x.txt', 'data-conversation-session')
+    fireEvent.click(live)
+    expect(details[1]).toMatchObject({ path: '/repo-a/x.txt', sessionId: 'session-869fd38a-live' })
+
+    // The NEAREST ancestor that names a session wins, whichever spelling it uses: a conversation body nested
+    // inside a session row (a shell that renders the transcript under the row) must take the body's session.
+    const outerRow = document.createElement('div')
+    outerRow.setAttribute('data-row-key', 'session:session-far')
+    document.body.appendChild(outerRow)
+    const body = document.createElement('div')
+    body.setAttribute('data-conversation-session', 'session-near')
+    outerRow.appendChild(body)
+    const nearCard = document.createElement('div')
+    nearCard.setAttribute('data-produced-files-row', '')
+    const nearChip = document.createElement('button')
+    nearChip.setAttribute('title', '/repo-a/near.txt')
+    nearCard.appendChild(nearChip)
+    body.appendChild(nearCard)
+    fireEvent.click(nearChip)
+    expect(details[2]).toMatchObject({ path: '/repo-a/near.txt', sessionId: 'session-near' })
+
+    // A `data-session-id` wrapper is the unmeasured alternative spelling, kept as a last resort.
+    const wrapper = document.createElement('div')
+    wrapper.setAttribute('data-session-id', 'session-9')
+    document.body.appendChild(wrapper)
+    const card = document.createElement('div')
+    card.setAttribute('data-presented-files-row', '')
+    const chip = document.createElement('button')
+    chip.setAttribute('title', '/repo-z/y.txt')
+    card.appendChild(chip)
+    wrapper.appendChild(card)
+    fireEvent.click(chip)
+    expect(details[3]).toMatchObject({ path: '/repo-z/y.txt', sessionId: 'session-9' })
+
+    // NOTHING is invented when no ancestor names a session: guessing one would ask a THIRD session.
+    const bare = chipInside(undefined, '/repo-a/x.txt')
+    fireEvent.click(bare)
+    expect(details[4]).not.toHaveProperty('sessionId')
+    stop()
+    for (const node of [...document.body.querySelectorAll('[data-row-key],[data-session-id],[data-conversation-session],[data-produced-files-row],[data-presented-files-row]')]) node.remove()
+  })
+
+  it('adds the file to the PRESS\'s own session, even while the panel shows another', async () => {
+    // The first press of the reader's bug, with the attribution in place: the add goes to session-1, whose
+    // workspace holds the path — so it lands, and the panel asks to open it, instead of refusing with
+    // 「路径不在当前工作区内」. (The other half of the reader's flow — the panel SHOWING the file it added,
+    // which it can only do once it is bound to the session the shell moved to — is pinned by the case above
+    // at 'adds a file the panel does not hold before showing it in the panel'.)
+    const opened: string[] = []
+    const onOpen = (event: Event): void => { opened.push((event as CustomEvent<{ path: string }>).detail.path) }
+    window.addEventListener('diff-approval:open-file', onOpen)
+    const props = panelProps({ read: true, files: [], busy: new Set() }, null, SHOWN)
+    const addPath = props.onAddPath as unknown as { mockImplementation: (fn: unknown) => void; mock: { calls: unknown[][] } }
+    addPath.mockImplementation(hostFor({ [String(OTHER)]: '/repo-a/', [String(SHOWN)]: '/repo-b/' }))
+    render(<PendingPanel {...props} />)
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
+        detail: { path: '/repo-a/x.txt', x: 10, y: 20, held: false, sessionId: String(OTHER) },
+      }))
+    })
+    fireEvent.click(screen.getAllByText('chip.reviewInPanel')[0]!)
+
+    await waitFor(() => { expect(addPath.mock.calls.length).toBe(1) })
+    // THE PIN: the session asked is the PRESS's own, not the one the panel happens to be showing.
+    expect(addPath.mock.calls[0]).toEqual([OTHER, '/repo-a/x.txt', false, true])
+    expect(props.onRefresh).toHaveBeenCalledWith(OTHER)
+    // …and the reader's file is opened, on the first press: the panel asks for the path the host answered with
+    // rather than leaving the pick silent.
+    await waitFor(() => { expect(opened).toEqual(['/repo-a/x.txt']) })
+    expect(document.body.textContent ?? '').not.toContain('panel.addOutside')
+    expect(document.body.textContent ?? '').not.toContain('panel.addOtherSession')
+    window.removeEventListener('diff-approval:open-file', onOpen)
+  })
+
+  it('still adds for a press with no session of its own, from the session the panel shows', async () => {
+    // The fallback is unchanged: the path field's route and any press whose surface names nothing.
+    const opened: string[] = []
+    const onOpen = (event: Event): void => { opened.push((event as CustomEvent<{ path: string }>).detail.path) }
+    window.addEventListener('diff-approval:open-file', onOpen)
+    const props = panelProps({ read: true, files: [], busy: new Set() }, null, SHOWN)
+    const addPath = props.onAddPath as unknown as { mockImplementation: (fn: unknown) => void; mock: { calls: unknown[][] } }
+    addPath.mockImplementation(hostFor({ [String(OTHER)]: '/repo-a/', [String(SHOWN)]: '/repo-b/' }))
+    render(<PendingPanel {...props} />)
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
+        detail: { path: '/repo-b/y.txt', x: 10, y: 20, held: false },
+      }))
+    })
+    fireEvent.click(screen.getAllByText('chip.reviewInPanel')[0]!)
+    await waitFor(() => { expect(addPath.mock.calls.length).toBe(1) })
+    expect(addPath.mock.calls[0]).toEqual([SHOWN, '/repo-b/y.txt', false, true])
+    expect(props.onRefresh).toHaveBeenCalledWith(SHOWN)
+    await waitFor(() => { expect(opened).toEqual(['/repo-b/y.txt']) })
+    expect(document.body.textContent ?? '').not.toContain('panel.addOtherSession')
+    window.removeEventListener('diff-approval:open-file', onOpen)
+  })
+
+  it('says the file belongs to another session when THAT session\'s workspace refuses it', async () => {
+    // The message half, for a refusal the attribution cannot prevent: the press named its own session, and
+    // THAT session's workspace does not hold the path. Naming the session is honest; blaming the path — the
+    // old wording — is not, because the host checked a workspace this press never came from.
+    const props = panelProps({ read: true, files: [], busy: new Set() }, null, SHOWN)
+    const addPath = props.onAddPath as unknown as { mockImplementation: (fn: unknown) => void }
+    addPath.mockImplementation(hostFor({ [String(OTHER)]: '/repo-a/', [String(SHOWN)]: '/repo-b/' }))
+    render(<PendingPanel {...props} />)
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
+        detail: { path: '/elsewhere/z.txt', x: 10, y: 20, held: false, sessionId: String(OTHER) },
+      }))
+    })
+    fireEvent.click(screen.getAllByText('chip.reviewInPanel')[0]!)
+    await waitFor(() => { expect(screen.getAllByText('panel.addOtherSession').length).toBeGreaterThanOrEqual(1) })
+    expect(screen.queryByText('panel.addOutside')).toBeNull()
+  })
+
+  it('keeps the host\'s own wording when the press named no session', async () => {
+    // The other half of the same branch: with no attribution the panel asked the session it shows, so the
+    // host's verdict about THAT workspace is all anyone can honestly say — and it is what is shown.
+    const props = panelProps({ read: true, files: [], busy: new Set() }, null, SHOWN)
+    const addPath = props.onAddPath as unknown as { mockImplementation: (fn: unknown) => void }
+    addPath.mockImplementation(hostFor({ [String(OTHER)]: '/repo-a/', [String(SHOWN)]: '/repo-b/' }))
+    render(<PendingPanel {...props} />)
+    act(() => {
+      window.dispatchEvent(new CustomEvent('diff-approval:chip-menu', {
+        detail: { path: '/elsewhere/z.txt', x: 10, y: 20, held: false },
+      }))
+    })
+    fireEvent.click(screen.getAllByText('chip.reviewInPanel')[0]!)
+    await waitFor(() => { expect(screen.getAllByText('panel.addOutside').length).toBeGreaterThanOrEqual(1) })
+    expect(screen.queryByText('panel.addOtherSession')).toBeNull()
+  })
+})

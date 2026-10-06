@@ -281,6 +281,9 @@ export const zh = {
   'panel.addNoEntries': '此目录为空',
   'panel.addMissing': '路径不存在',
   'panel.addOutside': '路径不在当前工作区内',
+  // A press that named its OWN session was asked against THAT session's workspace, so this refusal is a
+  // mismatch between two sessions rather than a bad path — the reader's bug (see `sessionOfPress`).
+  'panel.addOtherSession': '该文件属于另一个会话的工作区，请在那个会话里打开',
   'panel.addNotAFile': '这是一个目录，请输入文件路径',
   'panel.addFailed': '添加失败：{message}',
   'action.cancel': '取消',
@@ -548,6 +551,8 @@ export const en = {
   'panel.addNoEntries': 'This directory is empty',
   'panel.addMissing': 'No such path',
   'panel.addOutside': 'That path is outside the workspace',
+  // See the `panel.*` block above: the press named its own session this time, so this is a session mismatch.
+  'panel.addOtherSession': 'That file belongs to another session\'s workspace — open it from that session',
   'panel.addNotAFile': 'That is a directory; give a file path',
   'panel.addFailed': 'Add failed: {message}',
   'action.cancel': 'Cancel',

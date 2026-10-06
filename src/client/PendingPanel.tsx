@@ -8524,7 +8524,7 @@ export function PendingPanel({
       const detail = (event as CustomEvent<ProducedChipMenuDetail>).detail
       if (detail === undefined || typeof detail.path !== 'string') return
       if (typeof detail.x !== 'number' || typeof detail.y !== 'number') return
-      setChipMenu({ path: detail.path, x: detail.x, y: detail.y, held: detail.held === true })
+      setChipMenu({ path: detail.path, x: detail.x, y: detail.y, held: detail.held === true, sessionId: detail.sessionId })
     }
     window.addEventListener(CHIP_MENU_EVENT, onChipMenu)
     return () => { window.removeEventListener(CHIP_MENU_EVENT, onChipMenu) }
@@ -8750,7 +8750,7 @@ export function PendingPanel({
   const [commentMenu, setCommentMenu] = useState<{ id: string; fileId: string; x: number; y: number; picked: boolean } | null>(null)
   /** The produced-file chip whose menu is open, and where that chip is: the press on a pending file's
    *  chip is the panel's (see produced-diff.ts), so the panel answers it with the two ways to open it. */
-  const [chipMenu, setChipMenu] = useState<{ path: string; x: number; y: number; held: boolean; fromLink?: boolean } | null>(null)
+  const [chipMenu, setChipMenu] = useState<{ path: string; x: number; y: number; held: boolean; fromLink?: boolean; sessionId?: string | undefined } | null>(null)
   /** Whether the file menu's "关于此菜单" dialog is open: one block of prose and one button (see `chipMenuItems`). */
   const [aboutOpen, setAboutOpen] = useState(false)
   /** Whether the add-path dialog is open. One dialog covers both shapes: what
@@ -9637,12 +9637,17 @@ export function PendingPanel({
    * @returns what to select: the entry opened (the one already listed, for a duplicate), or
    *   undefined when the host refused the path.
    */
-  const addTypedPath = async (path: string, includeUnchanged = true): Promise<{ openPath?: string } | undefined> => {
-    if (current === undefined) {
+  const addTypedPath = async (path: string, includeUnchanged = true, session?: SessionId): Promise<{ openPath?: string } | undefined> => {
+    // THE SESSION ASKED IS THE PRESS'S OWN when it named one (see `ProducedChipMenuDetail.sessionId` and
+    // `sessionOfPress`): a chip in another session's transcript must be added to THAT session's workspace, or
+    // the host refuses with `outside` for a path that is perfectly inside its own. The panel's own `current`
+    // is the fallback — the right answer for the path field and for a press whose surface named nothing.
+    const asked = session ?? current
+    if (asked === undefined) {
       showCopyToast(t('panel.fileNotPending'))
       return undefined
     }
-    const value = await onAddPath(current, path, includeUnchanged, true).catch((error: unknown) => {
+    const value = await onAddPath(asked, path, includeUnchanged, true).catch((error: unknown) => {
       showCopyToast(t('panel.addFailed', { message: error instanceof Error ? error.message : String(error) }))
       return undefined
     })
@@ -9653,16 +9658,23 @@ export function PendingPanel({
         // The id is the host's answer, and the panel can only select ids its own list holds: ask
         // for the list now instead of waiting for the next poll. The field is a way to open a
         // file, and opening it a second later is not that.
-        onRefresh(current)
+        onRefresh(asked)
         return { openPath: value.id }
       }
       // Landed, but the host named no single entry (a directory scan): nothing to open.
-      onRefresh(current)
+      onRefresh(asked)
       return {}
     }
     if (value.outcome === 'missing') showCopyToast(t('panel.addMissing'))
-    else if (value.outcome === 'outside') showCopyToast(t('panel.addOutside'))
-    else if (value.outcome === 'not-a-file') showCopyToast(t('panel.addNotAFile'))
+    else if (value.outcome === 'outside') {
+      // ONE host verdict, TWO different situations. A press that named a session of its own was asked against
+      // THAT session's workspace, so the honest sentence names the session (the reader's bug: this used to say
+      // the path was outside "the workspace", which blamed the file for a mismatch between two sessions). A
+      // press that named none was asked against the session the panel is showing, and there the host's own
+      // wording — which names the workspace it checked — is all anyone can honestly say: the path may simply
+      // be outside it.
+      showCopyToast(session !== undefined && session !== current ? t('panel.addOtherSession') : t('panel.addOutside'))
+    } else if (value.outcome === 'not-a-file') showCopyToast(t('panel.addNotAFile'))
     else if (value.outcome === 'unchanged') {
       // The same case the browse dialog names: the file has to be asked for by name
       // (`includeUnchanged`) or it will not be listed at all.
@@ -10139,7 +10151,7 @@ export function PendingPanel({
     // none (a stale card, or a change already settled), its existing `unchanged` notice tells the reader so
     // and NOTHING opens, rather than an empty row being drawn as if a file had been opened. The path field
     // asks the same verb with `true`, because opening a clean file by name is exactly what that field is for.
-    void addTypedPath(target.path, false).then((added) => {
+    void addTypedPath(target.path, false, target.sessionId as SessionId | undefined).then((added) => {
       const open = added?.openPath
       if (open === undefined) return
       window.dispatchEvent(new CustomEvent(OPEN_FILE_EVENT, { detail: { path: open } }))

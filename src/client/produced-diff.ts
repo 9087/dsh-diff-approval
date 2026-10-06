@@ -120,6 +120,19 @@ export interface ProducedChipMenuDetail {
    * the host is not holding would simply fail.
    */
   held: boolean
+  /**
+   * The session the press belongs to, when its own surface says so.
+   *
+   * WITHOUT THIS the panel can only ask the session IT is showing to add the path, and the host resolves that
+   * path against that session's workspace: a press in session A's transcript while the panel is still bound
+   * to session B answers `outside` ("路径不在当前工作区内") — measured, and it was the reader's bug: the first
+   * press refused and the second worked, because by then the panel had followed the shell's selection.
+   *
+   * Read from the ANCESTORS of the pressed element only (see `sessionOfPress`), and `undefined` when none of
+   * them names a session. That is the honest half: the panel then asks its own session and, if the host
+   * refuses, says so with the wording that names what was checked rather than blaming the path.
+   */
+  sessionId?: string | undefined
 }
 
 /** What the bridge needs from the host to decide, and to report. */
@@ -238,6 +251,43 @@ export function replayFilePress(path: string): boolean {
 }
 
 /**
+ * The session a press belongs to, read from the pressed element's OWN surface.
+ *
+ * Ancestors only, and the NEAREST ancestor that names a session wins — whichever spelling it uses:
+ *
+ *   `data-row-key="session:<id>"`  a session-LIST item, measured by this repo's e2e harness. Right for a
+ *                                  press raised inside the sidebar, and NOT an ancestor of a transcript
+ *                                  chip (measured on the live shell: exactly one such element in the whole
+ *                                  document, and it does not contain the chip).
+ *   `data-conversation-session`    the conversation BODY, measured on the live shell — this is the one that
+ *                                  covers the reader's press, a chip inside a message.
+ *   `data-session-id`              unmeasured alternative spelling, kept as a last resort.
+ *
+ * Walking the chain rather than asking three separate `closest` queries is what makes "nearest wins" true
+ * across spellings: a chip inside a session row that ALSO nests a conversation body takes the nearer
+ * body's session. A document-wide search is still deliberately NOT done — an identity hit may be a SIBLING,
+ * an `href` or an `aria-controls`, and guessing which session a press belongs to would be worse than not
+ * knowing: a wrong guess would ask a THIRD session to add the file, which this can never do.
+ *
+ * @param press - the element the press landed on.
+ * @returns the session id, or undefined when no ancestor names one.
+ */
+export function sessionOfPress(press: Element): string | undefined {
+  for (let node: Element | null = press; node !== null; node = node.parentElement) {
+    const rowKey = node.getAttribute('data-row-key')
+    if (rowKey?.startsWith('session:') === true) {
+      const fromRow = rowKey.slice('session:'.length).trim()
+      if (fromRow !== '') return fromRow
+    }
+    const fromConversation = node.getAttribute('data-conversation-session')?.trim()
+    if (fromConversation !== undefined && fromConversation !== '') return fromConversation
+    const fromAttr = node.getAttribute('data-session-id')?.trim()
+    if (fromAttr !== undefined && fromAttr !== '') return fromAttr
+  }
+  return undefined
+}
+
+/**
  * Start routing the presses that would open a file in the shell's own viewer.
  *
  * @param bridge - the host's decision (is the file pending) and where to report a press that is.
@@ -272,7 +322,8 @@ export function startProducedChipMenu(bridge: ProducedChipBridge): () => void {
     event.preventDefault()
     event.stopImmediatePropagation()
     const rect = press.getBoundingClientRect()
-    bridge.onMenu({ path, x: rect.left, y: rect.bottom, held })
+    const sessionId = sessionOfPress(press)
+    bridge.onMenu({ path, x: rect.left, y: rect.bottom, held, ...(sessionId === undefined ? {} : { sessionId }) })
   }
   document.addEventListener('click', onClick, true)
   return () => { document.removeEventListener('click', onClick, true) }
