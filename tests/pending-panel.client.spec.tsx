@@ -1185,6 +1185,50 @@ describe('PendingPanel', () => {
     scroll.remove()
   })
 
+  it('reserves nothing for a right sidebar the shell has collapsed', () => {
+    // MEASURED ON THE LIVE PAGE: while the right sidebar is collapsed, the shell leaves
+    // `[data-sidebar-right-panel]` MOUNTED at its last width (630px at 770..1400, `aria-hidden="true"`) even
+    // though its grid track is 0px and nothing is drawn in that strip — the conversation reaches the viewport
+    // edge (1398 of 1400). Counting that ghost reserved 630px: with the right sidebar NOT covered the panel's
+    // inset was `8px 638px` and it stopped 638px short of the window edge — the empty strip the reader
+    // reported. With the sidebar open the same source is the real, drawn 630px and must still count.
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1200 })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
+    const scroll = document.createElement('div')
+    scroll.setAttribute('data-conversation-scroll', '')
+    document.body.appendChild(scroll)
+    // The centre column reaches the viewport edge, so the sidebar overlay is the only candidate for `right`.
+    scroll.getBoundingClientRect = () => ({
+      left: 56, right: 1200, width: 1144, top: 96, bottom: 800, height: 704, x: 56, y: 96, toJSON: () => ({}),
+    }) as DOMRect
+
+    const frame = document.createElement('div')
+    frame.setAttribute('data-rightbar-collapsed', 'true')
+    document.body.insertBefore(frame, scroll)
+    const sidebar = document.createElement('div')
+    sidebar.setAttribute('data-sidebar-right-panel', '')
+    sidebar.setAttribute('aria-hidden', 'true')
+    document.body.insertBefore(sidebar, scroll)
+    sidebar.getBoundingClientRect = () => ({
+      left: 570, right: 1200, width: 630, top: 0, bottom: 800, height: 800, x: 570, y: 0, toJSON: () => ({}),
+    }) as DOMRect
+
+    // Collapsed: an overlay left mounted at its last width is NOT space to sit beside.
+    expect(frameInsets()).toEqual({ top: 96, bottom: 0, left: 56, right: 0 })
+
+    // Open: the shell drops the marker (measured), and the same 630px is the drawn sidebar, so it counts.
+    frame.removeAttribute('data-rightbar-collapsed')
+    expect(frameInsets().right).toBe(630)
+
+    // A shell that renders the marker always, with a value, is honoured too: only an explicit `false` is open.
+    frame.setAttribute('data-rightbar-collapsed', 'false')
+    expect(frameInsets().right).toBe(630)
+
+    frame.remove()
+    sidebar.remove()
+    scroll.remove()
+  })
+
   it('sits above a docked composer seat (approval takeover included)', () => {
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
     const scroll = document.createElement('div')

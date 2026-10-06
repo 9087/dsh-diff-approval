@@ -966,8 +966,22 @@ export function frameInsets(): { top: number; bottom: number; left: number; righ
       right = Math.max(right, tracks.length > 1 ? (tracks[tracks.length - 1] ?? 0) : 0)
     }
   }
+  // The shell's right sidebar — and NOTHING of it while the shell says it is collapsed.
+  //
+  // A collapsed sidebar stays MOUNTED at its last width: measured on the live page, `[data-sidebar-right-panel]`
+  // is still 630px wide at 770..1400 and marked `aria-hidden="true"` while the frame carries
+  // `data-rightbar-collapsed="true"`, its last grid track is 0px, and the strip draws nothing at all (the
+  // conversation reaches the viewport edge). Counting that ghost reserved 630px for a sidebar that is not
+  // there: a panel NOT covering the right sidebar stopped 638px short of the window edge — the empty strip the
+  // reader reported — while with the sidebar open the same source is the real, drawn 630px and the panel
+  // correctly stops beside it. So its width counts only while the shell does not say it is collapsed; the
+  // attribute is absent (measured) when the sidebar is open, and an explicit `false` is honoured too.
+  const marked = document.querySelector('[data-rightbar-collapsed]')
+  const rightbarCollapsed = marked !== null && marked.getAttribute('data-rightbar-collapsed') !== 'false'
   const rightPanel = document.querySelector('[data-sidebar-right-panel]')?.getBoundingClientRect()
-  if (rightPanel !== undefined && rightPanel.width > 0) right = Math.max(right, viewport - rightPanel.left)
+  if (!rightbarCollapsed && rightPanel !== undefined && rightPanel.width > 0) {
+    right = Math.max(right, viewport - rightPanel.left)
+  }
   return { top, bottom, left, right }
 }
 
