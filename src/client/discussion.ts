@@ -187,10 +187,21 @@ export function discussionRounds(
     }
   }
   const kept = messages.slice(start)
-  const hidden = start
-  const rows = kept.reduce((total, message) => total + Math.max(1, sizeOf(message)), 0)
+  let shown = kept
+  let hidden = start
+  // The head of a thread that does not OPEN with a question is not a question at all: it is the annotation
+  // an agent-placed card starts with (see `discussionOfRecord`, where `record.author` decides the first
+  // turn's role). It is the head of the FIRST round, so trimming older rounds must never slice it away —
+  // exactly as a reader's own annotation survives by BEING the first question. What sat between it and the
+  // kept rounds is what the hidden count says.
+  const head = messages[0]
+  if (start > 0 && head !== undefined && head.role !== 'user') {
+    shown = [head, ...kept]
+    hidden = start - 1
+  }
+  const rows = shown.reduce((total, message) => total + Math.max(1, sizeOf(message)), 0)
   // The note that says what is hidden is a row of the body itself.
-  return { messages: kept, hidden, rows: rows + (hidden > 0 ? 1 : 0) }
+  return { messages: shown, hidden, rows: rows + (hidden > 0 ? 1 : 0) }
 }
 
 /** One run of a turn's prose, after its inline Markdown is read. */

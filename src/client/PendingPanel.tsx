@@ -1153,9 +1153,14 @@ function discussionOfRecord(
     { role: record.author === 'agent' ? 'assistant' : 'user', text: record.text },
   ]
   asks.forEach((ask, index) => {
-    // The first question IS the annotation: the reader popped the compose row on those rows and its
-    // words became `record.text`, so drawing `ask.text` too would show the same sentence twice.
-    if (index > 0 && typeof ask.text === 'string' && ask.text !== '') {
+    // The first question IS the annotation only on a card the READER made: they popped the compose row on
+    // those rows and their typed words became `record.text`, so drawing `ask.text` again would show the same
+    // sentence twice. On a card the annotate TOOL placed, `record.text` is the AGENT's annotation and the
+    // record has no ask at all until the reader replies — so its first ask (and every later one) is a reader
+    // turn and every one is drawn. The AUTHOR is what decides this, not the index: it is the one field that
+    // says whether an ask can possibly be the annotation.
+    const isAnnotation = index === 0 && record.author !== 'agent'
+    if (!isAnnotation && typeof ask.text === 'string' && ask.text !== '') {
       messages.push({ role: 'user', text: ask.text })
     }
     const answer = answers[ask.requestId]

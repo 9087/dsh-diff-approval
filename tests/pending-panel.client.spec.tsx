@@ -14943,3 +14943,63 @@ describe('settings group headers', () => {
     expect(tab).toMatch(/useLayoutEffect\(\(\) => \{/)
   })
 })
+
+describe('an agent-placed card\'s thread', () => {
+  // THE READER'S REPORT: on a card the annotate tool placed they replied, and their reply never appeared.
+  // The tool files a record with `author: 'agent'` and NO ask, so the reader's first reply is `asks[0]` —
+  // and the renderer skipped `asks[0]` unconditionally, on the assumption that it is always the annotation.
+  // That holds only for a comment the READER made, whose words became both `record.text` and `asks[0].text`.
+  // Measured before the fix: the card drew ["A:标注","A:答复"] (the reply gone) and, at the round cap,
+  // ["U:r2","A:a2","U:r3","A:a3"] (the annotation sliced away). The author is what says which case it is.
+  /** The turns a card draws, oldest first: `U:` is the reader's own words, `A:` the agent's. */
+  const segmentsOf = (card: HTMLElement): string[] =>
+    [...card.querySelectorAll('[data-diff-discussion-user],[data-diff-discussion-reply]')]
+      .map(node => `${node.hasAttribute('data-diff-discussion-user') ? 'U' : 'A'}:${(node.textContent ?? '').trim()}`)
+  const cardOf = (id: string): HTMLElement => document.querySelector(`[data-diff-discussion-id="${id}"]`) as HTMLElement
+  /** One file whose line 2 carries these records, with the panel opened onto it. */
+  const staged = (comments: CommentRecord[], answers: Record<string, string> = {}): void => {
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-thread', path: '/repo/thread.txt', oldText: 'a\nb\nc\nd\n', newText: 'a\nB\nc\nD\n' })
+    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set(), comments, commentAnswers: answers })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+  }
+  const annotation = (id: string, over: Record<string, unknown>): CommentRecord => ({
+    ...comment({ id, entryId: 'entry-thread', text: '标注', anchor: { startLine: 2, endLine: 2 }, quote: 'b' }),
+    ...over,
+  } as CommentRecord)
+
+  it('draws an agent card\'s reply as the reader\'s turn, between the annotation and the answer', () => {
+    staged([annotation('t-agent-1', { author: 'agent', asks: [{ requestId: 'q1', text: '读者的回复' }] })], { q1: '答复' })
+    expect(segmentsOf(cardOf('t-agent-1')), 'the reader\'s own reply is missing from the thread')
+      .toEqual(['A:标注', 'U:读者的回复', 'A:答复'])
+  })
+
+  it('draws only the annotation on an agent card that has no reply yet', () => {
+    staged([annotation('t-agent-0', { author: 'agent' })])
+    expect(segmentsOf(cardOf('t-agent-0'))).toEqual(['A:标注'])
+  })
+
+  it('keeps an agent card\'s annotation when the round cap hides earlier replies', () => {
+    // The annotation is a LEADING assistant turn, so a tail-walk to the Nth-from-last question used to slice
+    // it away — the very first segment the reader expects to keep. The cap is 2 (the default), and this card
+    // has three replies: r1/a1 are the older round that goes, and the count says exactly those two.
+    localStorage.setItem('diff-approval:discussion-rounds', '2')
+    staged([annotation('t-agent-many', {
+      author: 'agent',
+      asks: [{ requestId: 'm1', text: 'r1' }, { requestId: 'm2', text: 'r2' }, { requestId: 'm3', text: 'r3' }],
+    })], { m1: 'a1', m2: 'a2', m3: 'a3' })
+    expect(segmentsOf(cardOf('t-agent-many')), 'the annotation was trimmed away with the older round')
+      .toEqual(['A:标注', 'U:r2', 'A:a2', 'U:r3', 'A:a3'])
+    expect(cardOf('t-agent-many').textContent).toContain('discussion.hidden {"count":2}')
+    localStorage.setItem('diff-approval:discussion-rounds', '2')
+  })
+
+  it('still draws a reader card\'s annotation exactly once', () => {
+    // THE REGRESSION HALF: here `asks[0]` really IS the annotation — the reader's typed words became both
+    // `record.text` and `asks[0].text` — so drawing `ask.text` would show the same sentence twice.
+    staged([annotation('t-reader', {
+      asks: [{ requestId: 'rq1', text: '标注' }, { requestId: 'rq2', text: '第二问' }],
+    })], { rq1: 'ra1', rq2: 'ra2' })
+    expect(segmentsOf(cardOf('t-reader'))).toEqual(['U:标注', 'A:ra1', 'U:第二问', 'A:ra2'])
+  })
+})
