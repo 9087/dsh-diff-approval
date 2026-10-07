@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.31.0](https://github.com/9087/dsh-diff-approval/compare/v0.30.1...v0.31.0) (2026-10-07)
+
+### Features
+
+* **comments:** key a lineage's comments and undo stacks to its root ([e2fe32b](https://github.com/9087/dsh-diff-approval/commit/e2fe32b05e197b305d928e35c52e4904955ca156))
+* **panel:** carry shortcuts in the shell's own keycaps ([ee07b3e](https://github.com/9087/dsh-diff-approval/commit/ee07b3e120378286d63b548a104ca090de57612d))
+* **panel:** explain the file menu, and let the reader switch it off ([47987bc](https://github.com/9087/dsh-diff-approval/commit/47987bc54d42ce04721f40e3b6c108666428c396))
+* **panel:** mark a comment's class with a coloured dot, and stop a restart from eating annotations ([23c1d22](https://github.com/9087/dsh-diff-approval/commit/23c1d22db20ceb826f66e4d6aaadc9e63e07bb62))
+* **panel:** mark the row a session shares with its child too ([f1e4a02](https://github.com/9087/dsh-diff-approval/commit/f1e4a0259fe2cd84c9312d6da93cd7e5d6ae0eaa))
+* **panel:** name the session a row came from, and require its workspace ([0bad7d8](https://github.com/9087/dsh-diff-approval/commit/0bad7d8d474ba95b4c8389c80c52741b5f6c1fcb))
+* **panel:** offer copying the file path from the chip menu ([f84671c](https://github.com/9087/dsh-diff-approval/commit/f84671c89b56f463ddcbece5d5b44903895e66e1))
+* **panel:** open the file a Markdown link names, without navigating away ([25fdf92](https://github.com/9087/dsh-diff-approval/commit/25fdf9206c36a3f202b04049edf7ade6e034f7dc)), references [#fragment](https://github.com/9087/dsh-diff-approval/issues/fragment)
+* **panel:** open the review menu from any file press, and keep the count cheap ([2401b28](https://github.com/9087/dsh-diff-approval/commit/2401b284d5c81136c7ceacde960c50daf4b72f01)), references [#fragment](https://github.com/9087/dsh-diff-approval/issues/fragment)
+* **panel:** show what the sessions in this lineage changed ([bbf2d92](https://github.com/9087/dsh-diff-approval/commit/bbf2d92edc6cbadf3064b2ba027ed2656b26bbf0))
+* **panel:** tell the reader when a newer release of this plugin is out ([d34687e](https://github.com/9087/dsh-diff-approval/commit/d34687e1c52cb945d8d53f1cfa0b1f4187a9af2e))
+* **pending:** mark a change the reader has not looked at ([dd4bbeb](https://github.com/9087/dsh-diff-approval/commit/dd4bbeb89b52ec2bdfe46264250893febb0bef81))
+* **settings:** default the CJK code font and comment mode on, and title every dialog ([d6f282f](https://github.com/9087/dsh-diff-approval/commit/d6f282fc1c1a23b01ab7a919d018d4c772a741dd))
+* **settings:** park each settings group header at the top of the scroll area ([e031456](https://github.com/9087/dsh-diff-approval/commit/e03145614f338cae1f14a804ce9be65b23c40be8))
+
+### Bug Fixes
+
+* **actions:** the pressing seat governs the write, and its pair remembers it ([ca20adf](https://github.com/9087/dsh-diff-approval/commit/ca20adfffbe04dc66b59b167943e64a13da8e5da))
+* **client:** answer the newest list when no session is named ([9c210f3](https://github.com/9087/dsh-diff-approval/commit/9c210f371bd3c63e735d93a3d899e4553d6761b6))
+* **panel:** address a chip menu's press to the session it came from ([929976e](https://github.com/9087/dsh-diff-approval/commit/929976ebb6dfeb85983acb0f116557dbdbb7b7d8))
+* **panel:** draw a reader's first reply on a card the agent placed ([8ecf371](https://github.com/9087/dsh-diff-approval/commit/8ecf3714318949ee933d08f3e7993ddf6ebe1acf))
+* **panel:** give the line-number column the panel's own surface ([a43ffe2](https://github.com/9087/dsh-diff-approval/commit/a43ffe208af2f9020ea61a9ef7b9d842863c0322))
+* **panel:** hold the tree's scroll strip open like the two lists ([a286e80](https://github.com/9087/dsh-diff-approval/commit/a286e80b7764f710a98a07841260424d24edb295))
+* **panel:** keep a comment's dot honest across two answers ([a37a226](https://github.com/9087/dsh-diff-approval/commit/a37a226558d63a10f76a5031d86307cb70123e1f))
+* **panel:** keep the bulk actions to the rows they can act on ([e2632f6](https://github.com/9087/dsh-diff-approval/commit/e2632f6d911c9f7e033c5b208306d4a5fc34348a))
+* **panel:** keep the bulk footer's buttons and words fixed ([b011d21](https://github.com/9087/dsh-diff-approval/commit/b011d21a4097f9bd67a007cdeeb4abee5c185d84))
+* **panel:** name the answer "don't remove", and scope its quiet to the session ([bdb0185](https://github.com/9087/dsh-diff-approval/commit/bdb0185170d0dff16e748a40266d18e8ac4a1180))
+* **panel:** read one session's list, and stop the dot from flashing ([0b5fdb5](https://github.com/9087/dsh-diff-approval/commit/0b5fdb5ad15f17e78df7cd47c2a21334c5fca444))
+* **panel:** say and show exactly what a bulk press will do ([c838139](https://github.com/9087/dsh-diff-approval/commit/c838139fa00e20e9388b315c9f6e9639ebba66d3))
+* **panel:** settle every bulk action out of the list ([dcbcc6e](https://github.com/9087/dsh-diff-approval/commit/dcbcc6e607f999b3e23e3d5d57ad2f58786b6b43))
+* **panel:** show nothing while there is no session to review ([6c0224c](https://github.com/9087/dsh-diff-approval/commit/6c0224c690fb8b299e35847867dd75e170f79ccc))
+* **panel:** stop reserving room for a right sidebar the shell has collapsed ([9058660](https://github.com/9087/dsh-diff-approval/commit/9058660ff89e65f1b31276cf068733fcde4990a7))
+* **panel:** stop the panel's list text from being selectable ([b10620f](https://github.com/9087/dsh-diff-approval/commit/b10620fad057a1dc9ad0b9833b0de2338b6c468e))
+* **panel:** tell the truth about what a row's whole-file action will do ([65c4608](https://github.com/9087/dsh-diff-approval/commit/65c4608d0ac3f3379dc134211317588c0c9e7387))
+
+### Performance Improvements
+
+* **panel:** keep the count out of the full list read ([f30eb89](https://github.com/9087/dsh-diff-approval/commit/f30eb8976e6512edd7e83e8329d903704889dc09))
+
 ## [0.30.1](https://github.com/9087/dsh-diff-approval/compare/v0.30.0...v0.30.1) (2026-09-28)
 
 ## [0.30.0](https://github.com/9087/dsh-diff-approval/compare/v0.29.1...v0.30.0) (2026-09-28)
