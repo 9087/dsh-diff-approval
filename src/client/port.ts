@@ -545,10 +545,14 @@ function refreshValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>
   if (typeof value !== 'object' || value === null) throw new Error('the refresh returned a malformed value')
   const outcome = (value as Record<string, unknown>).outcome
   if (outcome !== 'refreshed' && outcome !== 'unchanged' && outcome !== 'no-change'
-    && outcome !== 'missing' && outcome !== 'no-vcs') {
+    && outcome !== 'committed' && outcome !== 'missing' && outcome !== 'no-vcs') {
     throw new Error('the refresh returned a malformed outcome')
   }
-  return { outcome }
+  const resolved = (value as Record<string, unknown>).resolved
+  if (resolved !== undefined && typeof resolved !== 'boolean') {
+    throw new Error('the refresh returned a malformed value')
+  }
+  return resolved === undefined ? { outcome } : { outcome, resolved }
 }
 
 /** Narrow the list-path endpoint's value; a malformed wire value is a browse failure. */

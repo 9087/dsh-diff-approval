@@ -272,8 +272,18 @@ export const zh = {
   'panel.refreshDone': '已重置成版本控制的差异',
   'panel.refreshUnchanged': '条目已经是版本控制的差异，未变',
   'panel.refreshNone': '版本控制报告该文件没有未提交的改动',
+  'panel.refreshCommitted': '改动已经提交，条目已保留',
   'panel.refreshUntrackedHint': '（未跟踪的新文件需要在设置里开启「包含版本控制未跟踪文件」）',
   'panel.refreshFailed': '版本控制重置失败：{message}',
+  // The reset is a ROW MENU's press too, and over a pick it asks once and reports once (see
+  // `runRefreshVcs` / `runRefreshPicked`): the dialog names the count in the same words the toolbar's
+  // button uses, and the outcome is ONE sentence — how many were reset, how many had nothing to reset,
+  // and, when the host refused any of them, how many failed. A file whose change turned out to be
+  // committed is counted with the ones that were reset: that press settled its entry.
+  'panel.batchRefreshVcsAsk': '把 {count} 个文件重置成版本控制的差异？',
+  'panel.refreshManyDone': '已把 {count} 个文件重置成版本控制的差异',
+  'panel.refreshManyMixed': '已把 {done} 个文件重置成版本控制的差异，{none} 个没有可重置的改动',
+  'panel.refreshManyFailed': '已把 {done} 个文件重置成版本控制的差异，{none} 个没有可重置的改动，{failed} 个失败',
   'action.addPath': '按文件或目录添加',
   'panel.addTitle': '添加到列表',
   'panel.addPathPlaceholder': '输入或粘贴绝对路径',
@@ -548,8 +558,14 @@ export const en = {
   'panel.refreshDone': 'Reset this entry to the version-control diff',
   'panel.refreshUnchanged': 'Already the version-control diff; the entry is unchanged',
   'panel.refreshNone': 'Version control reports no uncommitted change for this file',
+  'panel.refreshCommitted': 'The change is already committed; the entry was kept',
   'panel.refreshUntrackedHint': '(a new, untracked file needs "Include files version control has not seen" in Settings)',
   'panel.refreshFailed': 'Version-control reset failed: {message}',
+  // See the zh block: the reset over a pick asks once and answers once.
+  'panel.batchRefreshVcsAsk': 'Reset {count} file(s) to the version-control diff?',
+  'panel.refreshManyDone': 'Reset {count} file(s) to the version-control diff',
+  'panel.refreshManyMixed': 'Reset {done} file(s) to the version-control diff; {none} had nothing to reset',
+  'panel.refreshManyFailed': 'Reset {done} file(s) to the version-control diff; {none} had nothing to reset; {failed} failed',
   'action.addPath': 'Add by file or by directory',
   'panel.addTitle': 'Add to list',
   'panel.addPathPlaceholder': 'Type or paste an absolute path',

@@ -322,6 +322,9 @@ export type DiffApprovalRefreshOutcome =
   | 'unchanged'
   /** The file has no local VCS change (untracked-and-excluded, or already clean). */
   | 'no-change'
+  /** The scan saw no change AND the file's content equals its VCS baseline: the change is
+   *  committed, so the entry's diff is a keep away from being out of date. */
+  | 'committed'
   /** No pending entry existed for the id. */
   | 'missing'
   /** The workspace is not inside a git/svn/p4 checkout. */
@@ -330,6 +333,9 @@ export type DiffApprovalRefreshOutcome =
 /** Value returned by the channel's vcs-refresh endpoint. */
 export interface DiffApprovalRefreshValue {
   outcome: DiffApprovalRefreshOutcome
+  /** Set when the refresh already settled the entry (the `committed` outcome keeps it, with no
+   *  diff left); absent for every outcome that leaves the decision to the panel. */
+  resolved?: boolean | undefined
 }
 
 /** Value returned by the channel's keep and revert endpoints. */

@@ -24,7 +24,7 @@
  */
 
 import { existsSync, realpathSync } from 'node:fs'
-import { dirname, resolve, sep } from 'node:path'
+import { dirname, relative, resolve, sep } from 'node:path'
 
 /** The version-control systems this integration knows. */
 export type VcsKind = 'git' | 'svn' | 'p4'
@@ -145,6 +145,14 @@ function realpathOrSelf(absolutePath: string): string {  const path = resolve(ab
     return resolve(resolvedParent, path.slice(parent.length + 1))
   }
 }
+
+/** What a revision has to say about one path: its content, or that the path has no version at all.
+ * A FAILED read is neither: it throws (see {@link readVcsBaseline}). */
+export type VcsBaseline =
+  /** The baseline carries this path; `text` is its content there. */
+  | { state: 'file'; text: string }
+  /** The baseline has no version of this path (a creation — there is nothing to restore). */
+  | { state: 'none' }
 
 /** The `workspaceRoot`/`scope` pair with both sides resolved ONCE per scan, so the per-path side of
  * the comparison is the only `realpath` a scan pays per changed file. The roots are the same two
@@ -522,5 +530,58 @@ export async function listVcsChanges(input: VcsImportInput): Promise<VcsChange[]
     case 'git': return gitChanges(input)
     case 'svn': return svnChanges(input)
     case 'p4': return p4Changes(input)
+  }
+}
+
+/**
+ * Read one file's BASELINE content — the version every branch above reads to build a change's
+ * `oldText`: git's last commit (`HEAD`, when the scan could not see the change), svn's `BASE`, p4's
+ * `#have`. The commands are the same ones those branches run, so a caller that needs one file's
+ * pre-change content outside a scan (the per-file refresh's "was this committed?" check) does not
+ * invent a second way to ask the same question — or a second set of failure modes to reason about.
+ *
+ * The two answers stay distinguishable, exactly as they do in a scan: a baseline that carries no
+ * version of the path is {@link VcsBaseline} `none` (git is the only branch that can report it,
+ * through {@link readGitBlob}'s own absence pattern), while a read that FAILED — a refused command,
+ * a timeout, a missing client — throws, because "could not read" is not "there is nothing there".
+ *
+ * @param kind - the VCS to read.
+ * @param root - the repository/checkout/client root, as {@link detectVcsRoot} found it.
+ * @param absolutePath - the file's absolute path (inside the root's tree).
+ * @param shell - the deployment's shell executor.
+ * @param signal - the caller's abort signal.
+ * @returns the baseline content, or `none` when the baseline has no version of the path.
+ * @throws when the baseline read failed for any other reason.
+ */
+export async function readVcsBaseline(
+  kind: VcsKind,
+  root: string,
+  absolutePath: string,
+  shell: ShellExecutorLike,
+  signal: AbortSignal | undefined,
+): Promise<VcsBaseline> {
+  switch (kind) {
+    case 'git': {
+      // The repo-relative path, spelled the way {@link gitChanges} spells it: `relative` answers
+      // with the platform's separator, while git names a path with `/` — a `\` reaches it as an
+      // escape character, and the baseline then reads as absent for a file that is committed.
+      const rel = relative(root, resolve(absolutePath)).split(sep).join('/')
+      const blob = await readGitBlob(root, 'HEAD', rel, shell, signal)
+      return blob.found ? { state: 'file', text: blob.text } : { state: 'none' }
+    }
+    case 'svn': {
+      try {
+        return { state: 'file', text: await runShell(shell, `svn cat -r BASE ${shq(absolutePath)}`, root, signal) }
+      } catch (error) {
+        throw new Error(`could not read ${absolutePath} at BASE: ${errorMessage(error)}`)
+      }
+    }
+    case 'p4': {
+      try {
+        return { state: 'file', text: await runShell(shell, `p4 print -q ${shq(absolutePath)}#have`, root, signal) }
+      } catch (error) {
+        throw new Error(`could not read ${absolutePath}#have: ${errorMessage(error)}`)
+      }
+    }
   }
 }

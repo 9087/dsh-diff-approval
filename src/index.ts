@@ -64,7 +64,7 @@ import { annotateRun, annotateToolDefinition } from './annotate-tool.ts'
 import type { AnnotateRunDeps, ListFileOutcome } from './annotate-tool.ts'
 import { FONT_ASSET_DIR, FONT_ROUTE } from './font-slices.ts'
 import type { FontSlice } from './font-slices.ts'
-import { detectVcsRoot, listVcsChanges } from './vcs.ts'
+import { detectVcsRoot, listVcsChanges, readVcsBaseline } from './vcs.ts'
 import type { VcsChange, VcsImportInput, ShellExecutorLike } from './vcs.ts'
 import { createUpdateCheck } from './version.ts'
 import type { DiffApprovalUpdateValue } from './types.ts'
@@ -378,6 +378,37 @@ function normalizeEol(text: string): string {
  *  diff view shows as "no pending diff" is treated as fully resolved here too. */
 function contentEqual(a: string, b: string): boolean {
   return contentLinesOf(normalizeEol(a)).join('\n') === contentLinesOf(normalizeEol(b)).join('\n')
+}
+
+/**
+ * Whether one entry's change is COMMITTED: its content on disk equals its content at the VCS
+ * baseline.
+ *
+ * Read off the same helpers a scan uses — {@link readVcsBaseline} runs the very commands
+ * `listVcsChanges` runs to build a change's `oldText` (git `HEAD`, svn `BASE`, p4 `#have`) — and
+ * compared with {@link contentEqual}, the tolerance the whole-file diff already uses. A baseline
+ * that carries no version of the path (a file the scan cannot see because it was never
+ * committed-and-modified) is NOT "committed": it answers false, exactly like a baseline whose
+ * content differs. Anything that failed to read throws, for the caller to read as "not proven".
+ *
+ * @param root - the detected VCS root.
+ * @param kind - the VCS to read the baseline from.
+ * @param path - the entry's absolute file path.
+ * @param shell - the deployment's shell executor.
+ * @param signal - the caller's abort signal.
+ * @returns whether the on-disk content is the baseline's.
+ */
+async function committedChange(
+  root: string,
+  kind: VcsImportInput['kind'],
+  path: string,
+  shell: ShellExecutorLike,
+  signal: AbortSignal | undefined,
+): Promise<boolean> {
+  const baseline = await readVcsBaseline(kind, root, path, shell, signal)
+  if (baseline.state !== 'file') return false
+  const current = await readFile(path, 'utf8')
+  return contentEqual(current, baseline.text)
 }
 
 /** Re-encode `text`'s line endings to `eol` (its content is unchanged). */
@@ -3189,8 +3220,22 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // it and let the panel say so. Silently blanking the diff here would
         // discard a review in progress over a scan that simply saw no change
         // (an untracked new file, for instance, when untracked imports are off).
+        //
+        // ONE case is not that: the scan sees no change because the change was COMMITTED. The entry's
+        // diff is then stale rather than unreviewed, and the file itself proves it — its content on
+        // disk equals its content at the baseline the scan would have used as `oldText`. Only that
+        // positive equality answers `committed`; a baseline the read could not produce (an untracked
+        // file, or a failed command) stays on the `no-change` path below, untouched.
         if (change === undefined) {
-          const value: DiffApprovalRefreshValue = { outcome: 'no-change' }
+          let committed = false
+          try {
+            committed = await committedChange(root.root, root.kind, entry.path, shell, signal)
+          } catch {
+            // Not proven: fall through to `no-change`, the same answer as before this check existed.
+          }
+          const value: DiffApprovalRefreshValue = committed
+            ? { outcome: 'committed', resolved: true }
+            : { outcome: 'no-change' }
           return { ok: true, value }
         }
         if (change.earlierVersion === entry.earlierVersion && change.oldText === entry.oldText && change.newText === entry.newText) {

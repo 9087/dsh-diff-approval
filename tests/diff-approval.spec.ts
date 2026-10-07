@@ -2324,6 +2324,50 @@ describe('per-file VCS refresh', () => {
     expect(await listEntries(handle, 'session-1')).toEqual([])
   })
 
+  it('reports the change as committed when the file matches its baseline', async () => {
+    const { handle, entryId, file, routes } = await imported()
+    // The change was committed: the scan sees no local change, and the file on disk now holds
+    // exactly what the baseline holds. That equality is the whole proof.
+    routes['git -c status.renames=false status --porcelain=v1 -z --untracked-files=all'] = ''
+    await writeFile(file, 'base v1\n')
+
+    await expect(handle('vcs-refresh', { sessionId: 'session-1', id: entryId, includeUntracked: false }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'committed', resolved: true } })
+    // The refresh itself changes nothing: the panel's keep is what settles the entry.
+    const [still] = await listEntries(handle, 'session-1')
+    expect(still).toMatchObject({ oldText: 'base v1\n', newText: 'work v1\n' })
+  })
+
+  it('still reports no-change when the file differs from its baseline', async () => {
+    const { handle, entryId, file, routes } = await imported()
+    // The scan sees nothing AND the file does not hold the baseline's content (it was edited
+    // again after the commit, or the scan simply cannot see it), so nothing is proven.
+    routes['git -c status.renames=false status --porcelain=v1 -z --untracked-files=all'] = ''
+    await writeFile(file, 'work v3\n')
+
+    await expect(handle('vcs-refresh', { sessionId: 'session-1', id: entryId, includeUntracked: false }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'no-change' } })
+    const [kept] = await listEntries(handle, 'session-1')
+    expect(kept).toMatchObject({ oldText: 'base v1\n', newText: 'work v1\n' })
+  })
+
+  it('still reports no-change when the baseline cannot be read', async () => {
+    const { handle, entryId, file, routes } = await imported()
+    // The scan sees nothing and HEAD carries no version of the path at all (git's own "does not
+    // exist in HEAD" wording): absence is not equality, so the entry must not be blanked.
+    routes['git -c status.renames=false status --porcelain=v1 -z --untracked-files=all'] = ''
+    await writeFile(file, 'base v1\n')
+    routes['git cat-file -s HEAD:sub/a.txt'] = {
+      exitCode: 128,
+      stderr: "fatal: path 'sub/a.txt' does not exist in 'HEAD'",
+    }
+
+    await expect(handle('vcs-refresh', { sessionId: 'session-1', id: entryId, includeUntracked: false }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'no-change' } })
+    const [kept] = await listEntries(handle, 'session-1')
+    expect(kept).toMatchObject({ oldText: 'base v1\n', newText: 'work v1\n' })
+  })
+
   it('reports an unchanged entry without a second undo step', async () => {
     const { handle, entryId } = await imported()
     await expect(handle('vcs-refresh', { sessionId: 'session-1', id: entryId, includeUntracked: false }, signal()))

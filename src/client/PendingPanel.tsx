@@ -8795,7 +8795,7 @@ export function PendingPanel({
   const [batchPrompt, setBatchPrompt] = useState<{
     sessionId: SessionId
     kind: 'keep-picked' | 'keep-remove-picked' | 'revert-picked' | 'revert-remove-picked' | 'keep-all' | 'revert-all' | 'close-picked'
-      | 'remove-one' | 'keep-remove-one' | 'revert-remove-one'
+      | 'refresh-picked' | 'remove-one' | 'keep-remove-one' | 'revert-remove-one'
     ids: readonly string[]
     doomed: readonly string[]
   } | null>(null)
@@ -8832,6 +8832,9 @@ export function PendingPanel({
         ? t('panel.batchRevertAllDeletedAsk', { count: prompt.ids.length, doomed })
         : t('panel.batchRevertAllAsk', { count: prompt.ids.length })
     }
+    // The reset over a pick names the count and nothing else: it settles entries rather than taking them
+    // out of the list, so there is no deletion and no comment to warn about — only how many files.
+    if (kind === 'refresh-picked') return t('panel.batchRefreshVcsAsk', { count: prompt.ids.length })
     return t(
       kind === 'keep-picked' ? 'panel.batchKeepAsk'
         : kind === 'keep-remove-picked' ? 'panel.batchKeepRemoveAsk'
@@ -8881,7 +8884,10 @@ export function PendingPanel({
     // Same shape as the keep pair, and as the single row (see `runRowMenu`): 回退 leaves the rows listed,
     // 回退并移出 drops them.
     else if (prompt.kind === 'revert-picked') void onRevertMany(prompt.sessionId, ids, true)
-    else void onRevertMany(prompt.sessionId, ids, undefined)
+    else if (prompt.kind === 'revert-remove-picked') void onRevertMany(prompt.sessionId, ids, undefined)
+    // …and the reset walks the pick it was answered about, one file at a time, reusing the single-entry
+    // path (see `runRefreshPicked`).
+    else void runRefreshPicked(ids)
   }
   /**
    * The comments the reader has picked in the list (Ctrl/Cmd-click), by id.
@@ -9835,21 +9841,50 @@ export function PendingPanel({
   }
 
   /**
+   * Reset ONE file's diff to what the VCS scan reports, up to the point where the result is said out loud.
+   *
+   * Both presses come through here: the open file's toolbar button reports one result per file, and the row
+   * menu's reset over a pick reports one summary for the whole selection (see `runRefreshVcs` and
+   * `runRefreshPicked`). A `committed` outcome — the file already holds its baseline — is settled by the
+   * whole-file KEEP, through the same wrapper the Keep button runs, so the "ask after a whole-file keep"
+   * preference and the comments a drop would take with it are honoured identically whichever press found it.
+   *
+   * @param entry - the entry to reset.
+   * @param sessionId - the session to ask about it in.
+   * @returns the outcome, or the error the call raised (the callers word those differently).
+   */
+  const refreshVcsOnce = async (
+    entry: PendingFileDiff,
+    sessionId: SessionId,
+  ): Promise<{ outcome: DiffApprovalRefreshOutcome } | { error: unknown }> => {
+    let outcome: DiffApprovalRefreshOutcome
+    try {
+      const value = await onRefreshVcs(sessionId, entry.id, includeUntrackedEnabled())
+      outcome = value.outcome
+    } catch (error: unknown) {
+      return { error }
+    }
+    if (outcome === 'committed') await keepWithPrompt(entry.sessionId, entry.id)
+    return { outcome }
+  }
+
+  /**
    * Replace one file's diff with its current local VCS change, then report what
    * the scan found. A scan that sees no change leaves the entry alone, so the
    * message names the file rather than silently blanking a review in progress.
+   *
+   * This is the open file's own toolbar press, reached from a single row's menu too: one file in, one
+   * message out, and no confirmation (the button has none either).
    */
   const runRefreshVcs = async (entry: PendingFileDiff): Promise<void> => {
     if (current === undefined) return
-    const includeUntracked = includeUntrackedEnabled()
-    let outcome: DiffApprovalRefreshOutcome
-    try {
-      const value = await onRefreshVcs(current, entry.id, includeUntracked)
-      outcome = value.outcome
-    } catch (error: unknown) {
+    const result = await refreshVcsOnce(entry, current)
+    if ('error' in result) {
+      const { error } = result
       showCopyToast(t('panel.refreshFailed', { message: error instanceof Error ? error.message : String(error) }))
       return
     }
+    const outcome = result.outcome
     // The refresh came from the open file's own toolbar, so no message needs a
     // file name to be unambiguous.
     if (outcome === 'refreshed') {
@@ -9863,8 +9898,15 @@ export function PendingPanel({
     if (outcome === 'no-change') {
       // Untracked files are only visible to the scan while untracked imports are
       // on, so say so instead of implying the file is clean.
-      const hint = includeUntracked ? '' : ` ${t('panel.refreshUntrackedHint')}`
+      const hint = includeUntrackedEnabled() ? '' : ` ${t('panel.refreshUntrackedHint')}`
       showCopyToast(`${t('panel.refreshNone')}${hint}`)
+      return
+    }
+    if (outcome === 'committed') {
+      // The change is in the baseline now, so the entry's tracked diff is stale. The whole-file KEEP is
+      // the existing path that settles exactly that — and it has already run, inside `refreshVcsOnce`,
+      // so that both presses settle it identically; all that is left here is to say what happened.
+      showCopyToast(t('panel.refreshCommitted'))
       return
     }
     if (outcome === 'no-vcs') {
@@ -9872,6 +9914,41 @@ export function PendingPanel({
       return
     }
     showCopyToast(t('panel.fileNotPending'))
+  }
+
+  /**
+   * The row menu's reset over a pick: the SAME single-entry path, one file at a time, and ONE summary when
+   * it is done.
+   *
+   * Per-file messages are deliberately not raised — the reader answered ONE question (the confirm dialog,
+   * which counted the files) and gets one answer — and a `committed` entry is still settled through the
+   * keep `refreshVcsOnce` runs, because it is the same call that found it. The reset itself is never
+   * confirmed a second time: the batch dialog is that confirmation, and the single-file press has none at
+   * all. (A committed entry's KEEP keeps its own remove-or-keep question, the one the Keep button asks,
+   * because that question is about the row leaving the list rather than about the reset.)
+   *
+   * @param ids - the picked entries, in the list's own order.
+   */
+  const runRefreshPicked = async (ids: readonly string[]): Promise<void> => {
+    if (current === undefined) return
+    let done = 0
+    let none = 0
+    let failed = 0
+    for (const id of ids) {
+      const entry = files.find(file => file.id === id)
+      // A row that left the list between the dialog and the answer has nothing to reset. It was named in
+      // the question, so it is counted with the files that had nothing rather than dropped in silence.
+      if (entry === undefined) { none += 1; continue }
+      const result = await refreshVcsOnce(entry, current)
+      if ('error' in result) failed += 1
+      // `committed` counts as done: that press settled the entry (the keep above), so reporting it as
+      // "nothing to reset" would contradict the row the reader just watched change.
+      else if (result.outcome === 'refreshed' || result.outcome === 'committed') done += 1
+      else none += 1
+    }
+    if (failed > 0) showCopyToast(t('panel.refreshManyFailed', { done, none, failed }))
+    else if (none > 0) showCopyToast(t('panel.refreshManyMixed', { done, none }))
+    else showCopyToast(t('panel.refreshManyDone', { count: done }))
   }
 
   /**
@@ -10063,11 +10140,11 @@ export function PendingPanel({
     />
   )
 
-  /** The row menu's rows: the pair the file's own toolbar offers, or its single 移出. */
+  /** The row menu's rows: the pair the file's own toolbar offers plus that toolbar's own reset, or its single 移出. */
   const rowMenuItems = useMemo<MenuEntry[]>(() => {
     if (rowMenu === null) return []
     if (rowMenu.picked) {
-      // The pick's own menu: the SAME four decisions the single row offers, in the same short words. The
+      // The pick's own menu: the SAME decisions the single row offers, in the same short words. The
       // scope is not in the label — 所有选中 made every row a sentence — it is in the confirmation each
       // row opens, which counts the files, and (for a revert over a row with no earlier version) NAMES the
       // ones about to be deleted via `data-diff-batch-deletes`. So a pick across both kinds says the single
@@ -10078,6 +10155,12 @@ export function PendingPanel({
         { id: 'keep-remove-picked', label: t('row.keepRemove') },
         { id: 'revert-picked', label: t('action.revert') },
         { id: 'revert-remove-picked', label: t('row.revertRemove') },
+        // The toolbar's reset rides with the pick: it acts on the review's contents, and a pick asks about
+        // it through the SAME dialog the four rows above open (see `runRowMenu`). A hairline keeps it out of
+        // the decisions' group — it re-reads what the review holds, it is not one of the four kinds of
+        // decision — exactly as the single row separates it below.
+        { type: 'separator', id: 'refresh-picked-separator' },
+        { id: 'refresh-picked', label: t('action.refreshVcs') },
       ]
     }
     // The two ways out of the panel, behind a hairline: they act on the FILE, not on the review, so they
@@ -10092,7 +10175,15 @@ export function PendingPanel({
     // the file. A row gets here when its content already matches the baseline (`fileHasNoDiff`) — it was
     // kept or put back and left listed, so there is nothing to accept and nothing to restore.
     if (fileHasNoDiff(rowMenu.file)) {
-      return [{ id: 'remove', label: t('row.dismiss') }, ...openRows]
+      return [
+        { id: 'remove', label: t('row.dismiss') },
+        // …and the reset, which the open file's toolbar offers for such a file too: a file that was kept
+        // and then edited again has a change to find, and this is the press that looks for it. Behind a
+        // hairline: it re-reads what the review holds, it is not another decision about the file.
+        { type: 'separator', id: 'refresh-vcs-separator' },
+        { id: 'refresh-vcs', label: t('action.refreshVcs') },
+        ...openRows,
+      ]
     }
     // Put back wins a second reading too: 回退 puts the file back and leaves it listed, so a file
     // with more than one operation can be put back one at a time while staying in view.
@@ -10111,6 +10202,12 @@ export function PendingPanel({
         id: 'revert-remove',
         label: rowMenu.file.earlierVersion === 'none' ? t('row.deleteRemove') : t('row.revertRemove'),
       },
+      // The open file's own toolbar carries this press, and the row reaches it here in the same words and
+      // for the same single file: no confirmation, exactly as the button behaves. See `runRefreshVcs` for
+      // what a scan finds, including the change that turns out to be committed. Behind a hairline, so it
+      // stands apart from the four decisions above: it re-reads what the review holds.
+      { type: 'separator', id: 'refresh-vcs-separator' },
+      { id: 'refresh-vcs', label: t('action.refreshVcs') },
       ...openRows,
     ]
   }, [rowMenu, pickedFiles, files, t])
@@ -10125,7 +10222,7 @@ export function PendingPanel({
     setRowMenu(null)
     if (target === null || current === undefined) return
     if (target.picked) {
-      // The pick's four decisions all ask before they run (see `batchPrompt`): each one is a single press
+      // The pick's decisions all ask before they run (see `batchPrompt`): each one is a single press
       // that settles several files, and the dialog is where the reader sees how many — and, for a revert,
       // which of them are about to be DELETED, the one part of this that cannot be undone.
       //
@@ -10134,6 +10231,13 @@ export function PendingPanel({
       const picked = files.filter(file => pickedFiles.has(file.id))
       const ids = picked.map(file => file.id)
       if (ids.length === 0) { clearPickedFiles(); return }
+      // The reset asks first for a pick too — ONE dialog for the whole selection, and never one per file.
+      // It answers with a single summary when it is done (see `runRefreshPicked`), which is the other half
+      // of that rule.
+      if (id === 'refresh-picked') {
+        setBatchPrompt({ sessionId: current, kind: 'refresh-picked', ids, doomed: [] })
+        return
+      }
       if (id !== 'keep-picked' && id !== 'keep-remove-picked'
         && id !== 'revert-picked' && id !== 'revert-remove-picked') return
       // The pick stays until the dialog is answered, so cancelling leaves the reader where they were.
@@ -10163,6 +10267,9 @@ export function PendingPanel({
     // wired the other way round — the row that said 移出 stayed and the one that did not say it went.
     else if (id === 'revert') void onRevert(current, target.file.id, true)
     else if (id === 'revert-remove') void onRevert(current, target.file.id)
+    // The reset is the toolbar's own press, so the row calls the toolbar's own handler: no confirmation
+    // here either, and one file's worth of messages, exactly as the button behaves (see `runRefreshVcs`).
+    else if (id === 'refresh-vcs') void runRefreshVcs(target.file)
     // Opening is not a decision about the review, so it takes the FILE's own session — the one the header's
     // two icon buttons pass — rather than the session being viewed.
     else if (id === 'open-file') void onOpen(target.file.sessionId, target.file.id, 'open')

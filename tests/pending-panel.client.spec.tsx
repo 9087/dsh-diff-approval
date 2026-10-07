@@ -1576,6 +1576,7 @@ describe('PendingPanel', () => {
       'row.keepRemove',
       'action.delete',
       'row.deleteRemove',
+      'action.refreshVcs',
       'action.openFile',
       'action.revealFile',
     ])
@@ -1611,6 +1612,7 @@ describe('PendingPanel', () => {
       'row.keepRemove',
       'action.revert',
       'row.revertRemove',
+      'action.refreshVcs',
     ])
 
     // The press that DROPS the pick goes through the same confirmation the footer's press does, and it is
@@ -2929,22 +2931,30 @@ describe('PendingPanel', () => {
 
     // Keeping is two decisions and the menu names both: plain 保留 leaves the row in the list, while
     // 保留并移出 — one character apart in the tail — is today's keep, which folds the entry away.
-    // Putting back gets the same pair: 回退 leaves the row listed so one operation can go back at a
-    // time, 回退并移出 puts the file back and drops the row.
+    // Putting back gets the same pair: 回退 leaves the row listed so one operation can go back at a time,
+    // 回退并移出 puts the file back and drops the row. The toolbar's own reset sits with them — it acts on
+    // the review's contents too, and the row reaches the very press the open file's button makes.
     const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
     expect(items.map(item => item.textContent)).toEqual([
       'row.keepListed',
       'row.keepRemove',
       'action.revert',
       'row.revertRemove',
+      'action.refreshVcs',
       'action.openFile',
       'action.revealFile',
     ])
     // The two ways out are a group of their own, behind a hairline: they act on the FILE, not on the
-    // review, and the open file's header carries the same pair through the same `open` endpoint.
+    // review, and the open file's header carries the same pair through the same `open` endpoint. The reset
+    // has a hairline of its own for the same reason — it re-reads what the review holds rather than
+    // deciding anything about the file — so the menu reads: four decisions, reset, then the two ways out.
     expect([...document.querySelectorAll('[role="menuitem"], [role="separator"]')]
       .map(node => node.getAttribute('role')))
-      .toEqual(['menuitem', 'menuitem', 'menuitem', 'menuitem', 'separator', 'menuitem', 'menuitem'])
+      .toEqual([
+        'menuitem', 'menuitem', 'menuitem', 'menuitem',
+        'separator', 'menuitem',
+        'separator', 'menuitem', 'menuitem',
+      ])
 
     fireEvent.click(items[0]!)
     expect(props.onKeep).toHaveBeenCalledWith(FILE.sessionId, FILE.id, true)
@@ -2974,13 +2984,14 @@ describe('PendingPanel', () => {
 
     // And the two ways out of the panel, in one press each: 打开文件 hands the file to its own app, and
     // 打开所在目录 selects it in the file manager — both the `open` endpoint the header already calls.
+    // They sit after the reset, which is the last of the decisions above their hairline.
     fireEvent.contextMenu(row, { clientX: 40, clientY: 60 })
     const exits = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
-    fireEvent.click(exits[4]!)
+    fireEvent.click(exits[5]!)
     expect(props.onOpen).toHaveBeenLastCalledWith(FILE.sessionId, FILE.id, 'open')
     expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
     fireEvent.contextMenu(row, { clientX: 40, clientY: 60 })
-    fireEvent.click(([...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[])[5]!)
+    fireEvent.click(([...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[])[6]!)
     expect(props.onOpen).toHaveBeenLastCalledWith(FILE.sessionId, FILE.id, 'reveal')
     // Opening is not one of the review's decisions: nothing was kept, put back or removed by it.
     expect(props.onKeep).toHaveBeenCalledTimes(2)
@@ -3016,12 +3027,13 @@ describe('PendingPanel', () => {
     fireEvent.click(rowOf('entry-a'), { ctrlKey: true })
     fireEvent.click(rowOf('entry-b'), { ctrlKey: true })
 
-    // A press ON a picked row keeps the pick and offers the four decisions the single row offers, in the
-    // same short words: the scope is named by the dialog each of them opens, not by the label.
+    // A press ON a picked row keeps the pick and offers the decisions the single row offers, in the
+    // same short words: the scope is named by the dialog each of them opens, not by the label. The
+    // toolbar's reset is the last of them and asks through that same dialog (see `runRefreshPicked`).
     fireEvent.contextMenu(rowOf('entry-a'), { clientX: 10, clientY: 12 })
     const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
     expect(items.map(item => item.textContent)).toEqual([
-      'row.keepListed', 'row.keepRemove', 'action.revert', 'row.revertRemove',
+      'row.keepListed', 'row.keepRemove', 'action.revert', 'row.revertRemove', 'action.refreshVcs',
     ])
 
     // Every one of them asks first, and the question carries the scope: how many files this one press is
@@ -3049,7 +3061,7 @@ describe('PendingPanel', () => {
     expect([...document.querySelectorAll('[role="menuitem"]')].map(item => item.textContent))
       .toEqual([
         'row.keepListed', 'row.keepRemove', 'action.revert', 'row.revertRemove',
-        'action.openFile', 'action.revealFile',
+        'action.refreshVcs', 'action.openFile', 'action.revealFile',
       ])
   })
 
@@ -3125,7 +3137,7 @@ describe('PendingPanel', () => {
 
   it('takes a picked file with nothing left to review along with the rest', () => {
     // A file kept but left listed has no diff, and its OWN row menu offers only 移出. The pick's menu is
-    // the same four rows whatever mix the reader holds, and a revert over the pick is not refused for it
+    // the same decisions whatever mix the reader holds, and a revert over the pick is not refused for it
     // either: the file is an edit, so putting it back writes its own content and undoes cleanly.
     const settled = entry({ id: 'entry-settled', path: '/repo/settled.txt', oldText: 'same\n', newText: 'same\n' })
     const props = panelProps({ read: true, files: [FILE, settled], busy: new Set() })
@@ -3138,7 +3150,7 @@ describe('PendingPanel', () => {
     fireEvent.contextMenu(rowOf(FILE.id), { clientX: 10, clientY: 12 })
     const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
     expect(items.map(item => item.textContent)).toEqual([
-      'row.keepListed', 'row.keepRemove', 'action.revert', 'row.revertRemove',
+      'row.keepListed', 'row.keepRemove', 'action.revert', 'row.revertRemove', 'action.refreshVcs',
     ])
 
     fireEvent.click(items[1]!)
@@ -3264,7 +3276,9 @@ describe('PendingPanel', () => {
 
   it('offers 移出 from a row menu once that file has no diff left', () => {
     // The same condition the open file's toolbar uses: nothing to accept, nothing to put back,
-    // so the only decision left is whether the row stays in the list.
+    // so the only decision left is whether the row stays in the list — plus the reset, which the
+    // toolbar offers for such a file too, because a kept file that was edited again has a change to
+    // find again.
     const settled = entry({ oldText: 'same\n', newText: 'same\n' })
     const props = panelProps({ read: true, files: [settled], busy: new Set() })
     render(<PendingPanel {...props} />)
@@ -3272,7 +3286,9 @@ describe('PendingPanel', () => {
 
     fireEvent.contextMenu(screen.getByText('a.txt').closest('button') as HTMLElement, { clientX: 10, clientY: 12 })
     const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
-    expect(items.map(item => item.textContent)).toEqual(['row.dismiss', 'action.openFile', 'action.revealFile'])
+    expect(items.map(item => item.textContent)).toEqual([
+      'row.dismiss', 'action.refreshVcs', 'action.openFile', 'action.revealFile',
+    ])
 
     fireEvent.click(items[0]!)
     expect(props.onKeep).toHaveBeenCalledWith(settled.sessionId, settled.id)
@@ -4719,6 +4735,44 @@ describe('PendingPanel', () => {
     })
   })
 
+  it('keeps the entry when the change turns out to be committed', async () => {
+    // The host proved the file already holds its baseline, so there is no diff left to reset. The
+    // panel runs the whole-file KEEP — the same path the Keep button runs — and says what happened.
+    // The prompt is off here so the keep runs straight through (its own case is below).
+    localStorage.setItem('diff-approval:confirm-file-remove', '0')
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    ;(props.onRefreshVcs as unknown as { mockResolvedValueOnce: (v: unknown) => void })
+      .mockResolvedValueOnce({ outcome: 'committed', resolved: true })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    fireEvent.click(document.querySelector('[data-diff-refresh-vcs]') as HTMLElement)
+
+    await waitFor(() => { expect(props.onKeep).toHaveBeenCalledWith(FILE.sessionId, FILE.id) })
+    await waitFor(() => { expect(screen.getByText('panel.refreshCommitted')).toBeDefined() })
+  })
+
+  it('asks after a committed refresh too, when the whole-file keep prompt is on', async () => {
+    // The wrapper the Keep button goes through is the one used here, so a session that asks after a
+    // whole-file keep is asked after this one as well.
+    localStorage.setItem('diff-approval:confirm-file-remove', '1')
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    ;(props.onRefreshVcs as unknown as { mockResolvedValueOnce: (v: unknown) => void })
+      .mockResolvedValueOnce({ outcome: 'committed', resolved: true })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.txt'))
+    fireEvent.click(document.querySelector('[data-diff-refresh-vcs]') as HTMLElement)
+
+    await waitFor(() => { expect(document.querySelector('[data-diff-confirm-file]')).not.toBeNull() })
+    // Nothing has been kept yet: the question is the prompt's.
+    expect(props.onKeep).not.toHaveBeenCalled()
+    fireEvent.click(document.querySelector('[data-diff-file-confirm-keep]') as HTMLElement)
+    expect(props.onKeep).toHaveBeenCalledWith(FILE.sessionId, FILE.id, true)
+    // Ridden out of the prompt, the toast still says what the refresh found.
+    await waitFor(() => { expect(screen.getByText('panel.refreshCommitted')).toBeDefined() })
+  })
+
   it('reports a refresh that found no VCS at all', async () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     ;(props.onRefreshVcs as unknown as { mockResolvedValueOnce: (v: unknown) => void })
@@ -4741,6 +4795,111 @@ describe('PendingPanel', () => {
     fireEvent.click(document.querySelector('[data-diff-refresh-vcs]') as HTMLElement)
 
     await waitFor(() => { expect(screen.getByText('panel.refreshFailed {"message":"nope"}')).toBeDefined() })
+  })
+
+  it('resets one file from its row menu through the very press the toolbar makes', async () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    const refresh = props.onRefreshVcs as unknown as { mock: { calls: unknown[][] } }
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+
+    // The row's menu names the toolbar's own action, in the toolbar's own words.
+    const row = document.querySelector(`[data-diff-file="${FILE.id}"]`) as HTMLElement
+    fireEvent.contextMenu(row, { clientX: 10, clientY: 12 })
+    const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+    const reset = items.find(item => item.textContent === 'action.refreshVcs')
+    expect(reset).toBeDefined()
+
+    // One file asks nothing: this IS the toolbar's press, so it runs on the spot like the button does.
+    fireEvent.click(reset!)
+    expect(document.querySelector('[data-diff-batch-confirm]')).toBeNull()
+    await waitFor(() => { expect(refresh.mock.calls.length).toBe(1) })
+    expect(refresh.mock.calls[0]?.slice(0, 2)).toEqual([S1, FILE.id])
+    // …and reports it the way the button reports it.
+    await waitFor(() => { expect(screen.getByText('panel.refreshDone')).toBeDefined() })
+  })
+
+  it('asks before resetting a pick, and answers the whole pick with one summary', async () => {
+    const a = entry({ id: 'entry-a', path: '/repo/a.txt', earlierVersion: 'file' })
+    const b = entry({ id: 'entry-b', path: '/repo/b.txt', earlierVersion: 'file' })
+    const props = panelProps({ read: true, files: [a, b], busy: new Set() })
+    const refresh = props.onRefreshVcs as unknown as {
+      mock: { calls: unknown[][] }
+      mockResolvedValueOnce: (value: unknown) => void
+    }
+    // The first file is reset, the second has nothing to reset: one sentence has to carry both numbers.
+    refresh.mockResolvedValueOnce({ outcome: 'refreshed' })
+    refresh.mockResolvedValueOnce({ outcome: 'no-change' })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const rowOf = (id: string): HTMLElement => document.querySelector(`[data-diff-file="${id}"]`) as HTMLElement
+    const reset = (): HTMLElement => {
+      fireEvent.contextMenu(rowOf('entry-a'), { clientX: 10, clientY: 12 })
+      const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+      return items.find(item => item.textContent === 'action.refreshVcs')!
+    }
+
+    fireEvent.click(rowOf('entry-a'), { ctrlKey: true })
+    fireEvent.click(rowOf('entry-b'), { ctrlKey: true })
+    fireEvent.click(reset())
+
+    // Several files are a batch, so the pick asks first — the panel's own confirm dialog, in the shape
+    // every bulk press uses — and nothing has gone to the host while the question stands.
+    expect(screen.getByText('panel.batchRefreshVcsAsk {"count":2}')).toBeDefined()
+    expect(document.querySelector('[data-diff-batch-confirm]')).not.toBeNull()
+    expect(refresh).not.toHaveBeenCalled()
+
+    // Dismissing it does nothing at all: no call, and no summary either.
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-cancel]') as HTMLElement)
+    expect(document.querySelector('[data-diff-batch-confirm]')).toBeNull()
+    expect(refresh).not.toHaveBeenCalled()
+
+    // Answering it runs the same single-entry reset over every picked file, ONE at a time, in the list's
+    // own order…
+    fireEvent.click(rowOf('entry-a'), { ctrlKey: true })
+    fireEvent.click(rowOf('entry-b'), { ctrlKey: true })
+    fireEvent.click(reset())
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
+    await waitFor(() => { expect(refresh.mock.calls.length).toBe(2) })
+    expect(refresh.mock.calls.map(call => call.slice(0, 2))).toEqual([[S1, 'entry-a'], [S1, 'entry-b']])
+
+    // …and says how it went ONCE, rather than one message per file.
+    await waitFor(() => {
+      expect(screen.getByText('panel.refreshManyMixed {"done":1,"none":1}')).toBeDefined()
+    })
+    expect(screen.queryByText('panel.refreshDone')).toBeNull()
+    expect(screen.queryByText('panel.refreshNone panel.refreshUntrackedHint')).toBeNull()
+  })
+
+  it('settles a committed entry inside a pick through the same keep the single press runs', async () => {
+    // The wrapper the Keep button goes through is the one used here too, so a committed file resolves
+    // inside a batch exactly as it does from the toolbar button. The prompt is off, so the keep runs.
+    localStorage.setItem('diff-approval:confirm-file-remove', '0')
+    const committed = entry({ id: 'entry-committed', path: '/repo/committed.txt', earlierVersion: 'file' })
+    const live = entry({ id: 'entry-live', path: '/repo/live.txt', earlierVersion: 'file' })
+    const props = panelProps({ read: true, files: [committed, live], busy: new Set() })
+    ;(props.onRefreshVcs as unknown as { mockResolvedValueOnce: (value: unknown) => void })
+      .mockResolvedValueOnce({ outcome: 'committed', resolved: true })
+    ;(props.onRefreshVcs as unknown as { mockResolvedValueOnce: (value: unknown) => void })
+      .mockResolvedValueOnce({ outcome: 'refreshed' })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const rowOf = (id: string): HTMLElement => document.querySelector(`[data-diff-file="${id}"]`) as HTMLElement
+
+    fireEvent.click(rowOf('entry-committed'), { ctrlKey: true })
+    fireEvent.click(rowOf('entry-live'), { ctrlKey: true })
+    fireEvent.contextMenu(rowOf('entry-committed'), { clientX: 10, clientY: 12 })
+    const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+    fireEvent.click(items.find(item => item.textContent === 'action.refreshVcs')!)
+    fireEvent.click(document.querySelector('[data-diff-batch-confirm-go]') as HTMLElement)
+
+    // The committed entry is kept — the same call the Keep button makes — and both files count as settled
+    // in the ONE summary (a committed entry was handled, not "nothing to reset").
+    await waitFor(() => { expect(props.onKeep).toHaveBeenCalledWith(S1, 'entry-committed') })
+    await waitFor(() => {
+      expect(screen.getByText('panel.refreshManyDone {"count":2}')).toBeDefined()
+    })
+    expect(props.onKeep).toHaveBeenCalledTimes(1)
   })
 
   it('keeps an emptied list open instead of auto-closing', () => {
