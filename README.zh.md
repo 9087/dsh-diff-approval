@@ -92,27 +92,4 @@ npx @deepseek-ai/dsh plugin --profile web add dsh-diff-approval
 
 ## 🛠 开发
 
-```sh
-corepack pnpm install
-pnpm run typecheck   # 两个编译面的 tsc
-pnpm run build       # 产出 lib/index.js 与 lib/client.js
-pnpm test            # 单元测试（vitest）
-pnpm run e2e         # 浏览器端测试（Playwright，跑在真实宿主上）
-pnpm run compat      # 兼容性矩阵：本 checkout 对声明支持的 DSH 版本
-pnpm run compat:newer # 以及对比 latest 更新的已发布版本
-pnpm run verify:release # 发布之后核对：该 tag 的提交在 CI 里过了吗、npm 上真有这个版本吗
-pnpm run fonts:check # 内置代码字体：138 个切片，每个码位恰好被覆盖一次
-pnpm run fonts:plan  # 页面上出现多少汉字时实际会下载多少
-```
-
-发布流程（一条命令做什么、发布前跑哪些门禁、发布之后怎么核对）见 [`PUBLISH.md`](PUBLISH.md)。
-
-内置字体是 [JetBrains Maple Mono](https://github.com/SpaceTimee/Fusion-JetBrainsMapleMono)（SIL OFL 1.1），由 `scripts/fonts` 子集化并切片——流水线、许可证与各切片的体积见 [`assets/fonts/README.md`](assets/fonts/README.md)。
-
-`file:` 方式安装的 profile 只复制**安装当时** `files` 列出的文件，所以本地 checkout 后来新增的文件（如 `assets/fonts`）必须先刷新安装，宿主才拿得到：
-
-```sh
-npx @deepseek-ai/dsh plugin --profile web install   # 然后重启 `dsh web`
-```
-
-客户端那半会自己热更新（它的 bundle 被监听），所以客户端改动刷新页面即可；宿主那半的改动（例如提供字体的这条路由）要等重启才生效。
+开发环境、命令清单、两个半边各自的生效方式与字体流水线见 [`DEVELOP.md`](DEVELOP.md)。

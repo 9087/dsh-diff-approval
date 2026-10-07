@@ -92,27 +92,4 @@ Then restart `dsh web`.
 
 ## 🛠 Development
 
-```sh
-corepack pnpm install
-pnpm run typecheck   # tsc over both faces
-pnpm run build       # emits lib/index.js and lib/client.js
-pnpm test            # the unit suite (vitest)
-pnpm run e2e         # the browser suite (Playwright, against a real host)
-pnpm run compat      # the compatibility matrix: this checkout against the supported DSH releases
-pnpm run compat:newer # …and against published releases newer than the latest
-pnpm run verify:release # after a release is pushed: did the tag's commit pass CI, and did npm get that version
-pnpm run fonts:check # the bundled code font: 138 slices, every range covered exactly once
-pnpm run fonts:plan  # what a page actually downloads, by how many hanzi it shows
-```
-
-How a release works, which gates run before it, and how to check it afterwards: [`PUBLISH.md`](PUBLISH.md).
-
-The bundled font is [JetBrains Maple Mono](https://github.com/SpaceTimee/Fusion-JetBrainsMapleMono) (SIL OFL 1.1), subset and sliced by `scripts/fonts` — see [`assets/fonts/README.md`](assets/fonts/README.md) for the pipeline, the licence and what the slices cost.
-
-A `file:` profile install copies what the package's `files` list named *at install time*, so a checkout whose list grew needs a refresh before the host can hand the new files out:
-
-```sh
-npx @deepseek-ai/dsh plugin --profile web install   # then restart `dsh web`
-```
-
-Only the client half reloads on its own (its bundle is watched), so a client change shows up on a page refresh while a host-half change — like the route that serves the font — waits for the restart.
+Development setup, the command list, the two halves' reload rules and the font pipeline: [`DEVELOP.md`](DEVELOP.md).
