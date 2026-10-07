@@ -2610,6 +2610,29 @@
   z-index: 2;
 }
 
+/* ONLY the selection frame gives its own surface away. It holds the actions for a selection, and a drag that
+   crosses it has to keep reaching the code underneath: a press on that surface either starts no drag at all
+   (the side-by-side view drives its own, and only from inside a row) or leaves the reader's previous
+   selection standing (it is in `KEEPS_SELECTION`). Its buttons are the one part that takes the pointer.
+   The change block's own toolbar is deliberately NOT scoped by this: it lives on hover, and the pointer has
+   to be able to travel onto it — landing on the toolbar is what keeps the block hovered — so it keeps
+   taking pointer events exactly as it always did. */
+.blockActions[data-diff-selection-actions] {
+  pointer-events: none;
+}
+
+.blockActions[data-diff-selection-actions] button {
+  pointer-events: auto;
+}
+
+/* …and while a selection drag is running the frame is only being watched: it stays on screen — it is the
+   frame for the SELECTION, not the change block's own toolbar, which is what a drag has to keep off the
+   glass — but nothing in it, its buttons included, may take the pointer. */
+.blockActions[data-diff-frame-drag],
+.blockActions[data-diff-frame-drag] button {
+  pointer-events: none;
+}
+
 /* The hairline between the frame's two groups (keep/revert, then comment). It is
    rendered only while both are there, so it never stands with nothing on one side;
    `align-self` stretches it to the frame's inner height. */

@@ -9071,19 +9071,97 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-selection-actions] [data-diff-block-prev]')).toBeNull()
     expect(document.querySelector('[data-diff-selection-actions] [data-diff-block-next]')).toBeNull()
 
-    // Keep applies the combined range in a single call, but since this covers
-    // the file's last change it must prompt for remove-or-keep first.
+    // Keep acts on the lines the SELECTED ROWS name in a single call — rows 0..5 are old/new lines
+    // 1..4, the trailing context line 'd' included, and the splice writes those same lines back — but
+    // since this reaches the file's last change it must prompt for remove-or-keep first.
     fireEvent.click(document.querySelector('[data-diff-selection-keep]') as HTMLButtonElement)
     expect(document.querySelector('[data-diff-confirm]')).not.toBeNull()
     expect(props.onBlockKeep).not.toHaveBeenCalled()
     fireEvent.click(document.querySelector('[data-diff-confirm-remove]') as HTMLButtonElement)
-    expect(props.onBlockKeep).toHaveBeenCalledWith(S1, 'entry-multi', { oldStart: 1, oldEnd: 3, newStart: 1, newEnd: 3 }, true)
+    expect(props.onBlockKeep).toHaveBeenCalledWith(S1, 'entry-multi', { oldStart: 1, oldEnd: 4, newStart: 1, newEnd: 4 }, true)
 
     // The operated blocks leave the diff, so the selection is cleared and the
     // multi-block frame hides — the old row-range must not linger offset.
     await act(async () => {})
     expect(document.querySelector('[data-diff-selection-actions]')).toBeNull()
     expect(document.querySelector('[data-diff-copy]')).toBeNull()
+  })
+
+  it('keeps only the selected added lines of a change block', async () => {
+    // 'a\n' -> 'a\nb\nc\nd\n' is ONE change block: three added lines (rows 1..3) after the context
+    // line 'a'. A selection over rows 1..2 takes two of them, so the frame keeps exactly those: the
+    // added lines are read at new 2..3 and spliced into the old text at old 2..1 — the empty range at
+    // the insertion point after old line 1, which `replaceContentLines` reads as "insert here". The
+    // block's third line is left pending, so the file is not resolved and nothing prompts.
+    const insert = entry({ id: 'entry-partial-add', path: '/repo/partial.txt', oldText: 'a\n', newText: 'a\nb\nc\nd\n' })
+    const props = panelProps({ read: true, files: [insert], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('partial.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    expect(rows.length).toBe(4)
+    const node = (row: HTMLElement): Node => (row.querySelector('[data-diff-code]') ?? row).firstChild ?? row
+    const startNode = node(rows[1]!)
+    const endNode = node(rows[2]!)
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: startNode,
+      focusNode: endNode,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: startNode, startOffset: 0, endContainer: endNode, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    // The frame carries keep/revert although the selection covers no whole block.
+    expect((document.querySelector('[data-diff-selection-keep]') as HTMLButtonElement).hidden).toBe(false)
+    expect((document.querySelector('[data-diff-selection-revert]') as HTMLButtonElement).hidden).toBe(false)
+    // Keeping from a selection does not move the reader on to another change block: the flash overlay the
+    // block toolbar's own action raises on its way there (see `bumpFlash`) is not raised again, so the
+    // node in the DOM is the same one.
+    const flashBefore = document.querySelector('[data-diff-block-flash]')
+    fireEvent.click(document.querySelector('[data-diff-selection-keep]') as HTMLButtonElement)
+    expect(document.querySelector('[data-diff-confirm]')).toBeNull()
+    expect(props.onBlockKeep).toHaveBeenCalledWith(S1, 'entry-partial-add', { oldStart: 2, oldEnd: 1, newStart: 2, newEnd: 3 })
+    // The action's continuation runs on a microtask, so let it settle before reading the DOM back.
+    await act(async () => {})
+    expect(document.querySelector('[data-diff-block-flash]')).toBe(flashBefore)
+  })
+
+  it('reverts only the selected removed lines of a change block', async () => {
+    // 'a\nb\nc\nd\n' -> 'a\nd\n' removes two lines (rows 1..2) between the context rows. A selection
+    // over row 1 alone names old line 2, and no new-file line at all — so its new side is the empty
+    // range at the insertion point after old/new line 1 (new 2..1). Revert puts exactly that one line
+    // back, leaving the other removal pending.
+    const removed = entry({ id: 'entry-partial-del', path: '/repo/partial-del.txt', oldText: 'a\nb\nc\nd\n', newText: 'a\nd\n' })
+    const props = panelProps({ read: true, files: [removed], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('partial-del.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    expect(rows.length).toBe(4)
+    const cell = rows[1]!.querySelector('[data-diff-code]') ?? rows[1]!
+    const node = cell.firstChild ?? cell
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    expect((document.querySelector('[data-diff-selection-revert]') as HTMLButtonElement).hidden).toBe(false)
+    // Reverting part of the change leaves the reader where they were, for the same reason: no new flash.
+    const flashBefore = document.querySelector('[data-diff-block-flash]')
+    fireEvent.click(document.querySelector('[data-diff-selection-revert]') as HTMLButtonElement)
+    expect(document.querySelector('[data-diff-confirm]')).toBeNull()
+    expect(props.onBlockRevert).toHaveBeenCalledWith(S1, 'entry-partial-del', { oldStart: 2, oldEnd: 2, newStart: 2, newEnd: 1 })
+    await act(async () => {})
+    expect(document.querySelector('[data-diff-block-flash]')).toBe(flashBefore)
   })
 
   it('holds back the browser\'s selection menu on its own surface, and nowhere else', () => {
@@ -9184,7 +9262,10 @@ describe('PendingPanel', () => {
     } as unknown as Selection
     vi.spyOn(window, 'getSelection').mockReturnValue(overlapping)
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
-    expect(document.querySelector('[data-diff-selection-actions]')).toBeNull()
+    // No second comment — but the range DOES touch a change (rows 4..5 reach block 1), so the frame
+    // stays for that block's keep/revert, which is not the comment's business either way.
+    expect(document.querySelector('[data-diff-selection-comment]')).toBeNull()
+    expect((document.querySelector('[data-diff-selection-keep]') as HTMLButtonElement).hidden).toBe(false)
 
     // Enter in the input sends the comment, like the composer's own field. The annotation is written
     // down FIRST and the question asked inside it: a comment is the host's record, and a question can
@@ -12182,7 +12263,8 @@ describe('PendingPanel', () => {
     // offered: a thread is anchored to new-file lines — what survives a rebuild — so the left
     // column's old code has nothing to anchor to. The card is drawn over both halves (they are
     // separate clipped scrollers, so it cannot live inside either) while each half reserves its rows,
-    // which is what keeps the pairs below aligned.
+    // which is what keeps the pairs below aligned. The ANCHOR is the new line; the QUOTE is the whole
+    // pair, so both sides of the change reach the agent.
     localStorage.setItem('diff-approval:split-mode', '1')
     act(() => { setCommentModeEnabled(true) })
     const file = entry({ id: 'entry-split-comment', path: '/repo/comment.txt', oldText: 'a\nb\n', newText: 'a\nB\n' })
@@ -12192,7 +12274,11 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByText('comment.txt'))
 
     const select = (element: HTMLElement): void => {
-      const node = element.firstChild ?? element
+      // The deepest text on the line: a selection anchored on a chip's ELEMENT boundary reads as ending at
+      // the line's start (see the note on `lineOffsetAt`), so the mock walks down to the text node the way
+      // a real drag reports it.
+      let node: Node = element
+      while (node.firstChild !== null) node = node.firstChild
       vi.spyOn(window, 'getSelection').mockReturnValue({
         isCollapsed: false,
         anchorNode: node,
@@ -12207,9 +12293,16 @@ describe('PendingPanel', () => {
       [...document.querySelectorAll(`[data-diff-split-row][data-diff-split-side="${side}"] [data-diff-code]`)] as HTMLElement[]
     )
 
-    // The left column is the old file: it offers no comment at all.
-    select(rowsOf('left')[rowsOf('left').length - 1]!)
-    expect(document.querySelector('[data-diff-selection-actions]')).toBeNull()
+    // The left column holds the OLD file's code, so a selection there is about the removed line — and the
+    // panel offers the same frame for it: the comment, whose label falls back to the old-file number (the
+    // only number a removed line has), and keep/revert. The cell is picked by its text: the column also
+    // carries empty cells that pad the rows an unpaired addition occupies.
+    const removedCell = rowsOf('left').find(cell => cell.textContent === 'b')
+    expect(removedCell).toBeDefined()
+    select(removedCell!)
+    expect(document.querySelector('[data-diff-selection-actions]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-selection-comment]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-selection-keep]')).not.toBeNull()
 
     // The added line, on the right: the last right row (the first is the context line the pair
     // shares, which is not this file's change).
@@ -12226,14 +12319,239 @@ describe('PendingPanel', () => {
     expect(block.closest('[data-diff-split-side]')).toBeNull()
     // …and its reference names the added line the right column showed.
     expect(block.querySelector('[data-diff-discussion-range]')?.textContent).toBe('/repo/comment.txt:2')
+    // What the panel writes down carries BOTH sides of the pair — the removed line and the added one,
+    // each with its own side and number — which is what the agent is told, and what the question's own
+    // frame block is built from (see `quotedFrame`).
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+    fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    const draft = (props.onCommentAdd as unknown as {
+      mock: { calls: [unknown, { quote: string; quoteLines: { old?: number; new?: number; kind: string }[] }][] }
+    }).mock.calls[0]?.[1]
+    expect(draft).toBeDefined()
+    expect(draft!.quote).toBe('b\nB')
+    expect(draft!.quoteLines).toEqual([
+      { old: 2, new: undefined, kind: 'del' },
+      { old: undefined, new: 2, kind: 'add' },
+    ])
     // Both halves reserved its rows, so the pair below starts on the same pixel in each.
     expect(document.querySelectorAll('[data-diff-discussion-space]').length).toBe(2)
-    // The wash belongs to the pair, not to a half of it: the commented line is an addition, so the old
-    // side has no row there at all — and the band is drawn across both halves, the empty one included.
-    expect(document.querySelectorAll('[data-diff-split-row][data-diff-discussion-band]').length).toBe(2)
+    // The wash covers what the thread QUOTES, on both sides of the change: the removed line and the added
+    // one each wear the band, and each is drawn across both halves — the half that has no row of its own
+    // included — so the two columns stay aligned. Four elements: two rows, two halves.
+    expect(document.querySelectorAll('[data-diff-split-row][data-diff-discussion-band]').length).toBe(4)
     // The card is laid out to the rows the panel measured for the thread: a box sized to the compose
     // fallback would clip the thread's own turns (which is how an answer could go missing here).
     expect(Number.parseFloat(block.style.height)).toBeGreaterThan(2 * 22)
+  })
+
+  it('keeps the removed line a left-column selection names', () => {
+    // A removal the alignment left unpaired is drawn in the old column alone, so it can only be selected
+    // there. Keeping it accepts the deletion: that old line against the empty new range at its insertion
+    // point (`pairRangeOf`), which is the whole file's change — so the panel asks about the entry first.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const file = entry({ id: 'entry-split-left', path: '/repo/left.txt', oldText: 'a\nb\nc\n', newText: 'a\nc\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('left.txt'))
+
+    const leftCells = [...document.querySelectorAll('[data-diff-split-row][data-diff-split-side="left"] [data-diff-code]')] as HTMLElement[]
+    const removed = leftCells.find(cell => cell.textContent === 'b')
+    expect(removed).toBeDefined()
+    const node = removed!.firstChild ?? removed!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    const keep = document.querySelector('[data-diff-selection-keep]') as HTMLButtonElement | null
+    expect(keep).not.toBeNull()
+    fireEvent.click(keep!)
+    expect(document.querySelector('[data-diff-confirm]')).not.toBeNull()
+    fireEvent.click(document.querySelector('[data-diff-confirm-remove]') as HTMLButtonElement)
+    expect(props.onBlockKeep).toHaveBeenCalledWith(
+      S1, 'entry-split-left', { oldStart: 2, oldEnd: 2, newStart: 2, newEnd: 1 }, true,
+    )
+  })
+
+  it('keeps a left-column selection frame at its own height, with the buttons on the right', () => {
+    // A replacement whose two lines are too dissimilar to pair is drawn as one row per side, so the removal
+    // and the addition are DIFFERENT pairs: the old region has no counterpart on the new side, which is why
+    // the frame keeps the height the LEFT selection names rather than moving down to the addition's row. The
+    // buttons themselves sit over the new column — the frame is right-anchored against the split view (see
+    // `.blockActions` in the stylesheet) — so only the height is the selection's own.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    const file = entry({ id: 'entry-split-anchor', path: '/repo/anchor.txt', oldText: 'a\nb\n', newText: 'a\nB\n' })
+    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('anchor.txt'))
+
+    const cell = (side: 'left' | 'right', text: string): HTMLElement => {
+      const cells = [...document.querySelectorAll(`[data-diff-split-row][data-diff-split-side="${side}"] [data-diff-code]`)] as HTMLElement[]
+      const found = cells.find(candidate => candidate.textContent === text)
+      expect(found).toBeDefined()
+      return found!
+    }
+    const select = (element: HTMLElement): void => {
+      let node: Node = element
+      while (node.firstChild !== null) node = node.firstChild
+      vi.spyOn(window, 'getSelection').mockReturnValue({
+        isCollapsed: false,
+        anchorNode: node,
+        focusNode: node,
+        rangeCount: 1,
+        getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+        removeAllRanges: () => {},
+      } as unknown as Selection)
+      act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    }
+    const framePair = (): number => Number(
+      (document.querySelector('[data-diff-selection-actions]') as HTMLElement).dataset.diffSelectionPair,
+    )
+    const pairOf = (element: HTMLElement): number => Number(
+      element.closest('[data-diff-split-row]')!.getAttribute('data-diff-split-index'),
+    )
+
+    // The removal and the addition are two different pairs, and the frame hangs from the pair the reader
+    // SELECTED — the removal's own row, its own height. Snapping it onto the addition (one pair below, the
+    // place a right-column selection would land) would answer `addedPair` for the left selection too.
+    // jsdom has no layout, so the pair offsets are all zero and `top` cannot tell the two apart: the pair
+    // the frame hangs from is what this reads (`data-diff-selection-pair`).
+    const removedCell = cell('left', 'b')
+    select(removedCell)
+    expect(framePair()).toBe(pairOf(removedCell))
+    const addedCell = cell('right', 'B')
+    select(addedCell)
+    expect(pairOf(addedCell)).not.toBe(pairOf(removedCell))
+    expect(framePair()).toBe(pairOf(addedCell))
+  })
+
+  it('keeps the selection frame up while a drag runs, with nothing in it taking the pointer', () => {
+    // The frame follows the selection, so a drag that extends the selection keeps arriving at the frame. The
+    // frame is the SELECTION's own toolbar — not the change block's — so it stays on screen for the whole
+    // drag; what changes is that nothing in it, buttons included, takes the pointer while the press that
+    // began in the code lasts (see `data-diff-frame-drag`). A press that began ON the frame never marks it,
+    // or its own buttons could never be clicked (the frame is in `KEEPS_SELECTION` for exactly that reason).
+    localStorage.setItem('diff-approval:split-mode', '1')
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-press', path: '/repo/press.txt', oldText: 'foo bar\n', newText: 'foo baz\n' })
+    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('press.txt'))
+
+    const code = document.querySelector('[data-diff-split-row][data-diff-split-side="right"] [data-diff-code]') as HTMLElement
+    let node: Node = code
+    while (node.firstChild !== null) node = node.firstChild
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    expect(document.querySelector('[data-diff-selection-actions]')).not.toBeNull()
+
+    // A press in the code is a selection drag: the frame stays, and is marked so that nothing in it takes
+    // the pointer until the drag ends.
+    fireEvent.pointerDown(code)
+    const dragging = document.querySelector('[data-diff-selection-actions]') as HTMLElement
+    expect(dragging).not.toBeNull()
+    expect(dragging.hasAttribute('data-diff-frame-drag')).toBe(true)
+    fireEvent.pointerUp(document.body)
+    const resting = document.querySelector('[data-diff-selection-actions]') as HTMLElement
+    expect(resting).not.toBeNull()
+    expect(resting.hasAttribute('data-diff-frame-drag')).toBe(false)
+
+    // A press on the frame's own button never marks it: its buttons have to stay clickable.
+    const button = document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement
+    fireEvent.pointerDown(button)
+    expect((document.querySelector('[data-diff-selection-actions]') as HTMLElement).hasAttribute('data-diff-frame-drag')).toBe(false)
+    fireEvent.pointerUp(document.body)
+  })
+
+  it('offers keep/revert on a side-by-side selection, and drops the block toolbar while that frame is up', () => {
+    // A pair range in the right column names the PAIRS it covers (see `splitSelectionPairs`), and
+    // keep/revert act on BOTH sides of every one of them (`pairsRangeOf`): a pair is one old line against
+    // one new line. On 'foo bar\n' -> 'foo baz\n' similarity alignment makes ONE replacement pair, del
+    // 'foo bar' (row 0, old 1) over add 'foo baz' (row 1, new 1), so keeping sends old 1..1 against new
+    // 1..1 — the whole replacement, in one call. While the frame is on screen the hovered pair's own
+    // toolbar (keep/revert and the block stepping) is not drawn.
+    localStorage.setItem('diff-approval:split-mode', '1')
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-split-partial', path: '/repo/partial-split.txt', oldText: 'foo bar\n', newText: 'foo baz\n' })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('partial-split.txt'))
+
+    // Hovering the pair puts the change block's own toolbar up.
+    const pair = document.querySelector('[data-diff-split-row]') as HTMLElement
+    expect(pair).not.toBeNull()
+    fireEvent.mouseEnter(pair)
+    expect(document.querySelector('[data-diff-block-actions]')).not.toBeNull()
+
+    // Selecting the changed line in the right column replaces it with the selection's own frame. The
+    // boundary is a TEXT node, as a drag reports it (the line renders as chips, one span per run).
+    const code = document.querySelector('[data-diff-split-row][data-diff-split-side="right"] [data-diff-code]') as HTMLElement
+    expect(code.textContent).toBe('foo baz')
+    const node = code.firstChild?.firstChild ?? code.firstChild ?? code
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+
+    const frame = document.querySelector('[data-diff-selection-actions]')
+    expect(frame).not.toBeNull()
+    expect(frame!.querySelector('[data-diff-selection-comment]')).not.toBeNull()
+    // Keep/revert are offered on the rows the selection names, in this view too.
+    expect(frame!.querySelector('[data-diff-selection-keep]')).not.toBeNull()
+    expect(frame!.querySelector('[data-diff-selection-revert]')).not.toBeNull()
+    // The pair's own toolbar went with it: the selection frame replaces it, and hovering cannot bring
+    // the two up together.
+    expect(document.querySelector('[data-diff-block-actions]')).toBeNull()
+    fireEvent.mouseEnter(pair)
+    expect(document.querySelector('[data-diff-block-actions]')).toBeNull()
+
+    // Keeping sends both sides of the pair in one call: old line 1 is replaced by new line 1, so the
+    // replacement resolves instead of leaving the removal pending. That pair is this file's only change,
+    // so the keep resolves the file and the panel asks what to do with the entry before calling the host
+    // — the same prompt the change block's own toolbar raises.
+    const keepButton = frame!.querySelector('[data-diff-selection-keep]') as HTMLButtonElement
+    fireEvent.click(keepButton)
+    expect(document.querySelector('[data-diff-confirm]')).not.toBeNull()
+    expect(props.onBlockKeep).not.toHaveBeenCalled()
+    fireEvent.click(document.querySelector('[data-diff-confirm-remove]') as HTMLButtonElement)
+    expect(props.onBlockKeep).toHaveBeenCalledWith(
+      S1, 'entry-split-partial', { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1 }, true,
+    )
+
+    // The frame takes no pointer events of its own, so a drag that crosses it keeps reaching the code
+    // underneath — a press on the frame otherwise starts no drag at all in this view (its own drag begins
+    // inside a row) and leaves the reader's old selection standing. The buttons are the one part that takes
+    // them. jsdom does not simulate `pointer-events`, so the rule itself is what is checked.
+    const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    // Only the SELECTION frame gives its surface away. The change block's own toolbar must keep taking the
+    // pointer — landing on it is what keeps the block hovered while the reader moves onto it — so nothing may
+    // neuter the shared class again.
+    expect(/\.blockActions\[data-diff-selection-actions\] \{[^}]*pointer-events: none;/.test(sheet)).toBe(true)
+    expect(/\.blockActions\[data-diff-selection-actions\] button \{[^}]*pointer-events: auto;/.test(sheet)).toBe(true)
+    expect(/\.blockActions \{[^}]*pointer-events: none;/.test(sheet)).toBe(false)
+    expect(/\.blockActions button \{[^}]*pointer-events: auto;/.test(sheet)).toBe(false)
+    // …and while a drag is running, everything in the selection frame — buttons included — steps out of the
+    // pointer's way.
+    expect(/\.blockActions\[data-diff-frame-drag\][^{]*\{[^}]*pointer-events: none;/.test(sheet)).toBe(true)
   })
 
   it('reads a selection that crossed the divider as the column it began in', () => {

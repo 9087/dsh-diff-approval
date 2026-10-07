@@ -764,7 +764,7 @@ export function frameCoversRemovedRow(quoteLines: readonly DiscussionQuoteLine[]
 
 /** What the selection frame shows for the current selection. */
 export interface SelectionFrameActions {
-  /** Whether keep/revert apply (the selection fully covers change blocks). */
+  /** Whether keep/revert apply (the selection touches a change, whole block or part of one). */
   keepRevert: boolean
   /** Whether a new discussion may be started on this range. */
   comment: boolean
@@ -775,11 +775,11 @@ export interface SelectionFrameActions {
 /**
  * Decide the selection frame's contents.
  *
- * Keep/revert needs covered change blocks; commenting needs a range that has no
+ * Keep/revert needs the selection to touch a change; commenting needs a range that has no
  * discussion yet. A frame with neither would be an empty floating box, so it is
  * not rendered at all.
  *
- * @param options - whether change blocks are covered, and whether this range already has a discussion.
+ * @param options - whether the selection touches a change, and whether this range already has a discussion.
  * @returns the three flags the caller branches on.
  */
 export function selectionFrame(options: { coversBlocks: boolean; hasDiscussion: boolean }): SelectionFrameActions {

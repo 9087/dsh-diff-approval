@@ -53,6 +53,61 @@ export function changeBlocksOf(diff: WholeFileDiff): ChangeBlock[] {
   return blocks
 }
 
+/** The maximal run of non-context rows around `index` — the change region it belongs to. */
+function changeRunOf(rows: readonly WholeFileDiffRow[], index: number): { start: number; end: number } {
+  let start = index
+  while (start > 0 && rows[start - 1] !== undefined && rows[start - 1]!.kind !== 'context') start--
+  let end = index
+  while (end + 1 < rows.length && rows[end + 1] !== undefined && rows[end + 1]!.kind !== 'context') end++
+  return { start, end }
+}
+
+/**
+ * The change region a row range sits in, widened to whole runs: from the first row of the run `start`
+ * belongs to, to the last row of the run `end` belongs to. A row range that names one side of a change —
+ * one line of a replacement, or the additions alone — grows to cover that change's removals as well, which
+ * is what a reader pointing at it means. Rows that are context stand alone (a run is a maximal non-context
+ * run), so a range that touches no change is returned as it is.
+ * @param rows - the whole-file diff rows.
+ * @param start - the range's first row.
+ * @param end - the range's last row.
+ * @returns the widened row range.
+ */
+export function changeRunSpanOf(
+  rows: readonly WholeFileDiffRow[],
+  start: number,
+  end: number,
+): { start: number; end: number } {
+  return { start: changeRunOf(rows, start).start, end: changeRunOf(rows, Math.max(start, end)).end }
+}
+
+/**
+ * The line a side's missing lines would be inserted before. A change run lists all its removals before any
+ * addition, so the row next to a mid-run removal has no new-file line at all: reading one row back would
+ * put the insertion point at the top of the file. The line that side ends at inside the whole run is the
+ * position the pairing implies (a lone removal belongs after the lines that replaced its neighbours), and
+ * a run with no line on that side at all — a pure deletion asking where the new side is — falls back to
+ * the line above the run.
+ * @param rows - the whole-file diff rows.
+ * @param index - a row of the range whose side has no lines.
+ * @param side - which side is missing its lines.
+ * @returns the 1-based line the missing lines go before.
+ */
+function insertionPointOf(rows: readonly WholeFileDiffRow[], index: number, side: 'old' | 'new'): number {
+  const { start, end } = changeRunOf(rows, index)
+  let last: number | undefined
+  for (let at = start; at <= end; at++) {
+    const line = side === 'old' ? rows[at]?.oldLine : rows[at]?.newLine
+    if (line !== undefined) last = last === undefined ? line : Math.max(last, line)
+  }
+  if (last !== undefined) return last + 1
+  for (let at = start - 1; at >= 0; at--) {
+    const line = side === 'old' ? rows[at]?.oldLine : rows[at]?.newLine
+    if (line !== undefined) return line + 1
+  }
+  return 1
+}
+
 /**
  * One diff block's old/new line ranges, 1-based inclusive, for block-level
  * keep/revert. A side with no lines (a pure addition or deletion) is empty; its
@@ -82,16 +137,101 @@ export function blockRangesOf(rows: readonly WholeFileDiffRow[], block: ChangeBl
       newEnd = Math.max(newEnd, row.newLine)
     }
   }
-  const before = rows[block.start - 1]
   if (oldStart === Infinity) {
-    oldStart = (before?.oldLine ?? 0) + 1
+    oldStart = insertionPointOf(rows, block.start, 'old')
     oldEnd = oldStart - 1
   }
   if (newStart === Infinity) {
-    newStart = (before?.newLine ?? 0) + 1
+    newStart = insertionPointOf(rows, block.start, 'new')
     newEnd = newStart - 1
   }
   return { oldStart, oldEnd, newStart, newEnd }
+}
+
+/** One side-by-side pair: the whole-file row index each side holds, when it has one. */
+export interface DiffPairRows {
+  old?: number
+  new?: number
+}
+
+/** The row indices one pair holds, old side first. */
+function pairRowsOf(pair: DiffPairRows): number[] {
+  const list: number[] = []
+  if (pair.old !== undefined) list.push(pair.old)
+  if (pair.new !== undefined) list.push(pair.new)
+  return list
+}
+
+/** Whether any row the pair holds is a change; a pair of context rows is not one. */
+function pairIsChanged(rows: readonly WholeFileDiffRow[], pair: DiffPairRows): boolean {
+  return pairRowsOf(pair).some(index => rows[index] !== undefined && rows[index]!.kind !== 'context')
+}
+
+/**
+ * One side-by-side pair's old/new line ranges, 1-based inclusive, for pair-level keep/revert. A pair is
+ * one old line against one new line, so each side contributes a single line; a side the pair does not
+ * have (an unpaired insertion or removal) is the empty range at that side's insertion point, read off the
+ * row before the pair — the same rule `blockRangesOf` applies to a side with no lines at all.
+ * @param rows - the whole-file diff rows.
+ * @param pair - the rows the pair holds.
+ * @returns the old and new line ranges, or undefined for a pair that holds no row.
+ */
+export function pairRangeOf(
+  rows: readonly WholeFileDiffRow[],
+  pair: DiffPairRows,
+): DiffApprovalBlockRange | undefined {
+  const oldRow = pair.old === undefined ? undefined : rows[pair.old]
+  const newRow = pair.new === undefined ? undefined : rows[pair.new]
+  if (oldRow === undefined && newRow === undefined) return undefined
+  const first = Math.min(pair.old ?? Number.POSITIVE_INFINITY, pair.new ?? Number.POSITIVE_INFINITY)
+  const oldStart = oldRow?.oldLine ?? insertionPointOf(rows, first, 'old')
+  const newStart = newRow?.newLine ?? insertionPointOf(rows, first, 'new')
+  return {
+    oldStart,
+    oldEnd: oldRow?.oldLine ?? oldStart - 1,
+    newStart,
+    newEnd: newRow?.newLine ?? newStart - 1,
+  }
+}
+
+/**
+ * The old/new ranges keep/revert act on for the pairs a side-by-side selection names, in the order they
+ * must be sent. Pairs of context rows are dropped (nothing to act on). When the changed pairs occupy one
+ * contiguous span of the row list with no other changed row inside it, ONE range covers them all: one
+ * host call, one undo step, and the same range a whole-block action would send. Otherwise each pair gets
+ * its own range, ordered from the BOTTOM of the file up, so a splice never moves the line numbers of a
+ * pair still to be applied.
+ * @param rows - the whole-file diff rows.
+ * @param pairs - the pairs the selection names, in row order.
+ * @returns one range, several, or none when the selection carries no change.
+ */
+export function pairsRangeOf(
+  rows: readonly WholeFileDiffRow[],
+  pairs: readonly DiffPairRows[],
+): DiffApprovalBlockRange[] {
+  const changed = pairs.filter(pair => pairIsChanged(rows, pair))
+  if (changed.length === 0) return []
+  if (changed.length === 1) {
+    const single = pairRangeOf(rows, changed[0]!)
+    return single === undefined ? [] : [single]
+  }
+  const selected = new Set<number>()
+  for (const pair of changed) for (const index of pairRowsOf(pair)) selected.add(index)
+  const start = Math.min(...selected)
+  const end = Math.max(...selected)
+  let oneSpan = true
+  for (let index = start; index <= end; index++) {
+    const row = rows[index]
+    if (row !== undefined && row.kind !== 'context' && !selected.has(index)) {
+      oneSpan = false
+      break
+    }
+  }
+  if (oneSpan) return [blockRangesOf(rows, { start, end })]
+  return [...changed]
+    .sort((left, right) => Math.max(...pairRowsOf(right)) - Math.max(...pairRowsOf(left)))
+    .map(pair => pairRangeOf(rows, pair))
+    .filter((range): range is DiffApprovalBlockRange => range !== undefined)
 }
 
 /**

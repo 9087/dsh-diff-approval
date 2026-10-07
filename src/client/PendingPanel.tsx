@@ -23,7 +23,7 @@ import { CoverageControl, CoverageNotice, COVER_NOTICE_MS } from './coverage-con
 // The chord vocabulary is shared: the header entry advertises the same summon
 // hint this panel's close button spells, so both hint builders live in chords.ts.
 import { actionTooltip, chordLabel, closeTooltip, escapeTooltip, summonTooltip, withChord } from './chords.ts'
-import { blockRangesOf, changeBlocksOf, computeIntraLineDiff, computeWholeFileDiff } from './whole-file-diff.ts'
+import { blockRangesOf, changeBlocksOf, changeRunSpanOf, computeIntraLineDiff, computeWholeFileDiff, pairsRangeOf } from './whole-file-diff.ts'
 import {
   DISCUSSION_COMPOSE_ROWS, DISCUSSION_HEADER_ROWS, discussionOverlapping,
   discussionRowExtras, discussionRows, discussionRounds, discussionRuns, discussionStackOffsets,
@@ -33,7 +33,7 @@ import type { Discussion, DiscussionMessage, DiscussionQuoteLine } from './discu
 import { frameFollowIsAnimated, frameFollowKeyframes } from './scroll-follow.ts'
 import { renderMarkdownPreview } from './markdown-preview.ts'
 import { resolvePreviewImages } from './markdown-images.ts'
-import type { ChangeBlock, IntraRun, WholeFileDiffRow } from './whole-file-diff.ts'
+import type { ChangeBlock, DiffPairRows, IntraRun, WholeFileDiffRow } from './whole-file-diff.ts'
 import { computeSideBySideDiff, searchPairs } from './split-diff.ts'
 import type { SplitPair, SplitSide } from './split-diff.ts'
 import { HIGHLIGHT_LANGS, languageDisplayName } from './highlight.ts'
@@ -2436,13 +2436,17 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
   discussions?: readonly Discussion[]
   /** Draws one thread's card at the width this view gives it (see `DiscussionBlock`). */
   renderDiscussion?: (discussion: Discussion, bodyWidth: number, split: boolean) => ReactNode
+  /** The keep/revert actions for the current selection, when the panel offers them for it. */
+  selectionKeepRevert?: ReactNode
   /** The comment action for the current selection, when the panel offers one for it. */
   selectionComment?: ReactNode
+  /** Whether a selection drag is running: the frame then stays up but takes no pointer events. */
+  selectionDragging?: boolean | undefined
   /** The changed-line runs the overview ruler draws, in whole-file row indices. */
   rulerRuns: readonly RulerRun[]
   /** The go-to popup, which this view centres on its own box (see `gotoDialog`). */
   gotoDialog?: ReactNode
-}>(function SplitDiff({ file, sessionId, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert, onWrapToast, onVisibleLines, discussions, renderDiscussion, selectionComment, rulerRuns, gotoDialog }, ref) {
+}>(function SplitDiff({ file, sessionId, model, runs, langWrap, tabWidthSpaces, busy, t, selection, leadRows, onBlockKeep, onBlockRevert, onWrapToast, onVisibleLines, discussions, renderDiscussion, selectionKeepRevert, selectionComment, selectionDragging, rulerRuns, gotoDialog }, ref) {
   // The search bar's tooltips, decided once (see `chords.ts`): this host's keycaps where it can draw
   // them, the pre-0.1.7-rc.2 glued label where it cannot. One entry per control, so the five controls
   // cannot spell a chord differently from the bar in the unified view.
@@ -3294,6 +3298,13 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     }
   }, [])
 
+  // The selection's own frame is up. A range in either half may carry keep/revert and the comment (see
+  // the props' notes), and while that frame is on screen the change block's hover toolbar is not drawn:
+  // the two sit in the same corner, and a frame acting on the reader's selection replaces the one the
+  // pointer happens to be over — never both.
+  const selectionFrameUp = (selectionKeepRevert !== undefined || selectionComment !== undefined)
+    && selection !== undefined
+
   return (
     <div className={css.splitRoot} ref={splitRootRef} onMouseLeave={() => setHoveredBlock(undefined)}>
       <div
@@ -3459,16 +3470,22 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
       )}
       {/* The go-to popup, centred on this view the way the single column centres it on its own wrapper. */}
       {gotoDialog}
-      {/* The selection's own frame: a range in either half offers the comment, which is the one
-          action this view takes on a selection (keep/revert belong to the change blocks' own frames
-          here). It is placed against the scroller the two halves share — the content offset of the
-          selection's last pair, less the scroll — so it stays where the reader selected. */}
-      {selectionComment !== undefined && selection !== undefined && (
+      {/* The selection's own frame: a range in either half offers keep/revert on the rows it names and
+          the comment, with the hairline only when both groups are there — the rule the single column's
+          frame follows. It is placed against the scroller the two halves share — the content offset of
+          the selection's last pair, less the scroll — so it stays where the reader selected. */}
+      {selectionFrameUp && (
         <div
           className={css.blockActions}
           data-diff-selection-actions
+          data-diff-selection-pair={selection.end}
+          data-diff-frame-drag={selectionDragging ? '' : undefined}
           style={{ top: Math.max(0, Math.min(off(selection.end + 1) - scrollTop, Math.max(0, viewportH - 32))) }}
         >
+          {selectionKeepRevert}
+          {selectionKeepRevert !== undefined && selectionComment !== undefined && (
+            <span className={css.blockActionsDivider} data-diff-selection-divider aria-hidden="true" />
+          )}
           {selectionComment}
         </div>
       )}
@@ -3565,7 +3582,7 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
       {focusedBlock !== undefined && flashKey > 0 && (
         <div className={pinShakeRef.current ? `${css.blockFlash} ${css.blockFlashShake}` : css.blockFlash} data-diff-block-flash key={flashKey} style={{ top: flashTop, height: flashHeight }} />
       )}
-      {hoveredBlock !== undefined && blockOfPair[hoveredBlock] !== undefined && (
+      {!selectionFrameUp && hoveredBlock !== undefined && blockOfPair[hoveredBlock] !== undefined && (
         <div className={css.blockActions} data-diff-block-actions style={{ top: blockActionsTop }}>
           <span className={css.blockPosition} data-diff-block-position>
             {t('panel.blockPosition', { current: hoveredBlock + 1, total: blockOfPair.length })}
@@ -4193,13 +4210,14 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     return map
   }, [splitModel, model])
   /**
-   * The rows a selection names, whichever view made it: the pair range of a side-by-side selection
-   * mapped to that column's rows, and a single-column range left as it is.
+   * The rows a selection names, whichever view made it: the pair range of a side-by-side selection mapped
+   * to the rows of the column it began in, and a single-column range left as it is.
    *
-   * Only the NEW side can be named. A thread is anchored to new-file lines — those are what survive
-   * the model being rebuilt, and what its reference label shows — so a left-column selection (the
-   * old file, code that may not exist any more) has nothing to anchor to: it reads as no rows, and
-   * the comment is not offered on it.
+   * Both columns are read. A right-column selection names the NEW file's rows and a left-column one the OLD
+   * file's — which is what the reader pointed at, and what a removal the alignment left unpaired can only
+   * be reached by (it is drawn in the old column alone). A thread stays anchored to a new-file line wherever
+   * the range has one; where it does not, the label falls back to the old-file number exactly as it does for
+   * a removals-only selection in the single-column view (see `addDiscussion` and `frameNamesNoCurrentLine`).
    *
    * @param range - the selection to read.
    * @returns the same lines as a row range, or undefined when the view named none.
@@ -4207,10 +4225,10 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   const selectionRows = (range: RowRange | undefined): RowRange | undefined => {
     if (range === undefined) return undefined
     if (!splitView || range.side === undefined || splitModel === null) return range
-    if (range.side !== 'new') return undefined
+    const side = range.side
     const rows: number[] = []
     for (let index = range.start; index <= range.end; index++) {
-      const row = pairRows.get(index)?.new
+      const row = pairRows.get(index)?.[side]
       if (row !== undefined) rows.push(row)
     }
     return rows.length === 0 ? undefined : { start: Math.min(...rows), end: Math.max(...rows) }
@@ -4753,9 +4771,11 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     return covered
   }, [selection, splitView, model, mdPreview, lang, previewCovered])
 
-  // The combined old/new range spanning the covered blocks (first to last), so
-  // keep/revert applies to every covered block in one host call. The preview's
-  // covered blocks feed this too, through `coveredBlockIndices`.
+  // The combined old/new range spanning the covered blocks (first to last). The PREVIEW's
+  // range: its selection names rendered elements, so it is read as the change blocks it
+  // fully covers and keep/revert apply to every covered block in one host call. The code
+  // view's frame derives its own range from the selected ROWS instead (see
+  // `selectionTargetRanges`), which is what lets a partial selection act on part of a block.
   const selectionRange = useMemo(() => {
     if (coveredBlockIndices.length === 0) return undefined
     const firstIndex = coveredBlockIndices[0]
@@ -5702,8 +5722,17 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     // anchor is always new-file lines — the lines that survive the model being rebuilt.
     const range = selectionRows(selection)
     if (range === undefined) return
-    // A row belongs to one annotation at most, so any overlap refuses a second.
-    if (discussionOverlapping(discussions, range) !== undefined) return
+    // What the thread QUOTES. A change in the side-by-side view occupies PAIRS, and a replacement whose two
+    // lines are too dissimilar to pair is drawn as one row per side — so a thread quoting only the row the
+    // reader touched would hand the agent half the change. The quote therefore widens to the change region
+    // those rows sit in, removals and additions both (see `changeRunSpanOf`). The code view quotes the
+    // selection as it stands: there the reader's rows are literal, and they already carry both sides.
+    const quoteRange = splitView && !previewActive
+      ? changeRunSpanOf(model.diff.rows, range.start, range.end)
+      : range
+    // A row belongs to one annotation at most, so any overlap refuses a second — read over what the
+    // thread would quote, so the other side of a change is not free for a second thread either.
+    if (discussionOverlapping(discussions, quoteRange) !== undefined) return
     // What the frame COVERED on the NEW side — the side every label, jump and reference names, and
     // the side a thread is anchored to. A frame that holds a removal AND a current line therefore
     // names the current line, not the removal's old-file number; a frame of removed lines alone has
@@ -5728,7 +5757,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     // anchor is line numbers, and the quote is what tells a later rebuild whether they still
     // point at the same code — see `remapDiscussion`. The gutter pair rides along so an
     // outdated block can show the quote where the file showed it.
-    const quoted = model.diff.rows.slice(range.start, range.end + 1)
+    const quoted = model.diff.rows.slice(quoteRange.start, quoteRange.end + 1)
     const quote = quoted.map(row => row.text).join('\n')
     const quoteLines = quoted.map(row => ({ old: row.oldLine, new: row.newLine, kind: row.kind }))
     // The quoted rows with one row of context on each side — the fingerprint a rebuild matches the
@@ -5736,7 +5765,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     // (see `remapDiscussion`). A quote alone is too weak: a comment on a closing brace or a blank line
     // found that line elsewhere in the file and never went outdated.
     const quoteContext = model.diff.rows
-      .slice(Math.max(0, range.start - 1), Math.min(model.diff.rows.length, range.end + 2))
+      .slice(Math.max(0, quoteRange.start - 1), Math.min(model.diff.rows.length, quoteRange.end + 2))
       .map(row => row.text)
       .join('\n')
     // The block the reader just placed is not a comment yet: nothing is written until they send it,
@@ -6806,17 +6835,22 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     await runBlockAction(action, range, operated)
   }
 
-  // Keep/revert every block covered by the current text selection in one
-  // combined host call (the covered blocks are contiguous); the shared post-
-  // action logic then advances focus to the next change block. The operated
-  // blocks leave the diff, so their old row-range selection no longer maps to
-  // real rows — clear it (and the native highlight) once the action settles, or
-  // the stale selection lingers offset against the now-smaller diff.
+  // Keep/revert the lines the current selection names, one host call per range (see
+  // `selectionTargetRanges`): the code view sends the rows the reader selected, the side-by-side view
+  // sends both sides of every pair they selected — one range when those pairs sit in one span, otherwise
+  // one per pair from the bottom of the file up, so a splice never moves the line numbers of a pair still
+  // to come. Taking part of a change is the point: only those lines fold into the baseline (keep) or leave
+  // the file (revert). Unlike the change block's own toolbar this does NOT move the reader on to the next
+  // change: the lines were picked on purpose. The operated lines leave the diff, so their old row-range
+  // selection no longer maps to real rows — clear it (and the native highlight) once the actions settle,
+  // or the stale selection lingers offset against the smaller diff.
   const handleSelectionAction = async (action: 'keep' | 'revert'): Promise<void> => {
-    if (busy || selectionRange === undefined) return
-    const firstCovered = coveredBlockIndices[0]
-    if (firstCovered === undefined) return
-    await runBlockAction(action, selectionRange, firstCovered)
+    if (busy || selectionTargetRanges.length === 0) return
+    for (const range of selectionTargetRanges) {
+      await (action === 'keep'
+        ? onBlockKeep(sessionId, file.id, range)
+        : onBlockRevert(sessionId, file.id, range))
+    }
     setSelection(undefined)
     setPreviewCovered([])
     window.getSelection()?.removeAllRanges?.()
@@ -7108,22 +7142,93 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   const selectionHasDiscussion = selectionRowRange !== undefined
     && discussionOverlapping(discussions, selectionRowRange) !== undefined
 
+  /**
+   * The change blocks the selected rows touch, in order. A selection that stops inside a block still
+   * touches it, so this — rather than the blocks it fully covers — is what says whether keep/revert
+   * have anything to act on at all (an all-context range touches none, and offers the comment alone).
+   */
+  const selectionBlocks: number[] = []
+  if (selectionRowRange !== undefined) {
+    for (let index = 0; index < model.blocks.length; index++) {
+      const block = model.blocks[index]!
+      if (selectionRowRange.start <= block.end && block.start <= selectionRowRange.end) selectionBlocks.push(index)
+    }
+  }
+
+  /**
+   * The side-by-side pairs the selection names, in row order. That view selects PAIRS (see
+   * `splitRowRangeOf`), and a pair is one old line against one new line. The list is the same whichever
+   * column the selection came from — a pair holds both its sides, and a removal the alignment left unpaired
+   * holds only its old one, which is exactly the pair a left-column selection is about.
+   */
+  const splitSelectionPairs: DiffPairRows[] = []
+  if (splitView && !previewActive && selection !== undefined && selection.side !== undefined) {
+    for (let index = selection.start; index <= selection.end; index++) {
+      const pair = pairRows.get(index)
+      if (pair !== undefined) splitSelectionPairs.push(pair)
+    }
+  }
+
+  /**
+   * The old/new ranges the frame's keep/revert send, in the order they must be sent. Taking part of a
+   * change is the point: keep folds only those lines into the baseline and only those leave it, and the
+   * context lines a selection spans ride along unchanged. The code view sends the one range the SELECTED
+   * ROWS name; the side-by-side view sends the range(s) of the PAIRS it names (`pairsRangeOf`), which
+   * covers both sides of every pair the reader touched. The Markdown preview keeps its own block-derived
+   * range (`selectionRange`): its selection names rendered elements, not rows.
+   */
+  const selectionTargetRanges: DiffApprovalBlockRange[] = previewActive
+    ? selectionRange === undefined ? [] : [selectionRange]
+    : splitView
+      ? pairsRangeOf(model.diff.rows, splitSelectionPairs)
+      : selectionRowRange === undefined
+        ? []
+        : [blockRangesOf(model.diff.rows, selectionRowRange)]
+
   // What the frame offers for the current selection (see `selectionFrame`), with comment
   // mode applied: an OFF mode withholds the comment action but not the frame, so a range
-  // over change blocks still offers keep/revert. A range whose only action would have been
+  // over a change still offers keep/revert. A range whose only action would have been
   // the comment then has no frame at all — which is also what keeps the chord below off.
   const frameForSelection = selectionRowRange !== undefined
     ? selectionFrame({
-        // Keep/revert are the change blocks' own frames, and only the single-column view anchors a
-        // selection to them (see `selectionRange`); the comment is offered wherever a range reads as
-        // the current file's lines, which the side-by-side view's right column does too.
-        coversBlocks: !splitView && selectionRange !== undefined,
+        // Keep/revert act on the ranges `selectionTargetRanges` derives, in either view: the rows the
+        // reader selected in the code view, and BOTH sides of every pair they selected in the side-by-side
+        // view (see `pairsRangeOf`). The comment is offered wherever a range reads as the current file's
+        // lines, which the split view's right column also does.
+        coversBlocks: selectionTargetRanges.length > 0 && selectionBlocks.length > 0,
         hasDiscussion: selectionHasDiscussion,
       })
     : undefined
   const selectionCommentOffered = commentMode && frameForSelection?.comment === true
+  /** Whether the frame carries keep/revert (they stay in the DOM, `hidden`, when it does not). */
+  const selectionKeepRevert = frameForSelection?.keepRevert === true
   const selectionFrameVisible = frameForSelection !== undefined
     && (frameForSelection.keepRevert || selectionCommentOffered)
+  // A press that began in the CODE is a selection drag, and the frame must not take the pointer while it
+  // runs: the frame follows the selection, so the reader keeps dragging onto it, and a drag that ends up
+  // over the frame still has to reach the code underneath. Such a press therefore marks the frame
+  // `data-diff-frame-drag` — it stays on screen (it is the frame for the SELECTION, not the change block's
+  // own toolbar) but nothing in it takes the pointer until the press ends. A press that began ON the frame
+  // never marks it, or its own buttons could never be clicked (the frame is in `KEEPS_SELECTION` for
+  // exactly that reason).
+  const [pressInCode, setPressInCode] = useState(false)
+  useEffect(() => {
+    const down = (event: PointerEvent): void => {
+      const target = event.target
+      setPressInCode(target instanceof Element && target.closest('[data-diff-selection-actions]') === null)
+    }
+    const up = (): void => { setPressInCode(false) }
+    document.addEventListener('pointerdown', down, true)
+    document.addEventListener('pointerup', up, true)
+    document.addEventListener('pointercancel', up, true)
+    window.addEventListener('blur', up)
+    return () => {
+      document.removeEventListener('pointerdown', down, true)
+      document.removeEventListener('pointerup', up, true)
+      document.removeEventListener('pointercancel', up, true)
+      window.removeEventListener('blur', up)
+    }
+  }, [])
   // The comment chord, as the button prints it (that frame cannot carry a tooltip — see the
   // render). Read at render rather than cached, so a rebind in Settings shows on the next
   // selection, and empty when the action has been left unbound, so no hint is drawn at all.
@@ -7820,6 +7925,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
                 ref={previewSelectionFrameRef}
                 className={css.blockActions}
                 data-diff-selection-actions
+                data-diff-frame-drag={pressInCode ? '' : undefined}
                 style={{ top: previewFrameTop(previewSelectionFrame, previewScrollTopRef.current) ?? 0, right: previewSelectionFrame.right }}
               >
                 <button
@@ -7926,8 +8032,31 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
           renderDiscussion={renderDiscussion}
           rulerRuns={rulerMarkers}
           gotoDialog={gotoDialog}
-          // A range in either half offers the comment; keep/revert stay with the change blocks' own
-          // frames here (see `frameForSelection`).
+          // A range in either half offers keep/revert on the rows it names and the comment (see
+          // `frameForSelection`); the two groups are separate nodes, so the frame draws its hairline
+          // only when both are there.
+          selectionKeepRevert={splitView && selectionKeepRevert ? (
+            <>
+              <button
+                type="button"
+                className={`${css.action} ${css.actionPrimary}`}
+                data-diff-selection-keep
+                disabled={busy}
+                onClick={() => { void handleSelectionAction('keep') }}
+              >
+                {t('action.keep')}
+              </button>
+              <button
+                type="button"
+                className={css.action}
+                data-diff-selection-revert
+                disabled={busy}
+                onClick={() => { void handleSelectionAction('revert') }}
+              >
+                {t('action.revert')}
+              </button>
+            </>
+          ) : undefined}
           selectionComment={splitView && selectionCommentOffered ? (
             <button
               type="button"
@@ -7941,6 +8070,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
               )}
             </button>
           ) : undefined}
+          selectionDragging={pressInCode}
         />
       ) : (
       <div className={css.diffBodyWrap} ref={bodyWrapRef} onMouseLeave={() => { setHoveredBlock(undefined) }}>
@@ -8021,13 +8151,14 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
             ref={frameRef}
             className={css.blockActions}
             data-diff-selection-actions
+            data-diff-frame-drag={pressInCode ? '' : undefined}
             style={{ top: frameTop }}
           >
           <button
             type="button"
             className={`${css.action} ${css.actionPrimary}`}
             data-diff-selection-keep
-            hidden={selectionRange === undefined}
+            hidden={!selectionKeepRevert}
             disabled={busy}
             onClick={() => { void handleSelectionAction('keep') }}
           >
@@ -8037,20 +8168,20 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
             type="button"
             className={css.action}
             data-diff-selection-revert
-            hidden={selectionRange === undefined}
+            hidden={!selectionKeepRevert}
             disabled={busy}
             onClick={() => { void handleSelectionAction('revert') }}
           >
             {t('action.revert')}
           </button>
           {/* The frame holds two groups: what may be kept or reverted on the
-              covered change blocks, and the comment on the range. The hairline
+              selected lines, and the comment on the range. The hairline
               appears only when both are there - keep/revert are hidden over a
-              range with no covered blocks (their `hidden` attribute takes them
+              range that touches no change (their `hidden` attribute takes them
               out of the layout), the comment group is missing while comment mode
               is off, and a divider with nothing on one side of it would read as a
               rendering fault. */}
-          {selectionRange !== undefined && selectionCommentOffered && (
+          {selectionKeepRevert && selectionCommentOffered && (
             <span className={css.blockActionsDivider} data-diff-selection-divider aria-hidden="true" />
           )}
           {/* Offered when the range has no discussion yet and comment mode is on
