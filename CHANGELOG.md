@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.32.0](https://github.com/9087/dsh-diff-approval/compare/v0.31.0...v0.32.0) (2026-10-07)
+
+### Features
+
+* **panel:** act on the lines a selection names ([44f0866](https://github.com/9087/dsh-diff-approval/commit/44f0866f41e7b7698138fd58674bb5e95a689eb7))
+
+### Bug Fixes
+
+* **panel:** settle an entry whose change was committed ([e7ce281](https://github.com/9087/dsh-diff-approval/commit/e7ce2818dff5ae5d2f61147d7fab48d89ebb8867))
+
 ## [0.31.0](https://github.com/9087/dsh-diff-approval/compare/v0.30.1...v0.31.0) (2026-10-07)
 
 ### Features
