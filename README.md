@@ -26,23 +26,25 @@ For Markdown files, the source-line diff can also be shown as a rendered before/
 
 ## ✨ Features
 
-- **Diff view**: syntax-highlighted whole-file diff with +/− counts, an overview ruler on the scrollbar showing where changes sit, and an in-file search (`Ctrl+F`, step with `F3` / `Shift+F3`) that highlights matched words. Rows are virtualized, so huge files stay smooth.
+- **Diff view**: syntax-highlighted whole-file diff with +/− counts, an overview ruler on the scrollbar showing where changes sit, and an in-file search (`Ctrl+F`, step with `F3` / `Shift+F3`) that highlights matched words. Rows are virtualized, so huge files stay smooth. The line-number column keeps a surface of its own — a shade lighter than the code block, so the numbers read as a column rather than as part of the code — and stays pinned while the code scrolls sideways.
 - **Block navigation & decisions**: jump between change blocks with `Ctrl+↑/↓` (or the previous/next buttons) — the focused block flashes, navigation is anchored to the scroll position and wraps at the top/bottom. Hover a block to **Keep** or **Revert** just that block from a small actions frame that also shows its position (e.g. "2/5"); after a single-block decision, focus advances to the next block. The lead rows left above the jumped-to block are configurable in settings.
 - **Selection frame**: drag to select a range of lines and a frame appears to **Keep** / **Revert** exactly that range.
 - **Per-file and bulk decisions**: the files in the file list can be kept / reverted one at a time, or **Keep all** / **Revert all** from its footer.
-- **Resolved files stay listed**: once every change in a file has been kept/reverted, the entry remains in the list and the panel asks whether to remove it or keep it for later.
-- **Undo / Redo**: every keep, revert, and import is undoable with `Ctrl+Z` / `Ctrl+Shift+Z` (rebindable in Shortcuts; `Ctrl+Y` remains an alias), active while the panel is open — text inputs keep their own editing.
+- **Resolved files stay listed**: once every change in a file has been kept/reverted, the entry remains in the list and the panel asks whether to remove it or keep it there.
+- **Undo / Redo**: every keep, revert, import, and comment is undoable with `Ctrl+Z` / `Ctrl+Shift+Z` (rebindable in Shortcuts; `Ctrl+Y` remains an alias), active while the panel is open — text inputs keep their own editing.
 - **Quick summon & file cycling**: `Ctrl+D` (configurable in settings) toggles the review panel from anywhere and `Esc` closes it; the panel is also one click away from the sidebar-foot row and from a button in the Session header beside the app's own controls; `Ctrl+Tab` / `Ctrl+Shift+Tab` cycle through the pending files.
 - **Line references**: select text in the diff — the status bar shows its `(file:line)` / `(file:start-end)` reference; click it (or press `Ctrl+L`) to copy, and with the setting on it auto-pastes into the composer and focuses it. References in the composer and queued messages are **auto-aligned** when the referenced file changes: surviving lines re-map to their new range, and a fully-removed line becomes `(file:LINE_MISSING)`.
 - **Highlight language**: auto-detected from the file extension, or overridden from a dropdown.
 - **Auto-wrap**: a "Wrap lines" toggle beside the language selector wraps long lines for that language (CJK breaks between characters, Latin words stay whole), remembered per language.
 - **Side-by-side split view**: an opt-in two-column diff (left "before" | right "current"), line-aligned with per-side horizontal scrolling and a shared vertical scrollbar. Toggle it from the toolbar or in settings (default: single-column unified view). In split view, changed blocks are aligned by content similarity and changed lines show intra-line word diffs — whole words for Latin text, per-character for CJK.
 - **Markdown preview**: for Markdown files, toggle between the source-line diff and a rendered before/after preview (`Preview` / `Source`). The preview content max width is configurable.
-- **Customizable appearance**: from the "Diff view" settings group, adjust the diff's code font size (%), line height (px), and the added / removed line colors, with a live preview.
+- **Customizable appearance**: from the "Diff view" settings group, adjust the diff's code font size (%), line height (px), the added / removed line colors, and the tab width (2 / 4 / 8 spaces), with a live preview.
+- **Comments & annotations**: select any lines and write a comment. The card is anchored below the selected lines and holds the discussion with the agent. Comment mode is on by default and can be turned off in settings. The agent can comment on its own (annotate): asking it to annotate a piece of code is one way to read that code faster. Say "annotate this project's startup flow for me" and it marks the entry point, the initialisation order and the important branches, line by line, to be read in order.
+- **File menu**: on by default (the "File menu" row in the "Diff view" group turns it off). It takes over the click on some file links: a file row in the shell's edited / produced lists, an `@file` reference or file link in a message, and a relative link in this plugin's Markdown preview, and offers: **Open as usual** (the shell's own behaviour, replayed), **View in the review panel**, and **Copy file path**.
+- **Bundled CJK code font**: the panel ships JetBrains Maple Mono, subset and sliced by `unicode-range`; it is on by default and can be turned off in settings.
 - **External changes**: files already in the pending list are monitored — if one is later modified outside the reviewed edits (another tool, an editor), the panel adopts the new content and flags the divergence.
 - **Open / Reveal**: while reviewing a file's diff, open it in its default app or reveal it in the system file manager with one click.
 - **Import version-control changes**: when the list is empty, click the button to import the workspace's local changes from **Git / SVN / Perforce** — everything that is **not committed yet, staged or not** (Git is read against the last commit, the `git diff HEAD` view), plus deleted files and, opt-in, files the VCS has never seen (untracked / unversioned). The VCS root is found by walking up from the workspace, so a workspace inside a subdirectory works too.
-- **Settings**: a "Diff Approval" section in DeepSeek Harness settings, grouped into **Diff view** (code font size, line height, added / removed colors), **Shortcuts** (rebind the panel's keyboard chords), and **Floating coverage** (the same four edge switches the panel's own popover offers) plus preferences for auto-paste on copy, whether to include files version control has not seen when importing, the diff's tab width (2 / 4 / 8 spaces), the side-by-side split view, the block-jump lead rows, the Markdown preview default and width, and the quick-summon chord.
 - **Persistence**: pending state is stored per workspace at `<dshHome>/diff-approval/workspaces/<workspaceId>.json` and survives restarts — unhandled changes are still there when you come back, even in a fresh session.
 
 ## 📦 Install
@@ -94,10 +96,16 @@ Then restart `dsh web`.
 corepack pnpm install
 pnpm run typecheck   # tsc over both faces
 pnpm run build       # emits lib/index.js and lib/client.js
-pnpm test
+pnpm test            # the unit suite (vitest)
+pnpm run e2e         # the browser suite (Playwright, against a real host)
+pnpm run compat      # the compatibility matrix: this checkout against the supported DSH releases
+pnpm run compat:newer # …and against published releases newer than the latest
+pnpm run verify:release # after a release is pushed: did the tag's commit pass CI, and did npm get that version
 pnpm run fonts:check # the bundled code font: 138 slices, every range covered exactly once
 pnpm run fonts:plan  # what a page actually downloads, by how many hanzi it shows
 ```
+
+How a release works, which gates run before it, and how to check it afterwards: [`PUBLISH.md`](PUBLISH.md).
 
 The bundled font is [JetBrains Maple Mono](https://github.com/SpaceTimee/Fusion-JetBrainsMapleMono) (SIL OFL 1.1), subset and sliced by `scripts/fonts` — see [`assets/fonts/README.md`](assets/fonts/README.md) for the pipeline, the licence and what the slices cost.
 
