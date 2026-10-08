@@ -31,6 +31,25 @@ function chip(parent: HTMLElement, path: string, opened: () => void = () => {}):
   return el
 }
 
+/**
+ * The classes the shell puts on a message's file link, copied from a live page: a `<button>` whose
+ * CSS-module classes name it a file link (`_fileMention_… _fileLink_…`) and whose `title` is the path.
+ * The hash and the line number after each name are per build, which is why the marker is the name.
+ */
+const LINK_CLASS = '_fileMention_1ypvv_85 _fileLink_1ypvv_59'
+
+/** A message's file link as the shell draws one — the press this bridge is meant to route. */
+function fileLink(path: string, opened: () => void = () => {}): HTMLButtonElement {
+  const el = document.createElement('button')
+  el.type = 'button'
+  el.className = LINK_CLASS
+  el.setAttribute('title', path)
+  el.textContent = path.split('/').pop() ?? path
+  el.addEventListener('click', opened)
+  document.body.appendChild(el)
+  return el
+}
+
 /** A bridge that holds `held` and nothing else, recording every press it is handed. */
 function bridge(held: string[]) {
   const onMenu = vi.fn()
@@ -182,6 +201,9 @@ describe('startProducedChipMenu', () => {
     button.type = 'button'
     button.setAttribute('data-review-file', '/repo/a.txt')
     button.setAttribute('title', '/repo/a.txt')
+    // Marked as a file link too, so the PICKER rule is the reason this press is left alone: without it the
+    // marker alone would route it and this pin would pass for the wrong reason.
+    button.className = LINK_CLASS
     button.addEventListener('click', opened)
     picker.appendChild(button)
     const { onMenu, stop } = bridge(['/repo/a.txt'])
@@ -195,19 +217,59 @@ describe('startProducedChipMenu', () => {
     stop()
   })
 
-  it('routes a message\'s file link, which 0.1.7 draws as a button carrying the path in `title`', () => {
+  it('routes a message\'s file link, which the shell marks with its own file-link classes', () => {
     const opened = vi.fn()
-    const link = document.createElement('button')
-    link.type = 'button'
-    link.setAttribute('title', '/repo/a.txt')
-    link.addEventListener('click', opened)
-    document.body.appendChild(link)
+    const link = fileLink('/repo/a.txt', opened)
     const { onMenu, stop } = bridge(['/repo/a.txt'])
 
     link.click()
 
     expect(onMenu).toHaveBeenCalledWith({ path: '/repo/a.txt', x: 0, y: 0, held: true })
     expect(opened).not.toHaveBeenCalled()
+    stop()
+  })
+
+  it('leaves a control the shell did not mark alone, however its text reads', () => {
+    // THE READER'S BUG, 2026-10-09: a press was admitted by the SHAPE of its text, so the model picker —
+    // whose tooltip names the model, `deepseek-v3.2`, and ends in the ".extension" that filter accepted —
+    // raised this menu over the shell's own control; an in-app route link was admitted by its separator.
+    // A press is ours now only when the SHELL marked it, so both of those stay the shell's own press.
+    const opened = vi.fn()
+    const picker = document.createElement('button')
+    picker.type = 'button'
+    picker.setAttribute('title', 'deepseek-v3.2')
+    picker.addEventListener('click', opened)
+    document.body.appendChild(picker)
+    const route = document.createElement('a')
+    route.setAttribute('href', '/settings')
+    route.textContent = 'settings'
+    document.body.appendChild(route)
+    // The SAME text shape, marked by the shell, IS ours — so what decides here is the shell's mark and not
+    // the spelling of the value, which is the whole of the rule this file now follows.
+    const marked = fileLink('deepseek-ai/v3.ts')
+    const { onMenu, stop } = bridge(['deepseek-ai/v3.ts'])
+
+    picker.click()
+    route.click()
+
+    expect(onMenu).not.toHaveBeenCalled()
+    // The shell's own handlers ran: the reader's press went where it always went.
+    expect(opened).toHaveBeenCalledTimes(1)
+
+    marked.click()
+    expect(onMenu).toHaveBeenCalledWith({ path: 'deepseek-ai/v3.ts', x: 0, y: 0, held: true })
+    stop()
+  })
+
+  it('reads a marked link\'s path as written, even when it has no extension to recognise', () => {
+    // The shell marked it, so its value IS the path: `Makefile` is a file this panel must be able to open,
+    // and the text-shape test that an unmarked press still has to pass would have dismissed it as a label.
+    const link = fileLink('Makefile')
+    const { onMenu, stop } = bridge(['Makefile'])
+
+    link.click()
+
+    expect(onMenu).toHaveBeenCalledWith({ path: 'Makefile', x: 0, y: 0, held: true })
     stop()
   })
 
@@ -234,6 +296,7 @@ describe('startProducedChipMenu', () => {
 
   it('compares a link without its line suffix, so a `#L24` link still names the file', () => {
     const anchor = document.createElement('a')
+    anchor.className = LINK_CLASS
     anchor.setAttribute('href', '/repo/a.txt#L24')
     anchor.textContent = 'a.txt'
     document.body.appendChild(anchor)
@@ -245,46 +308,33 @@ describe('startProducedChipMenu', () => {
     stop()
   })
 
-  it('leaves a press that names no file alone: URLs, schemes, labels, in-page anchors', () => {
-    // The negative set that keeps an ordinary web link out of this menu. Every one of these is matched by
-    // the SELECTOR (`a[href]` / `button[title]`) and rejected by the PATH FILTER, which is the only thing
-    // that can tell them apart — so this is the case that would regress the moment a scheme is trusted.
-    const url = document.createElement('a')
-    url.setAttribute('href', 'https://example.com/a.txt')
-    url.textContent = 'docs'
-    document.body.appendChild(url)
-    const httpUrl = document.createElement('a')
-    httpUrl.setAttribute('href', 'http://example.com/b.ts')
-    httpUrl.textContent = 'plain http'
-    document.body.appendChild(httpUrl)
-    const mail = document.createElement('a')
-    mail.setAttribute('href', 'mailto:someone@example.com')
-    mail.textContent = 'mail'
-    document.body.appendChild(mail)
-    const schemeTitle = chip(document.body, 'dsh://settings')
-    const urlTitle = chip(document.body, 'https://example.com/c.ts')
-    const label = chip(document.body, 'Refresh')
-    const fragment = document.createElement('a')
-    fragment.setAttribute('href', '#section')
-    fragment.textContent = 'section'
-    document.body.appendChild(fragment)
-    const query = document.createElement('a')
-    query.setAttribute('href', '?tab=files')
-    query.textContent = 'query'
-    document.body.appendChild(query)
+  it('leaves a marked press whose value names no file alone: URLs, schemes, in-page anchors', () => {
+    // The negative set that keeps an ordinary web link out of this menu. Every one of these is MARKED like a
+    // file link, so the SELECTOR admits it and the SPELLING filter is the only thing that can refuse it —
+    // which is what makes this pin bite: drop the scheme rule and each of them becomes a menu. (A marked
+    // value with no path shape at all is NOT in this list: it is taken as written, which is how `Makefile`
+    // is read — see the extension-less case above.)
+    const press = (tag: 'a' | 'button', value: string): HTMLElement => {
+      const el = document.createElement(tag)
+      el.className = LINK_CLASS
+      if (tag === 'a') el.setAttribute('href', value)
+      else el.setAttribute('title', value)
+      document.body.appendChild(el)
+      return el
+    }
+    const url = press('a', 'https://example.com/a.txt')
+    const httpUrl = press('a', 'http://example.com/b.ts')
+    const mail = press('a', 'mailto:someone@example.com')
+    const schemeTitle = press('button', 'dsh://settings')
+    const urlTitle = press('button', 'https://example.com/c.ts')
+    const fragment = press('a', '#section')
+    const query = press('a', '?tab=files')
     // A Windows drive letter IS a path (the one exception the scheme rule makes) — held here so it stays
     // distinguishable from the schemes above.
-    const drive = chip(document.body, 'C:\\repo\\a.txt')
-    const { onMenu, stop } = bridge(['/repo/a.txt', 'Refresh', 'C:\\repo\\a.txt'])
+    const drive = press('button', 'C:\\repo\\a.txt')
+    const { onMenu, stop } = bridge(['C:\\repo\\a.txt'])
 
-    url.click()
-    httpUrl.click()
-    mail.click()
-    schemeTitle.click()
-    urlTitle.click()
-    label.click()
-    fragment.click()
-    query.click()
+    for (const el of [url, httpUrl, mail, schemeTitle, urlTitle, fragment, query]) el.click()
 
     // Not one of them was taken over…
     expect(onMenu).not.toHaveBeenCalled()
@@ -314,15 +364,8 @@ describe('startProducedChipMenu', () => {
     // does not hold it" is what the menu ANSWERS (view-in-panel adds it first), never a reason to leave the
     // press to the shell and show nothing. `held: false` is the label that makes the item add before opening.
     const opened = vi.fn()
-    const a = document.createElement('button')
-    a.type = 'button'
-    a.setAttribute('title', '/repo/a.txt')
-    a.addEventListener('click', opened)
-    document.body.appendChild(a)
-    const other = document.createElement('button')
-    other.type = 'button'
-    other.setAttribute('title', '/repo/b.ts')
-    document.body.appendChild(other)
+    const a = fileLink('/repo/a.txt', opened)
+    const other = fileLink('/repo/b.ts')
     const { onMenu, stop } = bridge(['/repo/b.ts'])
 
     a.click()
@@ -344,10 +387,7 @@ describe('startProducedChipMenu', () => {
     // add/open route. This pins the shape both ways round, with the panel NOT holding either path.
     const row = mountRow()
     const rowPress = chip(row, '/repo/from-row.txt')
-    const link = document.createElement('button')
-    link.type = 'button'
-    link.setAttribute('title', '/repo/from-link.txt')
-    document.body.appendChild(link)
+    const link = fileLink('/repo/from-link.txt')
     const { onMenu, stop } = bridge([])
 
     rowPress.click()
@@ -402,11 +442,7 @@ describe('startProducedChipMenu', () => {
     // the same ONE selector list and clicks the same element with the same stand-down guard, so DSH's own
     // open — whatever it does — runs for a message link exactly as it does for a row. One path, not two.
     const opened = vi.fn()
-    const link = document.createElement('button')
-    link.type = 'button'
-    link.setAttribute('title', '/repo/a.txt')
-    link.addEventListener('click', opened)
-    document.body.appendChild(link)
+    const link = fileLink('/repo/a.txt', opened)
     const { onMenu, stop } = bridge([])
 
     link.click()

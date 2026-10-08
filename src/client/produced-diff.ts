@@ -8,16 +8,27 @@
  *   `[data-produced-files-row] button`    0.1.5's produced-file card       `title` = the path
  *   `[data-presented-files-row] button`   0.1.7's presented-file card      `title` = the path
  *   `[data-changed-files] button`         0.1.7's changed-files row        `aria-describedby` = the path
- *   `button[title]`                       a message's file LINK (0.1.7)    `title` = the path
  *   `button[data-ref-chip]`               a `@file` chip in a message      `title` = the token
- *   `a[href]`                             any other link naming a file     `href`  = the path
+ *   `button._fileLink_…` / `._fileMention_…`  a message's file LINK         `title` = the path
  *
- * Everything else is left entirely alone: a link to a URL, an in-page anchor, a chip naming something
- * that is not a file, a file LINK whose file this panel does not hold, a modified press (Ctrl/Cmd/Shift/
- * Alt, or a middle click — gestures the harness may give its own meaning later), and any press inside this
- * plugin's own surface, whose buttons carry paths too and belong to the panel that is already showing
- * the file. A file-list ROW is the one press taken over whether or not the panel holds its file (see
- * `ROW_SELECTOR`); "we do not hold it" then decides what the menu offers, not whether it appears.
+ * A PRESS IS ADMITTED BY THE SHELL'S OWN MARK, NEVER BY THE SHAPE OF ITS TEXT. The link row's classes are
+ * the shell's CSS-module names — measured on the live shell as `_fileMention_1ypvv_85 _fileLink_1ypvv_59`,
+ * carrying `title="src/client/produced-diff.ts"` — and that name survives the hash and line suffix the
+ * module adds per build, so the marker is the `_fileLink_` / `_fileMention_` substring rather than the
+ * whole class.
+ *
+ * This replaced two blanket rules, `button[title]` and every `a[href]`, which admitted a press by how its
+ * text was spelled and were measured wrong twice on 2026-10-09: a model picker's button carries a tooltip
+ * naming the model, and a version-like name (`…v3.2`) ends in the ".extension" the text filter accepted, so
+ * pressing 修改模型 raised this menu over the shell's own control; an in-app route link (`/settings`) holds a
+ * separator and was admitted the same way. A file press is one the shell marks as one.
+ *
+ * Everything else is left entirely alone: a link to a URL, an in-page anchor, a button whose tooltip names
+ * something that is not a file, a file LINK whose file this panel does not hold, a modified press
+ * (Ctrl/Cmd/Shift/Alt, or a middle click — gestures the harness may give its own meaning later), and any
+ * press inside this plugin's own surface, whose buttons carry paths too and belong to the panel that is
+ * already showing the file. A file-list ROW is the one press taken over whether or not the panel holds its
+ * file (see `ROW_SELECTOR`); "we do not hold it" then decides what the menu offers, not whether it appears.
  *
  * The name of the module (and of the event it raises) dates from when the produced-file card was the
  * only press of this kind; `data-presented-files-row` is that same list under 0.1.7's name for it.
@@ -67,13 +78,25 @@ export const OPEN_FILE_EVENT = 'diff-approval:open-file'
  *
  * A press this list misses is not a crash — it is one menu the reader does not get.
  */
+/**
+ * The shell's OWN mark on a file link, as the name part of its CSS-module classes: measured on the live
+ * shell as `class="_fileMention_1ypvv_85 _fileLink_1ypvv_59"` on the `<button title="src/client/
+ * produced-diff.ts">` a message draws for a file. The hash and the line number after the name are per
+ * build, so the marker is the `_name_` substring and not the whole class.
+ *
+ * A CSS-module class name is the shell telling this module what the element IS, which is why this replaced
+ * the text-shape rules (see the module doc). It is a name, not an API: if the shell ever renames or
+ * minifies these classes, this marker stops matching and file links fall back to the shell's own press —
+ * fewer menus, never a menu over the wrong control, which is the direction a wrong guess must fail in.
+ */
+const MARKED_LINK_SELECTOR = '[class*="_fileLink_"], [class*="_fileMention_"]'
+
 const PRESS_SELECTOR = [
   '[data-produced-files-row] button',
   '[data-presented-files-row] button',
   '[data-changed-files] button',
-  'button[title]',
   'button[data-ref-chip]',
-  'a[href]',
+  MARKED_LINK_SELECTOR,
 ].join(', ')
 
 /**
@@ -179,33 +202,59 @@ function pathOfReference(text: string): string {
 }
 
 /**
- * Whether this text names a file, rather than a URL, an in-page anchor or a plain label.
+ * Whether this text is spelled as something that is not a file at all: an in-page anchor, a query, or
+ * another scheme's URL. A Windows drive letter is a file despite the colon it starts with.
  *
- * A shell tooltip lives in `title` too, so "the element has a title" is not enough: a URL scheme is not
- * a file (a Windows drive letter is), and a label with neither a separator nor an extension is a label.
- * This is a filter, not a decision — `isPending` is what decides — so it errs towards letting a press
- * through untouched rather than towards taking one over.
+ * @param value - the candidate text.
+ * @returns whether it is spelled as a non-file.
+ */
+function isNonFileSpelling(value: string): boolean {
+  if (value === '' || value.startsWith('#') || value.startsWith('?')) return true
+  return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(value) && !/^[A-Za-z]:[\\/]/.test(value)
+}
+
+/**
+ * Whether this text has the SHAPE of a path: a `.extension` tail or a separator.
+ *
+ * Only a press the shell did NOT mark is held to this, because its text is all there is to go on. A marked
+ * press is a file link by the shell's own word, so its value is taken as written and an extension-less path
+ * (`Makefile`) is read as the file it is instead of being dismissed as a label.
  *
  * @param value - the candidate text.
  * @returns whether it could name a file.
  */
 function looksLikePath(value: string): boolean {
-  if (value === '' || value.startsWith('#') || value.startsWith('?')) return false
-  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value) && !/^[A-Za-z]:[\\/]/.test(value)) return false
+  if (isNonFileSpelling(value)) return false
   return /\.[A-Za-z0-9]{1,8}$/.test(value) || value.includes('/') || value.includes('\\')
+}
+
+/** Whether the shell itself marked this press as one of its file links (see `MARKED_LINK_SELECTOR`). */
+function isMarkedFileLink(press: Element): boolean {
+  return press.matches(MARKED_LINK_SELECTOR)
 }
 
 /**
  * The path a press names, or undefined when it names no file.
  *
+ * Every shape is read from the same three places — `title`, the text its `aria-describedby` points at, an
+ * anchor's `href` — and what differs is the test the value must pass: a press the shell marked must only
+ * not be spelled as a non-file, while one it did not mark must ALSO have the shape of a path.
+ *
  * @param press - the element the reader pressed.
  * @returns the path, as the shell spelled it (the panel matches it against its own spelling).
  */
 function pressPathOf(press: Element): string | undefined {
+  const marked = isMarkedFileLink(press)
+  const accept = (value: string): string | undefined => {
+    const path = pathOfReference(value)
+    if (path === '') return undefined
+    if (marked) return isNonFileSpelling(path) ? undefined : path
+    return looksLikePath(path) ? path : undefined
+  }
   const title = press.getAttribute('title')?.trim()
   if (title !== undefined) {
-    const path = pathOfReference(title)
-    if (looksLikePath(path)) return path
+    const path = accept(title)
+    if (path !== undefined) return path
   }
   // A row can carry its path in a description instead of a `title`: 0.1.7's changed-files list points
   // `aria-describedby` at a visually hidden span whose text is the resolved absolute path — the row
@@ -213,12 +262,12 @@ function pressPathOf(press: Element): string | undefined {
   // than its copy, so a row in another language works the same.
   const describedBy = press.getAttribute('aria-describedby')
   if (describedBy !== null) {
-    const path = press.ownerDocument.getElementById(describedBy)?.textContent?.trim() ?? ''
-    if (looksLikePath(path)) return path
+    const path = accept(press.ownerDocument.getElementById(describedBy)?.textContent?.trim() ?? '')
+    if (path !== undefined) return path
   }
   if (press instanceof HTMLAnchorElement) {
-    const path = stripSuffix(press.getAttribute('href')?.trim() ?? '')
-    if (looksLikePath(path)) return path
+    const path = accept(stripSuffix(press.getAttribute('href')?.trim() ?? ''))
+    if (path !== undefined) return path
   }
   return undefined
 }

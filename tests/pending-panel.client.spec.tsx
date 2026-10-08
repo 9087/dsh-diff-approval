@@ -6097,6 +6097,9 @@ describe('PendingPanel', () => {
     render(<PendingPanel {...panelProps({ read: true, files: [FILE], busy: new Set() })} />)
     const link = document.createElement('button')
     link.type = 'button'
+    // The shell's own mark on a file link, copied from a live page: without it the press is not this
+    // bridge's to route, whatever its `title` says (see `MARKED_LINK_SELECTOR`).
+    link.className = '_fileMention_1ypvv_85 _fileLink_1ypvv_59'
     link.setAttribute('title', FILE.path)
     document.body.appendChild(link)
     const stop = startProducedChipMenu({
