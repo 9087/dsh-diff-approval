@@ -2889,17 +2889,12 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     if (pairIndex === undefined) return
     const body = bodyRef.current
     if (body === null) return
-    // Bring the pair into view only when it is off-screen; never recenter a
-    // match that is already visible.
+    // Every path into this function is a JUMP (the bar's next / previous, Enter, F3), so the pair goes to
+    // the middle of the pane: the point of the jump is to read the hit, and the top edge would leave it
+    // pressed against the pane's top with the rest of its context below.
     if (body.clientHeight <= 0) return
-    const viewTop = body.scrollTop
-    const viewBottom = viewTop + body.clientHeight
     const pairTop = off(pairIndex)
-    const pairBottom = pairTop + ROW_HEIGHT_PX
-    let target: number | undefined
-    if (pairTop < viewTop) target = pairTop
-    else if (pairBottom > viewBottom) target = pairBottom - body.clientHeight
-    if (target === undefined) return
+    const target = pairTop + ROW_HEIGHT_PX / 2 - body.clientHeight / 2
     const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
     if (body.scrollTop !== clamped) body.scrollTop = clamped
     setScrollTop(clamped)
@@ -5005,11 +5000,10 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   }
 
   /**
-   * Bring one preview search occurrence into view. The code view's search rule is
-   * reused: a hit that is already fully visible is left alone (a search must not
-   * yank the pane off what the user can see), one above the viewport lands with
-   * the lead rows above it — the block-jump rule — and one below lands at the
-   * bottom edge. The settled offset is mirrored into the frames, as for a jump.
+   * Put one preview search occurrence in the middle of the pane. Its only caller is the search JUMP — the
+   * bar's next / previous, Enter, F3 — and the point of that jump is to read the occurrence it landed on,
+   * which is the rule the code view and the side-by-side view now follow too. The settled offset is
+   * mirrored into the frames, as for a jump.
    * @param hit - the highlighted occurrence to reveal.
    */
   const scrollPreviewHitIntoView = (hit: HTMLElement): void => {
@@ -5018,12 +5012,10 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const bodyRect = body.getBoundingClientRect()
     const hitTop = hit.getBoundingClientRect().top - bodyRect.top + body.scrollTop
     const hitBottom = hit.getBoundingClientRect().bottom - bodyRect.top + body.scrollTop
-    const viewTop = body.scrollTop
-    const viewBottom = viewTop + body.clientHeight
-    let target: number | undefined
-    if (hitTop - leadRows * ROW_HEIGHT_PX < viewTop) target = hitTop - leadRows * ROW_HEIGHT_PX
-    else if (hitBottom > viewBottom) target = hitBottom - body.clientHeight
-    if (target === undefined) return
+    // Its only caller is the search JUMP, so the hit goes to the middle of the pane — the rule the code
+    // view and the side-by-side view follow there too: the point of the jump is to read the occurrence it
+    // landed on.
+    const target = (hitTop + hitBottom) / 2 - body.clientHeight / 2
     const maxTop = Math.max(0, body.scrollHeight - body.clientHeight)
     const clamped = Math.max(0, Math.min(target, maxTop))
     if (body.scrollTop !== clamped) body.scrollTop = clamped
@@ -5128,9 +5120,13 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     // the anchor: land on the selected occurrence first (so "选中这个作为第一个
     // holds), then subsequent presses advance normally.
     if (cursorPosRef.current !== undefined) {
+      centerSearchRef.current = true
+      setSearchJump(jump => jump + 1)
       setSearchIndex(startIndexFor(searchQuery))
       return
     }
+    centerSearchRef.current = true
+    setSearchJump(jump => jump + 1)
     setSearchIndex(current => (current + direction + searchMatches.length) % searchMatches.length)
   }
 
@@ -5158,6 +5154,11 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   // the next search starts from, since a diff has no text caret. Cleared once
   // consumed, and whenever the search bar closes.
   const cursorPosRef = useRef<RowRange | undefined>(undefined)
+  /** Set by a search JUMP: the next match is centred, where a typed query only brings it into view. */
+  const centerSearchRef = useRef(false)
+  /** Bumped by every JUMP, so the centring effect runs even when the match itself does not change (a single
+   *  hit, or a wrap back onto the same row). */
+  const [searchJump, setSearchJump] = useState(0)
   // Remembers the range the cursor was last recorded from, so a repeated
   // `selectionchange` for the same lingering selection (e.g. after a focus move)
   // does not re-record it.
@@ -5244,27 +5245,32 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     if (searchOpen) searchInputRef.current?.focus()
   }, [searchOpen])
 
-  // Bring the current search match into view, but never recenter when it is
-  // already inside the viewport: a search shouldn't yank the scroll position if
-  // the match is already visible.
+  // Put the current search match in the middle of the pane when the reader JUMPED to it (the bar's next /
+  // previous, Enter, F3): the point of that jump is to read the hit, and the top edge — where a block jump
+  // puts its block — would leave it pressed against the pane's top with all of its context below. A query
+  // the reader is only typing keeps the softer rule: a match already visible is left alone and an off-screen
+  // one is brought just inside the edge, so typing does not drag the pane around under them.
   useLayoutEffect(() => {
     const row = currentSearchRow
     if (row === undefined) return
     const body = bodyRef.current
     if (body === null) return
     if (body.clientHeight <= 0) return
+    const centring = centerSearchRef.current
+    centerSearchRef.current = false
     const viewTop = body.scrollTop
     const viewBottom = viewTop + body.clientHeight
     const rowTop = offsetOf(row)
     const rowBottom = rowTop + extentOf(row, row)
     let target: number | undefined
-    if (rowTop < viewTop) target = rowTop
+    if (centring) target = (rowTop + rowBottom) / 2 - body.clientHeight / 2
+    else if (rowTop < viewTop) target = rowTop
     else if (rowBottom > viewBottom) target = rowBottom - body.clientHeight
     if (target === undefined) return
     const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
     if (body.scrollTop !== clamped) body.scrollTop = clamped
     setScrollTop(clamped)
-  }, [currentSearchRow, searchMatches])
+  }, [currentSearchRow, searchMatches, searchJump])
 
   // Row index -> block index, so hovering any row of a block shows its actions.
   const blockIndexByRow = useMemo(() => {

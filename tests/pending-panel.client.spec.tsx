@@ -8068,6 +8068,41 @@ describe('PendingPanel', () => {
     expect(current.textContent).toContain('baz')
   })
 
+  it('centres the match a search jump lands on', () => {
+    // 'needle' sits on line 50 of a file whose only change is on line 1, so the match is far below the
+    // viewport. Every JUMP — the bar's next / previous, Enter, F3 — puts it in the MIDDLE of the pane: the
+    // point of the jump is to read the occurrence it landed on. This file has exactly one match, which also
+    // pins the trigger a plain index change would miss: a jump onto the row that is already current still
+    // centres.
+    const text = (changed: boolean): string => Array.from({ length: 60 }, (_, i) => {
+      const line = i + 1
+      if (line === 1) return changed ? 'CHANGED' : 'first'
+      if (line === 50) return 'needle'
+      return `line ${line}`
+    }).join('\n') + '\n'
+    const file = entry({ id: 'entry-search-centre', path: '/repo/centre.txt', oldText: text(false), newText: text(true) })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('centre.txt'))
+    fireEvent.click(screen.getByLabelText('action.search'))
+
+    const restore = stubCodeScroll()
+    try {
+      const pane = document.querySelector('[data-diff-body]') as HTMLElement
+      fireEvent.change(document.querySelector('[data-diff-search-input]') as HTMLInputElement, { target: { value: 'needle' } })
+      fireEvent.click(document.querySelector('[data-diff-search-next]') as HTMLElement)
+      const current = document.querySelector('[data-diff-search="current"]') as HTMLElement
+      const row = Number(current.getAttribute('data-diff-row'))
+      const height = diffLineHeight()
+      expect(pane.scrollTop).toBe(row * height + height / 2 - pane.clientHeight / 2)
+      // The property the reader sees: the match's own middle is the pane's middle.
+      expect(row * height - pane.scrollTop + height / 2).toBe(pane.clientHeight / 2)
+    } finally {
+      restore()
+    }
+  })
+
   it('Ctrl+F auto-fills the query from the selected text and lands on that occurrence first', () => {
     // 'data' appears in row 0 and row 2 (both context) so the auto-filled query
     // has two matches; selecting row 2 must make IT the first (current) result,
@@ -14122,11 +14157,11 @@ describe('PendingPanel', () => {
       vi.spyOn(hit, 'getBoundingClientRect').mockImplementation(() => rect(300 + index * 40, 320 + index * 40))
     })
 
-    // The second match sits below the fold: it lands at the pane's bottom edge,
-    // which is the code view's rule for a match under the viewport. (A match
-    // already inside the viewport is left where it is, as there too.)
+    // The second match is CENTRED: hit 2 spans 340..360, so its middle is 350 and the pane (100 tall)
+    // puts it at 350 - 50 = 300. Every jump centres the occurrence it lands on — the rule the code view
+    // and the side-by-side view follow too.
     fireEvent.click(document.querySelector('[data-diff-search-next]') as HTMLElement)
-    expect(scrolled).toBe(360 - 100)
+    expect(scrolled).toBe(300)
   })
 
   it('restores the remembered coverage from the footer entry', () => {
