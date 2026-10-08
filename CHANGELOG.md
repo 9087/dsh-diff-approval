@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.33.0](https://github.com/9087/dsh-diff-approval/compare/v0.32.0...v0.33.0) (2026-10-08)
+
+### Features
+
+* **panel:** centre the match a search jump lands on ([cb1f0b2](https://github.com/9087/dsh-diff-approval/commit/cb1f0b20a3f08f95865ece75cb8b5223473fba9f))
+
+### Bug Fixes
+
+* **client:** admit a file press only when the shell marks it as one ([b7d1429](https://github.com/9087/dsh-diff-approval/commit/b7d142918a43d646b39ad89d268a7fb33b935283))
+
 ## [0.32.0](https://github.com/9087/dsh-diff-approval/compare/v0.31.0...v0.32.0) (2026-10-07)
 
 ### Features
