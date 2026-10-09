@@ -224,6 +224,8 @@ interface CommentHost {
   answers: Record<string, string>
   /** Hand out an answer for one question, as the host would read it from the transcript. */
   answer: (requestId: string, text: string) => void
+  /** The turn that claimed one question is over — the log's `turn/end`, which the host writes back. */
+  end: (requestId: string) => void
   /** The session discarded a question before a turn claimed it. */
   drop: (requestId: string) => void
   /** The host dropped one comment outright — what keeping or reverting its entry does. */
@@ -329,14 +331,44 @@ function newestAsk(props: PanelProps, id?: string): { record: CommentRecord; req
 }
 
 /**
- * Answer the newest question, the way the host derives an answer from the transcript.
+ * The whole reply to the newest question: the host derived an answer from the transcript AND the turn
+ * that wrote it is over.
+ *
+ * Both halves, because an answer alone is a turn still in progress: it is written after the turn's first
+ * message and replaced by its later ones (see `answerMidTurn` for that state, which is the one a half
+ * answer leaves the thread in).
  * @param props - the panel under test.
  * @param text - what the agent answered.
  * @param id - the comment whose question is answered (defaults to the newest comment).
  */
 function answerComment(props: PanelProps, text: string, id?: string): void {
   const { requestId } = newestAsk(props, id)
+  act(() => {
+    hostOf(props).answer(requestId, text)
+    hostOf(props).end(requestId)
+  })
+}
+
+/**
+ * The reply SO FAR: the turn wrote something and is still working, which is what a tool call between two
+ * messages looks like from the panel — an answer exists and more is coming.
+ * @param props - the panel under test.
+ * @param text - what the turn has written.
+ * @param id - the comment whose question is being answered (defaults to the newest comment).
+ */
+function answerMidTurn(props: PanelProps, text: string, id?: string): void {
+  const { requestId } = newestAsk(props, id)
   act(() => { hostOf(props).answer(requestId, text) })
+}
+
+/**
+ * The turn that claimed the newest question is over, with no further answer coming.
+ * @param props - the panel under test.
+ * @param id - the comment whose question the turn claimed (defaults to the newest comment).
+ */
+function endComment(props: PanelProps, id?: string): void {
+  const { requestId } = newestAsk(props, id)
+  act(() => { hostOf(props).end(requestId) })
 }
 
 /** The session dropped the newest question before any turn claimed it. */
@@ -581,6 +613,15 @@ function panelProps(
     answer: (requestId, text) => {
       if (answers[requestId] === text) return
       answers[requestId] = text
+      revision += 1
+      publish()
+    },
+    end: (requestId) => {
+      const record = comments.find(entry => entry.asks?.some(ask => ask.requestId === requestId) === true)
+      if (record?.asks === undefined) return
+      const ask = record.asks.find(candidate => candidate.requestId === requestId)
+      if (ask?.ended === true) return
+      record.asks = record.asks.map(candidate => (candidate.requestId === requestId ? { ...candidate, ended: true } : candidate))
       revision += 1
       publish()
     },
@@ -10174,6 +10215,55 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
   })
 
+  it('keeps saying it is replying while the turn that wrote the answer is still running', async () => {
+    // THE READER'S REPORT, 2026-10-09: a turn writes a message, calls a tool and writes again, so an
+    // answer exists long before the turn is over — and the note used to come down for those FIRST words,
+    // leaving a half answer with nothing saying more was coming. Waiting is about the TURN, so the note
+    // (and this thread's own refused send) stays until the host says the turn ended.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const code = rows[5]!.querySelector('[data-diff-code]') ?? rows[5]!
+    const node = code.firstChild ?? code
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
+    await act(async () => {
+      fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
+    })
+
+    // The turn's first message: the answer is on screen, and more of it is coming.
+    answerMidTurn(props, 'the first half')
+    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('the first half')
+    expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
+    expect((document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement).disabled).toBe(true)
+    expect((document.querySelector('[data-diff-discussion-input]') as HTMLInputElement).disabled).toBe(true)
+
+    // Its later message replaces the answer — the transcript keeps the turn's LAST text — and the note is
+    // still up, which is the point: the reader watches the answer grow instead of being told it is done.
+    answerMidTurn(props, 'the first half, and then the rest')
+    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('the first half, and then the rest')
+    expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
+
+    // The TURN ending is what releases the thread, and it leaves the answer standing.
+    endComment(props)
+    expect(document.querySelector('[data-diff-discussion-asking]')).toBeNull()
+    expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('the first half, and then the rest')
+    expect((document.querySelector('[data-diff-discussion-send]') as HTMLButtonElement).disabled).toBe(false)
+  })
+
   it('draws a turn\'s inline code and bold, and never the markers', async () => {
     // The thread is prose laid out on the code rows, so it knows exactly two pieces of inline
     // Markdown: \`code\` and **bold**. Both are drawn with their markers gone, and the row
@@ -10725,7 +10815,7 @@ describe('PendingPanel', () => {
   it('only the newest question decides whether a thread is waiting or failed', () => {
     // The host answers every question it has a transcript message for, and the LAST one's state is
     // what the block wears: an older question the session dropped does not condemn a thread whose
-    // newest question is answered and live.
+    // newest question is answered and whose turn is over.
     const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     render(<PendingPanel {...panelProps({
       read: true,
@@ -10736,7 +10826,7 @@ describe('PendingPanel', () => {
         entryId: multi.id,
         text: 'why?',
         anchor: { startLine: 4, endLine: 4 },
-        asks: [{ requestId: 'q1', dropped: true }, { requestId: 'q2' }],
+        asks: [{ requestId: 'q1', dropped: true }, { requestId: 'q2', ended: true }],
       })],
       commentAnswers: { q2: 'the answer' },
     })} />)
@@ -10787,7 +10877,7 @@ describe('PendingPanel', () => {
       files: [multi],
       busy: new Set(),
       comments: [
-        comment({ id: 'd-answered', entryId: multi.id, text: 'the first one', anchor: { startLine: 4, endLine: 4 }, asks: [{ requestId: 'q1' }] }),
+        comment({ id: 'd-answered', entryId: multi.id, text: 'the first one', anchor: { startLine: 4, endLine: 4 }, asks: [{ requestId: 'q1', ended: true }] }),
         comment({ id: 'd-waiting', entryId: multi.id, text: 'the second one', anchor: { startLine: 4, endLine: 4 }, asks: [{ requestId: 'q2' }] }),
       ],
       commentAnswers: { q1: 'the first answer' },
@@ -10877,10 +10967,11 @@ describe('PendingPanel', () => {
     expect(screen.getByText('the session is gone')).toBeDefined()
   })
 
-  it('keeps the caret in the writing row across a send', async () => {
-    // The writing row stays while a question is in flight (see `DiscussionBlock`), so the caret never
-    // has to leave: the send takes the words, leaves the field where it was, and the reader can type
-    // the next question without reaching for the block again.
+  it('disables the writing row while a send is in flight, and lets it write again once the turn is over', async () => {
+    // The writing row stays while a question is in flight — it is where the follow-up will be written and
+    // the draft in it is kept — but it takes no writing until the turn is over: the FIELD is disabled, the
+    // same rule its own send button follows. (A disabled field cannot hold the caret, so the caret leaves
+    // with it; the row itself keeps its place in the page.)
     const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [multi], busy: new Set() })
     render(<PendingPanel {...props} />)
@@ -10906,16 +10997,17 @@ describe('PendingPanel', () => {
     await act(async () => { fireEvent.keyDown(input(), { key: 'Enter' }) })
 
     expect(askedPrompts(props).length).toBe(1)
-    // The row is still there, empty and focused: the send took the text, not the place the reader was
-    // typing in.
+    // The row is still there and empty — the send took the words, not the place — and it is DISABLED while
+    // the thread waits on its answer: the field takes no writing, which is the rule its send button
+    // already followed.
     expect(document.querySelector('[data-diff-discussion-input]')).not.toBeNull()
     expect(input().value).toBe('')
-    expect(document.activeElement).toBe(input())
+    expect(input().disabled).toBe(true)
 
-    // The answer lands in the same block, and the row is still where it was for the next question.
+    // The answer lands in the same block and the turn is over: the row takes writing again.
     answerComment(props, 'because')
     expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('because')
-    expect(document.activeElement).toBe(input())
+    expect(input().disabled).toBe(false)
   })
 
   it('scrolls with the code from a wheel over a discussion block', () => {
@@ -11250,9 +11342,9 @@ describe('PendingPanel', () => {
     // The same thread with a question and an answer: the annotation's bubble, the answer's own lines,
     // and the writing row under them. The blank line in the answer is the agent's paragraph gap, and
     // it costs neither a row nor a line in the render — a blank line in a thread reads as a gap in the
-    // code it annotates.
+    // code it annotates. The turn is over, so there is no waiting note.
     draft.unmount()
-    render(<PendingPanel {...panelProps({
+    const answered = render(<PendingPanel {...panelProps({
       read: true,
       files: [multi],
       busy: new Set(),
@@ -11261,7 +11353,7 @@ describe('PendingPanel', () => {
         entryId: multi.id,
         text: 'why?',
         anchor: { startLine: 4, endLine: 4 },
-        asks: [{ requestId: 'q1' }],
+        asks: [{ requestId: 'q1', ended: true }],
       })],
       commentAnswers: { q1: 'first answer\n\nsecond line' },
     })} />)
@@ -11274,6 +11366,31 @@ describe('PendingPanel', () => {
     expect(block().style.height).toBe('154px')
     expect(space().style.height).toBe('154px')
     expect(document.querySelector('[data-diff-discussion-reply]')?.textContent).toBe('first answer\nsecond line')
+
+    // The WAITING note is a row of its own, on the same grid: the same thread with its turn still
+    // running is exactly one row taller (22px), not a gap that would push the code below it off the
+    // grid — which is what a second, shorter block would do.
+    answered.unmount()
+    const waiting = render(<PendingPanel {...panelProps({
+      read: true,
+      files: [multi],
+      busy: new Set(),
+      comments: [comment({
+        id: 'd-grid-waiting',
+        entryId: multi.id,
+        text: 'why?',
+        anchor: { startLine: 4, endLine: 4 },
+        asks: [{ requestId: 'q1' }],
+      })],
+      commentAnswers: { q1: 'first answer\n\nsecond line' },
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
+    expect(block().style.height).toBe('176px')
+    expect(space().style.height).toBe('176px')
+    waiting.unmount()
   })
 
   /**
@@ -11362,7 +11479,9 @@ describe('PendingPanel', () => {
         entryId: before.id,
         text: 'why?',
         anchor: { startLine: 2, endLine: 2 },
-        asks: [{ requestId: 'q-drift' }],
+        // The turn is over, so the reader is composing a follow-up in a row the panel lets them write
+        // in: an in-flight question disables that field (and with it the caret this test is gated on).
+        asks: [{ requestId: 'q-drift', ended: true }],
       })
       const view = render(<PendingPanel {...panelProps({
         read: true,

@@ -1188,11 +1188,14 @@ function discussionOfRecord(
     quote: record.quote,
     ...(record.quoteContext === undefined ? {} : { quoteContext: record.quoteContext }),
     ...(record.quoteLines === undefined ? {} : { quoteLines: quoteLinesOf(record.quoteLines) }),
-    // Waiting is "the newest question has no answer yet, and nothing has said it is over": a question
-    // the session dropped is the failure the block has always reported for one that will never be
-    // answered, and one whose turn ENDED is the stop note below. A send this pane refused outright is
-    // page-local (`failed` below), because no question was ever stored for the host to know about.
-    ...(last !== undefined && answered === undefined && last.dropped !== true && last.ended !== true
+    // Waiting is "the newest question's TURN has not ended": what the reader is owed is the turn, not its
+    // first words. A turn that writes, calls a tool and writes again has an answer after its first
+    // message, and `readTurn` keeps replacing it with the turn's later one — so an answer already on
+    // screen is still a thread being answered, and taking the note down for it left a half-answer with
+    // nothing saying more was coming (the reader's report, 2026-10-09). A question the session dropped is
+    // the failure below, one whose turn ENDED is the stop note, and a send this pane refused outright is
+    // page-local (`failed` below).
+    ...(last !== undefined && last.dropped !== true && last.ended !== true
       ? { asking: true } : {}),
     ...(state?.failed === true || (last !== undefined && last.dropped === true) ? { failed: true } : {}),
     // The turn that claimed the newest question is over and the transcript holds no answer for it:
@@ -1851,6 +1854,10 @@ function DiscussionBlock({
               ref={(element) => { registerInput(discussion.id, element) }}
               value={discussion.draft}
               placeholder={t('discussion.placeholder')}
+              // THIS thread is waiting on an answer: the row is drawn (it is where the follow-up will
+              // start, and the draft in it is kept) but it takes no writing until the turn is over — the
+              // same rule its own send button follows, applied to the field.
+              disabled={asking}
               onChange={(event) => { onDraft(discussion.id, event.target.value) }}
               onKeyDown={(event) => {
                 if (event.key !== 'Enter') return
