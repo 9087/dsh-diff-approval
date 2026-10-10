@@ -1683,7 +1683,7 @@ interface DiscussionBlockProps {
   onDraft: (id: string, value: string) => void
   onSend: (id: string) => void
   /** Hands the writing field's element to the panel, so a send can ask for the caret back. */
-  registerInput: (id: string, element: HTMLInputElement | null) => void
+  registerInput: (id: string, element: HTMLTextAreaElement | null) => void
   /**
    * The reader has this card in front of them, held there: the host takes its unseen dot down. Not
    * called for a card the panel never drew, and never called twice for one look.
@@ -1714,6 +1714,38 @@ function DiscussionBlock({
   // The reader looking at the card is what clears the host's dot: the card is the only place a comment
   // can be read in full, so its own visibility is the signal (see `useSeenOnView`).
   const { ref: cardRef, dotOff } = useSeenOnView(discussion.unseen === true, onSeen)
+  const inputRef = useRef<HTMLTextAreaElement | null>(null)
+  /**
+   * The writing field's height follows what is written in it.
+   *
+   * At one line it is the 26px control the row's grid was built from (an 18px line, 3px of padding and a
+   * 1px border a side); every further line — one the field wrapped by itself, or one the reader broke with
+   * Shift+Enter — adds a line's height, up to the cap the stylesheet states, past which the field scrolls.
+   * The panel measures the card's own drawing and reserves whole rows for it (see the block's `bodyRows`
+   * correction), so the extra height is taken from the thread's reservation rather than pushing the code
+   * below it.
+   *
+   * A field with no layout at all — jsdom, a hidden pane — reports 0, and the height is then left entirely
+   * to the stylesheet. That is deliberate: the row grid the tests measure is the CSS recipe, and a zero
+   * reading written through as `0px` would collapse the field and move every measurement with it.
+   */
+  useLayoutEffect(() => {
+    const element = inputRef.current
+    if (element === null) return
+    // `auto` first: the box has to be free to report the height its content needs, not the one the last
+    // pass wrote into it.
+    element.style.height = 'auto'
+    const natural = element.scrollHeight
+    if (natural <= 0) {
+      element.style.height = ''
+      return
+    }
+    // `scrollHeight` is the content plus the padding; the border lies outside it and the field is a
+    // border-box, so this is the box that draws that content.
+    const style = getComputedStyle(element)
+    const border = (Number.parseFloat(style.borderTopWidth) || 0) + (Number.parseFloat(style.borderBottomWidth) || 0)
+    element.style.height = `${natural + border}px`
+  })
   return (
     <div
       className={css.discussion}
@@ -1853,10 +1885,17 @@ function DiscussionBlock({
                 above this row, so a reply still has something to be about, and the row stays
                 where the writing would happen so the block's shape does not change under the
                 reader when the code moves on. */}
-            <input
+            {/* A TEXTAREA, not an input: a comment is prose, and one line is not enough for it. The
+                field wraps by itself and grows a line at a time with what is written in it (see the
+                growth effect), and Shift+Enter breaks the line deliberately while Enter still sends. */}
+            <textarea
               className={css.discussionInput}
               data-diff-discussion-input
-              ref={(element) => { registerInput(discussion.id, element) }}
+              rows={1}
+              ref={(element) => {
+                inputRef.current = element
+                registerInput(discussion.id, element)
+              }}
               value={discussion.draft}
               placeholder={t('discussion.placeholder')}
               // THIS thread is waiting on an answer: the row is drawn (it is where the follow-up will
@@ -1869,6 +1908,9 @@ function DiscussionBlock({
                 // An IME's "confirm the candidate" Enter must not send: composing is the signal
                 // for it, and 229 is the code some engines send when they will not say so.
                 if (event.nativeEvent.isComposing || event.keyCode === 229) return
+                // SHIFT+ENTER IS THE READER'S OWN NEWLINE, and it is left to the browser: the key falls
+                // through, the textarea breaks the line, and the draft keeps it. Enter alone is the send.
+                if (event.shiftKey) return
                 event.preventDefault()
                 // The button's own rule, for the field's Enter: this thread is already waiting on an
                 // answer, and a second question would ride in on top of the first.
@@ -4505,7 +4547,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    *  `DiscussionBlock`): finishing a thread takes the block, and its rows, away. */
   const [discussionMenuFor, setDiscussionMenuFor] = useState<string | undefined>(undefined)
   /** The compose inputs, so a freshly created block can take the caret. */
-  const discussionInputEls = useRef(new Map<string, HTMLInputElement>())
+  const discussionInputEls = useRef(new Map<string, HTMLTextAreaElement>())
   /** The block whose input should be focused once it is on screen. */
   const focusPendingRef = useRef<string | undefined>(undefined)
   /**

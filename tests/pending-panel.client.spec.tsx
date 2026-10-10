@@ -11090,6 +11090,113 @@ describe('PendingPanel', () => {
     expect(input().disabled).toBe(false)
   })
 
+  it('writes in a textarea: it wraps, Shift+Enter breaks the line, and Enter still sends', async () => {
+    // A comment is prose, so the field is a TEXTAREA and not an input: it wraps instead of scrolling
+    // sideways, gives the growth effect a box to raise a line at a time, and takes a line the reader broke
+    // on purpose. Shift+Enter is that line — the key falls through to the browser, which is what makes the
+    // browser insert it — while Enter alone is still the send.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+
+    const field = (): HTMLTextAreaElement => document.querySelector('[data-diff-discussion-input]') as HTMLTextAreaElement
+    // One line tall at rest, and a textarea: that is what lets it wrap and grow.
+    expect(field().tagName).toBe('TEXTAREA')
+    expect(field().rows).toBe(1)
+
+    fireEvent.change(field(), { target: { value: 'first line' } })
+    const shiftEnter = new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true, cancelable: true })
+    field().dispatchEvent(shiftEnter)
+    // NOT prevented — the browser's own newline — and nothing was SENT. The one write so far is the card the
+    // PLACEMENT wrote, with nothing in it (that is what lists an unsent comment), not a send.
+    expect(shiftEnter.defaultPrevented).toBe(false)
+    expect(askedPrompts(props)).toEqual([])
+    const writes = (props.onCommentAdd as unknown as { mock: { calls: [SessionId, { text: string }][] } }).mock.calls
+    expect(writes.map(call => call[1].text)).toEqual([''])
+
+    // Enter alone sends, and the lines the reader broke above it travel with the comment.
+    fireEvent.change(field(), { target: { value: 'first line\nsecond line' } })
+    await act(async () => { fireEvent.keyDown(field(), { key: 'Enter' }) })
+    // The placement's empty card, then the words: one comment, written twice.
+    expect(addedCommentTexts(props)).toEqual(['', 'first line\nsecond line'])
+  })
+
+  it('raises the writing field to the height its content needs, and leaves the stylesheet in charge without layout', () => {
+    // jsdom lays nothing out, so `scrollHeight` is 0 — and then the height must stay the STYLESHEET's,
+    // because the row grid every measurement test reads IS that CSS recipe: a zero written through as
+    // `0px` would collapse the field and move every measurement with it. A real layout reports a height,
+    // and the box is set to it plus the border `scrollHeight` leaves out.
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+
+    const field = document.querySelector('[data-diff-discussion-input]') as HTMLTextAreaElement
+    expect(field.style.height).toBe('')
+
+    Object.defineProperty(field, 'scrollHeight', { configurable: true, get: () => 40 })
+    const computed = window.getComputedStyle.bind(window)
+    vi.spyOn(window, 'getComputedStyle').mockImplementation((element: Element) =>
+      element === field
+        ? ({ borderTopWidth: '1px', borderBottomWidth: '1px' } as CSSStyleDeclaration)
+        : computed(element))
+    fireEvent.change(field, { target: { value: 'a' } })
+
+    // 40px of content and the two 1px borders: the box that draws it.
+    expect(field.style.height).toBe('42px')
+  })
+
+  it('declares the wrapping, the one-line floor and the growth ceiling in the stylesheet', () => {
+    // jsdom lays nothing out, so the field's wrapping and how far it may grow are answered by the sheet.
+    // Read by name the way the neighbouring CSS cases do, so a dropped declaration fails here.
+    const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const rule = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(sheet)?.[1] ?? ''
+    const input = rule('discussionInput')
+    expect(input).toContain('white-space: pre-wrap')
+    expect(input).toContain('overflow-wrap: anywhere')
+    // One toolbar button tall at rest — the recipe the send button and the frame's own actions use.
+    expect(input).toContain('min-height: 26px')
+    // Eight lines is the ceiling: past it the field scrolls rather than taking more of the panel.
+    expect(input).toContain('max-height: calc(18px * 8 + 6px + 2px)')
+    expect(input).toContain('overflow-y: auto')
+    expect(input).toContain('resize: none')
+    // …and the band the field sits in is a MINIMUM height now, with no FIXED one: a fixed height would
+    // clip a grown field instead of letting the block's own reservation follow it.
+    const compose = rule('discussionCompose')
+    expect(compose).toContain('min-height: calc(22px * 2)')
+    expect(compose).toContain('height: auto')
+    expect(/(^|\n)\s*height:\s*calc\(/.test(compose)).toBe(false)
+  })
+
   it('scrolls with the code from a wheel over a discussion block', () => {
     // A block is painted INSIDE the scroller, in content coordinates, so the wheel
     // over it is the browser's own business — that is what makes it scroll with the

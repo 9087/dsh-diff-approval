@@ -3317,7 +3317,12 @@
   align-items: flex-end;
   gap: 8px;
   box-sizing: border-box;
-  height: calc(22px * 2);
+  /* The band's two rows are a MINIMUM, not a height: it is what an empty one-line field needs, and the
+     field grows past it a line at a time as the reader writes (see `.discussionInput`). The row count the
+     block reserves follows what is drawn — the panel measures the card and corrects its `bodyRows` — so a
+     taller field takes rows from the thread's own reservation instead of pushing the code down. */
+  min-height: calc(22px * 2);
+  height: auto;
   /* Horizontally the wider row above; vertically the leftover sits ABOVE the pair. */
   margin: 0 -6px;
   /* ...and a third of a row stays under the pair, so the block does not end on the controls'
@@ -3345,26 +3350,40 @@
   max-height: 22px;
 }
 
-/* The writing field, whose box is exactly one toolbar button (26px: 3px of padding,
-   an 18px line and a 1px border on each side — the recipe `.action` uses, so the two
-   cannot drift apart). An `<input>` centres its text in the box by itself, so the
-   vertical padding is only about the height. */
+/* The writing field, whose box is one toolbar button tall while it holds one line (26px: 3px of
+   padding, an 18px line and a 1px border on each side — the recipe `.action` uses, so the two
+   cannot drift apart), and grows a line at a time with the comment.
+
+   It is a TEXTAREA: a comment is prose, so it wraps instead of scrolling sideways, and Shift+Enter
+   can break a line on purpose. The height is set from the content by the panel's own growth effect —
+   `min-height` is the one-line control, `max-height` is the cap past which the field scrolls (eight
+   lines: a comment long enough to pass that is being read in the conversation, not in this row).
+   `resize: none` because the drag handle is not offered here: the row's height is the thread's
+   reservation, measured by the panel, and a reader-set height would be a number nothing tracks. */
 .discussionInput {
   flex: 1 1 auto;
   min-width: 0;
   box-sizing: border-box;
   /* Stated, not inferred: the recipe below is what makes 26px, but the field and 评论 both say the
      number so a font metric on either one cannot pull them apart by a pixel. */
-  height: 26px;
+  min-height: 26px;
+  max-height: calc(18px * 8 + 6px + 2px);
   padding: 3px 8px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 6px;
   background: var(--dsw-alias-bg-base);
   color: var(--dsw-alias-label-primary);
   /* Family from the compose row, at the thread's own size: the writing field belongs to the
-     comment box, not to the code, so it keeps the size the default setting shows. */
+     comment box, not to the code, so it keeps the size the default setting shows. `font-size` is
+     stated with it because a form control's size is its own user-agent default, not the parent's. */
   font-family: inherit;
+  font-size: inherit;
   line-height: 18px;
+  /* Wrapping, and a long token (a path, a hash) broken rather than pushed out of the box. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-y: auto;
+  resize: none;
   /* The block takes the text beam back (see `.discussion`); the field asks for it again, and
      its disabled rule turns it off once there is nothing to type. */
   cursor: text;
