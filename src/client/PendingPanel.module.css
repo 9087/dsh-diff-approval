@@ -2563,6 +2563,16 @@
   flex: 1;
   min-width: 0;
   overflow: auto;
+  /* THE SCROLLBAR IS PART OF THE LAYOUT, ALWAYS. Without this, the gutter appears the moment the
+     content grows past the viewport, which narrows this box by the scrollbar's own width — and a
+     thread card both measures its width from here (`bodyWidth`, read from `clientWidth`) and reports
+     its own drawn height back to the panel (`bodyRows`). A narrower box re-wraps the card, which
+     makes it TALLER, which keeps the scrollbar; right at the row boundary the two states flip —
+     taller card → scrollbar → narrower card → one more wrapped line → taller card → … — and React's
+     nested-update counter gives up with the panel unmounted. Hit live on 2026-10-11, at exactly the
+     height where a card first makes the code scroll. Reserving the gutter keeps this box's inner
+     width constant, so the card's wrap and the scrollbar cannot feed each other. */
+  scrollbar-gutter: stable;
   /* No inner padding: the whole-file diff runs edge to edge inside the
      scroll area, leaving no band above/below the rows or beside the text. */
   padding: 0;
@@ -2935,6 +2945,20 @@
      reserving air it never draws. */
   display: flex;
   flex-direction: column;
+}
+
+/* THE TURNS KEEP THEIR OWN HEIGHT, WHATEVER THE BLOCK RESERVED; ONLY THE SLACK FLEXES.
+   A flex item's default `flex-shrink: 1` let the reserved rows SQUASH the turns whenever the
+   reservation came up short — so the height the panel measured was not the content's but the
+   consequence of its own last write. The two figures then alternated at a row boundary: the blank
+   band above the writing row appeared and disappeared while the reader scrolled (the block was
+   re-measured, decided it needed a row it had just given back, and wrote that), and before the loop
+   was bounded it took the panel down with React's `Maximum update depth exceeded`. With the turns
+   rigid, one reading is the content's own height, the correction lands once, and the band is the
+   same for that card every time it is drawn. `overflow: hidden` on the body above clips the overrun
+   for the single frame an under-reserved block takes to be corrected. */
+.discussionBody > *:not(.discussionSlack) {
+  flex: none;
 }
 
 /* A block whose anchor no longer holds the code it was written about: it stays where it
@@ -3317,12 +3341,11 @@
   align-items: flex-end;
   gap: 8px;
   box-sizing: border-box;
-  /* The band's two rows are a MINIMUM, not a height: it is what an empty one-line field needs, and the
-     field grows past it a line at a time as the reader writes (see `.discussionInput`). The row count the
-     block reserves follows what is drawn — the panel measures the card and corrects its `bodyRows` — so a
-     taller field takes rows from the thread's own reservation instead of pushing the code down. */
-  min-height: calc(22px * 2);
-  height: auto;
+  /* A FIXED two rows, which with the one-row header is the three rows the block reserves. It must not
+     become a minimum: the card's own row count is measured from what it draws (see the panel's `bodyRows`
+     correction), so a band that grew with the field would make the block's height depend on its own
+     measurement — the loop that threw at the boundary (2026-10-11). The field scrolls instead. */
+  height: calc(22px * 2);
   /* Horizontally the wider row above; vertically the leftover sits ABOVE the pair. */
   margin: 0 -6px;
   /* ...and a third of a row stays under the pair, so the block does not end on the controls'
@@ -3350,24 +3373,24 @@
   max-height: 22px;
 }
 
-/* The writing field, whose box is one toolbar button tall while it holds one line (26px: 3px of
-   padding, an 18px line and a 1px border on each side — the recipe `.action` uses, so the two
-   cannot drift apart), and grows a line at a time with the comment.
+/* The writing field, whose box is exactly one toolbar button (26px: 3px of padding, an 18px line and a
+   1px border on each side — the recipe `.action` uses, so the two cannot drift apart).
 
-   It is a TEXTAREA: a comment is prose, so it wraps instead of scrolling sideways, and Shift+Enter
-   can break a line on purpose. The height is set from the content by the panel's own growth effect —
-   `min-height` is the one-line control, `max-height` is the cap past which the field scrolls (eight
-   lines: a comment long enough to pass that is being read in the conversation, not in this row).
-   `resize: none` because the drag handle is not offered here: the row's height is the thread's
-   reservation, measured by the panel, and a reader-set height would be a number nothing tracks. */
+   It is a TEXTAREA: a comment is prose, so it wraps instead of scrolling sideways, and Shift+Enter can
+   break a line on purpose. Its HEIGHT IS FIXED and the rest of the comment SCROLLS inside it — the box
+   must not follow its content, because the field's natural height depends on its width, and its width
+   depends on whether the code scroller is showing a scrollbar, which appears when the card grows tall
+   enough. A field that grew would close that loop (taller card → scrollbar → narrower card → one more
+   wrapped line → taller field …) and it threw at the boundary on 2026-10-11. The card's own row count is
+   measured from what it draws (see the panel's `bodyRows` correction), so a height that followed the text
+   would also be a height the reservation followed — the same loop by another path. */
 .discussionInput {
   flex: 1 1 auto;
   min-width: 0;
   box-sizing: border-box;
   /* Stated, not inferred: the recipe below is what makes 26px, but the field and 评论 both say the
      number so a font metric on either one cannot pull them apart by a pixel. */
-  min-height: 26px;
-  max-height: calc(18px * 8 + 6px + 2px);
+  height: 26px;
   padding: 3px 8px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 6px;
@@ -3382,6 +3405,7 @@
   /* Wrapping, and a long token (a path, a hash) broken rather than pushed out of the box. */
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  /* What is written past the one visible line scrolls within the box rather than growing it. */
   overflow-y: auto;
   resize: none;
   /* The block takes the text beam back (see `.discussion`); the field asks for it again, and

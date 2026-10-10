@@ -5164,6 +5164,81 @@ describe('PendingPanel', () => {
     expect(source).toMatch(/useLayoutEffect\(\(\) => \{\s*measureFloatBoxRef\.current\(\)\s*\}, \[/)
   })
 
+  it('keeps the turns rigid, so the card measurement reads the content and not its own reservation', () => {
+    // The source of the self-referential loop the cases further down bound: the turns are flex items in a
+    // column whose height IS the block's reservation, and a flex item's default `flex-shrink: 1` let a short
+    // reservation SQUASH them. The height the panel then measured was the consequence of its own last write,
+    // so the two figures alternated at a row boundary — the blank band above the writing row appearing and
+    // disappearing as the reader scrolled, and (before the correction was bounded) React's maximum update
+    // depth. Rigid turns make one reading the content's own height, which is what lets the correction land
+    // once. Only the slack flexes; it is the one child whose job is to take the leftover air.
+    const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    expect(/\.discussionBody > \*:not\(\.discussionSlack\) \{[^}]*flex: none/.test(sheet)).toBe(true)
+    const slack = /\.discussionSlack \{([^}]*)\}/.exec(sheet)?.[1] ?? ''
+    expect(slack).toContain('flex: 1 1 0')
+  })
+
+  it('ignores a card reading that only wobbles within a pixel of what is already reserved', () => {
+    // The live numbers of 2026-10-11, from the panel's own `[CARD-DIAG]` lines: `drawn=661` with `want`
+    // flipping 30, 31, 30 and the slack band going 22px, 0, 22px. A thread's lines fill their rows, so its
+    // height lands ON the pixel where thirty rows become thirty-one (`30 * 22 + 1`), and the layout rounds a
+    // fraction either side of it — so the reservation was rewritten on every pass, which is the blank line
+    // the reader watched appear and disappear above the writing row. One pixel of dead band is what stops a
+    // measurement acting on its own rounding; a card that is really a row out is 22px away, and still
+    // corrects. Pinned as source shape the way the neighbouring measurement cases are: jsdom lays nothing
+    // out, so the sub-pixel wobble itself cannot be produced here.
+    const source = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.tsx'), 'utf8')
+    expect(source).toMatch(
+      /if \(current !== undefined && Math\.abs\(drawn - \(current \* THREAD_ROW_PX \+ DISCUSSION_ROW_SNAP_PX\)\) <= 1\) continue/,
+    )
+  })
+
+  it('stops correcting a card whose reading alternates, instead of updating itself to death', async () => {    // The case above stages a reading that jitters around a row and settles. THIS one stages a reading that
+    // never settles — two rows on one pass, three on the next — which is the shape of the live crash of
+    // 2026-10-11: `Maximum update depth exceeded` thrown out of `PendingDiff` while a comment card was
+    // scrolled into view. The correction writes the card's reservation from a layout effect that has no
+    // dependency array (it must follow the drawing), so every alternation is another nested update, and
+    // React gives up at fifty with the panel unmounted. What has to stop it is the bound on how often one
+    // card may be re-reserved inside a second: three writes, and the model's own figure stands.
+    const file = entry({ id: 'entry-alt', path: '/repo/alt.txt', oldText: 'a\n', newText: 'b\n' })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [comment({ id: 'd-alt', entryId: file.id, text: 'why?', anchor: { startLine: 2, endLine: 2 } })],
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('alt.txt'))
+
+    const card = document.querySelector('[data-diff-discussion]') as HTMLElement
+    const body = card.children[1] as HTMLElement
+    const last = body.lastElementChild as HTMLElement
+    const slack = body.querySelector('[data-diff-discussion-slack]') as HTMLElement
+    const rect = (bottom: number): DOMRect =>
+      ({ top: 0, bottom, left: 0, right: 400, width: 400, height: bottom, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect
+    let pass = 0
+    vi.spyOn(card, 'getBoundingClientRect').mockImplementation(() => rect(0))
+    vi.spyOn(body, 'getBoundingClientRect').mockImplementation(() => rect(0))
+    vi.spyOn(slack, 'getBoundingClientRect').mockImplementation(() => rect(0))
+    // 44px is two rows, 66px is three: the card disagrees with the pass before it, every pass.
+    vi.spyOn(last, 'getBoundingClientRect').mockImplementation(() => rect(pass++ % 2 === 0 ? 44 : 66))
+    const errors: string[] = []
+    const quiet = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { errors.push(args.map(String).join(' ')) })
+    try {
+      await new Promise((resolve) => { window.setTimeout(resolve, 500) })
+      // 1. It did not update itself to death, which is what an unbounded correction does here.
+      expect(errors.filter(message => message.includes('Maximum update depth'))).toEqual([])
+      // 2. And the panel is still the panel.
+      expect(document.querySelector('[data-diff-discussion]')).not.toBeNull()
+      // 3. The reservation is one of the two figures the card actually measured, never a value the loop
+      //    left behind (a whole-row figure either way; the model's own when the bound is reached).
+      const space = card.closest('[data-diff-discussion-space]') as HTMLElement
+      expect(['66px', '88px']).toContain(space.style.height)
+    } finally {
+      quiet.mockRestore()
+    }
+  })
+
   it('keeps the file-list knob fully opaque, hovered or not', () => {
     // It is the only way back to the file list once the list has folded, so it does not
     // fade out when the pointer is elsewhere: no translucent rest state at all. The fill
@@ -11136,11 +11211,14 @@ describe('PendingPanel', () => {
     expect(addedCommentTexts(props)).toEqual(['', 'first line\nsecond line'])
   })
 
-  it('raises the writing field to the height its content needs, and leaves the stylesheet in charge without layout', () => {
-    // jsdom lays nothing out, so `scrollHeight` is 0 — and then the height must stay the STYLESHEET's,
-    // because the row grid every measurement test reads IS that CSS recipe: a zero written through as
-    // `0px` would collapse the field and move every measurement with it. A real layout reports a height,
-    // and the box is set to it plus the border `scrollHeight` leaves out.
+  it('never writes a height to the writing field, so its box cannot feed the card\'s own measurement', () => {
+    // THE CRASH OF 2026-10-11, pinned structurally. A field whose height follows its content depends on its
+    // width, and its width depends on whether the code scroller is showing a scrollbar — which appears
+    // exactly when the card grows tall enough. That loop (taller card → scrollbar → narrower card → one more
+    // wrapped line → taller field → …) flipped at the boundary until React's nested-update counter threw out
+    // of `PendingDiff`. The field keeps the stylesheet's fixed box and scrolls instead, and nothing in the
+    // panel may write a height into it — through typing, a re-render, or a content box that claims to be
+    // tall, which is what the removed growth effect used to write through.
     const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [multi], busy: new Set() })
     render(<PendingPanel {...props} />)
@@ -11163,38 +11241,49 @@ describe('PendingPanel', () => {
     const field = document.querySelector('[data-diff-discussion-input]') as HTMLTextAreaElement
     expect(field.style.height).toBe('')
 
+    // A layout that reports a tall content box, the way a wrapped comment does: still nothing is written.
     Object.defineProperty(field, 'scrollHeight', { configurable: true, get: () => 40 })
-    const computed = window.getComputedStyle.bind(window)
-    vi.spyOn(window, 'getComputedStyle').mockImplementation((element: Element) =>
-      element === field
-        ? ({ borderTopWidth: '1px', borderBottomWidth: '1px' } as CSSStyleDeclaration)
-        : computed(element))
-    fireEvent.change(field, { target: { value: 'a' } })
+    fireEvent.change(field, { target: { value: 'a line long enough to wrap inside the card' } })
+    expect(field.style.height).toBe('')
 
-    // 40px of content and the two 1px borders: the box that draws it.
-    expect(field.style.height).toBe('42px')
+    // …and another render leaves it alone too: the card's measurement pass runs after every one of them.
+    fireEvent.change(field, { target: { value: 'a line long enough to wrap inside the card, and more' } })
+    expect(field.style.height).toBe('')
   })
 
-  it('declares the wrapping, the one-line floor and the growth ceiling in the stylesheet', () => {
-    // jsdom lays nothing out, so the field's wrapping and how far it may grow are answered by the sheet.
-    // Read by name the way the neighbouring CSS cases do, so a dropped declaration fails here.
+  it('declares the field\'s fixed one-line box and its internal scrolling in the stylesheet', () => {
+    // jsdom lays nothing out, so the box's own recipe is read by name the way the neighbouring CSS cases do.
     const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const rule = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(sheet)?.[1] ?? ''
     const input = rule('discussionInput')
     expect(input).toContain('white-space: pre-wrap')
     expect(input).toContain('overflow-wrap: anywhere')
-    // One toolbar button tall at rest — the recipe the send button and the frame's own actions use.
-    expect(input).toContain('min-height: 26px')
-    // Eight lines is the ceiling: past it the field scrolls rather than taking more of the panel.
-    expect(input).toContain('max-height: calc(18px * 8 + 6px + 2px)')
+    // One toolbar button tall — the recipe the send button and the frame's own actions use — and FIXED: a
+    // minimum or a maximum would let the content move the box, which is the loop the case above pins.
+    expect(/(^|\n)\s*height: 26px/.test(input)).toBe(true)
+    expect(/(^|\n)\s*min-height:/.test(input)).toBe(false)
+    expect(/(^|\n)\s*max-height:/.test(input)).toBe(false)
+    // Past the one visible line the field scrolls, and the reader is offered no resize handle.
     expect(input).toContain('overflow-y: auto')
     expect(input).toContain('resize: none')
-    // …and the band the field sits in is a MINIMUM height now, with no FIXED one: a fixed height would
-    // clip a grown field instead of letting the block's own reservation follow it.
+    // …and the band the field sits in is a FIXED two rows: a band that grew would make the block's height
+    // depend on the measurement that writes it.
     const compose = rule('discussionCompose')
-    expect(compose).toContain('min-height: calc(22px * 2)')
-    expect(compose).toContain('height: auto')
-    expect(/(^|\n)\s*height:\s*calc\(/.test(compose)).toBe(false)
+    expect(/(^|\n)\s*height: calc\(22px \* 2\)/.test(compose)).toBe(true)
+    expect(/(^|\n)\s*min-height:/.test(compose)).toBe(false)
+  })
+
+  it('reserves the code scroller\'s gutter, so a scrollbar cannot change the width a card wraps in', () => {
+    // The other half of the 2026-10-11 crash, and the half the field's fixed box cannot cover. The card
+    // reads its width from this box's `clientWidth` and reports its drawn height back to the panel, so a
+    // scrollbar that appears only when the content grows narrows the box, re-wraps the card taller, keeps
+    // the scrollbar — and at the row boundary the two states flip until React throws. The gutter is
+    // reserved for good, which is what makes that loop impossible for ANY content, not just the field.
+    const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const rule = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(sheet)?.[1] ?? ''
+    const body = rule('diffBody')
+    expect(body).toContain('overflow: auto')
+    expect(body).toContain('scrollbar-gutter: stable')
   })
 
   it('scrolls with the code from a wheel over a discussion block', () => {

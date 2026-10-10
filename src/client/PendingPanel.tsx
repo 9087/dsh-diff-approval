@@ -1714,38 +1714,14 @@ function DiscussionBlock({
   // The reader looking at the card is what clears the host's dot: the card is the only place a comment
   // can be read in full, so its own visibility is the signal (see `useSeenOnView`).
   const { ref: cardRef, dotOff } = useSeenOnView(discussion.unseen === true, onSeen)
-  const inputRef = useRef<HTMLTextAreaElement | null>(null)
-  /**
-   * The writing field's height follows what is written in it.
-   *
-   * At one line it is the 26px control the row's grid was built from (an 18px line, 3px of padding and a
-   * 1px border a side); every further line — one the field wrapped by itself, or one the reader broke with
-   * Shift+Enter — adds a line's height, up to the cap the stylesheet states, past which the field scrolls.
-   * The panel measures the card's own drawing and reserves whole rows for it (see the block's `bodyRows`
-   * correction), so the extra height is taken from the thread's reservation rather than pushing the code
-   * below it.
-   *
-   * A field with no layout at all — jsdom, a hidden pane — reports 0, and the height is then left entirely
-   * to the stylesheet. That is deliberate: the row grid the tests measure is the CSS recipe, and a zero
-   * reading written through as `0px` would collapse the field and move every measurement with it.
-   */
-  useLayoutEffect(() => {
-    const element = inputRef.current
-    if (element === null) return
-    // `auto` first: the box has to be free to report the height its content needs, not the one the last
-    // pass wrote into it.
-    element.style.height = 'auto'
-    const natural = element.scrollHeight
-    if (natural <= 0) {
-      element.style.height = ''
-      return
-    }
-    // `scrollHeight` is the content plus the padding; the border lies outside it and the field is a
-    // border-box, so this is the box that draws that content.
-    const style = getComputedStyle(element)
-    const border = (Number.parseFloat(style.borderTopWidth) || 0) + (Number.parseFloat(style.borderBottomWidth) || 0)
-    element.style.height = `${natural + border}px`
-  })
+  // NO HEIGHT IS EVER WRITTEN TO THE FIELD, and that is a rule rather than an omission. A height that
+  // follows what is written — `scrollHeight` — depends on the field's WIDTH, and the width depends on
+  // whether the code scroller is showing a scrollbar, which appears when the card grows tall enough. That
+  // closes a loop the panel cannot win: taller card → scrollbar → narrower card → one more wrapped line →
+  // taller field → …, flipping back and forth at the boundary until React's nested-update counter throws
+  // (`Maximum update depth exceeded`, seen live on 2026-10-11). The card's own reservation is measured from
+  // what it draws (see the `bodyRows` correction), so the field keeps the fixed one-line box the row grid
+  // was built from and SCROLLS to show the rest (`.discussionInput`).
   return (
     <div
       className={css.discussion}
@@ -1892,10 +1868,7 @@ function DiscussionBlock({
               className={css.discussionInput}
               data-diff-discussion-input
               rows={1}
-              ref={(element) => {
-                inputRef.current = element
-                registerInput(discussion.id, element)
-              }}
+              ref={(element) => { registerInput(discussion.id, element) }}
               value={discussion.draft}
               placeholder={t('discussion.placeholder')}
               // THIS thread is waiting on an answer: the row is drawn (it is where the follow-up will
@@ -4724,6 +4697,16 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   const landedFileRef = useRef<string | undefined>(undefined)
   /** The file the placement effect below has decided the opening place for (see `placedFileRef`). */
   const placedFileRef = useRef<string | undefined>(undefined)
+  /** `scrollTick`/view as the landing effect last saw them, so "was this a landing ask?" is answerable. */
+  const lastLandKeyRef = useRef('')
+  /**
+   * The view belongs to the reader until the panel asks for a place again (see `readerTookOver`).
+   *
+   * A landing that is not asked for — the wrap table becoming readable as rows the reader scrolls into are
+   * measured — must not recentre them: that is the same "it dragged me back to the card" as the retry, by
+   * another route (`offsetsFromWrap` is the second dependency of that effect).
+   */
+  const readerOwnsViewRef = useRef(false)
   useEffect(() => {
     // A landing is "the panel asked for this file, at this place": the tick is what says an ask is
     // there at all, since a plain "land on the first change" carries no offset and no row.
@@ -4738,6 +4721,8 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     placedFileRef.current = file.id
     if (!landing && !opened) return
     if (landing) {
+      // A new ask is the panel taking the view in hand again (see `readerOwnsViewRef`).
+      readerOwnsViewRef.current = false
       // The list's comments tab names a comment by its new-file LINE (it draws no rows to give an
       // index); this pane owns the model, so that is where the line becomes a row — once, here, so
       // everything below lands the one row like any other jump.
@@ -6273,6 +6258,11 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   // own width a frame behind the code view's while the reader dragged. The frame after it settles
   // corrects as usual.
   const fitWidthRef = useRef(0)
+  // When each card's reservation was last corrected. A card's drawn height is part of what the correction
+  // below is trying to settle — the reserved rows decide where the cards under it sit, and a card that
+  // re-wraps at the width a new reservation leaves measures a row taller — so a reading can be the loop's
+  // own output rather than the content's. See the bound there.
+  const measuredWritesRef = useRef<Record<string, number[]>>({})
   // A correction that the settled pass still owes. Needed because the pass that first sees the new
   // width is the pass the read-back above triggered — and nothing else may re-render this panel once
   // the reader lets go of the edge, so without this the reservation could keep the outgoing figure.
@@ -6321,6 +6311,39 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       // A collapsed or not-yet-laid-out card measures zero; leave it to a later pass.
       if (drawn <= 0) continue
       const want = Math.max(1, Math.ceil((drawn - DISCUSSION_ROW_SNAP_PX) / THREAD_ROW_PX))
+      // A READING WITHIN A PIXEL OF WHAT IS ALREADY RESERVED IS NOT A REASON TO CORRECT.
+      //
+      // A thread's lines fill their rows, so its drawn height lands ON `ceil`'s boundary — `30 * 22 + 1` is the
+      // pixel where thirty rows become thirty-one — and layout rounds sub-pixel. The reading then alternates
+      // by a fraction of a pixel, `want` follows it, and the block rewrites its own reservation: measured live
+      // on 2026-10-11 as `drawn=661` with `want` flipping 30, 31, 30 …, which moves the slack band above the
+      // writing row between nothing and a whole row (the blank line that appeared and disappeared as the
+      // reader scrolled) and, unbounded, was the crash. One pixel of dead band is what a measurement needs to
+      // stop acting on its own rounding: a card that really is a row out is 22px away.
+      const current = threadState[id]?.bodyRows
+      if (current !== undefined && Math.abs(drawn - (current * THREAD_ROW_PX + DISCUSSION_ROW_SNAP_PX)) <= 1) continue
+      // A CARD'S RESERVATION IS CORRECTED AT MOST THREE TIMES INSIDE A SECOND.
+      //
+      // This effect has no dependency array on purpose: the reservation has to follow what is drawn, and a
+      // card settles over several commits. That also makes it the one place in this panel where a
+      // measurement can feed its own output — the rows it reserved decide where the cards under this one
+      // sit, and a card the new reservation re-wraps measures a row taller — and in a real browser that
+      // closes: the figure alternates at a row boundary (3, 4, 3, 4), and every alternation writes state
+      // from the layout phase. React counts those as nested updates and at fifty it throws `Maximum update
+      // depth exceeded`, with the whole panel gone: the crash of 2026-10-11, reached by scrolling a comment
+      // card into view.
+      //
+      // The bound is what makes that impossible rather than unlikely. A single reading is still acted on —
+      // a card that really grew must be re-reserved on the pass that noticed, and the runaway case the
+      // spec stages (a reading that jitters around a row) settles on the content's own figure — so the
+      // counter, not a wait for agreement, is the guard: after three corrections in a second the model's
+      // own reservation stands until the window clears, which is at most one frame of a stale row while
+      // the card is still moving, and exact again the moment it holds still.
+      const now = Date.now()
+      const writes = (measuredWritesRef.current[id] ?? []).filter(at => now - at < 1000)
+      measuredWritesRef.current[id] = writes
+      if (writes.length >= 3) continue
+      writes.push(now)
       if (threadState[id]?.bodyRows !== want) measured[id] = { bodyRows: want }
     }
     if (Object.keys(measured).length > 0) patchThreads(measured)
@@ -6572,6 +6595,16 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     if (placedFileRef.current !== file.id) {
       return
     }
+    // A LANDING ASK IS WHAT MAY MOVE THE VIEW. `offsetsFromWrap` is the other dependency of this effect, and
+    // it flips whenever the wrapped row heights become readable — which happens again and again as the reader
+    // scrolls into rows that had not been measured yet. Re-centring on each of those pulled the view back to
+    // the change block the reader had scrolled away from (a comment card hangs under that block, so it read
+    // as the card dragging them back). Once they have taken the view over — a wheel, the reader's own scroll
+    // — readiness alone is not a reason to move them; a jump still lands, because it changes `scrollTick`.
+    const landKey = `${scrollTick}|${previewActive === true ? 1 : 0}`
+    const asked = lastLandKeyRef.current !== landKey
+    lastLandKeyRef.current = landKey
+    if (!asked && readerOwnsViewRef.current) return
     // A resumed view wins over the focused block: the reader comes back to the
     // line they left, and the exact stored offset is a better answer than the
     // change block the anchor in `blockIndexAtOffset` approximated. Spent here,
@@ -7033,6 +7066,23 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     }
   }, [])
 
+  /**
+   * The reader has taken the view in hand: whatever landing was being kept true stops being true.
+   *
+   * This is the ONLY reliable way to tell their scroll from the panel's own. `onScroll` compares the
+   * position in the event with the last offset the panel wrote (`selfScrollRef`), and a landing retry that
+   * writes the very same frame makes those two the same number: the reader's wheel is then read as the
+   * panel's own write, the retry is never cancelled, and it keeps pulling the view back to the card it
+   * landed on (seen live on 2026-10-11 as `applyScrollTop 1417 -> 1627` every frame while the reader
+   * scrolled up). A `wheel` event cannot be raised by a programmatic `scrollTop` write, so it is the
+   * unmistakable signal — and it arrives BEFORE the scroll it causes, so the loop is cancelled in time.
+   */
+  const readerTookOver = (): void => {
+    landingGoalRef.current = undefined
+    landingPendingRef.current = false
+    readerOwnsViewRef.current = true
+  }
+
   const onScroll = () => {
     const body = bodyRef.current
     if (body === null) return
@@ -7042,8 +7092,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const written = selfScrollRef.current
     selfScrollRef.current = undefined
     if (written === undefined || Math.abs(body.scrollTop - written) >= 1) {
-      landingGoalRef.current = undefined
-      landingPendingRef.current = false
+      readerTookOver()
     }
     syncQuoteScroll(body)
     // The reader's place in this file, recorded as they read it rather than only on the way out: a
@@ -8212,6 +8261,9 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
           ref={bodyRef}
           tabIndex={0}
           onScroll={onScroll}
+          // A wheel over the code IS the reader scrolling it (see `readerTookOver`): a landing being kept
+          // true gives way at once, before the scroll it causes is even processed.
+          onWheel={readerTookOver}
           // The quote pans with this scroller (see `syncQuoteScroll`), so its own scroller is given
           // the width the file's widest line has: a narrower one clamps the pan and the quoted
           // columns drift out of alignment for the rest of the file's horizontal range.
