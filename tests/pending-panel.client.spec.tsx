@@ -5164,6 +5164,30 @@ describe('PendingPanel', () => {
     expect(source).toMatch(/useLayoutEffect\(\(\) => \{\s*measureFloatBoxRef\.current\(\)\s*\}, \[/)
   })
 
+  it('steps the code view\'s vertical bar a nudge more solid, without touching its size', () => {
+    // Asked for as "a bit more opaque", which is not available here: the app's thumb token is opaque already
+    // (measured `#e5e5e5`, no alpha channel), so the step is taken from the colour — 10% towards the theme's
+    // label, a nudge rather than a new colour. Only the VERTICAL bar: the horizontal one is a rare guest in
+    // the code view and stays the app's, as do the width and the rounding.
+    const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    expect(sheet).toMatch(/\.diffBody::-webkit-scrollbar-thumb:vertical \{\s*background: color-mix\(in srgb, var\(--dsh-scrollbar-thumb\) 90%, var\(--dsw-alias-label-secondary\) 10%\)/)
+    expect(sheet).toMatch(/\.diffBody::-webkit-scrollbar-thumb:vertical:hover \{\s*background: color-mix\(in srgb, var\(--dsh-scrollbar-thumb-hover\) 90%, var\(--dsw-alias-label-secondary\) 10%\)/)
+    // No width rule of ours: the bar keeps the app's own size.
+    expect(/\.diffBody::-webkit-scrollbar \{\s*width:/.test(sheet)).toBe(false)
+  })
+
+  it('keeps the changed-line ruler quiet, because its marks are a map and not a second diff', () => {
+    // Only the markers paint in that strip, so its opacity is what sets how loud they are. They sat at half the
+    // theme's own error/success colours, which read as bands laid over the code rather than as marks. A wider
+    // bar was tried and reverted: the bar and its thumb are the app's own, unchanged.
+    const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    const ruler = /^\.overviewRuler \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
+    expect(ruler).toContain('opacity: 0.35')
+    // …and the colours themselves stay the theme's, one per kind.
+    expect(sheet).toMatch(/\.markerDel \{\s*background-color: var\(--dsw-alias-state-error-primary\)/)
+    expect(sheet).toMatch(/\.markerAdd \{\s*background-color: var\(--dsw-alias-state-success-primary\)/)
+  })
+
   it('keeps the turns rigid, so the card measurement reads the content and not its own reservation', () => {
     // The source of the self-referential loop the cases further down bound: the turns are flex items in a
     // column whose height IS the block's reservation, and a flex item's default `flex-shrink: 1` let a short

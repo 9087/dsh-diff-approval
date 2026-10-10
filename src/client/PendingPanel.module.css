@@ -2599,6 +2599,20 @@
   cursor: default;
 }
 
+/* The code view's VERTICAL bar, a nudge more solid than the app's thumb.
+   Slightly more visible was asked for as "opacity", but the app's thumb token is opaque already (measured
+   `#e5e5e5`, no alpha channel), so there is no opacity to raise: the same effect is taken from the colour
+   instead — 10% towards the theme's label, which deepens the grey without changing what colour it is. Kept
+   to the vertical bar on purpose: the horizontal one is a rare guest in the code view, and one decision
+   should move one bar. The width and the hover colour stay the app's. */
+.diffBody::-webkit-scrollbar-thumb:vertical {
+  background: color-mix(in srgb, var(--dsh-scrollbar-thumb) 90%, var(--dsw-alias-label-secondary) 10%);
+}
+
+.diffBody::-webkit-scrollbar-thumb:vertical:hover {
+  background: color-mix(in srgb, var(--dsh-scrollbar-thumb-hover) 90%, var(--dsw-alias-label-secondary) 10%);
+}
+
 /* Per-block Keep/Revert, shown at the hovered block's bottom-right edge,
    framed on the file-list surface. It lives in the non-scrolling wrapper, one
    right-aligned column away from the code; its vertical position is a
@@ -3570,7 +3584,11 @@
      scrollbar reads as a faint smear). */
   width: 4px;
   pointer-events: none;
-  opacity: 0.5;
+  /* ONLY THE CHANGED-LINE MARKS PAINT IN THIS STRIP, so this opacity is what sets how loud they are. Half
+     was too loud for something read in the corner of the eye: the ruler is a map of where the changes are,
+     not a second diff, and at 0.35 the theme's error/success colours read as marks rather than as bands
+     over the code. */
+  opacity: 0.35;
 }
 
 /* The side-by-side view's ruler, over that view's own vertical bar. Two differences from the single
