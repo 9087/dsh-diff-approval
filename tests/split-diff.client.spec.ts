@@ -79,19 +79,60 @@ describe('computeSideBySideDiff', () => {
     expect(pairs[1]).toEqual({ kind: 'add', left: undefined, right: { text: 'modified old line A', line: 2 } })
   })
 
-  it('aligns a 1-del/2-add block by content similarity, not order', () => {
+  it('aligns a 1-del/2-add block by content similarity, keeping the file\'s order', () => {
     const rows = [
       row('del', 'old line A', 1, undefined),
       row('add', 'brand new unrelated', undefined, 1),
       row('add', 'modified old line A', undefined, 2),
     ]
     const { pairs } = computeSideBySideDiff(rows, true)
-    // The deletion pairs with its most-similar addition; the unrelated addition
-    // stays a right-only (inserted) pair.
+    // The deletion pairs with its most-similar addition, and the unrelated addition stays a right-only
+    // (inserted) pair — emitted at ITS OWN place in the new file, which is above the line it precedes.
+    // Printing the pair first and the leftover after it drew the right column 2 then 1: a line under the
+    // line number above its own (reported 2026-10-10).
     expect(pairs).toEqual([
-      { kind: 'replace', left: { text: 'old line A', line: 1 }, right: { text: 'modified old line A', line: 2 } },
       { kind: 'add', left: undefined, right: { text: 'brand new unrelated', line: 1 } },
+      { kind: 'replace', left: { text: 'old line A', line: 1 }, right: { text: 'modified old line A', line: 2 } },
     ])
+  })
+
+  it('never lets either column\'s line numbers go backwards while aligning by similarity', () => {
+    // THE REPORTED SHAPE, 2026-10-10: modified lines with an insertion before them. Aligning each deletion
+    // with the addition it resembles is right; doing it at the cost of the file's order is not. The
+    // inserted line belongs on new line 1, ABOVE the pair it was inserted before.
+    const columnLines = (rows: WholeFileDiffRow[], side: 'left' | 'right'): (number | undefined)[] =>
+      computeSideBySideDiff(rows, true).pairs.map(pair => (side === 'left' ? pair.left?.line : pair.right?.line))
+    /** Every defined line number is followed only by larger ones — the order the two columns must keep. */
+    const ascending = (lines: readonly (number | undefined)[]): boolean => lines.every((line, index) => {
+      if (line === undefined) return true
+      return lines.slice(index + 1).every(later => later === undefined || later > line)
+    })
+
+    // An ADDED line no deletion resembles, sitting before two pairs.
+    const inserted = [
+      row('del', 'old line A', 1, undefined),
+      row('del', 'old line B', 2, undefined),
+      row('add', 'brand new unrelated', undefined, 1),
+      row('add', 'modified old line A', undefined, 2),
+      row('add', 'modified old line B', undefined, 3),
+    ]
+    expect(columnLines(inserted, 'right')).toEqual([1, 2, 3])
+    expect(columnLines(inserted, 'left')).toEqual([undefined, 1, 2])
+    expect(ascending(columnLines(inserted, 'left'))).toBe(true)
+    expect(ascending(columnLines(inserted, 'right'))).toBe(true)
+
+    // The mirror: a DELETED line no addition resembles, sitting before two pairs.
+    const removed = [
+      row('del', 'totally different content', 1, undefined),
+      row('del', 'old line A', 2, undefined),
+      row('del', 'old line B', 3, undefined),
+      row('add', 'modified old line A', undefined, 1),
+      row('add', 'modified old line B', undefined, 2),
+    ]
+    expect(columnLines(removed, 'left')).toEqual([1, 2, 3])
+    expect(columnLines(removed, 'right')).toEqual([undefined, 1, 2])
+    expect(ascending(columnLines(removed, 'left'))).toBe(true)
+    expect(ascending(columnLines(removed, 'right'))).toBe(true)
   })
 
   it('leaves a deletion and both additions unaligned when nothing matches', () => {
