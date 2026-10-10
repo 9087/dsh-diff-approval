@@ -501,6 +501,31 @@ function resolveInsideWorkspace(root: string, input: string): string | undefined
   return workspaceRelativeOf(root, absolute) === undefined ? undefined : absolute
 }
 
+/**
+ * Resolve one caller-supplied path for LISTING, which an absolute path need not keep inside the workspace.
+ *
+ * A relative path is workspace-relative, exactly as before. An absolute one is taken as it is, wherever it
+ * points: the fence `resolveInsideWorkspace` draws is the right one for a SUBTREE question — a scan of the
+ * workspace's own VCS — and the wrong one for "show me this file".
+ *
+ * The panel can already hold a file outside the workspace: the tracked capture behind an `edit`/`write`/`
+ * `str_replace_editor` has never had a workspace fence (`tools/result` folds `outcome.path` as the tool
+ * spelled it), so a file the agent edited elsewhere is listed, kept and reverted like any other. Refusing
+ * to READ one into the list therefore only made the plugin disagree with itself: a card could not hang on a
+ * file the panel was already able to show. Both ways in — the agent's annotate call and the reader's own
+ * "add this path" — go through this, so they agree.
+ *
+ * What is read is still the harness's file service, whose reads are not workspace-confined (only its
+ * mutations are fenced, by the sandbox policy), so this adds no read the deployment does not already allow.
+ *
+ * @param root - the workspace root, for a relative path.
+ * @param input - the caller's path (absolute anywhere, or workspace-relative).
+ * @returns the absolute path to list.
+ */
+function resolveForListing(root: string, input: string): string {
+  return isAbsolute(input) ? resolve(input) : resolve(root, input)
+}
+
 /** The workspace-relative parent of a relative directory path (`''` at the root). */
 
 /** Fold one path for comparison: absolute, `/`-separated, case-folded on Windows.
@@ -829,8 +854,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * already lands with — so the file opens at its own content and the card sits on the lines it names.
    *
    * It is deliberately that ROUTE and not a raw insert: a path already listed is answered from the list
-   * (so annotating twice never re-baselines a review in progress), a path outside the workspace is
-   * refused here rather than confined later, and what lands goes through the same fold + persist + undo
+   * (so annotating twice never re-baselines a review in progress), a path outside the workspace is listed
+   * like any other (see `resolveForListing`), and what lands goes through the same fold + persist + undo
    * bookkeeping as every other admission.
    *
    * @param sessionId - the session whose list gains the file.
@@ -846,8 +871,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     await ensureLoaded()
     const workspace = workspaceOf(sessionId)
     if (workspace === undefined) return { kind: 'no-workspace' }
-    const absolute = resolveInsideWorkspace(workspace.path, asked)
-    if (absolute === undefined) return { kind: 'outside' }
+    const absolute = resolveForListing(workspace.path, asked)
     const listed = store.list(sessionId).find(entry => pathIdentity(entry.path) === pathIdentity(absolute))
     if (listed !== undefined) return { kind: 'listed', entry: listed, added: false }
     const content = await readTextOrNone(absolute, signal ?? new AbortController().signal)
@@ -3320,8 +3344,14 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         if (target === undefined) return rpcError('sessionId and path must be non-empty strings')
         const workspace = workspaceOf(target.sessionId)
         if (workspace === undefined) return rpcError('add unavailable: the session has no workspace')
-        const absolute = resolveInsideWorkspace(workspace.path, target.path)
-        if (absolute === undefined) {
+        const absolute = resolveForListing(workspace.path, target.path)
+        // A SUBTREE add is the workspace's own question — it asks the workspace's VCS for the changes under
+        // the path (`detectVcsRoot`, `scope: absolute`) — and a subtree outside the workspace has no place in
+        // that answer, so it keeps the fence every add used to have. ONE named file is a different shape: no
+        // VCS at all, both sides its own text (see the exact-file branch below), which is the state the panel
+        // already holds for a file outside the workspace, because the `tools/result` capture behind an edit
+        // has never had a fence either. A card has to be able to hang on a file the panel can show.
+        if (!target.exact && workspaceRelativeOf(workspace.path, absolute) === undefined) {
           const value: DiffApprovalAddValue = { outcome: 'outside', added: 0, duplicates: 0 }
           return { ok: true, value }
         }

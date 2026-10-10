@@ -281,20 +281,21 @@ describe('the annotate tool', () => {
   it('refuses what the workspace cannot list, in the workspace\'s own terms', async () => {
     // These are not annotation rules but workspace ones, so the sentences have to say which rule failed:
     // the agent can then pick another file instead of retrying the same call.
+    //
+    // A path OUTSIDE the workspace is deliberately not one of them any more: the panel can already hold a
+    // file from anywhere (the capture behind an edit has never had a workspace fence), so the host lists
+    // one instead of refusing it, and the tool has no such outcome to report.
     const of = (outcome: ListFileOutcome) => annotateRun({
       entriesOf: () => [],
       listFile: async () => outcome,
       commentsOf: () => [],
       addComment: () => { throw new Error('nothing may be stored') },
     })
-    const outside = await of({ kind: 'outside' })({ path: 'C:\\other\\x.ts', startLine: 1, note: 'n' }, { sessionId: S1, signal: undefined })
-    expect(outside).toContain('not inside this session\'s workspace')
     const missing = await of({ kind: 'missing' })({ path: 'C:\\repo\\x.ts', startLine: 1, note: 'n' }, { sessionId: S1, signal: undefined })
     expect(missing).toContain('could not be read as a text file')
     const none = await of({ kind: 'no-workspace' })({ path: 'C:\\repo\\x.ts', startLine: 1, note: 'n' }, { sessionId: S1, signal: undefined })
     expect(none).toContain('no workspace')
-    // The three sentences are the exported surface, so they are also asserted directly.
-    expect(unlistedText('outside', 'x.ts')).toContain('x.ts')
+    // The sentences are the exported surface, so they are also asserted directly.
     expect(unlistedText('missing', 'x.ts')).toContain('x.ts')
     expect(unlistedText('no-workspace', 'x.ts')).toContain('x.ts')
   })

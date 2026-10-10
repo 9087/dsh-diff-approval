@@ -404,6 +404,53 @@ describe('the comment-answering skill', () => {
     expect(await listEntries(handle, 'session-1')).toHaveLength(1)
   })
 
+  it('annotates a file OUTSIDE the workspace, which the panel can already hold', async () => {
+    // The reader's report (2026-10-09): a file outside the workspace could not be annotated at all. Nothing
+    // requires that — the harness does not confine READS to the workspace (only mutations are fenced, by the
+    // sandbox policy) — and this plugin did not either: the capture behind an edit has never had a fence, so
+    // a file edited outside the root is listed, kept and reverted like any other. Only the LISTING was
+    // fenced, which left the panel unable to hold a file it was asked to put a card on. A named file is now
+    // listed wherever it is; a SUBTREE keeps the fence (it is the workspace's own VCS question).
+    type Definition = { name?: string; execute?: (args: unknown, exec: unknown) => Promise<string> }
+    const definitions: Definition[] = []
+    const root = process.platform === 'win32' ? 'C:\\repo' : '/repo'
+    const elsewhere = await mkdtemp(join(tmpdir(), 'dsh-annotate-outside-'))
+    tempDirs.push(elsewhere)
+    const outside = join(elsewhere, 'note.txt')
+    const { fs, handle } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: root,
+      prepare: (ctx) => {
+        ctx.provide('tools', {
+          register: (definition: unknown) => { definitions.push(definition as Definition); return () => {} },
+        } as never)
+      },
+    })
+    fs.readText.mockResolvedValue('one\ntwo\nthree\n')
+
+    const answer = await definitions[0]!.execute!(
+      { path: outside, startLine: 2, endLine: 2, note: '外面的一行。' },
+      { agent: { id: SessionId('session-1') }, signal: signal() },
+    )
+    expect(answer).toContain('annotated')
+    expect(answer).toContain(outside)
+    expect(answer).toContain('added to the list')
+
+    // Listed as the same "no pending diff" shape, spelled as the absolute path it has, with the card on the
+    // lines it named — and no workspace-relative form invented for it.
+    const entries = await listEntries(handle, 'session-1')
+    expect(entries.map(entry => entry.path)).toEqual([outside])
+    expect(entries[0]).toMatchObject({ earlierVersion: 'file' })
+    expect(entries[0]!.oldText).toBe(entries[0]!.newText)
+    const read = await handle('list', { sessionId: 'session-1' }, signal())
+    if (!read.ok) throw new Error('list failed')
+    expect((read.value as { comments: CommentRecord[] }).comments[0]).toMatchObject({
+      entryId: outside,
+      anchor: { startLine: 2, endLine: 2 },
+      quote: 'two',
+    })
+  })
+
   it('has the added entry ON DISK before the tool answers, so a restart cannot orphan the card', async () => {
     // THE ORDERING INVARIANT (2026-10-06, this bug measured on the live host): a card is written the
     // moment the tool answers, but the entry it hangs on used to reach `pending.json` on a later,
@@ -2235,6 +2282,23 @@ describe('hand-adding paths to the review list', () => {
     fs.stat.mockResolvedValue({ version: 'v1', type: 'file' } as never)
     await expect(handle('add-path', { sessionId: 'session-1', path: '../sibling.txt' }, signal()))
       .resolves.toEqual({ ok: true, value: { outcome: 'outside', added: 0, duplicates: 0 } })
+
+    // A SUBTREE keeps that fence whatever its spelling: an absolute directory outside the workspace is the
+    // same question as `../sibling.txt` — the scan would be asking this workspace's VCS about a tree that is
+    // not in it. ONE named file (`exact`) is a different shape: no VCS at all, both sides its own text, which
+    // is what the panel already holds for a file outside the workspace (the capture behind an edit has never
+    // had a fence). It is listed, so a card can hang on it.
+    const elsewhere = await mkdtemp(join(tmpdir(), 'dsh-add-outside-'))
+    tempDirs.push(elsewhere)
+    const outsideFile = join(elsewhere, 'note.txt')
+    await expect(handle('add-path', { sessionId: 'session-1', path: elsewhere }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'outside', added: 0, duplicates: 0 } })
+    fs.readText.mockResolvedValue('one\ntwo\n')
+    await expect(handle('add-path', { sessionId: 'session-1', path: outsideFile, exact: true }, signal()))
+      .resolves.toEqual({
+        ok: true,
+        value: { outcome: 'added', added: 1, duplicates: 0, id: resolve(outsideFile) },
+      })
 
     fs.stat.mockResolvedValue(undefined as never)
     await expect(handle('add-path', { sessionId: 'session-1', path: 'gone.txt' }, signal()))

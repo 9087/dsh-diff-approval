@@ -260,7 +260,6 @@ export function refusalText(refusal: AnnotationRefusal, path: string): string {
  */
 export type ListFileOutcome =
   | { kind: 'listed'; entry: PendingEntry; added: boolean }
-  | { kind: 'outside' }
   | { kind: 'missing' }
   | { kind: 'no-workspace' }
 
@@ -295,19 +294,19 @@ export interface AnnotateRunDeps {
 /**
  * The sentence a file that could not be listed is refused with.
  *
- * All three are the workspace's rules rather than the annotation's: the panel can only show what the
- * session's workspace contains and the file service can read, and naming which one failed is what lets
- * the agent pick another file, or stop annotating that one.
+ * Both are the workspace's rules rather than the annotation's: there is either no workspace to hold a
+ * list, or the file service could not read the file as text. Naming which one failed is what lets the
+ * agent pick another file, or stop annotating that one.
+ *
+ * A path OUTSIDE the workspace is not in this list: the panel can hold such a file (an edit to one is
+ * captured like any other), so it is listed and annotated rather than refused (see `resolveForListing`).
  *
  * @param kind - why listing failed.
  * @param path - the path the caller named.
  * @returns the sentence the caller reads.
  */
-export function unlistedText(kind: 'outside' | 'missing' | 'no-workspace', path: string): string {
+export function unlistedText(kind: 'missing' | 'no-workspace', path: string): string {
   switch (kind) {
-    case 'outside':
-      return `refused: "${path}" is not inside this session's workspace, so the review panel cannot `
-        + 'list it. Annotate a file of the workspace the user is working in.'
     case 'no-workspace':
       return `refused: this session has no workspace, so there is no file list to add "${path}" to.`
     default:
