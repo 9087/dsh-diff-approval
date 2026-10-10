@@ -2597,6 +2597,35 @@ describe('comments over the channel', () => {
     expect(value.comments?.[0]).not.toHaveProperty('unseen')
   })
 
+  it('stores a card placed with nothing in it yet, and fills the words in on the same id', async () => {
+    // An unsent card IS a stored comment: the panel writes one the moment the reader places it, which is
+    // what lets the comment list carry a card that has nothing in it (so it can be found again). An empty
+    // text is therefore legitimate from the READER's door — the rule that an annotation must SAY something
+    // belongs to the annotate TOOL (`annotate.spec.ts`, `empty-note`). Writing the same id again is the
+    // same comment written again (`CommentStore.mergeOf`), which is how the send fills the words in
+    // without making a second comment.
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const entry = (await listEntries(handle, 'session-1'))[0]!
+
+    const placed = await handle('comment-add', {
+      sessionId: 'session-1', entryId: entry.id, id: 'c-placed',
+      anchor: { startLine: 1, endLine: 1 }, quote: 'a', text: '',
+    }, signal())
+    expect(placed.ok).toBe(true)
+    expect((placed.value as { comment: CommentRecord }).comment).toMatchObject({ id: 'c-placed', text: '' })
+    expect(await listComments(handle, 'session-1')).toHaveLength(1)
+
+    const written = await handle('comment-add', {
+      sessionId: 'session-1', entryId: entry.id, id: 'c-placed',
+      anchor: { startLine: 1, endLine: 1 }, quote: 'a', text: 'why is this here?',
+    }, signal())
+    expect(written.ok).toBe(true)
+    const comments = await listComments(handle, 'session-1')
+    expect(comments).toHaveLength(1)
+    expect(comments[0]).toMatchObject({ id: 'c-placed', text: 'why is this here?' })
+  })
+
   it('takes the dot down through its own endpoint, and persists that', async () => {
     // The reader looking at a card is a host action of its own (the panel reports it from an
     // IntersectionObserver), so it has to be an endpoint rather than a side effect of a read: a read

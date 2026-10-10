@@ -1158,12 +1158,17 @@ function discussionOfRecord(
   const asks = record.asks ?? []
   const last = asks.at(-1)
   const answered = last === undefined ? undefined : answers[last.requestId]
-  const messages: DiscussionMessage[] = [
-    // The first turn is whoever wrote the annotation: the reader's own words for a comment they made,
-    // and the agent's for a card the agent placed on the code (see `CommentRecord.author`). Drawing the
-    // agent's explanation as the reader's would put words in their mouth.
-    { role: record.author === 'agent' ? 'assistant' : 'user', text: record.text },
-  ]
+  // A card the reader PLACED and has not written in yet has no first turn to draw: it is the compose row
+  // alone, exactly as it was while such a card lived only on this page (see `addDiscussion`). Its text
+  // arrives with the first send, written onto this same record.
+  const messages: DiscussionMessage[] = record.text === ''
+    ? []
+    : [
+      // The first turn is whoever wrote the annotation: the reader's own words for a comment they made,
+      // and the agent's for a card the agent placed on the code (see `CommentRecord.author`). Drawing the
+      // agent's explanation as the reader's would put words in their mouth.
+      { role: record.author === 'agent' ? 'assistant' : 'user', text: record.text },
+    ]
   asks.forEach((ask, index) => {
     // The first question IS the annotation only on a card the READER made: they popped the compose row on
     // those rows and their typed words became `record.text`, so drawing `ask.text` again would show the same
@@ -4395,8 +4400,23 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   )
   useEffect(() => { rememberPlacedThreads(sessionId, draftThreads) }, [sessionId, draftThreads])
   /**
+   * Cards the reader placed and then discarded while the placement's own write was still in flight.
+   *
+   * A placement is a host write now (see `addDiscussion`), so discarding one asks the host to end it —
+   * but between the click and the acknowledgement the record may not exist yet, and an `ending` that
+   * arrives first would be answered `missing` while the write landed after it. The placement's own
+   * acknowledgement reads this set and takes the record back, so no card can be left stored with nothing
+   * on screen to end it from.
+   */
+  const discardedByReader = useRef(new Set<string>())
+  /**
    * The threads this pane draws, in the order their rows run: the host's records re-anchored, plus
    * the blocks that have not been written yet.
+   *
+   * A PLACED CARD IS DRAWN FROM ITS PAGE-LOCAL BLOCK even though the host holds a record for it from the
+   * moment it was placed: the words the reader has typed live on that block until the send writes them
+   * onto the record (see `addDiscussion` and `sendDiscussion`), so the record's copy of the same id is
+   * skipped here — one card, drawn from the block that owns what is in the box.
    *
    * Re-anchoring runs here rather than in an effect that rewrites state: the anchor's new-file lines
    * are what survive a rebuild, and the record's quote is what says whether they still hold the code
@@ -4405,9 +4425,13 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    * the quote (see `remapDiscussion`).
    */
   const discussions = useMemo<readonly Discussion[]>(() => {
+    const placed = draftThreads.filter(thread => thread.fileId === file.id)
+    const placedIds = new Set(placed.map(thread => thread.id))
     const mapped: Discussion[] = [
-      ...fileComments.map(record => discussionOfRecord(record, commentSource.answers, threadState)),
-      ...draftThreads.filter(thread => thread.fileId === file.id).map(thread => discussionOfDraft(thread, threadState)),
+      ...fileComments
+        .filter(record => !placedIds.has(record.id))
+        .map(record => discussionOfRecord(record, commentSource.answers, threadState)),
+      ...placed.map(thread => discussionOfDraft(thread, threadState)),
     ]
     return remapDiscussions(
       mapped,
@@ -5765,7 +5789,10 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     if (body !== null && offsetOf(range.start) - body.scrollTop < 0) {
       pendingScrollShiftRef.current += (DISCUSSION_HEADER_ROWS + DISCUSSION_COMPOSE_ROWS) * THREAD_ROW_PX
     }
-    const id = `draft-${Date.now().toString(36)}-${draftThreads.length}`
+    // The id the host will know this thread by is minted HERE, not at the send: the card is written the
+    // moment it is placed, and the page's state for a thread is keyed by the id the snapshot carries (see
+    // `threadState`), so one id has to serve the block and its record from the start.
+    const id = newId()
     // What those lines read like right now, and the numbers the file showed beside them. The
     // anchor is line numbers, and the quote is what tells a later rebuild whether they still
     // point at the same code — see `remapDiscussion`. The gutter pair rides along so an
@@ -5781,11 +5808,14 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       .slice(Math.max(0, quoteRange.start - 1), Math.min(model.diff.rows.length, quoteRange.end + 2))
       .map(row => row.text)
       .join('\n')
-    // The block the reader just placed is not a comment yet: nothing is written until they send it,
-    // so it goes into the page's own placement list — the host has nothing to hold for it (see
-    // `sendDiscussion`), and the next poll has no record to replace it with. It starts empty; the
-    // words arrive in `onDraft`, which is why they live on the placement rather than in the
-    // per-comment state (there is no comment id yet to hang them under).
+    // THE CARD GOES TO THE HOST NOW, with nothing written in it yet. That is what puts an unsent comment
+    // in the comment list — its row reads as the box's own placeholder, and pressing it lands back on the
+    // block — so a card nothing has been written in can still be found, and it is what lets the card
+    // outlive the page. The words follow, written onto this same id (see `sendDiscussion`).
+    //
+    // The page-local block stays until the record arrives on the next read, exactly as it did while the
+    // whole thing was page-local; from then on the host's own record draws the card, and words typed in
+    // the meantime survive the swap because both are keyed by this id.
     setDraftThreads(current => [...current, {
       id,
       fileId: file.id,
@@ -5798,6 +5828,38 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     // The user asked to comment, so the caret belongs in the new block's input
     // once it is on screen (the effect below runs after the commit).
     focusPendingRef.current = id
+    void (async () => {
+      let added = false
+      try {
+        added = (await onCommentAdd(sessionId, {
+          id,
+          entryId: file.id,
+          anchor: { startLine, endLine },
+          quote,
+          text: '',
+          quoteContext,
+          quoteLines: [...quoteLines],
+        })).outcome === 'added'
+      } catch (error: unknown) {
+        onToast(error instanceof Error ? error.message : String(error))
+      }
+      if (added) {
+        // The reader may have discarded the card while this write was in flight. The record exists now and
+        // nothing on screen ends it, so it is taken back here (see `discardedByReader`).
+        if (discardedByReader.current.delete(id)) {
+          void onCommentRemove(sessionId, id).catch((error: unknown) => {
+            onToast(error instanceof Error ? error.message : String(error))
+          })
+        }
+        return
+      }
+      // The host refused it — in practice because the entry left the list while the reader was placing the
+      // card. The block goes with the refusal, said out loud: a card the host does not hold is one no list,
+      // jump or reload could find again.
+      discardedByReader.current.delete(id)
+      onToast(t('discussion.addMissing'))
+      setDraftThreads(current => current.filter(thread => thread.id !== id))
+    })()
     // The selection has become an object: drop the browser's own highlight so
     // only the discussion's band marks those rows, and so the toolbar (which is
     // about a live selection) goes away with it. Guarded: a partial Selection
@@ -5920,18 +5982,20 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const prompt = frame === ''
       ? `${marker}\n${text}\n\n${rule}`
       : `${marker}\n${frame}${legend}\n\n${text}\n\n${rule}`
-    if (fileComments.some(record => record.id === id)) {
-      // Already written down: this is a follow-up, and it appends a question of its own rather than
-      // writing a second comment (see `CommentAsk`).
+    const held = fileComments.find(record => record.id === id)
+    if (held !== undefined && held.text !== '') {
+      // Already written down AND already saying something: this is a follow-up, and it appends a question
+      // of its own rather than writing a second comment (see `CommentAsk`). The stored text is left
+      // alone — it is the reader's own earlier words, or the annotation the agent placed on the code.
       void askComment(id, prompt, text)
       return
     }
-    // The id the host will know this thread by is minted here, not taken from the local block: the
-    // page's state for a thread is keyed by that id (see `threadState`), so the draft follows the id
-    // the snapshot will carry.
-    const commentId = newId()
+    // Either the host has not answered the placement yet, or the card it holds is the reader's own with
+    // nothing written in it. The words go onto the SAME id: the page minted it when the card was placed,
+    // the store's merge applies them to that record without touching its questions or its creation time,
+    // and only then is the question asked inside it.
     const draft: CommentDraft = {
-      id: commentId,
+      id,
       entryId: file.id,
       anchor: { startLine: discussion.anchor.startLine, endLine: discussion.anchor.endLine },
       quote: discussion.quote ?? '',
@@ -5957,8 +6021,8 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       // The host holds the comment now — the store re-read before its write resolved — so the local
       // block is spent and the snapshot's record takes its place. The ask lands on that record.
       setDraftThreads(current => current.filter(thread => thread.id !== id))
-      discussionRefocusRef.current = commentId
-      await askComment(commentId, prompt, text)
+      discussionRefocusRef.current = id
+      await askComment(id, prompt, text)
     })()
   }
 
@@ -5972,15 +6036,29 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     if (body !== null && offsetOf(discussion.anchor.start) - body.scrollTop < 0) {
       pendingScrollShiftRef.current += shift
     }
+    const placed = draftThreads.some(thread => thread.id === id)
     if (fileComments.some(record => record.id === id)) {
       // A written-down thread belongs to the host, so ending it is a host action and the next read is
       // what takes the block away. A refusal is said out loud rather than leaving the block up with
-      // no explanation.
+      // no explanation. The page-local block of a PLACED card goes with it here: the record it wrote is
+      // what is ending, and that block is only the box the reader was typing in.
       void onCommentRemove(sessionId, id).catch((error: unknown) => {
         onToast(error instanceof Error ? error.message : String(error))
       })
+      if (placed) {
+        setDraftThreads(current => current.filter(thread => thread.id !== id))
+        forgetThreads([id])
+      }
       return
     }
+    // Every card the reader places is written down now (see `addDiscussion`), so a thread the list has
+    // not caught up with yet is one whose record is either in flight or about to be read: the removal is
+    // asked for here as well, and the placement's own acknowledgement takes it back if it lands after this
+    // (see `discardedByReader`). Without that the record would linger with no card to end it from.
+    discardedByReader.current.add(id)
+    void onCommentRemove(sessionId, id).catch((error: unknown) => {
+      onToast(error instanceof Error ? error.message : String(error))
+    })
     setDraftThreads(current => current.filter(thread => thread.id !== id))
     forgetThreads([id])
   }
@@ -10377,8 +10455,9 @@ export function PendingPanel({
             // than with a bare digit that could be anything.
             label: `[${lineRangeLabel(start, end)}]${oldOnly ? t('discussion.deletedLabel') : ''}`,
             // Nothing written yet: the item says what the comment box is asking for, in the box's own
-            // words (a comment the host holds with no text is one the reader never finished; the panel
-            // does not write those, but a record from elsewhere can be one).
+            // words. That is the row of a card the reader PLACED and has not written in (the panel writes
+            // one the moment it is placed — see `addDiscussion`), which is what lets an unsent comment be
+            // found here rather than only on the code it names.
             title: empty ? t('discussion.placeholder') : written,
             empty,
             // What the host has not been told the reader has looked at: the row's own dot, carried through

@@ -3821,9 +3821,13 @@ function commentAddOf(payload: unknown): CommentAddInput | undefined {
   if (typeof startLine !== 'number' || !Number.isFinite(startLine)) return undefined
   if (typeof endLine !== 'number' || !Number.isFinite(endLine)) return undefined
   if (typeof quote !== 'string') return undefined
-  // An annotation with nothing in it is not a comment; the reader's own panel refuses to
-  // send one, so a blank here is a broken caller rather than an empty thread to store.
-  if (typeof text !== 'string' || text.trim().length === 0) return undefined
+  // An EMPTY text is a card the reader placed and has not written in yet: the panel writes one the moment
+  // they place it, which is what lists an unsent card (its row reads as the box's own placeholder) so a
+  // card that has nothing in it can still be found, and what lets it survive a reload. That is the
+  // READER's own card, so an empty one is a legitimate state rather than a broken caller. The rule that an
+  // annotation must SAY something belongs to the annotate TOOL — the agent's door into the same store (see
+  // `annotate.ts`, `empty-note`) — where a card with nothing in it is a call that said nothing.
+  if (typeof text !== 'string') return undefined
   const id = body.id
   const quoteContext = body.quoteContext
   const quoteLines: CommentQuoteLine[] = []

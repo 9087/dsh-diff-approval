@@ -641,6 +641,12 @@ function panelProps(
     },
     setFiles: (next) => {
       snapshot.files = next
+      // The host drops a comment WITH its entry (see `dropEntry`): a thread whose file has left the list
+      // cannot be read, jumped to or kept, so its records go rather than lingering in the mock's store.
+      const kept = new Set(next.map(file => file.id))
+      for (let index = comments.length - 1; index >= 0; index--) {
+        if (!kept.has(comments[index]!.entryId)) comments.splice(index, 1)
+      }
       publish()
     },
     publish: () => { publish() },
@@ -678,11 +684,25 @@ function panelProps(
     // `missing`, which is the one outcome the panel has to report rather than draw.
     onCommentAdd: vi.fn(async (_sessionId: SessionId, draft: { id: string; entryId: string; text: string }) => {
       if (!snapshot.files.some(file => file.id === draft.entryId)) return { outcome: 'missing' as const }
-      const stored = comment({
+      const written = comment({
         ...draft,
         path: snapshot.files.find(file => file.id === draft.entryId)?.path ?? '',
       } as Partial<CommentRecord> & { id: string; text: string })
-      comments.push(stored)
+      // THE HOST'S OWN RULE, mirrored: the id IS the comment's identity, so writing the same id again is the
+      // same comment written again — its questions and its creation time stay, and only the fields the
+      // caller wrote move (see `CommentStore.mergeOf`). A card is placed with no text in it and the send
+      // writes the words onto that same id, so without this the two writes would read as two comments.
+      const existing = comments.findIndex(entry => entry.id === written.id)
+      const before = existing < 0 ? undefined : comments[existing]!
+      const stored: CommentRecord = before === undefined ? written : {
+        ...written,
+        createdAt: before.createdAt,
+        ...(before.asks === undefined ? {} : { asks: before.asks }),
+        ...(before.answerSeen === undefined ? {} : { answerSeen: before.answerSeen }),
+        ...(before.unseen === true ? { unseen: true } : {}),
+      }
+      if (before === undefined) comments.push(stored)
+      else comments[existing] = stored
       revision += 1
       publish()
       return { outcome: 'added' as const, comment: stored }
@@ -9505,15 +9525,17 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-selection-comment]')).toBeNull()
     expect((document.querySelector('[data-diff-selection-keep]') as HTMLButtonElement).hidden).toBe(false)
 
-    // Enter in the input sends the comment, like the composer's own field. The annotation is written
-    // down FIRST and the question asked inside it: a comment is the host's record, and a question can
-    // only be asked of one the host holds.
+    // Enter in the input sends the comment, like the composer's own field. The CARD was already written
+    // when the reader placed it (with nothing in it), so this send fills in the words and then asks the
+    // question inside the record the host already holds.
     fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'why?' } })
     await act(async () => {
       fireEvent.keyDown(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { key: 'Enter' })
     })
     expect(props.onPasteReference).not.toHaveBeenCalled()
-    expect(addedCommentTexts(props)).toEqual(['why?'])
+    // TWO writes of ONE comment: the placement's empty card, then the words. The host's merge keeps the id
+    // a single comment, which is what lets an unsent card be listed and then be filled in.
+    expect(addedCommentTexts(props)).toEqual(['', 'why?'])
     // The prompt carries the marker and the range, so the answer is the answer to THIS question.
     expect(askedPrompts(props)[0]?.startsWith('discussion.marker (/repo/m.txt:4)\n')).toBe(true)
     expect(askedPrompts(props)[0]).toContain('\nwhy?')
@@ -9543,7 +9565,10 @@ describe('PendingPanel', () => {
       .toEqual(['why?', 'and then?'])
     expect(document.querySelector('[data-diff-discussion-asking]')).not.toBeNull()
     expect(askedPrompts(props).length).toBe(2)
-    expect(props.onCommentAdd).toHaveBeenCalledTimes(1)
+    // TWO writes and no more: the card the reader placed (with nothing in it) and the first send's words.
+    // The FOLLOW-UP just sent wrote nothing, which is the point of this case: it is a second question
+    // inside the comment the host already holds, not a second comment (see `CommentStore.mergeOf`).
+    expect(props.onCommentAdd).toHaveBeenCalledTimes(2)
     // The words that crossed the wire are the reader's own, not the prompt they were wrapped in.
     const asks = (props.onCommentAsk as unknown as { mock: { calls: [SessionId, string, string, string][] } }).mock.calls
     expect(asks[0]?.[3]).toBe('why?')
@@ -10523,8 +10548,8 @@ describe('PendingPanel', () => {
     expect(placed[0]?.draft).toBe('half a thought')
     expect(document.querySelector('[data-diff-discussion-range]')?.textContent).toBe('/repo/m.txt:4')
 
-    // Closed and reopened: a fresh mount draws the same block on the same lines with the words, and
-    // the host was never told about any of it.
+    // Closed and reopened: a fresh mount draws the same block on the same lines with the words. The host
+    // holds the CARD (written when it was placed, with nothing in it), and the words are still the page's.
     first.unmount()
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
@@ -10532,7 +10557,12 @@ describe('PendingPanel', () => {
     expect(document.querySelectorAll('[data-diff-discussion]').length).toBe(1)
     expect(document.querySelector('[data-diff-discussion-range]')?.textContent).toBe('/repo/m.txt:4')
     expect((document.querySelector('[data-diff-discussion-input]') as HTMLInputElement).value).toBe('half a thought')
-    expect(props.onCommentAdd).not.toHaveBeenCalled()
+    // ONE write, and it carried no text: the placement' own card, which is what an unsent comment is
+    // listed by (see the comment list's own case). Nothing here sent the words.
+    expect(props.onCommentAdd).toHaveBeenCalledTimes(1)
+    const placedDraft = (props.onCommentAdd as unknown as { mock: { calls: [SessionId, { text: string }][] } })
+      .mock.calls[0]?.[1]
+    expect(placedDraft?.text).toBe('')
   })
 
   it('keeps every file\'s draft when the reader switches files', () => {
@@ -10703,17 +10733,67 @@ describe('PendingPanel', () => {
     expect(hostOf(props).comments).toHaveLength(1)
     expect(hostOf(props).comments[0]?.text).toBe('why?')
 
-    // Discarded: the block leaves the page with nothing written down at all.
+    // Discarded: the card leaves the page, and the record its placement wrote goes with it.
     selectRow(0)
     fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
     fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'never mind' } })
-    expect(rememberedPlacedThreads(S1)).toHaveLength(1)
+    const placedId = rememberedPlacedThreads(S1)[0]?.id
+    expect(placedId).toBeDefined()
     const block = [...document.querySelectorAll('[data-diff-discussion]')]
-      .find(node => (node as HTMLElement).dataset.diffDiscussionId?.startsWith('draft-') === true)
+      .find(node => (node as HTMLElement).dataset.diffDiscussionId === placedId)
     fireEvent.click(block!.querySelector('[data-diff-discussion-menu]') as HTMLButtonElement)
     fireEvent.click(screen.getByText('action.discussionEnd'))
     expect(rememberedPlacedThreads(S1)).toEqual([])
+    // The sent thread is the one left: the discarded card's own record was ended with it, because an
+    // unsent card is a stored card now (see `addDiscussion`) and ending one is a host action.
     expect(hostOf(props).comments).toHaveLength(1)
+    expect(hostOf(props).comments[0]?.text).toBe('why?')
+  })
+
+  it('lists a card the reader placed before writing in it, and jumps back to it', () => {
+    // THE READER'S ASK (2026-10-10): a card placed and not yet written in was invisible to the comment
+    // list, so one that had nothing in it was hard to find again. The placement writes the card now (see
+    // `addDiscussion`), so the list carries it from the moment it exists — titled by the box's own
+    // placeholder, because there are no words yet — and pressing that row lands back on the card.
+    act(() => { setCommentModeEnabled(true) })
+    const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
+    const props = panelProps({ read: true, files: [multi], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('m.txt'))
+
+    const rows = [...document.querySelectorAll('[data-diff-row]')] as HTMLElement[]
+    const node = rows[5]!.querySelector('[data-diff-code]')?.firstChild ?? rows[5]!
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      anchorNode: node,
+      focusNode: node,
+      rangeCount: 1,
+      getRangeAt: () => ({ startContainer: node, startOffset: 0, endContainer: node, endOffset: 1 }),
+      removeAllRanges: () => {},
+    } as unknown as Selection)
+    act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    fireEvent.click(document.querySelector('[data-diff-selection-comment]') as HTMLButtonElement)
+
+    // The list counts it and names the lines it is on, with the placeholder standing in for words that
+    // have not been written yet.
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    const items = [...document.querySelectorAll('[data-diff-comment-link]')] as HTMLElement[]
+    expect(items).toHaveLength(1)
+    expect(items[0]!.querySelector('[data-diff-comment-label]')?.textContent).toBe('[4]')
+    expect(items[0]!.textContent).toContain('discussion.placeholder')
+    expect(document.querySelector('[data-diff-list-tab="comments"] [data-diff-list-count]')?.textContent).toBe('1')
+
+    // Words typed into the card are still the page's until the send, and the list still shows ONE card:
+    // what it carries is the record the placement wrote, not a second copy of the box.
+    fireEvent.change(document.querySelector('[data-diff-discussion-input]') as HTMLInputElement, { target: { value: 'half a thought' } })
+    expect([...document.querySelectorAll('[data-diff-comment-link]')]).toHaveLength(1)
+
+    // Pressing the row opens the file and lands on the card itself, words and all.
+    fireEvent.click(items[0]!)
+    const block = document.querySelector('[data-diff-discussion]') as HTMLElement
+    expect(block).not.toBeNull()
+    expect((block.querySelector('[data-diff-discussion-input]') as HTMLInputElement).value).toBe('half a thought')
   })
 
   it('stops waiting when the session drops the question, and gives the words back', async () => {
