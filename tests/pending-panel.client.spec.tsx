@@ -19,7 +19,7 @@ import { categoryColor } from '../src/client/category-color.ts'
 import { codeFontCss } from '../src/client/code-font.ts'
 import { actionTooltip, closeShortcut, shortcutOf, withChord } from '../src/client/chords.ts'
 import { zh, en } from '../src/client/locales.ts'
-import { dismissedUpdateVersion, lastPanelFile, panelFileOffset, rememberedPlacedThreads, rememberedThreads, removalAskQuiet, resetPanelMemory } from '../src/client/panel-memory.ts'
+import { dismissedUpdateVersion, lastPanelFile, panelFileOffset, rememberedPlacedThreads, rememberedThreads, rememberJumpAway, removalAskQuiet, resetPanelMemory } from '../src/client/panel-memory.ts'
 import { chipMenuEnabled, diffLineHeight, navLeadRows, setCommentModeEnabled, setConfirmFileRemoveEnabled } from '../src/client/settings.ts'
 import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
 import { DiffApprovalHeaderEntry } from '../src/client/header-entry.tsx'
@@ -6529,6 +6529,58 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByText('action.keep'))
     view.rerender(<PendingPanel {...panelProps({ read: true, files: [second], busy: new Set() })} />)
     expect(shownPath()).toBe('/repo/b.txt')
+  })
+
+  it('steps back within the open file, writing the box and the memory together', () => {
+    // The mouse's back side button on the file that is ALREADY open. The offset alone is not enough: an offset
+    // landing for a file that is already mounted is spent once per file (see the placement and landing
+    // effects), so the box is written directly — and the memory has to come along, or the next jump records
+    // the place the reader is already standing in and the step after it lands on itself. That is exactly what
+    // the browser log showed before the second half existed: a step back to 104.8 left the memory at 164.8.
+    const restore = stubCodeScroll()
+    try {
+      const second = entry({ id: 'entry-b', path: '/repo/b.txt' })
+      render(<PendingPanel {...panelProps({ read: true, files: [FILE, second], busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      expect(shownPath()).toBe('/repo/a.txt')
+
+      // Where the reader is, kept the way their own scrolling keeps it, and a jump that leaves it behind.
+      codeBody().scrollTop = 250
+      fireEvent.scroll(codeBody())
+      rememberJumpAway(S1, FILE.id)
+      // The jump put them further down and they read on from there — so the place on the stack (250), the box,
+      // and the memory (900) are three different numbers, and a step back has to move two of them.
+      codeBody().scrollTop = 900
+      fireEvent.scroll(codeBody())
+      fireEvent.mouseDown(document.querySelector('[data-diff-approval-panel]') as HTMLElement, { button: 3 })
+      expect(codeBody().scrollTop).toBe(250)
+      // And the memory came with it: a jump made now leaves 250 rather than the place they were standing in.
+      expect(panelFileOffset(S1, FILE.id)).toBe(250)
+    } finally {
+      restore()
+    }
+  })
+
+  it('steps back into the file a jump left, at the place it was left', () => {
+    const restore = stubCodeScroll()
+    try {
+      const second = entry({ id: 'entry-b', path: '/repo/b.txt' })
+      render(<PendingPanel {...panelProps({ read: true, files: [FILE, second], busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      codeBody().scrollTop = 250
+      fireEvent.scroll(codeBody())
+
+      // A row click is a jump the reader asked for, and it leaves for another file.
+      clickFileRow('b.txt')
+      expect(shownPath()).toBe('/repo/b.txt')
+
+      // One press brings that file back, at the place it was left.
+      fireEvent.mouseDown(document.querySelector('[data-diff-approval-panel]') as HTMLElement, { button: 3 })
+      expect(shownPath()).toBe('/repo/a.txt')
+      expect(codeBody().scrollTop).toBe(250)
+    } finally {
+      restore()
+    }
   })
 
   it('reopens on the file it was closed on, at the offset it was left', () => {

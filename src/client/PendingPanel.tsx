@@ -9315,7 +9315,11 @@ export function PendingPanel({
     return () => {
       root.removeEventListener('mousedown', onSideButton, true)
     }
-  }, [])
+    // On the SHOWING, not on the mount: the panel's root element exists only while the panel is open (`docked
+    // || open` below), so an effect that runs once at mount can find no element to attach to and never try
+    // again — the button then works or not depending on whether the panel happened to be open at mount, and
+    // stops working for good after the panel is closed and opened again.
+  }, [docked, open])
   const splitRef = useRef<HTMLDivElement>(null)
   /** The code scroll box's bounds within the split, so the floating card is
    * constrained to it. */
