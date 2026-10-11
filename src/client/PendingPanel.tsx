@@ -51,7 +51,7 @@ import type { ProducedChipMenuDetail } from './produced-diff.ts'
 import type { DiffApprovalPresentation } from './settings.ts'
 import { OPEN_PANEL_FILE_EVENT, PANEL_STATE_EVENT, SHOW_PANEL_EVENT, TOGGLE_PANEL_EVENT } from './dock.tsx'
 import type { PanelFileDetail, PanelStateDetail } from './dock.tsx'
-import { dismissedUpdateVersion, dismissUpdate, forgetPlacedThreadsNotIn, lastPanelFile, panelFileOffset, quietenRemovalAsk, rememberPlacedThreads, rememberThreads, rememberedPlacedThreads, rememberedThreads, rememberPanelView, removalAskQuiet, UPDATE_DISMISSED_EVENT } from './panel-memory.ts'
+import { dismissedUpdateVersion, dismissUpdate, forgetPlacedThreadsNotIn, lastPanelFile, panelFileOffset, popJumpAway, quietenRemovalAsk, rememberJumpAway, rememberPlacedThreads, rememberThreads, rememberedPlacedThreads, rememberedThreads, rememberPanelView, removalAskQuiet, UPDATE_DISMISSED_EVENT } from './panel-memory.ts'
 import type { PlacedThread, ThreadLocal } from './panel-memory.ts'
 import { composerCoveredByPanel, leaveComposerCaret } from './composer-cover.ts'
 import { categoryColor } from './category-color.ts'
@@ -5174,6 +5174,8 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       return
     }
     if (searchMatches.length === 0) return
+    // A go-to-match the reader asked for: the place they are leaving goes on the back stack.
+    rememberJumpAway(sessionId, file.id)
     // A just-recorded cursor (a fresh selection made while the bar is open) sets
     // the anchor: land on the selected occurrence first (so "选中这个作为第一个
     // holds), then subsequent presses advance normally.
@@ -6810,6 +6812,8 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   // jumps through `jump` like the single-column preview. Kept in a ref so the
   // capture-phase keydown listener always sees the current closure.
   const jumpBlock = (direction: -1 | 1, wrapGuard = false, singleToast = wrapGuard): void => {
+    // A jump the reader asked for: the place they are leaving goes on the back stack (see `rememberJumpAway`).
+    rememberJumpAway(sessionId, file.id)
     if (splitView && !previewActive) {
       splitDiffRef.current?.jump(direction, wrapGuard, singleToast)
       return
@@ -6827,6 +6831,8 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    * configured lead rows above it and the block it lands in flashed.
    */
   const gotoLine = (line: number): void => {
+    // A jump the reader asked for by number: the place they are leaving goes on the back stack.
+    rememberJumpAway(sessionId, file.id)
     const row = model.diff.rows.findIndex(entry => entry.newLine === line)
     if (row === -1) {
       onToast(t('panel.gotoMissing', { line }))
@@ -8784,6 +8790,65 @@ export function PendingPanel({
   ): void => {
     setLanding(prev => ({ fileId, top, row, line, old, card, comment, n: (prev?.n ?? 0) + 1 }))
   }
+  /** Whether the panel is stepping back through the reader's jumps (see `jumpBack`). */
+  const jumpingBackRef = useRef(false)
+  /**
+   * Put the place the reader is leaving on the back stack.
+   *
+   * The JUMPS themselves call this — a row click, a path typed into the header, the file keys, an undo/redo's
+   * re-landing, a comment jump — and `landOn` deliberately does NOT: the panel also lands itself on a file (a
+   * fresh showing, the advance a decision leaves behind, the rest of this list arriving), which is not a jump
+   * the reader made, and recording those would put a step on the stack that only leads back to where they
+   * already are.
+   *
+   * A back step records nothing at all, which is what `jumpingBackRef` says: it is already leaving the place
+   * it is about to land on, and recording it would keep the stack from ever shrinking.
+   */
+  const leftPlace = (): void => {
+    if (!jumpingBackRef.current) rememberJumpAway(current, selected)
+  }
+  /**
+   * Step back to where the last deliberate jump was made from — the mouse's BACK side button, while the
+   * pointer is over this panel.
+   *
+   * The stack holds PLACES rather than files, one per jump the reader made, and it spans files: the step that
+   * matters most is coming back out of a file a jump took them into. A place whose entry has left the list
+   * since is skipped rather than landing nowhere, because the list is a live view of the store and a file can
+   * vanish between two jumps.
+   */
+  const jumpBack = (): void => {
+    for (;;) {
+      const place = popJumpAway(current)
+      if (place === undefined) return
+      if (!files.some(entry => entry.id === place.fileId)) continue
+      jumpingBackRef.current = true
+      try {
+        if (place.fileId === selected) {
+          // The file is already open, and an offset landing for the file that is open is spent once per file
+          // while it stays mounted (see the placement and landing effects' `landedFileRef`/`placedFileRef`):
+          // asking `landOn` for it again moves nothing, and a step back within one file is exactly that. So the
+          // offset is written straight to the scroller the reader is looking at — the element their own
+          // scrolling and `rememberView` already use — and the memory is brought along, so the next record
+          // reads the place this step landed on rather than the one it left (measured: without the second
+          // half, the following record kept the offset of where the reader already was, and the next step back
+          // landed on itself and looked like nothing had been recorded at all).
+          const body = panelRef.current?.querySelector<HTMLElement>('[data-diff-body]')
+          if (body !== null && body !== undefined) {
+            body.scrollTop = place.scrollTop
+            rememberPanelView(current, { fileId: place.fileId, scrollTop: place.scrollTop })
+          }
+        } else {
+          // Another file: the step back mounts it, and a landing on a file that is not open is honoured —
+          // exactly what the list's own press does, selection and landing in one commit.
+          setSelected(place.fileId)
+          landOn(place.fileId, place.scrollTop)
+        }
+      } finally {
+        jumpingBackRef.current = false
+      }
+      return
+    }
+  }
   /** The selection as the latest render has it, for the closers that run from a
    *  cleanup (the docked tab unmounting) rather than from a handler. */
   const selectedRef = useRef(selected)
@@ -8941,6 +9006,9 @@ export function PendingPanel({
     const onPanelFile = (event: Event): void => {
       const detail = (event as CustomEvent<PanelFileDetail>).detail
       if (detail === undefined || typeof detail.fileId !== 'string') return
+      // "Show me this diff", from the host's side: the reader asked to be taken here, so where they were goes
+      // on the back stack.
+      leftPlace()
       setSelected(detail.fileId)
       // "Show me this diff": the file's first change, wherever it was left — for
       // the file already open too, so re-clicking the chip jumps back to the top
@@ -9224,6 +9292,30 @@ export function PendingPanel({
   /** The window's height, for the panel's minimum-size floor (see {@link panelInsets}). */
   const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight)
   const panelRef = useRef<HTMLElement>(null)
+  /** The latest `jumpBack`, for the side-button listener, which is attached once and must not go stale. */
+  const jumpBackRef = useRef(jumpBack)
+  jumpBackRef.current = jumpBack
+  /**
+   * The mouse's BACK side button steps back through the reader's jumps.
+   *
+   * The listener is on the panel's own element, so the press only counts while the pointer is over the panel
+   * — a side button pressed anywhere else in the harness is none of this plugin's business. `button === 3` is
+   * the X1 (back) button; its default is prevented so Chromium's own history does not answer the same press
+   * and leave the page as well as the panel.
+   */
+  useEffect(() => {
+    const root = panelRef.current
+    if (root === null) return
+    const onSideButton = (event: MouseEvent): void => {
+      if (event.button !== 3) return
+      event.preventDefault()
+      jumpBackRef.current()
+    }
+    root.addEventListener('mousedown', onSideButton, true)
+    return () => {
+      root.removeEventListener('mousedown', onSideButton, true)
+    }
+  }, [])
   const splitRef = useRef<HTMLDivElement>(null)
   /** The code scroll box's bounds within the split, so the floating card is
    * constrained to it. */
@@ -9708,7 +9800,12 @@ export function PendingPanel({
     // A typed path lands on its file's first change like a row click does, whatever this
     // showing was doing; a fresh showing lands where the file was left instead.
     if (started) landOn(pick, panelFileOffset(current, pick))
-    else if (typed !== undefined) landOn(pick)
+    else if (typed !== undefined) {
+      // A path typed into the header's field: the reader named that file, so where they were goes on the back
+      // stack. The fresh showing above is the panel's own doing and records nothing.
+      leftPlace()
+      landOn(pick)
+    }
   }, [open, docked, current, files, selected, pendingSelect])
 
   // A fully-processed (emptied) list stays open with the empty state on
@@ -10318,6 +10415,7 @@ export function PendingPanel({
         // restored view) ends in `selected` too, so one reporter covers them all.
         if (id === selected) setJumpSignal(signal => signal + 1)
         else {
+          leftPlace()
           setSelected(id)
           landOn(id)
         }
@@ -10602,6 +10700,9 @@ export function PendingPanel({
    *  line, and the detail lands on the removal carrying it rather than on the current line that now
    *  reads that number (see `frameNamesNoCurrentLine`). */
   const jumpToComment = (fileId: string, line: number, id: string, oldSide: boolean): void => {
+    // A comment the reader picked out of the list, in this file or another: one jump, so one place on the
+    // stack whether or not it also switches the file.
+    leftPlace()
     if (fileId !== selected) setSelected(fileId)
     landOn(fileId, undefined, undefined, true, line, id, oldSide)
   }
@@ -11070,6 +11171,7 @@ export function PendingPanel({
     if (id === undefined) return
     if (id === selected) setUndoFlash(signal => signal + 1)
     else {
+      leftPlace()
       setSelected(id)
       landOn(id)
     }
@@ -11079,6 +11181,7 @@ export function PendingPanel({
     if (id === undefined) return
     if (id === selected) setUndoFlash(signal => signal + 1)
     else {
+      leftPlace()
       setSelected(id)
       landOn(id)
     }
@@ -11160,6 +11263,7 @@ export function PendingPanel({
       if (next !== undefined) {
         // Cycling is a switch like a click on the list: the file opens at its
         // first change rather than at wherever it was last left.
+        leftPlace()
         setSelected(next.id)
         landOn(next.id)
       }

@@ -7,8 +7,8 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import type { PlacedThread } from '../src/client/panel-memory.ts'
 import {
-  forgetPlacedThreadsNotIn, lastPanelFile, panelFileOffset, rememberPanelView, rememberPlacedThreads, rememberThreads,
-  rememberedPlacedThreads, rememberedThreads, resetPanelMemory,
+  forgetPlacedThreadsNotIn, lastPanelFile, panelFileOffset, popJumpAway, rememberJumpAway, rememberPanelView,
+  rememberPlacedThreads, rememberThreads, rememberedPlacedThreads, rememberedThreads, resetPanelMemory,
 } from '../src/client/panel-memory.ts'
 
 afterEach(resetPanelMemory)
@@ -175,5 +175,64 @@ describe('placed-but-unsent blocks', () => {
     // A page with no session has no record to drop, and dropping is not an error.
     forgetPlacedThreadsNotIn(undefined, [])
     expect(rememberedPlacedThreads(undefined)).toEqual([])
+  })
+})
+
+// The reader's jumps back: what a deliberate jump leaves behind, so the mouse's back side button can hand
+// the place back. ONLY jumps are recorded — never a scroll of the reader's own — which is the property that
+// keeps the stack small and makes every press mean something.
+describe('jumps back', () => {
+  it('hands back the place a jump left, newest first, on one stack shared across files', () => {
+    // Where the reader is in each file, as their own scrolling keeps it.
+    rememberPanelView('s1', { fileId: 'a', scrollTop: 400 })
+    rememberJumpAway('s1', 'a')
+    rememberPanelView('s1', { fileId: 'b', scrollTop: 90 })
+    rememberJumpAway('s1', 'b')
+    // Newest first: the file the last jump came out of, then the one before it.
+    expect(popJumpAway('s1')).toEqual({ fileId: 'b', scrollTop: 90 })
+    expect(popJumpAway('s1')).toEqual({ fileId: 'a', scrollTop: 400 })
+    // Spent, not re-landed: a third press has nowhere to go rather than landing where the reader already is.
+    expect(popJumpAway('s1')).toBeUndefined()
+  })
+
+  it('reads the place from the file memory, so a file with no place yet counts as its top', () => {
+    rememberJumpAway('s1', 'never-scrolled')
+    expect(popJumpAway('s1')).toEqual({ fileId: 'never-scrolled', scrollTop: 0 })
+  })
+
+  it('drops a jump that would push the place already on top', () => {
+    rememberPanelView('s1', { fileId: 'a', scrollTop: 12 })
+    rememberJumpAway('s1', 'a')
+    // The same place again — a second jump out of the same spot, or entry points that nest — is ONE step
+    // out, not two, or the reader would press the button twice to get anywhere.
+    rememberJumpAway('s1', 'a')
+    expect(popJumpAway('s1')).toEqual({ fileId: 'a', scrollTop: 12 })
+    expect(popJumpAway('s1')).toBeUndefined()
+  })
+
+  it('keeps sessions apart, and records nothing without a session or a file', () => {
+    rememberJumpAway('s1', 'a')
+    expect(popJumpAway('s2')).toBeUndefined()
+    rememberJumpAway(undefined, 'a')
+    expect(popJumpAway(undefined)).toBeUndefined()
+    rememberJumpAway('s1', undefined)
+    expect(popJumpAway('s1')).toEqual({ fileId: 'a', scrollTop: 0 })
+  })
+
+  it('caps the stack, so a long reading session cannot grow it without bound', () => {
+    for (let n = 0; n < 55; n++) {
+      rememberPanelView('s1', { fileId: `f${n}`, scrollTop: n })
+      rememberJumpAway('s1', `f${n}`)
+    }
+    const back: string[] = []
+    for (;;) {
+      const place = popJumpAway('s1')
+      if (place === undefined) break
+      back.push(place.fileId)
+    }
+    expect(back).toHaveLength(50)
+    expect(back[0]).toBe('f54')
+    // The five oldest steps are the ones that fell off.
+    expect(back[49]).toBe('f5')
   })
 })

@@ -17,13 +17,32 @@
 
 import type { Discussion, DiscussionQuoteLine } from './discussion.ts'
 
-/** One session's remembered view: its last file, and how far down each file was. */
+/** One place a deliberate jump left behind: the file, and how far down it was. */
+export interface PanelJumpPlace {
+  /** The pending entry the reader was in. */
+  fileId: string
+  /** The code view's `scrollTop` there — what `rememberPanelView` keeps current as the reader scrolls. */
+  scrollTop: number
+}
+
+/** One session's remembered view: its last file, how far down each file was, and where its jumps left from. */
 interface SessionView {
   /** The pending entry that was open when this session's panel last closed. */
   last?: string | undefined
   /** Entry id -> the code view's `scrollTop` when that file was last left. */
   offsets: Map<string, number>
+  /**
+   * The places deliberate jumps LEFT, oldest first (see `rememberJumpAway`). One stack per session, shared
+   * across files, because the step that matters most is going back to the file a jump came out of.
+   */
+  jumps: PanelJumpPlace[]
 }
+
+/**
+ * How many back steps one session may hold. A page-long reading session must not grow this without bound,
+ * and the oldest steps are the ones a reader is least likely to want back; browsers cap their history too.
+ */
+const JUMP_STACK_LIMIT = 50
 
 const views = new Map<string, SessionView>()
 
@@ -302,7 +321,7 @@ export function dismissUpdate(version: string): void {
 function viewOf(sessionId: string): SessionView {
   let view = views.get(sessionId)
   if (view === undefined) {
-    view = { offsets: new Map() }
+    view = { offsets: new Map(), jumps: [] }
     views.set(sessionId, view)
   }
   return view
@@ -346,6 +365,41 @@ export function lastPanelFile(sessionId: string | undefined): string | undefined
  */
 export function panelFileOffset(sessionId: string | undefined, fileId: string): number | undefined {
   return sessionId === undefined ? undefined : views.get(sessionId)?.offsets.get(fileId)
+}
+
+/**
+ * Remember the place a deliberate jump is leaving, so the reader can come back to it.
+ *
+ * ONLY JUMPS PASS THROUGH HERE — never a scroll of the reader's own, which is the whole point. Their place
+ * is already kept per file (`rememberPanelView`), kept current by every scroll they make, so a back step
+ * has nothing to measure: it hands that same memory back. Reading it from there rather than from the DOM is
+ * also what makes this work in both views, one column and side by side, whose scrollers are different
+ * elements and only one of which is ever mounted.
+ *
+ * A jump that would push the place already on top is dropped: two entries for one place would cost the
+ * reader two presses of the back button to get anywhere.
+ *
+ * @param sessionId - the session the panel is reviewing; nothing is recorded without one.
+ * @param fileId - the entry being LEFT, not the one being jumped to.
+ */
+export function rememberJumpAway(sessionId: string | undefined, fileId: string | undefined): void {
+  if (sessionId === undefined || fileId === undefined) return
+  const place: PanelJumpPlace = { fileId, scrollTop: panelFileOffset(sessionId, fileId) ?? 0 }
+  const jumps = viewOf(sessionId).jumps
+  const top = jumps[jumps.length - 1]
+  if (top !== undefined && top.fileId === place.fileId && top.scrollTop === place.scrollTop) return
+  jumps.push(place)
+  if (jumps.length > JUMP_STACK_LIMIT) jumps.shift()
+}
+
+/**
+ * Take the last place a deliberate jump left, for a back step. Spent here, so a second press goes one step
+ * further back rather than landing where the reader already is.
+ * @param sessionId - the session, if any.
+ * @returns that place, or undefined when there is nothing to go back to.
+ */
+export function popJumpAway(sessionId: string | undefined): PanelJumpPlace | undefined {
+  return sessionId === undefined ? undefined : views.get(sessionId)?.jumps.pop()
 }
 
 /**
