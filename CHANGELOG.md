@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.34.0](https://github.com/9087/dsh-diff-approval/compare/v0.33.0...v0.34.0) (2026-10-11)
+
+### Features
+
+* **comments:** write a card when it is placed, so an unsent one is listed ([7daa609](https://github.com/9087/dsh-diff-approval/commit/7daa609cce4dd22e259ccf9be0cf8ca986cdfa9a))
+* **host:** annotate a file outside the workspace ([cc63f4d](https://github.com/9087/dsh-diff-approval/commit/cc63f4d355a50fc7238d14349b2627e92770efc7))
+* **panel:** step back through the reader's own jumps with the mouse's side button ([396abba](https://github.com/9087/dsh-diff-approval/commit/396abbac8708f0e971905f14bbd4745b0f5f69dc))
+* **panel:** the comment field wraps, grows, and keeps Shift+Enter for a newline ([983f2fb](https://github.com/9087/dsh-diff-approval/commit/983f2fbf447adff28c9591e821063c626f8158a3))
+
+### Bug Fixes
+
+* **client:** keep both columns' line order in the side-by-side view ([beef11f](https://github.com/9087/dsh-diff-approval/commit/beef11f835148f9cfa4704ab75584e3c54fa6618))
+* **panel:** keep a comment card's height and the view's scroll out of their own feedback ([d4f8003](https://github.com/9087/dsh-diff-approval/commit/d4f8003a1a379b23022adcece5b29f6cd18dc91a))
+* **panel:** keep a thread replying until its turn ends, and refuse writing while it does ([67d29d6](https://github.com/9087/dsh-diff-approval/commit/67d29d62f3ead7247931be6d743fa1990a5ade7b))
+* **panel:** keep the side-button listener on the panel that is showing, and pin the step back ([32d30f1](https://github.com/9087/dsh-diff-approval/commit/32d30f13d1e5c62562f725c02deef7f532557e05))
+
 ## [0.33.0](https://github.com/9087/dsh-diff-approval/compare/v0.32.0...v0.33.0) (2026-10-08)
 
 ### Features
