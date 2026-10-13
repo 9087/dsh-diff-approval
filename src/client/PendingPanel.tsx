@@ -10766,12 +10766,22 @@ export function PendingPanel({
       return
     }
     if (id === 'copy-path') {
-      // The path is copied exactly as the shell handed it over — the Markdown link's own spelling, the
-      // `@file` token with its `@` and quotes already stripped, or the absolute path a changed-files
-      // row carries. This menu has no spelling of its own to prefer, so it invents none: a conversion
-      // here would copy a path the reader never pointed at. The toast is the acceptance, not the
-      // attempt — a host that refused the write has copied nothing to confirm.
-      void writeClipboard(target.path).then((accepted) => { if (accepted) showCopyToast(t('action.copied')) })
+      // The FULL path. What the pressed element names is the spelling the READER pointed at — a Markdown
+      // link's own text, a chip's display path, usually relative to the workspace — and this menu is where a
+      // path is taken OUT of the panel and pasted somewhere else (a terminal, an editor), where only the
+      // absolute one lands. So it is resolved rather than echoed: a file the host already lists keeps the
+      // absolute spelling the host gave that entry, a path that is already absolute is copied as it stands,
+      // and anything else is joined onto the workspace root. (This is the opposite of what this branch first
+      // did, on purpose: copying the reader's own spelling was safe but not useful.)
+      const listed = files.find(file => diffPathsMatch(target.path, file.path, snapshot.workspacePath))
+      const absolute = /^([a-zA-Z]:[\\/]|\\\\|\/)/.test(target.path)
+      const root = snapshot.workspacePath
+      const full = listed?.path
+        ?? (absolute || root === undefined || root === ''
+          ? target.path
+          : `${root.replace(/[\\/]+$/, '')}/${target.path.replace(/^[\\/]+/, '')}`)
+      // The toast is the acceptance, not the attempt — a host that refused the write has copied nothing.
+      void writeClipboard(full).then((accepted) => { if (accepted) showCopyToast(t('action.copied')) })
       return
     }
     if (id !== 'review') return
