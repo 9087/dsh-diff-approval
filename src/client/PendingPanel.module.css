@@ -3355,11 +3355,14 @@
   align-items: flex-end;
   gap: 8px;
   box-sizing: border-box;
-  /* A FIXED two rows, which with the one-row header is the three rows the block reserves. It must not
-     become a minimum: the card's own row count is measured from what it draws (see the panel's `bodyRows`
-     correction), so a band that grew with the field would make the block's height depend on its own
-     measurement — the loop that threw at the boundary (2026-10-11). The field scrolls instead. */
-  height: calc(22px * 2);
+  /* A MINIMUM of two rows, which with the one-row header is the three rows the block reserves: the band
+     grows with the field inside it (see the growth effect), so the card's own measurement can see the height
+     it is drawing — a fixed band would let a wrapped comment spill past it and the card would reserve rows
+     for a height it does not draw. A growing band was the second half of the loop that threw at the boundary
+     (2026-10-11); what bounds it now is the reserved gutter (the wrap cannot change with the bar), the
+     one-pixel dead band on the card's correction and that correction's three-a-second cap. */
+  min-height: calc(22px * 2);
+  height: auto;
   /* Horizontally the wider row above; vertically the leftover sits ABOVE the pair. */
   margin: 0 -6px;
   /* ...and a third of a row stays under the pair, so the block does not end on the controls'
@@ -3403,8 +3406,12 @@
   min-width: 0;
   box-sizing: border-box;
   /* Stated, not inferred: the recipe below is what makes 26px, but the field and 评论 both say the
-     number so a font metric on either one cannot pull them apart by a pixel. */
-  height: 26px;
+     number so a font metric on either one cannot pull them apart by a pixel. A FLOOR AND A CEILING rather
+     than a stated height — what the field actually draws is set from its content by the growth effect. This
+     is what an empty one-line field needs (an 18px line, 3px of padding and a 1px border a side), and how far
+     it may grow — eight lines — past which it scrolls inside the box. */
+  min-height: 26px;
+  max-height: calc(18px * 8 + 6px + 2px);
   padding: 3px 8px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 6px;

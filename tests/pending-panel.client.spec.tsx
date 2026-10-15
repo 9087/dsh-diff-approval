@@ -11287,14 +11287,16 @@ describe('PendingPanel', () => {
     expect(addedCommentTexts(props)).toEqual(['', 'first line\nsecond line'])
   })
 
-  it('never writes a height to the writing field, so its box cannot feed the card\'s own measurement', () => {
-    // THE CRASH OF 2026-10-11, pinned structurally. A field whose height follows its content depends on its
-    // width, and its width depends on whether the code scroller is showing a scrollbar — which appears
-    // exactly when the card grows tall enough. That loop (taller card → scrollbar → narrower card → one more
-    // wrapped line → taller field → …) flipped at the boundary until React's nested-update counter threw out
-    // of `PendingDiff`. The field keeps the stylesheet's fixed box and scrolls instead, and nothing in the
-    // panel may write a height into it — through typing, a re-render, or a content box that claims to be
-    // tall, which is what the removed growth effect used to write through.
+  it('raises the writing field to the height its content needs, and leaves the stylesheet in charge with no layout', () => {
+    // The field grows with what is written in it — a line the wrap made, or one the reader broke with
+    // Shift+Enter — and the height is written to the ELEMENT, never into state: this is the field's own box,
+    // not the thread's reservation. See the growth effect for why that write is safe now that the scroller
+    // reserves its gutter (the width the wrap depends on cannot move), and for the guards that bound the
+    // card's own correction.
+    //
+    // jsdom lays nothing out, so `scrollHeight` is 0 — and then the height must stay the STYLESHEET's: the row
+    // grid these cases measure IS that CSS recipe, and a `0px` written through would collapse the field and
+    // move every measurement with it.
     const multi = entry({ id: 'entry-multi', path: '/repo/m.txt', oldText: 'a\nb\nc\nd\n', newText: 'A\nb\nC\nd\n' })
     const props = panelProps({ read: true, files: [multi], busy: new Set() })
     render(<PendingPanel {...props} />)
@@ -11317,36 +11319,38 @@ describe('PendingPanel', () => {
     const field = document.querySelector('[data-diff-discussion-input]') as HTMLTextAreaElement
     expect(field.style.height).toBe('')
 
-    // A layout that reports a tall content box, the way a wrapped comment does: still nothing is written.
+    // A layout that reports a tall content box, the way a wrapped comment does: the box is set to it. The
+    // border lies outside `scrollHeight` and jsdom reports none, so the two figures are the same here.
     Object.defineProperty(field, 'scrollHeight', { configurable: true, get: () => 40 })
     fireEvent.change(field, { target: { value: 'a line long enough to wrap inside the card' } })
-    expect(field.style.height).toBe('')
+    expect(field.style.height).toBe('40px')
 
-    // …and another render leaves it alone too: the card's measurement pass runs after every one of them.
+    // …and the next render keeps it there rather than letting it drift.
     fireEvent.change(field, { target: { value: 'a line long enough to wrap inside the card, and more' } })
-    expect(field.style.height).toBe('')
+    expect(field.style.height).toBe('40px')
   })
 
-  it('declares the field\'s fixed one-line box and its internal scrolling in the stylesheet', () => {
+  it('declares the field\'s one-line floor and its growth ceiling, and a band that grows with it', () => {
     // jsdom lays nothing out, so the box's own recipe is read by name the way the neighbouring CSS cases do.
     const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const rule = (name: string): string => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(sheet)?.[1] ?? ''
     const input = rule('discussionInput')
     expect(input).toContain('white-space: pre-wrap')
     expect(input).toContain('overflow-wrap: anywhere')
-    // One toolbar button tall — the recipe the send button and the frame's own actions use — and FIXED: a
-    // minimum or a maximum would let the content move the box, which is the loop the case above pins.
-    expect(/(^|\n)\s*height: 26px/.test(input)).toBe(true)
-    expect(/(^|\n)\s*min-height:/.test(input)).toBe(false)
-    expect(/(^|\n)\s*max-height:/.test(input)).toBe(false)
-    // Past the one visible line the field scrolls, and the reader is offered no resize handle.
+    // One toolbar button tall is a FLOOR — the recipe the send button and the frame's own actions use — and what
+    // the field actually draws is set from its content by the growth effect. A stated height would pin the box,
+    // and no ceiling would let a pasted document grow the card without bound.
+    expect(/(^|\n)\s*min-height: 26px/.test(input)).toBe(true)
+    expect(/(^|\n)\s*max-height: calc\(18px \* 8 \+ 6px \+ 2px\)/.test(input)).toBe(true)
+    expect(/(^|\n)\s*height:\s*\d/.exec(input)?.[0] ?? 'none').toBe('none')
+    // Past the ceiling the field scrolls, and the reader is offered no resize handle.
     expect(input).toContain('overflow-y: auto')
     expect(input).toContain('resize: none')
-    // …and the band the field sits in is a FIXED two rows: a band that grew would make the block's height
-    // depend on the measurement that writes it.
+    // …and the band the field sits in is a MINIMUM, so the height the field draws is inside a box the card's
+    // own measurement can see.
     const compose = rule('discussionCompose')
-    expect(/(^|\n)\s*height: calc\(22px \* 2\)/.test(compose)).toBe(true)
-    expect(/(^|\n)\s*min-height:/.test(compose)).toBe(false)
+    expect(/(^|\n)\s*min-height: calc\(22px \* 2\)/.test(compose)).toBe(true)
+    expect(/(^|\n)\s*height: auto/.test(compose)).toBe(true)
   })
 
   it('reserves the code scroller\'s gutter, so a scrollbar cannot change the width a card wraps in', () => {

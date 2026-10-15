@@ -1714,14 +1714,45 @@ function DiscussionBlock({
   // The reader looking at the card is what clears the host's dot: the card is the only place a comment
   // can be read in full, so its own visibility is the signal (see `useSeenOnView`).
   const { ref: cardRef, dotOff } = useSeenOnView(discussion.unseen === true, onSeen)
-  // NO HEIGHT IS EVER WRITTEN TO THE FIELD, and that is a rule rather than an omission. A height that
-  // follows what is written — `scrollHeight` — depends on the field's WIDTH, and the width depends on
-  // whether the code scroller is showing a scrollbar, which appears when the card grows tall enough. That
-  // closes a loop the panel cannot win: taller card → scrollbar → narrower card → one more wrapped line →
-  // taller field → …, flipping back and forth at the boundary until React's nested-update counter throws
-  // (`Maximum update depth exceeded`, seen live on 2026-10-11). The card's own reservation is measured from
-  // what it draws (see the `bodyRows` correction), so the field keeps the fixed one-line box the row grid
-  // was built from and SCROLLS to show the rest (`.discussionInput`).
+  const inputRef = useRef<HTMLTextAreaElement | null>(null)
+  /**
+   * The writing field's height follows what is written in it: a line the wrap made, or one the reader broke
+   * with Shift+Enter, up to the cap the stylesheet states, past which it scrolls.
+   *
+   * THE WRITE IS SAFE BECAUSE THE LOOP IT ONCE CLOSED HAS NO ENGINE LEFT. A height that follows
+   * `scrollHeight` depends on the field's WIDTH, and that width once depended on whether the code scroller
+   * was showing a bar — which appeared when the card grew tall enough: taller card → bar → narrower card →
+   * one more wrapped line → taller field → …, flipping at the boundary until React's nested-update counter
+   * gave up (`Maximum update depth exceeded`, hit live on 2026-10-11). Two things now stand in that route,
+   * so the write is a function of the TEXT alone and settles on the pass that sees it: the scroller reserves
+   * its gutter, so its inner width — and the card's, which reads its own width from there — never moves (see
+   * `.diffBody`), and the card's reservation is corrected by a pass that ignores a reading within a pixel of
+   * what is already reserved and may act at most three times a second (see the `bodyRows` correction).
+   *
+   * The write goes to the ELEMENT, never into state: this is the field's own box, not the thread's
+   * reservation, and a layout-phase state write here is exactly what that crash was made of.
+   *
+   * A field with no layout at all — jsdom, a hidden pane — reports 0, and the height is then left entirely to
+   * the stylesheet: the row grid the tests measure IS that CSS recipe, and a zero reading written through as
+   * `0px` would collapse the field and move every measurement with it.
+   */
+  useLayoutEffect(() => {
+    const element = inputRef.current
+    if (element === null) return
+    // `auto` first: the box has to be free to report the height its content needs, not the one the last pass
+    // wrote into it.
+    element.style.height = 'auto'
+    const natural = element.scrollHeight
+    if (natural <= 0) {
+      element.style.height = ''
+      return
+    }
+    // `scrollHeight` is the content plus the padding; the border lies outside it and the field is a
+    // border-box, so this is the box that draws that content.
+    const style = getComputedStyle(element)
+    const border = (Number.parseFloat(style.borderTopWidth) || 0) + (Number.parseFloat(style.borderBottomWidth) || 0)
+    element.style.height = `${natural + border}px`
+  })
   return (
     <div
       className={css.discussion}
@@ -1868,7 +1899,7 @@ function DiscussionBlock({
               className={css.discussionInput}
               data-diff-discussion-input
               rows={1}
-              ref={(element) => { registerInput(discussion.id, element) }}
+              ref={(element) => { inputRef.current = element; registerInput(discussion.id, element) }}
               value={discussion.draft}
               placeholder={t('discussion.placeholder')}
               // THIS thread is waiting on an answer: the row is drawn (it is where the follow-up will
