@@ -8318,6 +8318,63 @@ describe('PendingPanel', () => {
     }
   })
 
+  it('leaves the view alone when the rows change under an open search bar', () => {
+    // The bar is open and its match is CURRENT, but the reader has scrolled somewhere else — the state a keep
+    // hands the pane. The effect that keeps the current match visible used to list the matches ARRAY among its
+    // dependencies, so any content change (a poll, a keep, anything that rebuilds the model) gave it a new
+    // array identity and re-ran it: it judged the match against the viewport a landing had just placed and
+    // scrolled back to it, silently undoing the landing. The trigger is the current match ROW changing, and an
+    // explicit jump — not the array identity. Reported 2026-10-16: with the search bar open on a hit, keep
+    // appeared not to move the view.
+    const text = (changed: boolean, mutate: boolean): string => Array.from({ length: 60 }, (_, i) => {
+      const line = i + 1
+      if (line === 1) return changed ? 'CHANGED' : 'first'
+      // The content really changes between the two renders: `model` memoises on the TEXTS, so only different
+      // text rebuilds the rows — and only rebuilt rows give the search a new match array at all. A render that
+      // merely hands over a new object with the same text proves nothing (that is exactly how the first version
+      // of this spec passed with the bug still in place). The change is BELOW the match and below the viewport's
+      // top edge, which is the reported case: rows above and at the match keep their numbers, so the only thing
+      // that can move the pane is the effect re-running for a reason the reader never asked for.
+      if (line === 55 && mutate) return 'MUTATED'
+      if (line === 50) return 'needle'
+      return `line ${line}`
+    }).join('\n') + '\n'
+    const build = (mutate: boolean): PendingFileDiff => entry({
+      id: 'entry-search-still',
+      path: '/repo/still.txt',
+      oldText: text(false, false),
+      newText: text(true, mutate),
+    })
+    const view = render(<PendingPanel {...panelProps({ read: true, files: [build(false)], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('still.txt'))
+    fireEvent.click(screen.getByLabelText('action.search'))
+
+    const restore = stubCodeScroll()
+    try {
+      const pane = document.querySelector('[data-diff-body]') as HTMLElement
+      fireEvent.change(document.querySelector('[data-diff-search-input]') as HTMLInputElement, { target: { value: 'needle' } })
+      // The scenario states its own preconditions: the bar found exactly one match and it is CURRENT, and it
+      // sits far below the viewport — so the effect this pins had every reason to move the pane, and moving it
+      // is precisely what must not happen.
+      expect(document.querySelector('[data-diff-searchbar]')).not.toBeNull()
+      expect(document.querySelector('[data-diff-search-count]')!.textContent).toBe('1/1')
+      const current = document.querySelector('[data-diff-search="current"]') as HTMLElement
+      const row = Number(current.getAttribute('data-diff-row'))
+      expect(row * diffLineHeight()).toBeGreaterThan(pane.clientHeight)
+      // The match is far below the viewport here, so a re-run of that effect would move the pane.
+      pane.scrollTop = 0
+      // Then the content changes under the open bar — what a keep hands the pane — and nothing about where
+      // the reader stands changed.
+      view.rerender(<PendingPanel {...panelProps({ read: true, files: [build(true)], busy: new Set() })} />)
+      // Re-queried rather than reusing `pane`: the assertion must read the scroller that is on screen now.
+      const after = document.querySelector('[data-diff-body]') as HTMLElement
+      expect(after.scrollTop).toBe(0)
+    } finally {
+      restore()
+    }
+  })
+
   it('Ctrl+F auto-fills the query from the selected text and lands on that occurrence first', () => {
     // 'data' appears in row 0 and row 2 (both context) so the auto-filled query
     // has two matches; selecting row 2 must make IT the first (current) result,
