@@ -5361,7 +5361,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const clamped = Math.max(0, Math.min(target, body.scrollHeight - body.clientHeight))
     if (body.scrollTop !== clamped) body.scrollTop = clamped
     setScrollTop(clamped)
-  }, [currentSearchRow, searchMatches, searchJump])
+  }, [currentSearchRow, searchJump])
 
   // Row index -> block index, so hovering any row of a block shows its actions.
   const blockIndexByRow = useMemo(() => {
