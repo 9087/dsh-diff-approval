@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.35.0](https://github.com/9087/dsh-diff-approval/compare/v0.34.0...v0.35.0) (2026-10-15)
+
+### Features
+
+* **panel:** copy the full path from the file menu, not the spelling it was raised on ([7b68b83](https://github.com/9087/dsh-diff-approval/commit/7b68b837e26990df94f3b15463d9c670e060afb5))
+
+### Bug Fixes
+
+* **panel:** give a file with no readable text its own state, not a no-diff answer ([4046c68](https://github.com/9087/dsh-diff-approval/commit/4046c689d957e525f2eb90c1b787db6b4ded66f4))
+* **panel:** let the writing field grow with its content again ([ea61ced](https://github.com/9087/dsh-diff-approval/commit/ea61ceda21c84148e1a22fc740757d7469739ef6)), references [#185](https://github.com/9087/dsh-diff-approval/issues/185)
+* **panel:** stop the search match from dragging the view back after a keep ([05c4dcf](https://github.com/9087/dsh-diff-approval/commit/05c4dcf04cfd58cd52408da52a6bb43070c91d6a))
+
 ## [0.34.0](https://github.com/9087/dsh-diff-approval/compare/v0.33.0...v0.34.0) (2026-10-11)
 
 ### Features
