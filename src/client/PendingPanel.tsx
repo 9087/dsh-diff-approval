@@ -8052,7 +8052,10 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
             keep — the host folds the (identical) content and drops the entry — which leaves the file itself
             exactly as it is. The row menu and the bulk footer ask the same question of the same helper
             (`fileHasNoDiff`), so the three surfaces cannot disagree. */}
-        {fileHasNoDiff(file) ? (
+        {file.textUnavailable === true && (
+          <p className={`${css.note} ${css.noteCentered}`} data-diff-text-unavailable>{t('panel.textUnavailable')}</p>
+        )}
+        {fileHasNoDiff(file) && file.textUnavailable !== true ? (
           <button
             type="button"
             className={`${css.action} ${css.actionPrimary} ${css.actionQuietDisabled}`}

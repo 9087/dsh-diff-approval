@@ -46,6 +46,17 @@ export interface PendingEntry {
    * did not exist, so the whole-file action deletes it.
    */
   earlierVersion: PendingEntryKind
+  /**
+   * WHETHER THE HOST COULD READ THIS PATH AS TEXT AT ALL. Set when a read failed for a path that EXISTS — a
+   * binary, a format the backend will not decode, an unreadable permission — so there is no diff to compute
+   * and no line to compare.
+   *
+   * It is NOT "the file is empty": an empty file reads as `''`, which is a value, and its diff is a real (if
+   * trivial) answer. It is NOT "the content matches the baseline" either — that is `fileHasNoDiff` on the
+   * client, which needs text to have been read. The panel says this state in its own words and offers only
+   * the decisions that make sense without text (dismiss, open with the default application).
+   */
+  textUnavailable?: boolean | undefined
   /** File content before the first captured operation (empty for a creation). */
   oldText: string
   /** File content after the latest captured operation. */

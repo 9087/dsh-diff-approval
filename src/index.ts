@@ -875,15 +875,30 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     const listed = store.list(sessionId).find(entry => pathIdentity(entry.path) === pathIdentity(absolute))
     if (listed !== undefined) return { kind: 'listed', entry: listed, added: false }
     const content = await readTextOrNone(absolute, signal ?? new AbortController().signal)
-    if (content === undefined) return { kind: 'missing' }
+    // A path that EXISTS but has no readable text — a binary, a format the backend will not decode, an
+    // unreadable permission — is LISTED with its own state rather than answered as missing: the reader asked
+    // for it, and "there is nothing here to compare by line" is a different answer from "this file is not
+    // text". `readText` fails for both, so the kind has to come from a stat.
+    let existsAsFile = false
+    if (content === undefined) {
+      const lifetime = signal ?? new AbortController().signal
+      try {
+        const info = await ctx.fs.stat(await ctx.fs.resolve(absolute, { signal: lifetime }), lifetime)
+        existsAsFile = info !== undefined && info.type === 'file'
+      } catch {
+        existsAsFile = false
+      }
+    }
+    if (content === undefined && !existsAsFile) return { kind: 'missing' }
     const now = Date.now()
     await foldBatch(sessionId, [{
       id: absolute,
       sessionId,
       path: absolute,
       earlierVersion: 'file',
-      oldText: content,
-      newText: content,
+      oldText: content ?? '',
+      newText: content ?? '',
+      textUnavailable: content === undefined ? true : undefined,
       updatedAt: now,
       sessionIds: [sessionId],
       // The AGENT put this file in the list (to hang a comment on it) while the reader was elsewhere: the
@@ -3433,17 +3448,30 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             .find(entry => pathIdentity(entry.path) === pathIdentity(absolute))
           if (existing !== undefined) return await admitNamed([existing], false, false)
           const content = await readTextOrNone(absolute, signal)
-          const named: PendingEntry[] = content === undefined ? [] : [{
+          // A path the reader NAMED that exists but has no readable text is listed with its own state (see
+          // `PendingEntry.textUnavailable`) rather than dropped; one that does not exist is still left out,
+          // because there is nothing to list.
+          let listNamed = content !== undefined
+          if (!listNamed) {
+            try {
+              const info = await ctx.fs.stat(await ctx.fs.resolve(absolute, { signal }), signal)
+              listNamed = info !== undefined && info.type === 'file'
+            } catch {
+              listNamed = false
+            }
+          }
+          const named: PendingEntry[] = listNamed ? [{
             id: absolute,
             sessionId: target.sessionId,
             path: absolute,
             earlierVersion: 'file',
-            oldText: content,
-            newText: content,
+            oldText: content ?? '',
+            newText: content ?? '',
+            textUnavailable: content === undefined ? true : undefined,
             updatedAt: now,
             sessionIds: [target.sessionId],
             lineage: lineageOf(target.sessionId),
-          }]
+          }] : []
           return await admitNamed(named, false, false)
         }
         const root = detectVcsRoot(workspace.path)

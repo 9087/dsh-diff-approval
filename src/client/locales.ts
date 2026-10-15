@@ -6,6 +6,9 @@ export const NS = 'diff-approval'
 export const zh = {
   'panel.title': '待处理改动',
   'panel.empty': '列表中暂无文件',
+  // 读得出文本的两种"没有差异"（空文件、内容与基线相同）各说各的；这一条是第三种：路径存在，但宿主
+  // 根本读不出文本（二进制、不支持的文件格式、无权限），所以没有行可以比较。
+  'panel.textUnavailable': '该文件不是文本（二进制或不支持的文件格式），无法按行比较。可以移出列表，或用默认程序打开。',
   'panel.dockGuide': '逐条审查改动，可保留、回退或评论',
   'panel.dockUnavailable': '这个环境没有可停靠的右侧边栏',
   'panel.dockFailed': '右侧边栏现在还不能接收面板',
@@ -328,6 +331,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 export const en = {
   'panel.title': 'Pending changes',
   'panel.empty': 'No files in the list yet',
+  'panel.textUnavailable': 'This file is not text (binary or an unsupported format), so it cannot be compared line by line. You can dismiss it or open it with the default application.',
   'panel.dockGuide': 'Review each change: keep, revert, or comment',
   'panel.dockUnavailable': 'This build has no right sidebar to dock into',
   'panel.dockFailed': 'The right sidebar cannot take the panel yet',
