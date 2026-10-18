@@ -637,9 +637,24 @@ export function makeMeasurer(font: string | undefined): ((text: string) => numbe
     return width
   }
 }
-/** The overview ruler's width in px (mirrors `.overviewRuler`). The flash is
- * kept off it even when the scroller has no vertical scrollbar. */
-const OVERVIEW_RULER_WIDTH_PX = 4
+/** The fallback width of the VERTICAL BAR in px, which is what the two places below keep clear of: the
+ *  stylesheet states `var(--dsh-scrollbar-width, 8px)` for the bar, and the single-column ruler is half of it
+ *  and centred (see `.overviewRuler`), so the strip reserved here is the whole gutter the ruler lives in. It
+ *  is the fallback because the theme normally publishes the token; it is read from the element when it does. */
+const OVERVIEW_RULER_WIDTH_PX = 8
+/** The bar's width as the app states it on the element (`--dsh-scrollbar-width`), so the two places that
+ *  have to stay clear of the ruler follow the theme's own number instead of a copy of it. */
+function scrollbarWidthPxOf(element: HTMLElement | null): number {
+  if (element === null) return OVERVIEW_RULER_WIDTH_PX
+  const style = getComputedStyle(element)
+  // The measured bar first (the panel publishes it, see the `--dsh-ruler-bar` effect), then the app's own
+  // token if a host ever starts declaring it, then the constant.
+  for (const name of ['--dsh-ruler-bar', '--dsh-scrollbar-width']) {
+    const parsed = Number.parseFloat(style.getPropertyValue(name))
+    if (Number.isFinite(parsed) && parsed > 0) return parsed
+  }
+  return OVERVIEW_RULER_WIDTH_PX
+}
 /** The cap on a user bubble, as a share of the thread's width (mirrors
  * `.discussionUser`'s `max-width`, which is the chat's own `.userStack` cap). The
  * wrap measurement has to know it, since the bubble wraps at its cap, not at the
@@ -5417,7 +5432,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const scroller = bodyRef.current
     if (scroller === null) return OVERVIEW_RULER_WIDTH_PX
     const scrollbarWidth = scroller.offsetWidth - scroller.clientWidth
-    return scrollbarWidth > 0 ? 0 : OVERVIEW_RULER_WIDTH_PX
+    return scrollbarWidth > 0 ? 0 : scrollbarWidthPxOf(scroller)
   })()
   // The block's own horizontal placement is the browser's job now: it is mounted
   // under a zero-width `position: sticky` pin in its row (`.discussionPin`), which
@@ -7651,7 +7666,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const scroller = bodyRef.current
     if (scroller === null) return 0
     const scrollbarWidth = scroller.offsetWidth - scroller.clientWidth
-    return Math.max(0, scroller.clientWidth - (scrollbarWidth > 0 ? 0 : OVERVIEW_RULER_WIDTH_PX))
+    return Math.max(0, scroller.clientWidth - (scrollbarWidth > 0 ? 0 : scrollbarWidthPxOf(scroller)))
   })()
   // The flash is absolutely positioned inside `.diffBody` (the scroll box); it
   // is fixed relative to that box and does NOT scroll with the in-flow rows.
@@ -9363,6 +9378,23 @@ export function PendingPanel({
   /** The window's height, for the panel's minimum-size floor (see {@link panelInsets}). */
   const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight)
   const panelRef = useRef<HTMLElement>(null)
+  /**
+   * THE BAR'S REAL WIDTH, published for the ruler. The app declares no `--dsh-scrollbar-width` anywhere
+   * (its whole package was searched: no declaration), so every `var(--dsh-scrollbar-width, 8px)` in the
+   * stylesheet resolves to that 8px fallback — a guess that only happens to match a bar Chromium draws 8px
+   * wide. One measurement of the scrolling box feeds BOTH views through `--dsh-ruler-bar`, which the ruler
+   * rules read first, so the strip is half a real bar (centred) in one column and a whole real bar in the
+   * split view. Only a changed value is written, and it is a style property, never state: no render, no loop.
+   */
+  useLayoutEffect(() => {
+    const panel = panelRef.current
+    if (panel === null) return
+    const scroller = panel.querySelector<HTMLElement>('[data-diff-body], [data-diff-md-preview-body]')
+    if (scroller === null) return
+    const real = scroller.offsetWidth - scroller.clientWidth
+    const value = `${real > 0 ? real : OVERVIEW_RULER_WIDTH_PX}px`
+    if (panel.style.getPropertyValue('--dsh-ruler-bar') !== value) panel.style.setProperty('--dsh-ruler-bar', value)
+  })
   /** The latest `jumpBack`, for the side-button listener, which is attached once and must not go stale. */
   const jumpBackRef = useRef(jumpBack)
   jumpBackRef.current = jumpBack

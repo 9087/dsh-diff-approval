@@ -5164,7 +5164,7 @@ describe('PendingPanel', () => {
     expect(source).toMatch(/useLayoutEffect\(\(\) => \{\s*measureFloatBoxRef\.current\(\)\s*\}, \[/)
   })
 
-  it('steps the code view\'s vertical bar a nudge more solid, without touching its size', () => {
+  it('steps the code view\'s vertical bar a nudge more solid, without touching its size or its air', () => {
     // Asked for as "a bit more opaque", which is not available here: the app's thumb token is opaque already
     // (measured `#e5e5e5`, no alpha channel), so the step is taken from the colour — 10% towards the theme's
     // label, a nudge rather than a new colour. Only the VERTICAL bar: the horizontal one is a rare guest in
@@ -5174,6 +5174,14 @@ describe('PendingPanel', () => {
     expect(sheet).toMatch(/\.diffBody::-webkit-scrollbar-thumb:vertical:hover \{\s*background: color-mix\(in srgb, var\(--dsh-scrollbar-thumb-hover\) 90%, var\(--dsw-alias-label-secondary\) 10%\)/)
     // No width rule of ours: the bar keeps the app's own size.
     expect(/\.diffBody::-webkit-scrollbar \{\s*width:/.test(sheet)).toBe(false)
+    // A pixel of air on each side of the vertical bar, and it is the CODE's surface that shows through it:
+    // the thumb paints inside a transparent border on both sides, and the track beneath carries the code
+    // background. Insets on the thumb rather than a narrower bar, so the app keeps owning the width.
+    const thumb = /\.diffBody::-webkit-scrollbar-thumb:vertical \{([^}]*)\}/.exec(sheet)?.[1] ?? ''
+    expect(thumb).toContain('border-left: 1px solid transparent')
+    expect(thumb).toContain('border-right: 1px solid transparent')
+    expect(thumb).toContain('background-clip: padding-box')
+    expect(sheet).toMatch(/\.diffBody::-webkit-scrollbar-track \{\s*background: var\(--dsw-alias-bg-base\)/)
   })
 
   it('keeps the changed-line ruler quiet, because its marks are a map and not a second diff', () => {
@@ -5183,6 +5191,20 @@ describe('PendingPanel', () => {
     const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const ruler = /^\.overviewRuler \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
     expect(ruler).toContain('opacity: 0.35')
+    // AS WIDE AS THE BAR, not a hard-coded 4px: the strip overlays the scrollbar's own track, and the bar's
+    // width is the app's token. The split view's strip spans one bar too, and each of its two halves is
+    // 50% of it (half a bar per pane), so the two panes' marks never add up past the bar.
+    expect(ruler).toContain('width: calc(var(--dsh-ruler-bar, 8px) / 2)')
+    expect(ruler).toContain('right: calc(var(--dsh-ruler-bar, 8px) / 4)')
+    const splitRuler = /^\.overviewRulerSplit \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
+    expect(splitRuler).toContain('right: 0')
+    // Both views read the MEASURED bar the panel publishes (`--dsh-ruler-bar`), because the app declares no
+    // `--dsh-scrollbar-width`: before this, every width here was the 8px fallback, whatever the bar drew.
+    expect(splitRuler).toContain('width: var(--dsh-ruler-bar, 8px)')
+    for (const half of ['markerSplitDel', 'markerSplitAdd']) {
+      const rule = new RegExp(`^\\.${half} \\{([^}]*)\\}`, 'm').exec(sheet)?.[1] ?? ''
+      expect(rule, `${half} takes half a bar`).toContain('width: 50%')
+    }
     // …and the colours themselves stay the theme's, one per kind.
     expect(sheet).toMatch(/\.markerDel \{\s*background-color: var\(--dsw-alias-state-error-primary\)/)
     expect(sheet).toMatch(/\.markerAdd \{\s*background-color: var\(--dsw-alias-state-success-primary\)/)
@@ -7382,7 +7404,7 @@ describe('PendingPanel', () => {
     // left half went missing in the browser, so the sheet is asserted here.
     const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const rule = (name: string): string => new RegExp(`^\\.${name} \\{([^}]*)\\}`, 'm').exec(sheet)?.[1] ?? ''
-    expect(rule('overviewRulerSplit')).toContain('width: var(--dsh-scrollbar-width, 8px)')
+    expect(rule('overviewRulerSplit')).toContain('width: var(--dsh-ruler-bar, 8px)')
     // The rule the halves have to beat.
     expect(rule('overviewMarker')).toContain('width: 100%')
     const base = sheet.indexOf('.overviewMarker {')
@@ -7929,20 +7951,45 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     const body = document.querySelector('[data-diff-body]') as HTMLElement
 
-    // No vertical scrollbar (offset == client): the ruler's 4px is reserved,
+    // No vertical scrollbar (offset == client): the ruler's width is reserved (the bar's, 8px fallback here),
     // so the flash stops short of it. The clientHeight change forces the
     // re-render that recomputes the width.
     Object.defineProperty(body, 'clientWidth', { value: 200, configurable: true })
     Object.defineProperty(body, 'offsetWidth', { value: 200, configurable: true })
     Object.defineProperty(body, 'clientHeight', { value: 100, configurable: true })
     fireEvent.scroll(body)
-    expect(document.querySelector('[data-diff-block-flash]')!.style.width).toBe('196px')
+    expect(document.querySelector('[data-diff-block-flash]')!.style.width).toBe('192px')
 
     // With a scrollbar (offset > client), clientWidth already ends at it.
     Object.defineProperty(body, 'offsetWidth', { value: 208, configurable: true })
     Object.defineProperty(body, 'clientHeight', { value: 120, configurable: true })
     fireEvent.scroll(body)
     expect(document.querySelector('[data-diff-block-flash]')!.style.width).toBe('200px')
+  })
+
+  it("publishes the bar it measures, instead of trusting a token the app never declares", () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+    const panel = body.closest('section') as HTMLElement
+    // The app declares no `--dsh-scrollbar-width` anywhere (its package was searched), so every CSS
+    // `var(..., 8px)` is a guess about a bar Chromium owns. The panel measures the real bar and publishes
+    // it as `--dsh-ruler-bar`, which the ruler's rules read first; only a changed value is written.
+    Object.defineProperty(body, 'clientWidth', { value: 200, configurable: true })
+    Object.defineProperty(body, 'offsetWidth', { value: 212, configurable: true })
+    Object.defineProperty(body, 'offsetHeight', { value: 120, configurable: true })
+    Object.defineProperty(body, 'clientHeight', { value: 100, configurable: true })
+    // The panel shell re-renders on a resize, and that is what reruns the measuring effect; scrolling alone
+    // only re-renders the code view below it.
+    fireEvent(window, new Event('resize'))
+    expect(panel.style.getPropertyValue('--dsh-ruler-bar')).toBe('12px')
+    // No bar at all: the constant is the fallback, so the ruler still gets a sane width.
+    Object.defineProperty(body, 'offsetWidth', { value: 200, configurable: true })
+    Object.defineProperty(body, 'offsetHeight', { value: 120, configurable: true })
+    Object.defineProperty(body, 'clientHeight', { value: 120, configurable: true })
+    fireEvent(window, new Event('resize'))
+    expect(panel.style.getPropertyValue('--dsh-ruler-bar')).toBe('8px')
   })
 
   it('re-clicking the already-open file jumps to the next diff block', () => {

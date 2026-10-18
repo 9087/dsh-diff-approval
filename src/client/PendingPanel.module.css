@@ -2605,8 +2605,21 @@
    instead — 10% towards the theme's label, which deepens the grey without changing what colour it is. Kept
    to the vertical bar on purpose: the horizontal one is a rare guest in the code view, and one decision
    should move one bar. The width and the hover colour stay the app's. */
+/* The gutter behind the vertical bar paints the code's own surface, so the strip between the bar and the
+   rows reads as code rather than as a second, paler column. */
+.diffBody::-webkit-scrollbar-track {
+  background: var(--dsw-alias-bg-base);
+}
+
 .diffBody::-webkit-scrollbar-thumb:vertical {
   background: color-mix(in srgb, var(--dsh-scrollbar-thumb) 90%, var(--dsw-alias-label-secondary) 10%);
+  /* A pixel of air on each side of the bar. The thumb keeps the app's width (no `::-webkit-scrollbar`
+     rule of ours — see the spec that forbids one); the inset is taken out of its PAINT by a transparent
+     border on each side, with `background-clip: padding-box` keeping the colour inside that border. What
+     shows through the gap is the track above, which is the code's own surface. */
+  border-left: 1px solid transparent;
+  border-right: 1px solid transparent;
+  background-clip: padding-box;
 }
 
 .diffBody::-webkit-scrollbar-thumb:vertical:hover {
@@ -3584,12 +3597,15 @@
 .overviewRuler {
   position: absolute;
   top: 0;
-  right: 0;
+  /* HALF THE BAR, CENTRED ON IT: the strip is a map of the bar's track, and half a bar reads the marks
+     without covering the thumb. Centred means (bar - half) / 2 = a quarter of the bar on each side, so
+     `right` is a quarter and `width` a half. Both follow the app's token — this file never sets
+     `::-webkit-scrollbar`'s width — and the 1px of air the bar keeps for itself (the thumb's own inset, see
+     the scrollbar rules above) plays no part in this. The split view still spans the whole bar, split into
+     two halves. */
+  right: calc(var(--dsh-ruler-bar, 8px) / 4);
   bottom: 0;
-  /* Half the 8px scrollbar width: the ruler tints the outer half while the
-     scrollbar thumb stays visible on the inner half (a fully covered
-     scrollbar reads as a faint smear). */
-  width: 4px;
+  width: calc(var(--dsh-ruler-bar, 8px) / 2);
   pointer-events: none;
   /* ONLY THE CHANGED-LINE MARKS PAINT IN THIS STRIP, so this opacity is what sets how loud they are. Half
      was too loud for something read in the corner of the eye: the ruler is a map of where the changes are,
@@ -3604,8 +3620,10 @@
    visible wherever nothing changed), and it stops above the pinned horizontal row BELOW the scroller
    rather than above a bar inside it (that row is a sibling, not part of the scroller). */
 .overviewRulerSplit {
-  width: var(--dsh-scrollbar-width, 8px);
-  bottom: calc(var(--dsh-scrollbar-width, 8px) + 1px);
+  /* This one spans the WHOLE bar, so the single-column centring above must not apply to it. */
+  right: 0;
+  width: var(--dsh-ruler-bar, 8px);
+  bottom: calc(var(--dsh-ruler-bar, 8px) + 1px);
 }
 
 /* One changed-line marker; a 2px floor keeps a single changed line visible
