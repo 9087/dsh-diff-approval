@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.36.0](https://github.com/9087/dsh-diff-approval/compare/v0.35.0...v0.36.0) (2026-10-18)
+
+### Features
+
+* **panel:** keep the go-to button in place and disable it in the Markdown preview ([afa77e6](https://github.com/9087/dsh-diff-approval/commit/afa77e66cb29b674a8a334b924f8972e7c642631))
+
+### Bug Fixes
+
+* **panel:** keep the card reservation up with the writing field without forgetting a refused pass ([edf93cf](https://github.com/9087/dsh-diff-approval/commit/edf93cf18564263a7ffae07ccf3b708682b65c95))
+* **panel:** measure the scrollbar for the ruler, and air the thumb by a pixel ([342e1eb](https://github.com/9087/dsh-diff-approval/commit/342e1eb902fd4971bc05b7d8fb12047fde418afc))
+
 ## [0.35.0](https://github.com/9087/dsh-diff-approval/compare/v0.34.0...v0.35.0) (2026-10-15)
 
 ### Features
