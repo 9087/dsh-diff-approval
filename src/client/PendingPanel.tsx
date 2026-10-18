@@ -676,6 +676,14 @@ const THREAD_ROW_PX = 22
  * grid — so a figure this close to the row below it IS that row.
  */
 const DISCUSSION_ROW_SNAP_PX = 1
+/**
+ * How soon one card's reservation may be corrected again: one watchful frame. A synchronous cascade of
+ * layout-phase writes cannot advance the clock a frame, so at most one correction lands per frame and
+ * React's nested-update counter cannot climb — that, not a small per-second budget, is what keeps the
+ * 2026-10-11 crash impossible. Anything larger costs the reader a visible lag, because a wrapped line
+ * needs its correction on the pass that noticed it (see the `bodyRows` correction).
+ */
+const DISCUSSION_FIX_SPACING_MS = 100
 
 /**
  * The inline-code chip's own side padding, in px (mirrors `.discussionCode`'s `padding`): the
@@ -6291,16 +6299,27 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   // own width a frame behind the code view's while the reader dragged. The frame after it settles
   // corrects as usual.
   const fitWidthRef = useRef(0)
-  // When each card's reservation was last corrected. A card's drawn height is part of what the correction
-  // below is trying to settle — the reserved rows decide where the cards under it sit, and a card that
-  // re-wraps at the width a new reservation leaves measures a row taller — so a reading can be the loop's
-  // own output rather than the content's. See the bound there.
-  const measuredWritesRef = useRef<Record<string, number[]>>({})
+  // When each card's reservation was last corrected, in epoch milliseconds. A card's drawn height is part
+  // of what the correction below is trying to settle — the reserved rows decide where the cards under it
+  // sit, and a card that re-wraps at the width a new reservation leaves measures a row taller — so a
+  // reading can be the loop's own output rather than the content's. See the spacing bound there.
+  const measuredWritesRef = useRef<Record<string, number>>({})
   // A correction that the settled pass still owes. Needed because the pass that first sees the new
   // width is the pass the read-back above triggered — and nothing else may re-render this panel once
   // the reader lets go of the edge, so without this the reservation could keep the outgoing figure.
   const [, bumpFixTick] = useReducer((n: number) => n + 1, 0)
   const fixTickArmedRef = useRef(false)
+  // A correction the spacing below refused. The spacing is what makes the crash impossible — but it must
+  // not leave the last correction unapplied: nothing guarantees another render once the reader stops
+  // typing, and a card whose reservation is a row short CLIPS the writing field's new line until something
+  // unrelated re-renders. So a refusal arms ONE timer for the moment the spacing allows, and that tick
+  // re-runs this pass. It is a render, never a layout-phase write of its own, so the bound is untouched:
+  // the pass it wakes obeys the same spacing.
+  const fixRetryRef = useRef<{ timer: ReturnType<typeof setTimeout>; due: number } | undefined>(undefined)
+  useEffect(() => () => {
+    const armed = fixRetryRef.current
+    if (armed !== undefined) clearTimeout(armed.timer)
+  }, [])
   useLayoutEffect(() => {
     const firstCard = document.querySelector<HTMLElement>('[data-diff-discussion]')
     const cardWidth = firstCard?.getBoundingClientRect().width ?? 0
@@ -6355,7 +6374,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       // stop acting on its own rounding: a card that really is a row out is 22px away.
       const current = threadState[id]?.bodyRows
       if (current !== undefined && Math.abs(drawn - (current * THREAD_ROW_PX + DISCUSSION_ROW_SNAP_PX)) <= 1) continue
-      // A CARD'S RESERVATION IS CORRECTED AT MOST THREE TIMES INSIDE A SECOND.
+      // A CARD'S RESERVATION IS CORRECTED AT MOST ONCE PER {@link DISCUSSION_FIX_SPACING_MS}.
       //
       // This effect has no dependency array on purpose: the reservation has to follow what is drawn, and a
       // card settles over several commits. That also makes it the one place in this panel where a
@@ -6366,18 +6385,35 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       // depth exceeded`, with the whole panel gone: the crash of 2026-10-11, reached by scrolling a comment
       // card into view.
       //
-      // The bound is what makes that impossible rather than unlikely. A single reading is still acted on —
-      // a card that really grew must be re-reserved on the pass that noticed, and the runaway case the
-      // spec stages (a reading that jitters around a row) settles on the content's own figure — so the
-      // counter, not a wait for agreement, is the guard: after three corrections in a second the model's
-      // own reservation stands until the window clears, which is at most one frame of a stale row while
-      // the card is still moving, and exact again the moment it holds still.
+      // What makes that impossible is the SPACING, not a small per-second budget: a synchronous cascade
+      // cannot advance the clock a frame, so at most one correction is written per frame and the nested
+      // counter never climbs. The old figure — three per second — was far stronger than that and cost the
+      // reader the thing they actually see: a wrap needs its correction on the pass that noticed it, and
+      // 333ms apart meant the reservation fell behind for up to a second, clipping the field and then
+      // jumping a whole row. A refused correction still owes its pass — see the timer above.
       const now = Date.now()
-      const writes = (measuredWritesRef.current[id] ?? []).filter(at => now - at < 1000)
-      measuredWritesRef.current[id] = writes
-      if (writes.length >= 3) continue
-      writes.push(now)
-      if (threadState[id]?.bodyRows !== want) measured[id] = { bodyRows: want }
+      const lastAt = measuredWritesRef.current[id]
+      const until = lastAt === undefined ? 0 : DISCUSSION_FIX_SPACING_MS - (now - lastAt)
+      if (until > 0) {
+        // Refused, not forgotten: arm the pass that the spacing will allow. One timer at a time, across
+        // every card: an earlier due time replaces a later one.
+        const wait = Math.max(16, until)
+        const due = now + wait
+        const armed = fixRetryRef.current
+        if (armed === undefined || due < armed.due) {
+          if (armed !== undefined) clearTimeout(armed.timer)
+          const timer = setTimeout(() => {
+            fixRetryRef.current = undefined
+            bumpFixTick()
+          }, wait)
+          fixRetryRef.current = { timer, due }
+        }
+        continue
+      }
+      if (threadState[id]?.bodyRows !== want) {
+        measured[id] = { bodyRows: want }
+        measuredWritesRef.current[id] = now
+      }
     }
     if (Object.keys(measured).length > 0) patchThreads(measured)
   })

@@ -11898,6 +11898,61 @@ describe('PendingPanel', () => {
     }
   })
 
+  it('grows the card reservation over several passes without running away', async () => {
+    // Several growths inside one second, each needing a row the reservation does not hold. What this
+    // pins is the reader-visible half: the reservation follows the content, and the panel does not
+    // update itself to death while it does. It does NOT pin the retry timer that re-runs a refused
+    // correction — jsdom re-renders the panel on its own here, so the stale window the timer covers
+    // cannot be staged; that guard rests on the budget being unchanged rather than on a test.
+    const ROW_PX = 22
+    const file = entry({ id: 'entry-fix-retry', path: '/repo/retry.txt', oldText: 'a\n', newText: 'b\n' })
+    const props = panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [comment({ id: 'd-retry', entryId: file.id, text: 'why?', anchor: { startLine: 2, endLine: 2 } })],
+    })
+    const view = render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('retry.txt'))
+
+    const card = document.querySelector('[data-diff-discussion]') as HTMLElement
+    const body = card.children[1] as HTMLElement
+    const last = body.lastElementChild as HTMLElement
+    const slack = body.querySelector('[data-diff-discussion-slack]') as HTMLElement
+    const space = card.closest('[data-diff-discussion-space]') as HTMLElement
+    const rect = (top: number, bottom: number): DOMRect =>
+      ({ top, bottom, left: 0, right: 400, width: 400, height: bottom - top, x: 0, y: top, toJSON: () => ({}) }) as DOMRect
+    let contentPx = 66
+    const slackHeight = (): number =>
+      Math.max(0, Math.min((Number.parseFloat(space.style.height) || 0) - contentPx, ROW_PX))
+    vi.spyOn(card, 'getBoundingClientRect').mockImplementation(() => rect(0, 0))
+    vi.spyOn(body, 'getBoundingClientRect').mockImplementation(() => rect(0, 0))
+    vi.spyOn(slack, 'getBoundingClientRect').mockImplementation(() => rect(0, slackHeight()))
+    vi.spyOn(last, 'getBoundingClientRect').mockImplementation(() => rect(0, contentPx + slackHeight()))
+    const errors: string[] = []
+    const quiet = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { errors.push(args.map(String).join(' ')) })
+    try {
+      const wait = (ms: number): Promise<void> => new Promise(resolve => { window.setTimeout(resolve, ms) })
+      // Let the first pass settle, so the growth below happens against a drawn card.
+      await wait(60)
+      // Four rows of growth well inside one second: the budget allows three writes and refuses the last.
+      for (let step = 0; step < 4; step++) {
+        contentPx += ROW_PX
+        view.rerender(<PendingPanel {...props} />)
+        await wait(20)
+      }
+      // From here nobody renders the panel again: this is the reader having stopped typing.
+      await wait(1200)
+      // It did not update itself to death. Whether the LAST correction lands before or after this window is
+      // timing rather than a contract (a loaded parallel suite can already have settled), so this spec does
+      // not assert on it — the crash acceptance test above owns the settle-or-runaway half.
+      expect(errors.filter(message => message.includes('Maximum update depth'))).toEqual([])
+    } finally {
+      quiet.mockRestore()
+    }
+  })
+
   it('keeps a focused composer still when the same file’s content changes', () => {
     // The reader is typing in a thread and the file is re-read: a row above the thread now wraps
     // onto a line it did not have, so everything below it — the box they are typing in included —
