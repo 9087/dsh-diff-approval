@@ -7824,15 +7824,16 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     label: t('action.search'), hint: withChord(t('action.search'), 'openSearch'), shortcut: 'openSearch', icon: <IconSearchOutline16 size={14} />,
     onSelect: toggleSearch,
   })
-  if (!previewActive) {
-    // The button only asks; the popup itself is rendered by the code view it belongs to (see
-    // `gotoDialog`), so it can be centred on that view's own box.
-    toolbarItems.push({
-      kind: 'button', key: 'goto', data: { 'data-diff-goto': '' },
-      label: t('action.goto'), hint: withChord(t('action.goto'), 'goto'), shortcut: 'goto', icon: <GotoLineIcon />,
-      onSelect: () => { setGotoDraft(''); setGotoOpen(true) },
-    })
-  }
+  // The button only asks; the popup itself is rendered by the code view it belongs to (see
+  // `gotoDialog`), so it can be centred on that view's own box. The rendered Markdown preview draws no
+  // code view to ask, so there the button stays in place and reads DISABLED rather than vanishing: a
+  // control that disappears from the group when the reader toggles the view moves every button after it,
+  // and a reader who had just used it has to hunt for where it went.
+  toolbarItems.push({
+    kind: 'button', key: 'goto', data: { 'data-diff-goto': '' }, disabled: previewActive,
+    label: t('action.goto'), hint: withChord(t('action.goto'), 'goto'), shortcut: 'goto', icon: <GotoLineIcon />,
+    onSelect: () => { setGotoDraft(''); setGotoOpen(true) },
+  })
   toolbarItems.push({ kind: 'divider', key: 'viewDivider' })
   toolbarItems.push({
     kind: 'button', key: 'splitView', data: { 'data-diff-toggle-view': '' },

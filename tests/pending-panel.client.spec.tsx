@@ -8375,6 +8375,33 @@ describe('PendingPanel', () => {
     }
   })
 
+  it('keeps the go-to button in place, disabled, while the Markdown preview shows', () => {
+    // The preview draws no code view, so the button has nothing to ask there. It used to be dropped
+    // from the group instead, which moved every control after it whenever the reader toggled the
+    // view — and a reader who had just used it lost track of where it went.
+    const file = entry({
+      id: 'entry-goto-preview',
+      path: '/repo/notes.md',
+      oldText: '# title\n',
+      newText: '# title\ntext\n',
+    })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('notes.md'))
+
+    const button = document.querySelector('[data-diff-goto]') as HTMLButtonElement
+    expect(button).not.toBeNull()
+    expect(button.disabled).toBe(false)
+
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+    expect(document.querySelector('[data-diff-md-preview-body]')).not.toBeNull()
+    // Still there, and in the same place in the group: only its state changed.
+    const inPreview = document.querySelector('[data-diff-goto]') as HTMLButtonElement
+    expect(inPreview).not.toBeNull()
+    expect(inPreview.disabled).toBe(true)
+  })
+
   it('Ctrl+F auto-fills the query from the selected text and lands on that occurrence first', () => {
     // 'data' appears in row 0 and row 2 (both context) so the auto-filled query
     // has two matches; selecting row 2 must make IT the first (current) result,
