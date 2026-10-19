@@ -14116,6 +14116,38 @@ describe('PendingPanel', () => {
     expect(document.querySelectorAll('[data-diff-row], [data-diff-split-row]').length).toBeGreaterThan(0)
   })
 
+  it('draws the source from its top when the preview closes on a file with no change block', () => {
+    // A row whose changes were all settled but which the reader left listed shows the file with no change
+    // block at all — `model.blocks` is empty. The switch back from the preview normally leaves the
+    // placement to the landing effect, but that effect has nothing to land on here and returns without
+    // writing. The fresh body's own scrollTop is 0 while the `scrollTop` state still names the offset the
+    // reader had scrolled to before the preview, so the window is drawn where they used to be: the rows
+    // sit far below the top of the box, the code view reads as blank, and only a scroll (which re-reads
+    // the box) puts it right.
+    const settled = Array.from({ length: 400 }, (_, index) => `line ${index + 1}`).join('\n') + '\n'
+    const file = entry({ id: 'entry-settled-md', path: '/repo/settled.md', oldText: settled, newText: settled })
+    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('settled.md'))
+
+    const body = document.querySelector('[data-diff-body]') as HTMLElement
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 440 })
+    // Read part-way down: the window follows the scroll, so the first drawn row is no longer the first.
+    body.scrollTop = 3000
+    fireEvent.scroll(body)
+    const firstRow = (): string | null => document.querySelector('[data-diff-row]')?.getAttribute('data-diff-row') ?? null
+    expect(Number(firstRow())).toBeGreaterThan(0)
+
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+    expect(document.querySelector('[data-diff-md-preview-body]')).not.toBeNull()
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+    expect(document.querySelector('[data-diff-md-preview-body]')).toBeNull()
+
+    // The fresh box stands at its top, so the first row it draws is the file's first row — not the one
+    // the reader had scrolled to before the preview.
+    expect(firstRow()).toBe('0')
+  })
+
   /**
    * Stage a Markdown file whose NEW side carries these links, select it and show its rendered preview.
    *

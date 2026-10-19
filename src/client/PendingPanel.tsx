@@ -7899,6 +7899,20 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
         const next = !mdPreview
         setMdPreview(next)
         setMdPreviewEnabled(next)
+        // Coming back to the source mounts a FRESH body whose real scrollTop is 0, while the `scrollTop`
+        // state still names where the reader was in the code view. The render window is derived from that
+        // state, so it would be drawn around rows that are not on screen — the code view reads as blank
+        // above them until a scroll re-reads the box.
+        //
+        // The landing effect normally re-places the file and takes the state with it, but it has nothing
+        // to land on in a file with NO change block: a row whose changes were all settled and which the
+        // reader left listed shows the file with no block at all (`model.blocks[focus]` is undefined), and
+        // the effect returns without writing. So this switch cannot borrow the landing — reset the window
+        // and ask for a placement here, exactly as the split view's own switch does (see `toggleSplitView`).
+        if (!next) {
+          setScrollTop(0)
+          setScrollTick(tick => tick + 1)
+        }
       },
     })
   }
