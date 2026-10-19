@@ -9252,10 +9252,15 @@ export function PendingPanel({
    */
   const [pickedComments, setPickedComments] = useState<ReadonlySet<string>>(() => new Set())
   /**
-   * Where a Shift press in the COMMENTS list measures from: the comment the last non-Shift press landed on
-   * (a Ctrl/Cmd pick, or an ordinary press, which jumps to the comment). The comments list has no "open"
-   * item of its own — a press navigates away rather than selecting — so this is what stands in for the file
-   * list's open file, and it is the reason the two lists can share one rule (see `pickCommentRangeTo`).
+   * Where a Shift press in the COMMENTS list measures from — the same idea as the file list's `pickAnchor`,
+   * with one difference in where it comes from.
+   *
+   * The comments list has no "open" item of its own: a press navigates away rather than selecting, so there
+   * is no focused row to stand in for an anchor the reader has not named. The row a Shift press lands on
+   * therefore BECOMES the anchor when there is none (see `pickCommentRangeTo`), which is what lets the very
+   * first Shift press start a range instead of selecting a row the next Shift press would have to start
+   * over from. A press that only UNPICKS a comment leaves it alone, exactly as in the file list: it
+   * selected nothing, so the span must still begin where the pick began (see `pickComment`).
    */
   const [commentAnchor, setCommentAnchor] = useState<string | undefined>(undefined)
   /** End the picking, keeping the same set object when there is nothing to end (so nothing re-renders). */
@@ -9270,6 +9275,18 @@ export function PendingPanel({
       else next.add(id)
       return next
     })
+  }
+  /**
+   * Pick or unpick one comment with a Ctrl/Cmd press, moving the Shift anchor with it — but only when the
+   * press PICKS.
+   *
+   * An unpick selected nothing: it took a row out, so the next Shift press must still measure from where the
+   * pick began. Moving the anchor to the row just cleared would start the next span on a comment the reader
+   * had removed from the pick — the same rule the file list follows (see `pickFile`).
+   */
+  const pickComment = (id: string): void => {
+    if (!pickedComments.has(id)) setCommentAnchor(id)
+    togglePicked(id)
   }
   // Picking is about the comments in front of the reader NOW: switching files or tabs replaces every item
   // it could have named, so the pick ends with the switch rather than surviving into a list it is not about.
@@ -9311,13 +9328,19 @@ export function PendingPanel({
    */
   const [pickedFiles, setPickedFiles] = useState<ReadonlySet<string>>(() => new Set())
   /**
-   * Where a Shift press measures from: the row the last NON-Shift press landed on — a Ctrl/Cmd pick, or an
-   * ordinary press, which opens the file. Shift never moves it, so pressing Shift twice measures from the
-   * same place and the range can shrink as well as grow (see `pickRangeTo`).
+   * Where a Shift press measures from: the row the last press that SELECTED something landed on — an
+   * ordinary press, which opens the file, or a Ctrl/Cmd press that ADDED a row to the pick.
+   *
+   * A Ctrl/Cmd press that took a row OUT leaves it alone. That press selected nothing: it removed something,
+   * so measuring the next span from it would start the range on a row that is no longer picked at all — the
+   * reader would Shift-click and watch the range begin at a row they had just cleared. Shift itself never
+   * moves the anchor either, so pressing Shift again measures from the same place and the range can shrink
+   * as well as grow (see `pickRangeTo`).
    *
    * Nothing has been pressed yet on a fresh panel, and `selected` was not the reader's doing (the list
    * opens on its first file), so the range falls back to the open file when this is unset: the row the
-   * reader is looking at is the only sensible place to measure from before they have touched anything.
+   * reader is looking at is the only sensible place to measure from before they have touched anything. The
+   * first Shift press PINS that stand-in, so a later auto-advance cannot move the range under the reader.
    */
   const [pickAnchor, setPickAnchor] = useState<string | undefined>(undefined)
   /** End the file picking, keeping the same set object when there is nothing to end. */
@@ -10427,11 +10450,12 @@ export function PendingPanel({
    * they are gathering rows out of the list they are looking at, and the row the detail pane is showing is
    * one of them. Only when the pick is empty — otherwise the open row could never be clicked OUT of a pick
    * it is already in, and Ctrl-click is the only way to take anything out.
+   *
+   * Only the press that PICKS moves the Shift anchor (see `pickAnchor`): an unpick selected nothing, so it
+   * leaves the anchor where the pick began, and the span the next Shift press draws still starts there.
    */
   const pickFile = (id: string): void => {
-    // The press just made is where the next Shift press measures from, whatever it did to the pick — a
-    // Ctrl press that took the row OUT is still the row the reader last acted on.
-    setPickAnchor(id)
+    if (!pickedFiles.has(id)) setPickAnchor(id)
     setPickedFiles(current => {
       const next = new Set(current)
       if (next.has(id)) {
@@ -10444,26 +10468,39 @@ export function PendingPanel({
     })
   }
   /**
-   * Set the pick to exactly the rows between the OPEN file and `id`, both ends included — Shift-click.
+   * Set the pick to exactly the rows between the ANCHOR and `id`, both ends included — Shift-click.
    *
    * Shift REPLACES the pick instead of adding to it. The reader names one end by looking at it (the open
-   * file) and the other by pressing, and the span between them IS the selection: anything picked earlier
-   * that falls outside that span goes. That is what makes the gesture work in both directions — press
-   * nearer than last time and the range shrinks, press further and it grows — with the anchor staying put.
-   * A stale open file (its row left the list) degrades to the pressed row alone: a Shift press must always
-   * leave something selected, since it has just thrown the old pick away.
+   * file, until they have pressed a row themselves) and the other by pressing, and the span between them IS
+   * the selection: anything picked earlier that falls outside that span goes. That is what makes the gesture
+   * work in both directions — press nearer than last time and the range shrinks, press further and it grows
+   * — with the anchor staying put.
+   *
+   * The open file is only a STAND-IN for an anchor the reader has not named yet, and the first Shift press
+   * pins it (see `pickAnchor`): from then on the span measures from that row even when the detail pane
+   * moves on by itself, because the range is about the rows the reader picked rather than about whatever
+   * file happens to be open now.
+   *
+   * A stale anchor (its row left the list) is no anchor at all: the press stands in for it and becomes the
+   * next one, so the gesture keeps working — a Shift press must always leave something selected, since it
+   * has just thrown the old pick away, and something to measure from next time. The comments list adopts the
+   * same way (see `pickCommentRangeTo`).
    */
   const pickRangeTo = (id: string): void => {
-    setPickedFiles(() => {
-      const to = files.findIndex(file => file.id === id)
-      if (to === -1) return new Set()
-      const anchorId = pickAnchor ?? selected
-      const from = anchorId === undefined || anchorId === ''
-        ? -1
-        : files.findIndex(file => file.id === anchorId)
-      if (from === -1) return new Set([id])
-      return new Set(files.slice(Math.min(from, to), Math.max(from, to) + 1).map(file => file.id))
-    })
+    const to = files.findIndex(file => file.id === id)
+    if (to === -1) return setPickedFiles(() => new Set())
+    const anchorId = pickAnchor ?? selected
+    const from = anchorId === undefined || anchorId === ''
+      ? -1
+      : files.findIndex(file => file.id === anchorId)
+    if (from === -1) {
+      setPickAnchor(id)
+      return setPickedFiles(() => new Set([id]))
+    }
+    // The open file is a stand-in until the reader names an anchor; pin the first one a Shift press used, so
+    // a poll that moves the open file cannot move the range out from under a reader still pressing Shift.
+    if (pickAnchor === undefined) setPickAnchor(anchorId)
+    setPickedFiles(() => new Set(files.slice(Math.min(from, to), Math.max(from, to) + 1).map(file => file.id)))
   }
 
   /**
@@ -10793,22 +10830,28 @@ export function PendingPanel({
   /**
    * Set the comment pick to the span between the anchor and `id`, both ends included — Shift-click.
    *
-   * The same rule the file list follows (see `pickRangeTo`): Shift REPLACES the pick, the anchor is where
-   * the last non-Shift press landed, and Shift never moves it — so pressing Shift again measures from the
-   * same place and the span can shrink as well as grow. The span follows the RENDERED order, which is the
-   * order the reader sees: comments grouped by file, and inside a group the file's own comments — so a span
-   * may cross a file boundary, exactly as it reads on screen. With no anchor yet (nothing pressed in this
-   * tab), the pressed comment is the whole selection.
+   * The same rule the file list follows (see `pickRangeTo`): Shift REPLACES the pick, and Shift never moves
+   * the anchor — so pressing Shift again measures from the same place and the span can shrink as well as
+   * grow. The span follows the RENDERED order, which is the order the reader sees: comments grouped by file,
+   * and inside a group the file's own comments — so a span may cross a file boundary, exactly as it reads on
+   * screen.
+   *
+   * With no anchor yet (nothing selected in this tab), the pressed comment is the whole selection AND
+   * becomes the anchor: a Shift press from nothing names one row, and the next Shift press extends from it
+   * rather than naming one row all over again. An anchor whose comment left the list is no anchor at all,
+   * and the same adoption happens: the press must always leave something selected, and something to measure
+   * from next time.
    */
   const pickCommentRangeTo = (id: string): void => {
-    setPickedComments(() => {
-      const ids = commentEntries.map(entry => entry.id)
-      const to = ids.indexOf(id)
-      if (to === -1) return new Set()
-      const from = commentAnchor === undefined ? -1 : ids.indexOf(commentAnchor)
-      if (from === -1) return new Set([id])
-      return new Set(ids.slice(Math.min(from, to), Math.max(from, to) + 1))
-    })
+    const ids = commentEntries.map(entry => entry.id)
+    const to = ids.indexOf(id)
+    if (to === -1) return setPickedComments(() => new Set())
+    const from = commentAnchor === undefined ? -1 : ids.indexOf(commentAnchor)
+    if (from === -1) {
+      setCommentAnchor(id)
+      return setPickedComments(() => new Set([id]))
+    }
+    setPickedComments(() => new Set(ids.slice(Math.min(from, to), Math.max(from, to) + 1)))
   }
   /** Open the file a comment hangs in and land on the thread's own box, not on the rows it names:
    *  the box hangs below the range it ends in, and the code an outdated comment named may be gone
@@ -11143,7 +11186,7 @@ export function PendingPanel({
                               // `consumePickPress`) so it lands with this row's own press state.
                               consumePickPress(
                                 event, entry.id,
-                                (id) => { setCommentAnchor(id); togglePicked(id) },
+                                pickComment,
                                 pickCommentRangeTo,
                               )
                             }}
@@ -11153,7 +11196,7 @@ export function PendingPanel({
                               // are picking from (see `pickedComments`).
                               if (consumePickPress(
                                 event, entry.id,
-                                (id) => { setCommentAnchor(id); togglePicked(id) },
+                                pickComment,
                                 pickCommentRangeTo,
                               )) return
                               // An ordinary press is a jump, and it is also the reader ACTING on this

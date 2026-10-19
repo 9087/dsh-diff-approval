@@ -3150,8 +3150,8 @@ describe('PendingPanel', () => {
     fireEvent.click(rowOf('b'), { shiftKey: true })
     expect(pickedNames()).toEqual(['a', 'b'])
 
-    // A Ctrl press IS the reader acting on a row, so it moves the anchor to that row — the open file joins
-    // an empty pick, and stays picked here because it already was.
+    // A Ctrl press that PICKS a row is the reader naming a new start, so it moves the anchor there — the
+    // open file joins an empty pick, and stays picked here because it already was.
     fireEvent.click(rowOf('d'), { ctrlKey: true })
     expect(pickedNames()).toEqual(['a', 'b', 'd'])
 
@@ -3165,12 +3165,13 @@ describe('PendingPanel', () => {
     fireEvent.pointerDown(document.body, { shiftKey: true })
     expect(pickedNames()).toEqual(['d', 'e'])
 
-    // Ctrl still takes a single row back OUT — and that press becomes the anchor, so the Shift below
-    // measures from `e`: the span b..e has `e` INSIDE it, so the row just removed comes back with it.
+    // Ctrl still takes a single row back OUT — and an UNPICK selected nothing, so it does NOT become the
+    // anchor: the Shift below still measures from `d`, where the pick last began. `e` comes back only
+    // because it falls inside the d..b span.
     fireEvent.click(rowOf('e'), { ctrlKey: true })
     expect(pickedNames()).toEqual(['d'])
     fireEvent.click(rowOf('b'), { shiftKey: true })
-    expect(pickedNames()).toEqual(['b', 'c', 'd', 'e'])
+    expect(pickedNames()).toEqual(['b', 'c', 'd'])
   })
 
   it('picks on the PRESS, and the click that follows it does not pick twice', () => {
@@ -4451,6 +4452,44 @@ describe('PendingPanel', () => {
     expect(picked()).toEqual([true, true, true])
     fireEvent.click(rowOf('d-one'), { ctrlKey: true })
     expect(picked()).toEqual([true, true, true])
+  })
+
+  it('starts a comment pick on the first Shift press, and an unpick does not move its anchor', () => {
+    // The comments list has no open row to stand in for an anchor, so a Shift press with nothing selected
+    // names one row and BECOMES the anchor — and an unpick, which selected nothing, leaves it there. Both
+    // halves are what make Shift read the way it does everywhere else: the span starts where the reader's
+    // own pick started, never at whatever they pressed last.
+    act(() => { setCommentModeEnabled(true) })
+    const file = entry({ id: 'entry-four', path: '/repo/four.txt', earlierVersion: 'none', oldText: '', newText: 'a\nb\nc\nd\n' })
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [file],
+      busy: new Set(),
+      comments: [
+        comment({ id: 'd-one', entryId: file.id, text: '一', anchor: { startLine: 1, endLine: 1 } }),
+        comment({ id: 'd-two', entryId: file.id, text: '二', anchor: { startLine: 2, endLine: 2 } }),
+        comment({ id: 'd-three', entryId: file.id, text: '三', anchor: { startLine: 3, endLine: 3 } }),
+        comment({ id: 'd-four', entryId: file.id, text: '四', anchor: { startLine: 4, endLine: 4 } }),
+      ],
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-list-tab="comments"]') as HTMLElement)
+    const rowOf = (id: string): HTMLElement => document.querySelector(`[data-diff-comment-link="${id}"]`) as HTMLElement
+    const picked = (): boolean[] => ['d-one', 'd-two', 'd-three', 'd-four'].map(id => rowOf(id).hasAttribute('data-selected'))
+
+    // The first Shift press names ONE row and leaves it as the anchor — the next Shift press extends from
+    // it, instead of naming one row all over again (which is what happened while the anchor stayed unset).
+    fireEvent.click(rowOf('d-two'), { shiftKey: true })
+    expect(picked()).toEqual([false, true, false, false])
+    fireEvent.click(rowOf('d-four'), { shiftKey: true })
+    expect(picked()).toEqual([false, true, true, true])
+
+    // The unpick of `d-four` selected nothing, so the anchor is still `d-two`: the span below is d-one..d-two
+    // and stops there. Were the just-unpicked row to have become the anchor, all four would be in.
+    fireEvent.click(rowOf('d-four'), { ctrlKey: true })
+    expect(picked()).toEqual([false, true, true, false])
+    fireEvent.click(rowOf('d-one'), { shiftKey: true })
+    expect(picked()).toEqual([true, true, false, false])
   })
 
   it('ends every picked comment from the row menu, and clears the pick with it', async () => {
