@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.1](https://github.com/9087/dsh-diff-approval/compare/v0.36.0...v0.36.1) (2026-10-19)
+
+### Bug Fixes
+
+* **panel:** draw the source from its top when the preview closes on a settled file ([d2c7cc5](https://github.com/9087/dsh-diff-approval/commit/d2c7cc586de3ec786d786c6244f42018da90ca23))
+* **panel:** measure a Shift range from the row the pick began at ([559a6b6](https://github.com/9087/dsh-diff-approval/commit/559a6b63bdfcab6e50fa3fbddd5b9ba51b587a77))
+
 ## [0.36.0](https://github.com/9087/dsh-diff-approval/compare/v0.35.0...v0.36.0) (2026-10-18)
 
 ### Features
