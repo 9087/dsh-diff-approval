@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconChevronDownOutline14, IconRefreshOutline14, Menu } from './dsh-icons.ts'
-import { DEFAULT_KEYBINDINGS, DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, COVER_CHANGED_EVENT, chipMenuEnabled, codeFontEnabled, commentModeEnabled, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, discussionRoundLimit, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, pasteOnCopyEnabled, quickSummonKey, setChipMenuEnabled, setCodeFontEnabled, setCommentModeEnabled, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setDiscussionRoundLimit, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPanelCover, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN,
+import { DEFAULT_KEYBINDINGS, DEFAULT_QUICK_SUMMON, DIFF_FONT_SCALE_MAX, DIFF_FONT_SCALE_MIN, DIFF_LINE_HEIGHT_MAX, DIFF_LINE_HEIGHT_MIN, MD_MAX_WIDTH_MAX, MD_MAX_WIDTH_MIN, COVER_CHANGED_EVENT, chipMenuEnabled, codeFontEnabled, commentModeEnabled, confirmFileRemoveEnabled, currentDiffAddColor, currentDiffDelColor, diffAddColor, diffDelColor, diffFontScale, diffLineHeight, discussionRoundLimit, groupOpen, includeUntrackedEnabled, keybindingOf, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, pasteOnCopyEnabled, quickSummonKey, setChipMenuEnabled, setCodeFontEnabled, setCommentModeEnabled, setConfirmFileRemoveEnabled, setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setDiscussionRoundLimit, setGroupOpen, setIncludeUntrackedEnabled, setKeybinding, setMdMaxWidth, setMdPreviewEnabled, setNavLeadRows, setPanelCover, setPasteOnCopyEnabled, setQuickSummonKey, setSplitMode, setTabWidth, splitMode, tabWidth, NAV_LEAD_ROWS_MAX, NAV_LEAD_ROWS_MIN,
   DISCUSSION_ROUNDS_MAX, DISCUSSION_ROUNDS_MIN } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
 import type { DiffApprovalKey } from './locales.ts'
@@ -447,11 +447,15 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
   // The theme's current added/removed base colors, shown as the palette default.
   const addDefault = currentDiffAddColor()
   const delDefault = currentDiffDelColor()
-  // Folded on open, like the two groups below it: the diff-view group is the longest one, and the
-  // switches a reader reaches for while reviewing are on the panel's own toolbar.
-  const [diffOpen, setDiffOpen] = useState(false)
+  // The four groups below start EXPANDED and remember what the reader last chose. They used to start
+  // folded, which left the page opening as four bare titles — indistinguishable from a page that failed
+  // to render. Each setter writes through so a collapse survives a reload; the read is `!== '0'`, so a
+  // profile that never chose lands expanded.
+  const [diffOpen, setDiffOpenState] = useState(() => groupOpen('diff-view'))
+  const setDiffOpen = (next: boolean): void => { setDiffOpenState(next); setGroupOpen('diff-view', next) }
   const [cover, setCoverState] = useState<DiffApprovalCover>(panelCover)
-  const [coverOpen, setCoverOpen] = useState(false)
+  const [coverOpen, setCoverOpenState] = useState(() => groupOpen('cover'))
+  const setCoverOpen = (next: boolean): void => { setCoverOpenState(next); setGroupOpen('cover', next) }
   // The panel's own popover flips the same switches: follow it, so neither
   // surface can show a value the other has already changed.
   useEffect(() => {
@@ -465,8 +469,10 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
     setPanelCover(value)
   }
   const [summon, setSummonState] = useState(quickSummonKey)
-  const [commentOpen, setCommentOpen] = useState(false)
-  const [keysOpen, setKeysOpen] = useState(false)
+  const [commentOpen, setCommentOpenState] = useState(() => groupOpen('comments'))
+  const setCommentOpen = (next: boolean): void => { setCommentOpenState(next); setGroupOpen('comments', next) }
+  const [keysOpen, setKeysOpenState] = useState(() => groupOpen('keybindings'))
+  const setKeysOpen = (next: boolean): void => { setKeysOpenState(next); setGroupOpen('keybindings', next) }
   const [keybindings, setKeybindingsState] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {}
     for (const action of Object.keys(DEFAULT_KEYBINDINGS)) initial[action] = keybindingOf(action)
@@ -589,7 +595,7 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
         <button
           type="button"
           className={css.settingsGroupHeader}
-          onClick={() => { setDiffOpen(open => !open) }}
+          onClick={() => { setDiffOpen(!diffOpen) }}
           data-diff-view-toggle
         >
           <span className={css.settingsGroupText}>
@@ -728,7 +734,7 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
         <button
           type="button"
           className={css.settingsGroupHeader}
-          onClick={() => { setCommentOpen(open => !open) }}
+          onClick={() => { setCommentOpen(!commentOpen) }}
           data-diff-comment-toggle
         >
           <span className={css.settingsGroupText}>
@@ -772,7 +778,7 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
         <button
           type="button"
           className={css.settingsGroupHeader}
-          onClick={() => { setKeysOpen(open => !open) }}
+          onClick={() => { setKeysOpen(!keysOpen) }}
           data-diff-keybindings-toggle
         >
           <span className={css.settingsGroupText}>
@@ -818,7 +824,7 @@ export function DiffApprovalSettingsTab({ t }: DiffApprovalSettingsTabProps) {
         <button
           type="button"
           className={css.settingsGroupHeader}
-          onClick={() => { setCoverOpen(open => !open) }}
+          onClick={() => { setCoverOpen(!coverOpen) }}
           data-diff-cover-toggle
         >
           <span className={css.settingsGroupText}>

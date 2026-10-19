@@ -23,6 +23,12 @@ const LANG_BY_SUFFIX_KEY = 'diff-approval:lang-by-suffix'
 const PRESENTATION_KEY = 'diff-approval:presentation'
 const FLOAT_COVER_KEY = 'diff-approval:float-cover'
 const FILE_LIST_FLOAT_KEY = 'diff-approval:file-list-float'
+// The four settings groups (diff view, comments, keybindings, cover) used to start folded, so the page
+// opened as four bare titles and read like a broken page. They now start EXPANDED and remember whatever
+// the reader last chose. Absent means expanded: only an explicit `'0'` folds a group back up. Read as
+// `!== '0'` rather than `=== '1'` on purpose — a profile written before this change never picked a
+// collapse, and the default it lands on should be the visible one.
+const GROUP_OPEN_PREFIX = 'diff-approval:group-open:'
 // Comment mode is the DEFAULT now, so the preview parking described in earlier revisions of this file is
 // over: the real field is below and the `-preview` key is not read, written or migrated. Migrating it would
 // be the one thing worse than dropping it — an old opt-in or opt-out would be carried over as if it were a
@@ -104,6 +110,21 @@ export function pasteOnCopyEnabled(): boolean {
 /** Persist the auto-paste preference. */
 export function setPasteOnCopyEnabled(value: boolean): void {
   localStorage.setItem(PASTE_ON_COPY_KEY, value ? '1' : '0')
+}
+
+/** Persist whether one settings group is expanded. */
+export function setGroupOpen(group: string, value: boolean): void {
+  localStorage.setItem(`${GROUP_OPEN_PREFIX}${group}`, value ? '1' : '0')
+}
+
+/**
+ * Whether one settings group starts expanded. Defaults to on so the page shows
+ * its content on first open; only an explicit `'0'` folds a group up.
+ * @param group one of `diff-view`, `comments`, `keybindings`, `cover`.
+ * @returns whether the group is expanded.
+ */
+export function groupOpen(group: string): boolean {
+  return localStorage.getItem(`${GROUP_OPEN_PREFIX}${group}`) !== '0'
 }
 
 /**
