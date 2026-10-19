@@ -9417,7 +9417,6 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     const settingsProps = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...settingsProps} />)
-    fireEvent.click(document.querySelector('[data-diff-cover-toggle]') as HTMLButtonElement)
     const row = (edge: string): HTMLElement => document.querySelector(`[data-diff-cover-${edge}]`) as HTMLElement
     expect(row('left').getAttribute('aria-checked')).toBe('true')
     expect(row('composer').getAttribute('aria-checked')).toBe('false')
@@ -12583,8 +12582,7 @@ describe('PendingPanel', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)
     // The row lives in the comments group — it is about the message being written, not about how
-    // the diff is drawn — and that group opens folded.
-    fireEvent.click(document.querySelector('[data-diff-comment-toggle]') as HTMLButtonElement)
+    // the diff is drawn — and that group starts expanded.
     // Re-query the switch each time: re-rendering can replace the node.
     const toggle = () => document.querySelector('[data-diff-paste-on-copy-select]') as HTMLButtonElement
     expect(toggle()).not.toBeNull()
@@ -12640,8 +12638,7 @@ describe('PendingPanel', () => {
     // the choice back from the same storage the preview toggle uses.
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     const view = render(<DiffApprovalSettingsTab {...props} />)
-    // The row lives in the diff-view group, which opens folded.
-    fireEvent.click(document.querySelector('[data-diff-view-toggle]') as HTMLButtonElement)
+    // The row lives in the diff-view group, which starts expanded.
     const toggle = () => document.querySelector('[data-diff-chip-menu-select]') as HTMLButtonElement
     expect(toggle()).not.toBeNull()
     expect(toggle().getAttribute('aria-checked')).toBe('true')
@@ -12654,7 +12651,6 @@ describe('PendingPanel', () => {
     // A FRESH render — the same read a reloaded page makes — still says off.
     view.unmount()
     render(<DiffApprovalSettingsTab {...props} />)
-    fireEvent.click(document.querySelector('[data-diff-view-toggle]') as HTMLButtonElement)
     expect(toggle().getAttribute('aria-checked')).toBe('false')
 
     fireEvent.click(toggle())
@@ -12665,8 +12661,7 @@ describe('PendingPanel', () => {
   it('the DSH Settings tab steps the block-jump lead rows and clamps to the bounds', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)
-    // The row lives in the diff-view group, which opens folded.
-    fireEvent.click(document.querySelector('[data-diff-view-toggle]') as HTMLButtonElement)
+    // The row lives in the diff-view group, which starts expanded.
     const value = () => document.querySelector('[data-diff-nav-lead-rows]') as HTMLElement
     // The page now has several stepper rows (font size, line height, lead rows);
     // target the ± buttons of the lead-rows row specifically.
@@ -12699,8 +12694,7 @@ describe('PendingPanel', () => {
   it('the DSH Settings tab sets how many rounds a comment keeps', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)
-    // The row lives in the comments group, which opens folded.
-    fireEvent.click(document.querySelector('[data-diff-comment-toggle]') as HTMLButtonElement)
+    // The row lives in the comments group, which starts expanded.
     // The group holds the mode, the rounds and the auto-paste switch together.
     expect(document.querySelector('[data-diff-paste-on-copy-select]')).not.toBeNull()
     const value = () => document.querySelector('[data-diff-discussion-rounds]') as HTMLElement
@@ -12727,17 +12721,14 @@ describe('PendingPanel', () => {
     expect(localStorage.getItem('diff-approval:discussion-rounds')).toBe('10')
   })
 
-  it('the DSH Settings tab exposes a collapsed keybindings group that persists chords', () => {
+  it('the DSH Settings tab exposes a keybindings group that opens expanded and persists chords', () => {
     // Reset any stored chords so the defaults apply.
     localStorage.removeItem('diff-approval:key:jumpDown')
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)
 
-    // The group is collapsed by default: no per-action recorder rows yet.
-    expect(document.querySelector('[data-diff-key-jumpdown]')).toBeNull()
-
-    // Expand the group.
-    fireEvent.click(document.querySelector('[data-diff-keybindings-toggle]') as HTMLButtonElement)
+    // The group starts expanded: the per-action recorder rows are visible without a click, so the
+    // page never opens as a bare title a reader has to discover.
     const rec = document.querySelector('[data-diff-key-jumpdown]') as HTMLButtonElement
     expect(rec).not.toBeNull()
     expect(rec.textContent).toContain('Ctrl+ArrowDown')
@@ -12749,16 +12740,16 @@ describe('PendingPanel', () => {
     // The row re-renders with the new chord.
     expect((document.querySelector('[data-diff-key-jumpdown]') as HTMLButtonElement).textContent).toContain('Ctrl+K')
 
-    // Collapse again.
+    // Collapse it: the rows hide, and the choice is remembered for the next open.
     fireEvent.click(document.querySelector('[data-diff-keybindings-toggle]') as HTMLButtonElement)
     expect(document.querySelector('[data-diff-key-jumpdown]')).toBeNull()
+    expect(localStorage.getItem('diff-approval:group-open:keybindings')).toBe('0')
   })
 
   it('the shortcut rows carry no chevron, and reset to their default', () => {
     localStorage.removeItem('diff-approval:key:jumpDown')
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)
-    fireEvent.click(document.querySelector('[data-diff-keybindings-toggle]') as HTMLButtonElement)
 
     const recorder = (): HTMLButtonElement => document.querySelector('[data-diff-key-jumpdown]') as HTMLButtonElement
     const reset = (): HTMLButtonElement => document.querySelector('[data-reset="data-diff-key-jumpdown"]') as HTMLButtonElement
@@ -12788,7 +12779,6 @@ describe('PendingPanel', () => {
     localStorage.removeItem('diff-approval:key:jumpDown')
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)
-    fireEvent.click(document.querySelector('[data-diff-keybindings-toggle]') as HTMLButtonElement)
 
     const recorder = document.querySelector('[data-diff-key-jumpdown]') as HTMLButtonElement
     fireEvent.click(recorder)
@@ -12805,12 +12795,7 @@ describe('PendingPanel', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)
 
-    // Collapsed like the other groups: the rows appear once it is expanded.
-    expect(document.querySelector('[data-diff-cover-left]')).toBeNull()
-    fireEvent.click(document.querySelector('[data-diff-cover-toggle]') as HTMLButtonElement)
-
-    // The same four edges the panel's popover offers, in the same order, each a
-    // switch showing its own state.
+    // Expanded like the other groups: the rows are there on the first open.
     const edges = ['left', 'top', 'right', 'composer']
     const switches = edges.map(edge => document.querySelector(`[data-diff-cover-${edge}]`) as HTMLElement)
     for (const node of switches) expect(node).not.toBeNull()
@@ -12833,7 +12818,8 @@ describe('PendingPanel', () => {
 
     const settingsProps = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...settingsProps} />)
-    fireEvent.click(document.querySelector('[data-diff-cover-toggle]') as HTMLButtonElement)
+
+    // The cover group opens expanded, so its switches are one press away — no expand step first.
     fireEvent.click(document.querySelector('[data-diff-cover-composer]') as HTMLElement)
 
     // The open panel followed the switch: no reopen, no refresh.
@@ -12843,7 +12829,6 @@ describe('PendingPanel', () => {
   it('the DSH Settings tab carries a recorder row per coverage edge', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)
-    fireEvent.click(document.querySelector('[data-diff-keybindings-toggle]') as HTMLButtonElement)
 
     // The four switches are rebindable like every other action, and each row
     // shows the default the panel actually applies.
@@ -12860,17 +12845,12 @@ describe('PendingPanel', () => {
     }
   })
 
-  it('the DSH Settings tab exposes a folded diff-view group with editable appearance', () => {
+  it('the DSH Settings tab exposes an expanded diff-view group with editable appearance', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)
 
-    // Folded on open, like the keybindings and cover groups: the group is the longest one, and
-    // the switches a reader reaches for while reviewing are on the panel's own toolbar.
-    expect(document.querySelector('[data-diff-view-preview]')).toBeNull()
-    expect(document.querySelector('[data-diff-font-size]')).toBeNull()
-
-    // Expanding it brings the live preview and the font/line-height/color and layout rows in.
-    fireEvent.click(document.querySelector('[data-diff-view-toggle]') as HTMLButtonElement)
+    // Expanded on open, like the keybindings and cover groups. It used to start folded, which left the
+    // page opening as four bare titles — indistinguishable from a page that failed to render.
     expect(document.querySelector('[data-diff-view-preview]')).not.toBeNull()
     expect(document.querySelector('[data-diff-font-size]')).not.toBeNull()
     expect(document.querySelector('[data-diff-line-height]')).not.toBeNull()
@@ -12912,7 +12892,11 @@ describe('PendingPanel', () => {
     expect(link).not.toContain('underline')
     expect(hover).toContain('text-decoration: underline')
     // The auto-paste switch is not here: it belongs to the comments group, which is about writing.
-    expect(document.querySelector('[data-diff-paste-on-copy-select]')).toBeNull()
+    // Both groups now open expanded, so "not in this group" is a place in the tree, not an absence.
+    const pasteSwitch = document.querySelector('[data-diff-paste-on-copy-select]')
+    expect(pasteSwitch).not.toBeNull()
+    const diffViewGroup = document.querySelector('[data-diff-view-toggle]')?.closest('div') as HTMLElement
+    expect(diffViewGroup.contains(pasteSwitch as Node)).toBe(false)
 
     // Opening a color trigger shows the HSV dial; typing an RGB value and
     // committing persists to localStorage.
@@ -15889,9 +15873,7 @@ describe('dialog titles', () => {
     // The one of the three without a title reachable without duplicating a flow: the picker's own trigger.
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)
-    // The colour rows live in the folded diff-view group, so it is opened first — the same flow the settings
-    // cases above take.
-    fireEvent.click(document.querySelector('[data-diff-view-toggle]') as HTMLButtonElement)
+    // The colour rows live in the diff-view group, which opens expanded — no click needed first.
     const trigger = document.querySelector('[data-diff-add-color]') as HTMLElement
     fireEvent.click(trigger)
     expect(document.querySelector('[data-diff-color-title]'), 'the popover still carries a title element').toBeNull()
