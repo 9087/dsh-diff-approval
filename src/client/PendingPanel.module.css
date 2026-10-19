@@ -424,8 +424,12 @@
 .settingsGroup[data-open] .settingsGroupChevron {
   transform: rotate(180deg);
 }
-/* A line between the header and the expanded body reads as a section break. */
+/* An open group is a boxed section: the header carries a rule on BOTH edges so the
+   amber-tinted header band does not start on a hard, unmarked cut. A closed group
+   keeps its bottom rule only (the group's own border-bottom), so a run of collapsed
+   headers still reads as one column of rows. */
 .settingsGroup[data-open] .settingsGroupHeader {
+  border-top: 1px solid var(--dsw-alias-border-l2);
   border-bottom: 1px solid var(--dsw-alias-border-l2);
 }
 .settingsGroupBody {
