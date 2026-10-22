@@ -25,6 +25,8 @@ import type { DockHostContext } from './dock.tsx'
 import { DiffApprovalHeaderEntry } from './header-entry.tsx'
 import { attachCodeFont } from './code-font.ts'
 import { chipMenuEnabled } from './settings.ts'
+import { attachCommentCardTitles } from './comment-card.ts'
+import { CommentCardSeat } from './comment-card-seat.tsx'
 import { en, NS, zh } from './locales.ts'
 
 export type { PendingPanelProps } from './PendingPanel.tsx'
@@ -344,6 +346,25 @@ export function apply(ctx: ClientContext): void {
   } catch {
     // No header utilities in this host.
   }
+
+  // The same slot carries this plugin's INVISIBLE comment-card seat: the shell merges `sessionId` and
+  // `useChat` onto session-scope slots, and the seat publishes the conversation snapshot so a delivered
+  // comment's trigger card can be titled with the file and lines it came from (see `comment-card.ts`).
+  // Its own try: a host that refuses the seat costs the card titles, never the header entry above.
+  try {
+    looseSlots.inject('conversation.session.header.utilities', () => looseSlots.register({
+      name: 'conversation.session.header.utilities',
+      id: 'diff-approval-comment-card',
+      order: -4,
+      locale: NS,
+      inject: () => ({}),
+    }, CommentCardSeat))
+  } catch {
+    // No session-scope seats in this host: comments still deliver, just with the shell's generic title.
+  }
+
+  // The DOM half of the same feature: retitle the trigger cards of comments this plugin delivered.
+  ctx.effect(() => attachCommentCardTitles({ t }), 'diff-approval: comment card titles')
 
   // Guarded as a whole: a seat whose contract differs from the one this was
   // written against costs the docked tab, never the footer entry seated above.

@@ -95,6 +95,9 @@ describe('plugin apply', () => {
     apply(ctx as never)
 
     const byName = new Map(registrations.map(entry => [entry.config.name as string, entry.config]))
+    /** One registration's config by the `id` (or the `key`) it registered under. */
+    const byId = (id: string): Record<string, unknown> | undefined =>
+      registrations.find(entry => entry.config.id === id || entry.config.key === id)?.config
     // The seats this plugin fills. The two keyed ones must carry `key`: a keyed
     // seat validates it at registration time and throws without it. The header
     // utilities seat is named as a string because the conversation UI package is
@@ -117,9 +120,18 @@ describe('plugin apply', () => {
     expect(byName.get('settings.section')!.id).toBe('diff-approval')
     // The header entry sorts before the app's own more-actions button (order 0),
     // so the cluster keeps the app's button last.
-    expect(byName.get('conversation.session.header.utilities')!.id).toBe('diff-approval-entry')
-    expect(byName.get('conversation.session.header.utilities')!.order).toBe(-5)
-    expect(byName.get('conversation.session.header.utilities')!.key).toBeUndefined()
+    expect(byId('diff-approval-entry')).toMatchObject({
+      name: 'conversation.session.header.utilities',
+      order: -5,
+    })
+    expect(byId('diff-approval-entry')!.key).toBeUndefined()
+    // The invisible comment-card seat shares the same slot: it publishes the chat snapshot the trigger
+    // cards are joined through, and carries no face of its own.
+    expect(byId('diff-approval-comment-card')).toMatchObject({
+      name: 'conversation.session.header.utilities',
+      order: -4,
+    })
+    expect(byId('diff-approval-comment-card')!.key).toBeUndefined()
     expect(injections).toContain('sidebar.right.pane.tab')
     expect(injections).toContain('conversation.session.header.utilities')
   })

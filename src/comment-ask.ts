@@ -28,6 +28,13 @@ import type { CommentScope, CommentStore } from './comments.ts'
 /** The one verb this plugin uses from the host's session business API. */
 interface SessionControllerSurface {
   prompt?: (request: PromptRequest, signal?: AbortSignal) => Promise<unknown>
+  /**
+   * The WAKE-UP seam the host's own reminders use: resolve the live agent, then publish a user message
+   * on it so an idle loop wakes. A message delivered this way is drawn as a `turn-trigger` CARD rather
+   * than a user bubble — and the card takes its chrome from the message's `source` — so a comment asked
+   * this way reads as a review notification instead of words the reader typed into the chat.
+   */
+  resolveAgent?: (sessionId: SessionId) => Promise<unknown>
 }
 
 /** One prompt submission, narrowed to the fields this plugin fills. */
@@ -38,6 +45,42 @@ interface PromptRequest {
   /** `queue` opens the comment's own turn; `steer` would join whatever is running. */
   mode: 'queue'
   content: { type: 'text'; text: string }[]
+}
+
+/** The source a comment DELIVERY carries, so the shell and this plugin's client can tell it apart. */
+interface CommentSource {
+  kind: 'diff-comment'
+  /** The join key the ask's answer is read back by (see `answerForRequest`). */
+  rpcId: string
+  commentId: string
+  path: string
+  startLine: number
+  endLine: number
+}
+
+/** One user message as the wake-up seam publishes it. */
+interface WakeMessage {
+  id: string
+  role: 'user'
+  content: { type: 'text'; text: string }[]
+  source: CommentSource
+}
+
+/** A live agent as the wake-up seam hands it over: a followup verb, and the session to flush. */
+interface WakeAgent {
+  followup?: (message: WakeMessage) => unknown
+  session?: unknown
+}
+
+/** What `resolveAgent` answers: the agent to publish on, or the host's refusal. */
+interface ResolvedAgent {
+  agent?: WakeAgent
+  error?: unknown
+}
+
+/** The persistence verb the wake-up path owes after a followup. */
+interface SessionsSurface {
+  flush?: (session: unknown) => Promise<boolean>
 }
 
 /** An agent-scoped context, narrowed to the listener registration this plugin needs. */
@@ -337,7 +380,7 @@ export class CommentAsker {
     // require the comment's own session would refuse the ask the moment the panel showed a merged row.
     if (comment === undefined || !inScope(comment.sessionId)) return { outcome: 'missing' }
     const controller = this.ctx.get('sessionController') as SessionControllerSurface | undefined
-    if (typeof controller?.prompt !== 'function') {
+    if (typeof controller?.prompt !== 'function' && typeof controller?.resolveAgent !== 'function') {
       // Silence here is what made the first live failure undiagnosable: the panel says
       // "the question failed" and nothing anywhere says why. A deployment missing the
       // session API is a fact about the host, and it belongs in the host's log.
@@ -351,6 +394,20 @@ export class CommentAsker {
     this.watch(sessionId)
     const requestId = randomUUID()
     this.comments.recordAsk(sessionId, commentId, requestId, undefined, text)
+    // A comment that WAKES an idle agent is packaged as a trigger card, the same card a scheduled
+    // reminder gets: the shell draws it from the message source, so the comment reads as a review
+    // notification rather than as chat input. The prompt itself is unchanged either way; a host
+    // without the wake-up verb still gets the ordinary submission below.
+    const source: CommentSource = {
+      kind: 'diff-comment',
+      rpcId: requestId,
+      commentId,
+      path: comment.path,
+      startLine: comment.anchor.startLine,
+      endLine: comment.anchor.endLine,
+    }
+    if (await this.deliverAsCard(sessionId, prompt, source)) return { outcome: 'asked', requestId }
+    if (typeof controller.prompt !== 'function') return { outcome: 'no-agent', requestId }
     try {
       await controller.prompt({ requestId, sessionId, mode: 'queue', content: [{ type: 'text', text: prompt }] }, signal)
       return { outcome: 'asked', requestId }
@@ -367,6 +424,52 @@ export class CommentAsker {
       this.comments.markDroppedForRequest(requestId)
       return { outcome: 'failed', message: reason }
     }
+  }
+
+  /**
+   * Deliver one comment through the host's WAKE-UP seam, so the shell draws it as a trigger card.
+   *
+   * The seam is the one the host's own reminders use: resolve the live agent, publish a user message on
+   * it, then flush. The message's `source` is what the shell's closed switch turns into a card, and this
+   * plugin's client retitles its own source on the rendered DOM (an unknown kind falls back to a generic
+   * title). A host without the seam — or any failure asking for it — answers false, and the caller falls
+   * back to an ordinary prompt rather than losing the question.
+   *
+   * @param sessionId - the session whose live agent wakes.
+   * @param prompt - the prompt text to deliver verbatim.
+   * @param source - the comment's source marker, carried onto the message.
+   * @returns whether the message was published on the live agent.
+   */
+  private async deliverAsCard(sessionId: SessionId, prompt: string, source: CommentSource): Promise<boolean> {
+    const controller = this.ctx.get('sessionController') as SessionControllerSurface | undefined
+    if (typeof controller?.resolveAgent !== 'function') return false
+    let resolved: ResolvedAgent | undefined
+    try {
+      resolved = await controller.resolveAgent(sessionId) as ResolvedAgent | undefined
+    } catch {
+      return false
+    }
+    if (resolved === undefined || resolved.error !== undefined || resolved.agent === undefined) return false
+    const agent = resolved.agent
+    if (typeof agent.followup !== 'function') return false
+    try {
+      agent.followup({ id: randomUUID(), role: 'user', content: [{ type: 'text', text: prompt }], source })
+    } catch {
+      return false
+    }
+    // The host's own wake path persists right after the followup. A delivery this one cannot flush is
+    // still in the live agent's hands, so it counts as delivered and the failure is only noted.
+    const sessions = this.ctx.get('sessions') as SessionsSurface | undefined
+    if (typeof sessions?.flush === 'function' && agent.session !== undefined) {
+      try {
+        if (!await sessions.flush(agent.session)) {
+          this.ctx.logger.warn('diff-approval: the host did not persist the comment delivery')
+        }
+      } catch (error: unknown) {
+        this.ctx.logger.warn(`diff-approval: flushing the comment delivery failed: ${rejectionText(error)}`)
+      }
+    }
+    return true
   }
 
   /**

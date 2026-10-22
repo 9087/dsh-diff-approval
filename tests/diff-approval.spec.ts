@@ -39,6 +39,13 @@ interface FsDouble {
   processPath: ReturnType<typeof vi.fn>
 }
 
+/** One message as the wake-up seam publishes it: the fields the card test reads. */
+interface WakeMessageLike {
+  role?: string
+  content?: unknown
+  source?: Record<string, unknown>
+}
+
 interface TestHarness {
   ctx: Context
   fs: FsDouble
@@ -2847,6 +2854,87 @@ describe('comments over the channel', () => {
     // exist: the transcript holds the prompt, which wraps them in the marker and the rules.
     expect(value.comments?.[0]?.asks?.[0]?.text).toBe('why?')
     expect(value.commentAnswers).toEqual({ [submitted[0] as string]: 'because it guards the edge' })
+  })
+
+  it('delivers a comment through the wake-up seam, so the shell draws a trigger card', async () => {
+    // The card is the packaging, not the message: the prompt rides the ordinary user message, while the
+    // message SOURCE says this is a delivered review comment. The shell draws a wake message as its
+    // trigger card and the client retitles ours from that source (see `client/comment-card.ts`).
+    const followedUp: WakeMessageLike[] = []
+    const flushed: unknown[] = []
+    let promptCalls = 0
+    const { ctx, handle } = await harness({
+      prepare: (prepared) => {
+        prepared.provide('sessionController', {
+          prompt: () => { promptCalls += 1; return Promise.resolve({ accepted: true }) },
+          resolveAgent: () => Promise.resolve({
+            agent: {
+              session: { id: 'agent-session' },
+              followup: (message: WakeMessageLike) => { followedUp.push(message) },
+            },
+          }),
+        } as never)
+        prepared.provide('agents', { get: () => ({ ctx: { on: () => () => {} } }) } as never)
+        prepared.provide('sessions', {
+          get: () => ({
+            snapshotEvents: () => [],
+          }),
+          flush: (session: unknown) => { flushed.push(session); return Promise.resolve(true) },
+        } as never)
+      },
+    })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b'))
+    const comment = await addComment(handle)
+
+    const answer = await handle('comment-ask', { sessionId: 'session-1', id: comment.id, prompt: 'the prompt', text: 'why?' }, signal())
+    expect(answer).toEqual({ ok: true, value: { outcome: 'asked', requestId: expect.any(String) as string } })
+    const requestId = (answer as { value: { requestId: string } }).value.requestId
+    // The wake-up path was used, not the ordinary prompt: that is what makes the shell draw a card.
+    expect(promptCalls).toBe(0)
+    expect(followedUp).toHaveLength(1)
+    expect(followedUp[0]).toMatchObject({
+      role: 'user',
+      content: [{ type: 'text', text: 'the prompt' }],
+      source: {
+        kind: 'diff-comment',
+        rpcId: requestId,
+        commentId: comment.id,
+        path: '/repo/a.txt',
+        startLine: 1,
+        endLine: 1,
+      },
+    })
+    // Delivered AND persisted: the live message is what wakes the loop, the flush is what a reload keeps.
+    expect(flushed).toEqual([{ id: 'agent-session' }])
+  })
+
+  it('falls back to an ordinary prompt when the wake-up seam is unavailable', async () => {
+    // Older hosts expose only `prompt`; a host whose seam refuses must still get the question through.
+    const submitted: string[] = []
+    let followupCalls = 0
+    const { ctx, handle } = await harness({
+      prepare: (prepared) => {
+        prepared.provide('sessionController', {
+          prompt: (request: { requestId: string }) => {
+            submitted.push(request.requestId)
+            return Promise.resolve({ accepted: true })
+          },
+          resolveAgent: () => Promise.resolve({
+            error: { code: 'session/not-found' },
+            agent: { followup: () => { followupCalls += 1 } },
+          }),
+        } as never)
+        prepared.provide('agents', { get: () => ({ ctx: { on: () => () => {} } }) } as never)
+        prepared.provide('sessions', { get: () => ({ snapshotEvents: () => [] }) } as never)
+      },
+    })
+    emitResult(ctx, editExec(), editSuccess('/repo/b.txt', 'a', 'b'))
+    const comment = await addComment(handle)
+
+    await expect(handle('comment-ask', { sessionId: 'session-1', id: comment.id, prompt: 'the prompt', text: 'why?' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'asked', requestId: expect.any(String) as string } })
+    expect(followupCalls).toBe(0)
+    expect(submitted).toHaveLength(1)
   })
 
   it('reports a question whose turn ended with no answer as over, from the log alone', async () => {
