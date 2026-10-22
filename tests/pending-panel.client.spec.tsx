@@ -678,6 +678,10 @@ function panelProps(
     onMarkSeen: vi.fn(),
     onCommentSeen: vi.fn(),
     onKeep: vi.fn(async () => {}),
+    // The editor's save. A face without this verb draws no Edit button, which is the state every test
+    // that is not about the editor runs in — so the fixture provides it, and the one case that removes
+    // it asserts the button is gone.
+    onKeepEdited: vi.fn(async () => {}),
     onRevert: vi.fn(async () => {}),
     onBlockKeep: vi.fn(async () => {}),
     onBlockRevert: vi.fn(async () => {}),
@@ -14075,7 +14079,7 @@ describe('PendingPanel', () => {
       }
       expect([...names.keys()]).toEqual([
         'data-diff-prev', 'data-diff-next', 'data-diff-search-toggle',
-        'data-diff-goto', 'data-diff-toggle-view', 'data-diff-refresh-vcs',
+        'data-diff-goto', 'data-diff-toggle-view', 'data-diff-edit', 'data-diff-refresh-vcs',
       ])
       // The button's accessible name stays the action itself; its bubble names the action and the chord,
       // glued on this host (which cannot draw keycaps) and mirrored in aria on every host.
@@ -14113,11 +14117,12 @@ describe('PendingPanel', () => {
         'action.search (Ctrl+F)',
         'action.goto (Ctrl+G)',
         hints.get('data-diff-toggle-view'),
+        hints.get('data-diff-edit'),
         hints.get('data-diff-refresh-vcs'),
       ])
 
       // A row does what its button did: the split view turns on from the menu, and the menu closes.
-      fireEvent.click(rows[rows.length - 2]!)
+      fireEvent.click(rows[rows.length - 3]!)
       expect(document.querySelector('[data-diff-hscroll="left"]')).not.toBeNull()
       expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
     } finally {
@@ -17614,5 +17619,85 @@ describe('Markdown preview · structure renderer edge cases', () => {
     expect(oldBox.getAttribute('data-md-block')).toBe(newBox.getAttribute('data-md-block'))
     expect(oldItem.hasAttribute('data-md-block')).toBe(false)
     expect(oldItem.querySelectorAll('[data-md-block]').length).toBe(1)
+  })
+})
+
+describe('editing a pending change', () => {
+  /** The editor's textarea while it is open. */
+  function editBody(): HTMLTextAreaElement {
+    const field = document.querySelector('[data-diff-edit-body]')
+    if (field === null) throw new Error('the editor is not open')
+    return field as HTMLTextAreaElement
+  }
+
+  /** The save half of the pair the decision row shows while the editor is open. */
+  function keepEditedButton(): HTMLButtonElement {
+    return document.querySelector('[data-diff-keep-edited]') as HTMLButtonElement
+  }
+
+  /** The calls the panel has made to the face's own keep-edited verb. */
+  function keepEditedCalls(props: PanelProps): [SessionId, string, string][] {
+    return (props.onKeepEdited as unknown as { mock: { calls: [SessionId, string, string][] } }).mock.calls as [SessionId, string, string][]
+  }
+
+  /** Show the panel on one file and open that file's editor. */
+  function openEditor(): PanelProps {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(document.querySelector('[data-diff-edit]') as HTMLElement)
+    return props
+  }
+
+  it('edits the file in place and keeps the reader\'s version without leaving the row', () => {
+    const props = openEditor()
+
+    // The draft IS the pending change's after-content, so the reader starts from what the agent wrote
+    // rather than from the committed basis, and the caret is in the field they pressed Edit for.
+    expect(editBody().value).toBe(FILE.newText)
+    expect(document.activeElement).toBe(editBody())
+    // Nothing to save until the reader types: the save is not a second Remove.
+    expect(keepEditedButton().disabled).toBe(true)
+
+    fireEvent.change(editBody(), { target: { value: 'mine\n' } })
+    expect(keepEditedButton().disabled).toBe(false)
+    fireEvent.click(keepEditedButton())
+    expect(keepEditedCalls(props)).toEqual([[S1, FILE.id, 'mine\n']])
+
+    // Still the editor until the HOST's own read shows the new content: a refused write must not look
+    // saved, and a keep that found nothing to change must not close the field either.
+    expect(document.querySelector('[data-diff-edit-body]')).not.toBeNull()
+
+    // The host's next read: the row stays listed, and its after-content is the reader's version.
+    act(() => { hostOf(props).setFiles([entry({ newText: 'mine\n' })]) })
+    expect(document.querySelector('[data-diff-edit-body]')).toBeNull()
+    expect(document.querySelector('[data-diff-body]')).not.toBeNull()
+    expect(screen.getAllByText('a.txt')).toHaveLength(1)
+    expect(shownPath()).toBe('/repo/a.txt')
+    // The diff runs from the agent's basis to the reader's version now, so the kept line is an addition.
+    const code = [...document.querySelectorAll('[data-diff-code]')].map(node => node.textContent)
+    expect(code).toContain('mine')
+  })
+
+  it('abandons the draft on Esc without writing anything', () => {
+    const props = openEditor()
+    fireEvent.change(editBody(), { target: { value: 'scratch\n' } })
+    fireEvent.keyDown(editBody(), { key: 'Escape' })
+
+    // Back to the diff, with no keep sent: a draft the reader walked away from never touches the file.
+    expect(document.querySelector('[data-diff-edit-body]')).toBeNull()
+    expect(document.querySelector('[data-diff-body]')).not.toBeNull()
+    expect(keepEditedCalls(props)).toHaveLength(0)
+    expect(document.querySelector('[data-diff-keep-edited]')).toBeNull()
+  })
+
+  it('leaves the editor out of a seat whose face has no keep-edited verb', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+    ;(props as unknown as Record<string, unknown>).onKeepEdited = undefined
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    // No button at all rather than one that could not work.
+    expect(document.querySelector('[data-diff-edit]')).toBeNull()
+    expect(document.querySelector('[data-diff-keep]')).not.toBeNull()
   })
 })

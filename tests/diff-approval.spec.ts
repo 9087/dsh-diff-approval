@@ -645,6 +645,197 @@ describe('keep', () => {
   })
 })
 
+/** One dynamic-context contribution, as the harness's registry hands it to a provider. */
+interface PromptContribution {
+  name?: string
+  order?: number
+  interpolate?: boolean
+  text: (context: { agent?: { id?: string } } | undefined) => string
+}
+
+/**
+ * The harness seams a kept edit reaches, faked to exactly what this plugin reads.
+ *
+ * Three services, and each is one half of the promise the feature makes:
+ *  - `systemPrompt.context` captures the contribution, so a test can ask what an agent's assembly would
+ *    append without a real model call;
+ *  - `agents` hands back one agent whose own context records its `agent/request` subscriptions, which is
+ *    where the queue is consumed (one request = one delivery);
+ *  - `sessionController.prompt` is a spy, and the whole no-LLM-call claim is that it is never touched.
+ * @returns the prepare callback plus readers for what it captured.
+ */
+function delivery(): {
+  prepare: (prepared: Context) => void
+  contribution: () => PromptContribution
+  registered: () => PromptContribution | undefined
+  modelRequest: () => (payload: unknown, next: () => unknown) => unknown
+  requests: () => number
+  prompts: ReturnType<typeof vi.fn>
+} {
+  let contribution: PromptContribution | undefined
+  let request: ((payload: unknown, next: () => unknown) => unknown) | undefined
+  let subscriptions = 0
+  const prompts = vi.fn(async () => {})
+  const agent = {
+    id: SessionId('session-1'),
+    ctx: {
+      on: (name: string, handler: (...args: never[]) => unknown) => {
+        if (name === 'agent/request') {
+          subscriptions += 1
+          request = handler as unknown as (payload: unknown, next: () => unknown) => unknown
+        }
+        return () => {}
+      },
+    },
+  }
+  return {
+    prepare: (prepared: Context) => {
+      prepared.provide('systemPrompt', {
+        context: (value: PromptContribution) => { contribution = value; return () => {} },
+      } as never)
+      prepared.provide('agents', { get: (id: SessionId) => String(id) === 'session-1' ? agent : undefined } as never)
+      prepared.provide('sessionController', { prompt: prompts } as never)
+    },
+    contribution: () => {
+      if (contribution === undefined) throw new Error('the plugin registered no context contribution')
+      return contribution
+    },
+    registered: () => contribution,
+    modelRequest: () => {
+      if (request === undefined) throw new Error('no model-request subscription was made')
+      return request
+    },
+    requests: () => subscriptions,
+    prompts,
+  }
+}
+
+describe('keep-edited', () => {
+  it('writes the reader\'s version, keeps the row showing it, and queues its diff for the agent', async () => {
+    const fake = delivery()
+    const { ctx, fs, handle } = await harness({ sessionIds: [SessionId('session-1')], workspacePath: '/repo', prepare: fake.prepare })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'before\n', 'agent\n'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    await expect(handle('keep-edited', { sessionId: 'session-1', id: entry!.id, content: 'user\n' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'kept', appended: true } })
+
+    // Written under the reader's own session policy, exactly like a revert.
+    expect(fs.writeText).toHaveBeenCalledWith(
+      { displayPath: '/repo/a.txt', targetKey: 'key:/repo/a.txt' }, 'user\n', undefined, expect.anything() as AbortSignal,
+    )
+    // The row STAYS listed, and its after-content is the reader's version rather than the agent's.
+    const [kept] = await listEntries(handle, 'session-1')
+    expect(kept).toMatchObject({ id: entry!.id, path: '/repo/a.txt', oldText: 'before\n', newText: 'user\n' })
+
+    // The contribution is the harness's own runtime context, not a prompt.
+    const registered = fake.registered()
+    expect(registered).toMatchObject({ name: 'diff-approval:kept-edits', order: 130, interpolate: false })
+    const text = fake.contribution().text({ agent: { id: 'session-1' } })
+    expect(text).toContain('### a.txt')
+    expect(text).toContain('--- a/a.txt')
+    expect(text).toContain('+++ b/a.txt')
+    expect(text).toContain('@@ -1,1 +1,1 @@')
+    // Against what the AGENT wrote, not against the file's committed basis.
+    expect(text).toContain('-agent')
+    expect(text).toContain('+user')
+    expect(text).not.toContain('-before')
+    // And no prompt, no turn: the keep is a file write and a queue entry.
+    expect(fake.prompts).not.toHaveBeenCalled()
+  })
+
+  it('says the same thing to no other session, and consumes the queue at the agent\'s next model request', async () => {
+    const fake = delivery()
+    const { ctx, handle } = await harness({ sessionIds: [SessionId('session-1')], prepare: fake.prepare })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'before\n', 'agent\n'))
+    const [entry] = await listEntries(handle, 'session-1')
+    await handle('keep-edited', { sessionId: 'session-1', id: entry!.id, content: 'user\n' }, signal())
+
+    // A different session's assembly is told nothing: the queue is that conversation's own.
+    expect(fake.contribution().text({ agent: { id: 'session-2' } })).toBe('')
+    // A subscription exists for the session's live agent as soon as something is queued.
+    expect(fake.requests()).toBe(1)
+
+    // The model request is what consumes it, so a snapshot that returns to its baseline afterwards is
+    // exactly the diff having been PICKED UP, not the diff having been cancelled.
+    const next = fake.modelRequest()
+    const config = { provider: 'fake', model: 'fake-model' }
+    expect(next(undefined, () => config)).toBe(config)
+    expect(fake.contribution().text({ agent: { id: 'session-1' } })).toBe('')
+  })
+
+  it('writes nothing and queues nothing when the draft is what the change already holds', async () => {
+    const fake = delivery()
+    const { ctx, fs, handle } = await harness({ sessionIds: [SessionId('session-1')], prepare: fake.prepare })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'before\n', 'agent\n'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    await expect(handle('keep-edited', { sessionId: 'session-1', id: entry!.id, content: 'agent\n' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'unchanged', appended: false } })
+    expect(fs.writeText).not.toHaveBeenCalled()
+    expect(fake.contribution().text({ agent: { id: 'session-1' } })).toBe('')
+    expect(await listEntries(handle, 'session-1')).toHaveLength(1)
+  })
+
+  it('reports a row it cannot find as missing, and refuses a payload with no content', async () => {
+    const fake = delivery()
+    const { fs, handle } = await harness({ sessionIds: [SessionId('session-1')], prepare: fake.prepare })
+    await expect(handle('keep-edited', { sessionId: 'session-1', id: 'none', content: 'x' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'missing', appended: false } })
+    expect(fs.writeText).not.toHaveBeenCalled()
+
+    // An emptied file sends '', not nothing at all: only a MISSING content field is malformed.
+    const answer = await handle('keep-edited', { sessionId: 'session-1', id: '/repo/a.txt' }, signal())
+    expect(answer).toMatchObject({ ok: false, error: { code: 'internal' } })
+  })
+
+  it('re-encodes the reader\'s version to the file\'s own line endings before writing', async () => {
+    const fake = delivery()
+    const { ctx, fs, handle } = await harness({ sessionIds: [SessionId('session-1')], prepare: fake.prepare })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'l1\nl2\n', 'l1\r\nl2\r\n'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    await handle('keep-edited', { sessionId: 'session-1', id: entry!.id, content: 'l1\nL2\n' }, signal())
+    // The textarea delivers LF; the file keeps the terminators it had.
+    expect(fs.writeText).toHaveBeenCalledWith(
+      expect.anything(), 'l1\r\nL2\r\n', undefined, expect.anything() as AbortSignal,
+    )
+    const [kept] = await listEntries(handle, 'session-1')
+    expect(kept!.newText).toBe('l1\r\nL2\r\n')
+  })
+
+  it('is undoable: Ctrl+Z puts the agent\'s version back on disk and in the list', async () => {
+    const fake = delivery()
+    let disk = 'agent\n'
+    const { ctx, fs, handle } = await harness({ sessionIds: [SessionId('session-1')], prepare: fake.prepare })
+    fs.readText.mockImplementation(async () => disk)
+    fs.writeText.mockImplementation(async (_target: unknown, content: string) => { disk = content; return { version: 1 } })
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'before\n', 'agent\n'))
+    const [entry] = await listEntries(handle, 'session-1')
+    await handle('keep-edited', { sessionId: 'session-1', id: entry!.id, content: 'user\n' }, signal())
+    expect(disk).toBe('user\n')
+
+    await expect(handle('undo', { sessionId: 'session-1' }, signal()))
+      .resolves.toEqual({ ok: true, value: { outcome: 'undone', id: entry!.id } })
+    expect(disk).toBe('agent\n')
+    const [restored] = await listEntries(handle, 'session-1')
+    expect(restored!.newText).toBe('agent\n')
+  })
+
+  it('keeps the row and the file when the write is refused, and queues nothing', async () => {
+    const fake = delivery()
+    const { ctx, fs, handle } = await harness({ sessionIds: [SessionId('session-1')], prepare: fake.prepare })
+    fs.writeText.mockRejectedValue(new Error('disk full'))
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'before\n', 'agent\n'))
+    const [entry] = await listEntries(handle, 'session-1')
+
+    const answer = await handle('keep-edited', { sessionId: 'session-1', id: entry!.id, content: 'user\n' }, signal())
+    expect(answer).toEqual({ ok: false, error: { code: 'internal', message: 'keep edited failed: disk full', details: {} } })
+    expect((await listEntries(handle, 'session-1'))[0]!.newText).toBe('agent\n')
+    expect(fake.contribution().text({ agent: { id: 'session-1' } })).toBe('')
+  })
+})
+
 describe('revert', () => {
   it('writes the old content back through fs and removes the entry', async () => {
     const { ctx, fs, handle } = await harness()

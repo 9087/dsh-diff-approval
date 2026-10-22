@@ -379,6 +379,21 @@ export interface DiffApprovalActionValue {
   resolved?: boolean | undefined
 }
 
+/**
+ * Value returned by the channel's keep-edited endpoint: the reader's version of a pending change was
+ * written to the file and made the entry's after-content.
+ */
+export interface DiffApprovalKeepEditedValue {
+  /**
+   * What the request did: `kept` wrote the reader's version and queued its diff for the agent's next
+   * call, `unchanged` found it identical to what the pending change already held (so nothing was
+   * written and nothing queued), and `missing` means no pending entry existed.
+   */
+  outcome: 'kept' | 'unchanged' | 'missing'
+  /** Whether a diff was queued for the agent (true only for `kept`). */
+  appended: boolean
+}
+
 /** One row of a browsed directory level. */
 export interface DiffApprovalBrowseEntry {
   /** Base name inside the listed directory. */

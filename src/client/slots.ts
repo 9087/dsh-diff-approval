@@ -226,6 +226,15 @@ export interface PendingPanelFace extends PendingViewHooks {
   onMarkSeen?: ((sessionId: SessionId | undefined, id: string) => void) | undefined
   /** Keep one operation. `keepListed` leaves the resolved entry in the list. */
   onKeep: (sessionId: SessionId, id: string, keepListed?: boolean) => Promise<void>
+  /**
+   * Keep the READER's own version of one pending change: `content` is the file's whole text.
+   *
+   * The keep leaves the row listed showing the reader's version (the host writes it and makes it the
+   * entry's after-content), and the host queues a unified diff of the change for the agent's next model
+   * call — no prompt, no turn. Optional in the face type for the same reason the other newer verbs are:
+   * a seat built against an older face still renders, and this one simply offers no editor.
+   */
+  onKeepEdited?: ((sessionId: SessionId, id: string, content: string) => Promise<void>) | undefined
   /** Revert one operation (restore its prior content, or remove a created file).
    *  `keepListed` leaves the resolved entry in the list. */
   onRevert: (sessionId: SessionId, id: string, keepListed?: boolean) => Promise<void>

@@ -13,6 +13,13 @@
  * restored by its revert). `open` launches the file with its default
  * application or reveals it in the file manager.
  *
+ * It also lets the reader REWRITE a pending change in place. The panel's edit mode hands the reader's
+ * version to `keep-edited`, which writes it to the file, makes it the entry's after-content, and queues
+ * a unified diff of what the reader changed — against what the agent itself produced — for the agent's
+ * next model call (`kept-edits.ts`). That diff rides the agent's dynamic runtime context, which is
+ * assembled fresh before every request: no prompt is submitted and no turn is started, so the reader's
+ * edit is picked up by the next call and never causes one.
+ *
  * Mount this row in any profile's `cordis.patch.yml`:
  *
  * ```yaml
@@ -52,6 +59,7 @@ import { PendingDiffStore } from './pending.ts'
 import { PendingPersistence, defaultStorageDir } from './persist.ts'
 import { CommentStore, commentsDirFor } from './comments.ts'
 import type { CommentScope } from './comments.ts'
+import { KeptEditQueue, keptEditsDirFor, renderKeptEdits } from './kept-edits.ts'
 import { CommentAsker } from './comment-ask.ts'
 import type { TranscriptCache } from './comment-ask.ts'
 import { resolveCommentLines } from './comment-lines.ts'
@@ -70,13 +78,14 @@ import { createUpdateCheck } from './version.ts'
 import type { DiffApprovalUpdateValue } from './types.ts'
 import type {
   DiffApprovalActionValue, DiffApprovalAddOutcome, DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBlockTarget, DiffApprovalBrowseEntry, DiffApprovalBrowseValue,
-  DiffApprovalBulkValue, DiffApprovalListCountValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue,
+  DiffApprovalBulkValue, DiffApprovalKeepEditedValue, DiffApprovalListCountValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue,
   CommentAnchor, CommentQuoteLine, CommentRecord, DiffApprovalCommentAddValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue,
   LineageDirection, PendingEntry, PendingEntryKind, PendingFileDiff, SessionLineage, VcsImportValue,
 } from './types.ts'
 
 export type {
   DiffApprovalActionOutcome, DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalBlockTarget,
+  DiffApprovalKeepEditedValue,
   DiffApprovalListCountValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalRefreshOutcome, DiffApprovalRefreshValue,
   CommentAnchor, CommentQuoteLine, CommentRecord, DiffApprovalCommentAddValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue,
   LineageDirection, PendingEntry, PendingEntryKind, PendingFileDiff, SessionLineage,
@@ -84,6 +93,7 @@ export type {
 export { PendingDiffStore } from './pending.ts'
 export { PendingPersistence, defaultStorageDir } from './persist.ts'
 export { CommentStore, commentsDirFor } from './comments.ts'
+export { KeptEditQueue, keptEditsDirFor, renderKeptEdits, unifiedDiffFor } from './kept-edits.ts'
 export { CommentAsker, answerForRequest } from './comment-ask.ts'
 export { defaultOpenPath } from './open.ts'
 
@@ -103,6 +113,24 @@ export const inject = ['fs', 'connection', 'webServer', 'workspaceRegistry', 'se
 
 /** The connection RPC channel this plugin serves. */
 export const DIFF_APPROVAL_CHANNEL = '/diff-approval'
+
+/**
+ * The name of the dynamic-context contribution that carries the reader's kept edits.
+ *
+ * A registered contribution is part of the harness's own runtime-context snapshot, which is assembled
+ * before each model call and materialised as a durable user-role message — the one channel that reaches
+ * the agent on its next call without starting anything.
+ */
+const KEPT_EDITS_CONTEXT_NAME = 'diff-approval:kept-edits'
+
+/**
+ * Where that contribution sits in the snapshot, in the harness's centrally allocated context order.
+ *
+ * `130` is between the delegation facts (`SUBAGENT_DELEGATION`, 120) and the harness-source context
+ * (200): the reader's edit explains the working tree those facts describe, so it reads after the
+ * delegation and before the environment.
+ */
+const KEPT_EDITS_CONTEXT_ORDER = 130
 
 export { COMMENT_SKILL_NAME } from './comment-skill.ts'
 
@@ -685,6 +713,25 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
   // answer back out of the transcript (see `CommentAsker`).
   const commentAsker = new CommentAsker(ctx, comments)
 
+  // The reader's kept edits, waiting for the agent's next model call. It is read by a SYNCHRONOUS
+  // dynamic-context provider (the harness assembles contexts before each request and cannot await), so
+  // the whole directory is read once here, at mount: the diff a reader kept before a restart is in
+  // memory before the first call that could need it. Its two failure seams are wired here for the same
+  // reason the comment store's are — a queue that cannot be written is a reader's edit that will never
+  // reach the agent, and that has to be said rather than discovered.
+  const keptEdits = new KeptEditQueue(keptEditsDirFor(storageRoot), {
+    onLoadSkipped: (file, reason) => {
+      ctx.logger.warn(`diff-approval: skipping an unreadable kept-edit queue '${file}': ${reason}`)
+    },
+    onPersistError: (message) => {
+      if (message === undefined) return
+      ctx.logger.error(`diff-approval: writing the kept-edit queue failed, so a reader's edit will not reach the agent: ${message}`)
+    },
+  })
+  void keptEdits.loadAll().catch((error: unknown) => {
+    ctx.logger.error(`diff-approval: loading the kept-edit queues failed, so edits kept before this start cannot reach the agent: ${errorMessage(error)}`)
+  })
+
   /**
    * The lines each comment sits on now, resolved from the entry content it hangs off and held
    * against the version of that content it was resolved at (see `resolveCommentLines` for the rule
@@ -1180,6 +1227,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // row and the threads written on it. It is snapshotted BEFORE the drop, which is what that call
         // is about to take away.
         const checkpoint = droppingComments({ id: entry.path, path: entry.path, entry, fileText: entry.newText })
+        // The file is gone, so a kept edit queued for the agent is about content nothing holds any more.
+        keptEdits.withdraw(entry.path)
         dropEntry(entry.path)
         pushUndo(sessionId, checkpoint,
           { id: entry.path, path: entry.path, entry: undefined, fileText: undefined }, view)
@@ -1189,6 +1238,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       if (live.kind === 'unavailable') {
         // Present but unreadable: no operation is safe, so drop the entry and
         // purge its undo/redo records so the LIFO queue stays traversable.
+        keptEdits.withdraw(entry.path)
         dropEntry(entry.path)
         purgeForEntry(entry.path)
         persistSession()
@@ -2496,6 +2546,99 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     if (store.fold(entry)) persistSession()
   })
 
+  /** The agents watched for their next model request, keyed by session (see `watchAgentRequests`). */
+  const keptEditWatches = new Map<string, { agent: unknown; detach: readonly (() => void)[] }>()
+
+  /**
+   * The path a kept edit's diff headers print: workspace-relative when the file is inside the session's
+   * workspace, absolute otherwise.
+   *
+   * The path is the only thing a unified diff's headers carry, so it is also the agent's only clue about
+   * WHICH file the change is in: a workspace-relative path is what its own tools take, while a file
+   * outside the workspace has no relative spelling that would resolve, so it keeps its absolute one.
+   * @param sessionId - the session whose workspace the path is named against.
+   * @param path - the entry's absolute path.
+   * @returns the path to print in the diff's headers.
+   */
+  function keptEditDisplayPath(sessionId: SessionId, path: string): string {
+    const workspace = workspaceOf(sessionId)
+    if (workspace === undefined) return path
+    const inside = relative(workspace.path, path)
+    if (inside === '' || inside.startsWith('..') || isAbsolute(inside)) return path
+    // A patch header names a path, not a Windows path: the separators are forward slashes on every host,
+    // and a diff with backslashes in its `---`/`+++` lines is a diff no tool can apply.
+    return inside.split('\\').join('/')
+  }
+
+  /**
+   * The block one agent's pending assembly appends, or `''` when it has nothing queued.
+   *
+   * Read SYNCHRONOUSLY from the queue (the assembly cannot await) and filtered against the entry each
+   * record names: a record whose version the pending change no longer holds is about an edit that was
+   * undone, reverted or overwritten since it was kept, and announcing it would tell the agent the file
+   * holds something it does not. A record whose ENTRY is gone is kept — a plain Keep drops the row while
+   * leaving the reader's version on disk, which is exactly the change the agent still has to hear about.
+   * @param agentId - the session of the agent whose assembly this is.
+   * @returns the context block, or `''`.
+   */
+  function keptEditsTextFor(agentId: string | undefined): string {
+    if (agentId === undefined) return ''
+    const queued = keptEdits.recordsOf(agentId)
+    if (queued.length === 0) return ''
+    // Re-armed on every assembly that has something to hand over, so a resumed or rebuilt agent gets its
+    // own subscription rather than the disposed one's (see `watchAgentRequests`).
+    watchAgentRequests(SessionId(agentId))
+    const held = queued.filter((record) => {
+      const entry = store.get(record.path)
+      return entry === undefined || entry.newText === record.userText
+    })
+    return renderKeptEdits(held)
+  }
+
+  /**
+   * Subscribe one session's live agent for its model requests, so a queued diff leaves the context
+   * snapshot at the request that carries it.
+   *
+   * The queue is consumed at the REQUEST and not at the assembly: an assembly that never becomes a
+   * request — a step the harness rejects, a turn that stops before it — has told the agent nothing, so
+   * its diff has to stay queued for the call that does happen (see `KeptEditQueue.markDelivered`).
+   * Re-armed whenever the agent object is replaced, the way the shell boundary's turn-end watcher is:
+   * the listener lives on that agent's own context, and a resumed agent is a different object.
+   * @param sessionId - the session whose requests consume its queue.
+   */
+  function watchAgentRequests(sessionId: SessionId): void {
+    const key = String(sessionId)
+    const registry = ctx.get('agents') as AgentRegistrySurface | undefined
+    const agent = registry?.get?.(sessionId)
+    const on = (agent as RequestAgentSurface | undefined)?.ctx?.on
+    if (typeof on !== 'function') return
+    const watching = keptEditWatches.get(key)
+    if (watching?.agent === agent) return
+    if (watching !== undefined) {
+      keptEditWatches.delete(key)
+      for (const off of watching.detach) {
+        try {
+          off()
+        } catch {
+          // An agent that is already gone has nothing left to release.
+        }
+      }
+    }
+    const detach: (() => void)[] = []
+    try {
+      const handle = on.call((agent as RequestAgentSurface).ctx, 'agent/request', (_payload: unknown, next: () => unknown) => {
+        void keptEdits.markDelivered(sessionId)
+        return next()
+      })
+      if (typeof handle === 'function') detach.push(handle as () => void)
+      keptEditWatches.set(key, { agent, detach })
+    } catch (error: unknown) {
+      // A build that cannot be subscribed still delivers the diff (the assembly renders it); what is lost
+      // is only the snapshot's return to its baseline after the call, which is reported rather than silent.
+      ctx.logger.debug(`diff-approval: watching a session for its kept-edit delivery failed: ${errorMessage(error)}`)
+    }
+  }
+
   const handle: ConnectionRpcHandler = async (endpoint, payload, signal): Promise<RpcResult<unknown>> => {
     switch (endpoint) {
       case 'update-check': {
@@ -2786,6 +2929,77 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         const value: DiffApprovalActionValue = { outcome: 'kept' }
         return { ok: true, value }
       }
+      case 'keep-edited': {
+        const request = keepEditedOf(payload)
+        if (request === undefined) return rpcError('sessionId, id and content must be given')
+        // The reader's own version becomes the pending change's after-content: the file is written, the
+        // entry stays listed showing what the reader wrote, and the difference from what the agent
+        // produced is queued for the agent's next call (see `kept-edits.ts`). Resolved through the
+        // request's merged view like every other action, so a row outside the requester's lineage answers
+        // `missing` — exactly what an id that names nothing gets.
+        const lineage = lineageView()
+        let entry = actionableEntryOf(lineage, request.sessionId, request.id)
+        if (entry === undefined) {
+          await ensureLoaded()
+          entry = actionableEntryOf(lineage, request.sessionId, request.id)
+          if (entry === undefined) {
+            const value: DiffApprovalKeepEditedValue = { outcome: 'missing', appended: false }
+            return { ok: true, value }
+          }
+        }
+        if (entry.textUnavailable === true) {
+          return rpcError(`'${entry.path}' is not text this panel can read, so it cannot be edited here`)
+        }
+        // The file's own line endings survive the reader's typing: an HTML textarea delivers `\n` whatever
+        // the file used, and writing that back over a CRLF file would make the whole file look rewritten on
+        // the next read (the same re-encoding a revert does, in the other direction).
+        const content = reencodeEol(request.content, detectEol(entry.newText))
+        if (content === entry.newText) {
+          // The draft is already what the pending change holds: nothing to write, and nothing to tell the
+          // agent. Not an error — the panel's Keep is also how a reader closes an edit that changed nothing.
+          const value: DiffApprovalKeepEditedValue = { outcome: 'unchanged', appended: false }
+          return { ok: true, value }
+        }
+        // What the file held BEFORE this write, for the undo pair: the reader's keep must be as undoable as
+        // any other decision, and Ctrl+Z has to put the agent's version back on disk with the row.
+        let resolved: FsTarget
+        let preWrite: string
+        try {
+          resolved = await ctx.fs.resolve(entry.path, { signal })
+          preWrite = await ctx.fs.readText(resolved, undefined) ?? entry.newText
+          // Under the PRESSING session's own authority, like a revert: the reader is the one writing.
+          await writeRevert(resolved, content, request.sessionId, signal)
+        } catch (error: unknown) {
+          if (isPolicyRefusal(error)) return policyRefusal(entry.path, error)
+          return rpcError(`keep edited failed: ${errorMessage(error)}`)
+        }
+        store.update(entry.path, { newText: content })
+        const afterEntry: PendingEntry = { ...entry, newText: content, updatedAt: Date.now() }
+        pushUndo(request.sessionId,
+          { id: entry.id, path: entry.path, entry, fileText: preWrite },
+          { id: entry.id, path: entry.path, entry: afterEntry, fileText: content },
+          lineage)
+        await persistSession(true)
+        // The agent is told on its next model call, never by a prompt: `keep()` only queues the diff, and
+        // the provider registered below is what the harness assembles it from.
+        let appended = false
+        try {
+          await keptEdits.keep(request.sessionId, {
+            path: entry.path,
+            displayPath: keptEditDisplayPath(request.sessionId, entry.path),
+            agentText: entry.newText,
+            userText: content,
+          })
+          appended = true
+          watchAgentRequests(request.sessionId)
+        } catch (error: unknown) {
+          // The file holds the reader's version either way; what failed is the agent being told. Said at
+          // error level because the reader's intent — "the agent should see this" — did not happen.
+          ctx.logger.error(`diff-approval: queueing a kept edit for the agent failed: ${errorMessage(error)}`)
+        }
+        const value: DiffApprovalKeepEditedValue = { outcome: 'kept', appended }
+        return { ok: true, value }
+      }
       case 'revert': {
         const target = targetOf(payload)
         if (target === undefined) return rpcError('sessionId and id must be non-empty strings')
@@ -2840,6 +3054,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // no pair for a snapshot to ride — the one revert whose threads cannot come back, which is the
         // same "this action is not undoable" the file itself already is.
         const pair = undo === undefined ? undefined : { before: droppingComments(undo.before), after: undo.after }
+        // A Revert puts the old content back on disk, so a kept edit queued for the agent is about a
+        // version the file no longer holds: it leaves the queue with it.
+        keptEdits.withdraw(entry.path)
         dropEntry(target.id)
         // The session that PRESSED, which is also the session whose policy the write above ran under: undo
         // is retrieved from the requester's own lineage stack (`undoStackOf`/`popOwnPair` are keyed
@@ -2901,6 +3118,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             batchBefore.push(droppingComments(undo.before))
             batchAfter.push(undo.after)
           }
+          // A whole-list Revert puts each file's old content back, so a kept edit queued for the agent
+          // about a version it no longer holds leaves the queue too.
+          keptEdits.withdraw(entry.path)
           dropEntry(entry.id)
         }
         if (batchBefore.length > 0) pushBatchUndo(sessionId, batchBefore, batchAfter)
@@ -2995,6 +3215,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             before.push(droppingComments(undo.before))
             after.push(undo.after)
           }
+          // A pick's Revert puts the row's old content back, so a kept edit queued for the agent about a
+          // version it no longer holds leaves the queue too.
+          keptEdits.withdraw(entry.path)
           dropEntry(id)
         }
         pushBatchUndo(request.sessionId, before, after)
@@ -3651,6 +3874,34 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
       : service.rpc.handle(DIFF_APPROVAL_CHANNEL, handle, { authority: 'trusted-host' })
   }, 'diff-approval: review channel')
 
+  // The reader's kept edits reach the agent through the harness's own dynamic runtime context, and
+  // nothing else: the context is assembled before EVERY model call, so a diff kept while the agent was
+  // idle is simply part of the next request's snapshot — no prompt is submitted, no turn is started, and
+  // the agent's own next call is what reads it. That is the whole mechanism, and it is why the keep
+  // itself can never invoke an LLM.
+  //
+  // The contribution is registered on the plugin's context (one assembly-time provider for every agent),
+  // and `interpolate: false` is not optional: prompt variables are interpolated into a contribution by
+  // default, and a diff of code containing `{{...}}` would make the ASSEMBLY throw rather than reach the
+  // agent. The provider is asked for a per-agent text, so a session that has nothing queued contributes
+  // nothing and the snapshot stays exactly as it was.
+  ctx.effect(() => {
+    const prompt = ctx.get('systemPrompt') as SystemPromptSurface | undefined
+    if (typeof prompt?.context !== 'function') {
+      // A harness without the dynamic-context registry cannot be handed the diff; the keep itself still
+      // worked (the file and the row are the reader's), so this is reported once, at mount, and not
+      // treated as a failure of the feature.
+      ctx.logger.warn('diff-approval: this host has no systemPrompt.context, so a kept edit cannot be appended to the agent\'s next call')
+      return () => {}
+    }
+    return prompt.context({
+      name: KEPT_EDITS_CONTEXT_NAME,
+      order: KEPT_EDITS_CONTEXT_ORDER,
+      interpolate: false,
+      text: context => keptEditsTextFor(context?.agent?.id),
+    })
+  }, 'diff-approval: kept edits in the agent context')
+
   // Serve the bundled code font's slices. The panel asks for a family whose one
   // CJK glyph is exactly twice one Latin glyph, and the files that back it ship
   // with the plugin: a CDN is not an option (Google Fonts is unreachable in
@@ -3687,6 +3938,42 @@ interface IntentBasis {
   earlierVersion: PendingEntryKind
   before: string
   sessionId: SessionId | undefined
+}
+
+/**
+ * A live agent, narrowed to the one waterfall subscription the kept-edit queue needs: the model request
+ * that will carry the diff (`agent/request`).
+ *
+ * Read structurally, like every other optional service here, because this package does not depend on the
+ * agent package: the event name and its arguments are the harness's contract, and a build whose agent has
+ * no such context simply never delivers the diff's consumption (a fact `watchAgentRequests` reports).
+ */
+interface RequestAgentSurface {
+  ctx?: {
+    on?: (name: string, handler: (payload: unknown, next: () => unknown) => unknown) => unknown
+  } | undefined
+}
+
+/**
+ * The system-prompt registry's dynamic-context seam, read structurally like every other optional
+ * service here.
+ *
+ * Only the one method this plugin uses is named: a contribution is rendered by the harness before each
+ * model call, with the agent that assembly is for, which is exactly the question this feature has to
+ * answer. A shape rather than an import keeps this package's dependency list as it is.
+ */
+interface SystemPromptSurface {
+  context?: (contribution: {
+    name: string
+    order: number
+    text: (context: { agent?: { id?: string } | undefined } | undefined) => string
+    interpolate?: boolean
+  }) => () => void
+}
+
+/** The agent registry's lookup, read structurally the way every optional service is (see `headerOf`). */
+interface AgentRegistrySurface {
+  get?: (id: SessionId) => unknown
 }
 
 /** Narrow a wire payload's `sessionId` field to a branded session id. */
@@ -3810,6 +4097,25 @@ function targetOf(payload: unknown): { sessionId: SessionId; id: string } | unde
   const id = (payload as Record<string, unknown>).id
   if (typeof id !== 'string' || id.length === 0) return undefined
   return { sessionId, id }
+}
+
+/**
+ * Narrow a wire payload to one keep of an edited pending change: the row to keep, and the reader's whole
+ * version of the file.
+ *
+ * `content` is the file's complete text rather than a patch: the panel edits a whole file, the reader's
+ * version IS the new state, and applying a patch to a file that has moved under the panel is exactly the
+ * drift this endpoint must not have. An empty string is a real value (a file the reader emptied) — only a
+ * MISSING `content` field is refused.
+ * @param payload - the wire payload.
+ * @returns the request, or undefined when it is not one.
+ */
+function keepEditedOf(payload: unknown): { sessionId: SessionId; id: string; content: string } | undefined {
+  const target = targetOf(payload)
+  if (target === undefined) return undefined
+  const content = (payload as Record<string, unknown>).content
+  if (typeof content !== 'string') return undefined
+  return { ...target, content }
 }
 
 /**
