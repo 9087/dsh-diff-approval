@@ -1,6 +1,7 @@
 // The host half: capture, per-operation entries, channel serving, keep,
 // earlier-version-aware revert, live file state, and persistence.
 
+import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -4668,6 +4669,181 @@ describe('write authority: the requester writes, and the pair remembers its seat
     expect(fs.writeText).not.toHaveBeenCalled()
     expect(disk.get('/repo/a.txt')).toBe('b')
     expect(disk.get('/other/b.txt')).toBe('b')
+  })
+})
+
+// --- The shell boundary, end to end: a real checkout, a real shell, and the two event halves the tool
+// registry emits. The command itself runs between them, exactly as a tool body would, and what is
+// asserted is the pending list after the commit — the row that used to be missing.
+
+/** Whether this machine has git at all (the boundary specs are skipped without it). */
+const gitInstalled = spawnSync('git', ['--version']).status === 0
+
+/** The command interpreter the deployment's shell executor uses, per platform. */
+const SHELL_INTERPRETER = process.platform === 'win32'
+  ? { file: 'powershell.exe', head: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command'] }
+  : { file: '/bin/sh', head: ['-c'] }
+
+/** A real `ctx.shell` executor: the boundary's git reads go through the deployment's seam, and the test
+ *  lets them run against the real filesystem rather than replaying routes. */
+function realShell(): unknown {
+  return {
+    resolve: (request: unknown) => request,
+    run: async (spec: unknown) => {
+      const { command, workdir, stdoutMaxBytes } = spec as { command: string; workdir?: string; stdoutMaxBytes?: number }
+      const result = spawnSync(SHELL_INTERPRETER.file, [...SHELL_INTERPRETER.head, command], {
+        cwd: workdir,
+        encoding: 'utf8',
+        maxBuffer: (stdoutMaxBytes ?? 8 * 1024 * 1024) + 1024,
+      })
+      return { exitCode: result.status, stdout: { text: result.stdout ?? '' }, stderr: { text: result.stderr ?? '' } }
+    },
+  }
+}
+
+/** Run the `tools/pre-execute` waterfall for one execution, as the tool registry does before a tool
+ *  body runs: the boundary records its baseline here, and the chain is handed on untouched. */
+async function emitPreExecute(ctx: Context, exec: unknown): Promise<void> {
+  const waterfall = (ctx as unknown as {
+    waterfall: (name: string, exec: unknown, next: () => Promise<unknown>) => Promise<unknown>
+  }).waterfall.bind(ctx)
+  await waterfall('tools/pre-execute', exec, async () => ({ kind: 'allow' }))
+}
+
+/** One real git command in a boundary fixture. */
+function fixtureGit(root: string, ...args: string[]): string {
+  return execFileSync('git', ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', ...args], {
+    cwd: root,
+    encoding: 'utf8',
+  })
+}
+
+/** Run one command the way the model's shell tool would, in the fixture checkout. */
+function runShell(root: string, command: string): void {
+  execFileSync(SHELL_INTERPRETER.file, [...SHELL_INTERPRETER.head, command], { cwd: root, encoding: 'utf8' })
+}
+
+/** A real checkout with one commit in it: `a.txt` holds `one`. */
+async function shellFixture(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-shell-boundary-'))
+  tempDirs.push(root)
+  fixtureGit(root, 'init', '-q')
+  await writeFile(join(root, 'a.txt'), 'one\n')
+  await writeFile(join(root, 'kept.txt'), 'kept\n')
+  fixtureGit(root, 'add', '-A')
+  fixtureGit(root, 'commit', '-qm', 'baseline')
+  return root
+}
+
+/** One `bash` execution, as the tool registry shapes it: name, call id, arguments and owning agent. */
+function bashExec(callId: string, command: string, extra: Record<string, unknown> = {}): unknown {
+  return {
+    name: 'bash',
+    callId,
+    arguments: { command, description: 'boundary fixture', ...extra },
+    agent: { id: SessionId('session-1') },
+  }
+}
+
+/** A successful result, as the settle half receives any tool's outcome. */
+function okResult(): unknown {
+  return { isError: false, value: {} }
+}
+
+describe.skipIf(!gitInstalled)('shell boundary capture', () => {
+  it('lists a sed-style edit the command committed before the panel could see it', async () => {
+    const root = await shellFixture()
+    const shell = realShell()
+    const { ctx, handle } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: root,
+      prepare: (prepared) => { prepared.provide('shell', shell) },
+    })
+    const command = "printf 'ONE\\n' > a.txt && git add -A "
+      + '&& git -c user.email=test@example.com -c user.name=Test commit -qm change'
+    const exec = bashExec('call-shell-1', command)
+    await emitPreExecute(ctx, exec)
+    // The tool body: what the command writes and commits happens here, between the two halves.
+    runShell(root, command)
+    emitResult(ctx, exec, okResult())
+    const path = resolve(root, 'a.txt')
+    await vi.waitFor(async () => {
+      expect((await listEntries(handle, 'session-1')).map(file => file.path)).toContain(path)
+    })
+    const entry = (await listEntries(handle, 'session-1')).find(file => file.path === path)
+    expect(entry).toMatchObject({ earlierVersion: 'file', oldText: 'one\n', newText: 'ONE\n' })
+    // `git status` is clean: the row exists because the boundary kept the pre-command revision.
+    expect(fixtureGit(root, 'status', '--porcelain').trim()).toBe('')
+  })
+
+  it('waits for a background command at its job tool', async () => {
+    const root = await shellFixture()
+    const shell = realShell()
+    const { ctx, handle } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: root,
+      prepare: (prepared) => { prepared.provide('shell', shell) },
+    })
+    const exec = bashExec('call-shell-bg', 'printf "bg\\n" > bg.txt', { run_in_background: true })
+    await emitPreExecute(ctx, exec)
+    runShell(root, 'printf "bg\\n" > bg.txt')
+    // The result of a background command arrives when the job STARTS: the boundary must not settle yet.
+    emitResult(ctx, exec, okResult())
+    expect((await listEntries(handle, 'session-1')).map(file => file.path)).not.toContain(resolve(root, 'bg.txt'))
+    // The job tool is where its caller learns it is done.
+    emitResult(ctx, { name: 'job_output', callId: 'call-job-1', arguments: { job_id: 'job-1' }, agent: { id: SessionId('session-1') } }, okResult())
+    await vi.waitFor(async () => {
+      expect((await listEntries(handle, 'session-1')).map(file => file.path)).toContain(resolve(root, 'bg.txt'))
+    })
+  })
+
+  it('does not re-list a change the reader already kept', async () => {
+    const root = await shellFixture()
+    const shell = realShell()
+    const { ctx, handle } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: root,
+      prepare: (prepared) => { prepared.provide('shell', shell) },
+    })
+    // A kept, still-uncommitted change: the file holds `KEPT`, the repository still holds `kept`.
+    const first = bashExec('call-shell-keep-1', 'printf "KEPT\\n" > kept.txt')
+    await emitPreExecute(ctx, first)
+    runShell(root, 'printf "KEPT\\n" > kept.txt')
+    emitResult(ctx, first, okResult())
+    const kept = resolve(root, 'kept.txt')
+    await vi.waitFor(async () => {
+      expect((await listEntries(handle, 'session-1')).map(file => file.path)).toContain(kept)
+    })
+    await handle('keep', { sessionId: 'session-1', id: kept }, signal())
+    expect((await listEntries(handle, 'session-1')).map(file => file.path)).not.toContain(kept)
+    // A later command rewrites the SAME bytes — a formatter's no-op — and the settled content must not
+    // come back as a fresh pending row.
+    const second = bashExec('call-shell-keep-2', 'printf "KEPT\\n" > kept.txt')
+    await emitPreExecute(ctx, second)
+    runShell(root, 'printf "KEPT\\n" > kept.txt')
+    emitResult(ctx, second, okResult())
+    await new Promise(settle => setTimeout(settle, 200))
+    expect((await listEntries(handle, 'session-1')).map(file => file.path)).not.toContain(kept)
+  })
+
+  it('leaves the edit and write capture untouched beside it', async () => {
+    const root = await shellFixture()
+    const shell = realShell()
+    const { ctx, handle } = await harness({
+      sessionIds: [SessionId('session-1')],
+      workspacePath: root,
+      prepare: (prepared) => { prepared.provide('shell', shell) },
+    })
+    emitResult(ctx, editExec(), editSuccess(resolve(root, 'a.txt'), 'one\n', 'edited\n'))
+    const exec = bashExec('call-shell-both', 'printf "shell\\n" > shell.txt')
+    await emitPreExecute(ctx, exec)
+    runShell(root, 'printf "shell\\n" > shell.txt')
+    emitResult(ctx, exec, okResult())
+    await vi.waitFor(async () => {
+      const paths = (await listEntries(handle, 'session-1')).map(file => file.path)
+      expect(paths).toContain(resolve(root, 'a.txt'))
+      expect(paths).toContain(resolve(root, 'shell.txt'))
+    })
   })
 })
 

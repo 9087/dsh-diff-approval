@@ -8,7 +8,7 @@ English | [中文](README.zh.md)
 [![Compat (newer published releases)](https://img.shields.io/github/actions/workflow/status/9087/dsh-diff-approval/compat-newer.yml?label=compat%20(newer))](https://github.com/9087/dsh-diff-approval/actions/workflows/compat-newer.yml)
 [![Release](https://img.shields.io/github/actions/workflow/status/9087/dsh-diff-approval/release.yml?label=release)](https://github.com/9087/dsh-diff-approval/actions/workflows/release.yml)
 
-A DeepSeek Harness (DSH) plugin for pending-change review: it automatically tracks every successful `edit`, `write`, and editor (`str_replace_editor`) mutation, folds them into a single pending list in the sidebar where each file's diff can be reviewed and kept/reverted — and it can also import the workspace's version-control repository's local changes (Git / SVN / Perforce) in one click.
+A DeepSeek Harness (DSH) plugin for pending-change review: it automatically tracks every successful `edit`, `write`, and editor (`str_replace_editor`) mutation, folds them into a single pending list in the sidebar where each file's diff can be reviewed and kept/reverted — and it can also import the workspace's version-control repository's local changes (Git / SVN / Perforce) in one click. In a git checkout it captures what a SHELL command changed too — `sed -i`, a heredoc, `git apply`, a formatter — against the revision the command started from, so a `git commit` in the same command cannot hide it from the list.
 
 ![Pending changes panel](docs/images/pending-panel.png)
 
@@ -45,6 +45,7 @@ For Markdown files, the source-line diff can also be shown as a rendered before/
 - **External changes**: files already in the pending list are monitored — if one is later modified outside the reviewed edits (another tool, an editor), the panel adopts the new content and flags the divergence.
 - **Open / Reveal**: while reviewing a file's diff, open it in its default app or reveal it in the system file manager with one click.
 - **Import version-control changes**: when the list is empty, click the button to import the workspace's local changes from **Git / SVN / Perforce** — everything that is **not committed yet, staged or not** (Git is read against the last commit, the `git diff HEAD` view), plus deleted files and, opt-in, files the VCS has never seen (untracked / unversioned). The VCS root is found by walking up from the workspace, so a workspace inside a subdirectory works too.
+- **Shell capture** (git): a command run through a shell tool (`bash`, `pwsh`, `terminal_send`) is recorded as well. The plugin reads the checkout's revision before the command runs and what changed against it afterwards, so `sed -i`, a heredoc, `git apply` or a formatter's rewrite becomes a pending row even when the command commits it in the same breath — the commit moves `HEAD`, not the baseline. Linked worktrees the command reaches are covered too.
 - **Persistence**: pending state is stored per workspace at `<dshHome>/diff-approval/workspaces/<workspaceId>.json` and survives restarts — unhandled changes are still there when you come back, even in a fresh session.
 
 ## 📦 Install
@@ -83,7 +84,8 @@ Then restart `dsh web`.
 
 ## 📝 Notes
 
-- Only tracked mutations (`edit`, `write`, and `str_replace_editor` editor calls) are recorded automatically. Deletions made outside these tools (e.g. shell `rm`) are sensed only for tracked files: the entry turns "File is gone" and its Revert restores the file.
+- The `edit`, `write` and `str_replace_editor` tools are recorded from their own results. A shell command is recorded separately in a git checkout: the plugin reads the checkout's revision in `tools/pre-execute` and what changed against it when the command settles, so a commit inside the command cannot hide the change. Only paths the command is evidenced to have written are listed — their modification time moved after the baseline was taken — which keeps a change that was already uncommitted from being attributed to it. Shell capture is git-only; svn and p4 keep the import path. A background command settles when its `job_output` / `job_kill` result arrives or at the turn's end, so a job that outlives its own turn is picked up by a later boundary rather than instantly.
+- Deletions made outside every capture (e.g. shell `rm` in a non-git directory) are sensed only for tracked files: the entry turns "File is gone" and its Revert restores the file.
 - The VCS import runs read-only Git/SVN/Perforce commands through the deployment's shell executor, so the respective CLI must be on `PATH`. Including files version control has not seen (default off) scans the whole workspace, which can be slow on large trees.
 - For a newly-created file, the whole-file revert action reads **Delete** and removes the file.
 - Reverting a file writes it back with its current line endings (LF / CRLF) preserved.

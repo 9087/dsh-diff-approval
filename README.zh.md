@@ -8,7 +8,7 @@
 [![兼容性（比 latest 更新的已发布版本）](https://img.shields.io/github/actions/workflow/status/9087/dsh-diff-approval/compat-newer.yml?label=compat%20(newer))](https://github.com/9087/dsh-diff-approval/actions/workflows/compat-newer.yml)
 [![发布](https://img.shields.io/github/actions/workflow/status/9087/dsh-diff-approval/release.yml?label=release)](https://github.com/9087/dsh-diff-approval/actions/workflows/release.yml)
 
-一个 DeepSeek Harness（DSH）待处理改动审核插件：自动跟踪每次成功的 `edit` / `write` / 编辑器（`str_replace_editor`）改动，在侧边栏整合为一个待处理列表，可逐个文件查看完整差异并保留 / 回退，也可以把工作区里版本控制仓库的本地改动一键导入（Git / SVN / Perforce）。
+一个 DeepSeek Harness（DSH）待处理改动审核插件：自动跟踪每次成功的 `edit` / `write` / 编辑器（`str_replace_editor`）改动，在侧边栏整合为一个待处理列表，可逐个文件查看完整差异并保留 / 回退，也可以把工作区里版本控制仓库的本地改动一键导入（Git / SVN / Perforce）。在 git 仓库里，它还会捕获 SHELL 命令造成的改动——`sed -i`、heredoc、`git apply`、格式化重写——以命令启动时的版本为基准，因此同一条命令里的 `git commit` 无法再把这些改动藏起来。
 
 ![待处理改动面板](docs/images/pending-panel.zh.png)
 
@@ -45,6 +45,7 @@
 - **外部改动**：已纳入列表的文件若之后被外部修改（其它工具 / 编辑器），面板会跟进最新内容并标记分歧。
 - **打开 / 定位**：查看某个文件的差异时，可一键在默认应用中打开它，或在系统文件管理器中定位它。
 - **导入版本控制的改动**：列表为空时，点击按钮即可导入工作区里 **Git / SVN / Perforce** 的本地改动——**凡是没有提交的都算，add 过与否一样**（Git 以最后一次提交为基准，即 `git diff HEAD` 的口径），以及已删除文件，和（可选开启的）VCS 从未见过的文件（未跟踪 / 未版本化）。通过从工作区目录逐级向上查找 VCS 根目录，工作区在子目录里也能识别。
+- **SHELL 捕获**（git）：通过 shell 工具（`bash`、`pwsh`、`terminal_send`）执行的命令也会被记录。插件在命令运行前记下仓库的当前版本，之后据此读取改动，因此 `sed -i`、heredoc、`git apply` 或格式化重写即使被同一条命令提交，也仍会成为待处理条目——commit 移动的是 `HEAD`，不是基准。命令涉及的关联 worktree 同样覆盖。
 - **持久化**：待处理状态按 workspace 落盘至 `<dshHome>/diff-approval/workspaces/<workspaceId>.json`，跨重启保留——回来时未处理的改动仍在，即便换了新会话。
 
 ## 📦 安装
@@ -83,7 +84,8 @@ npx @deepseek-ai/dsh plugin --profile web add dsh-diff-approval
 
 ## 📝 注意事项
 
-- 只自动记录被跟踪的改动（`edit`、`write` 与编辑器 `str_replace_editor` 调用）。通过以上工具以外的删除（如 shell `rm`）只能对已跟踪的文件感知：条目显示"文件已不存在"，回退即恢复。
+- `edit`、`write` 与 `str_replace_editor` 从各自的工具结果记录。git 仓库里的 shell 命令单独记录：插件在 `tools/pre-execute` 读取仓库版本，在命令结束时据此读取改动，因此命令内部的 commit 藏不住这些改动。只列出有证据表明该命令写过的路径——修改时间晚于基准记录时间——这样早先就未提交的改动不会被算到这条命令头上。SHELL 捕获仅支持 git；svn 与 p4 仍走导入。后台命令在 `job_output` / `job_kill` 结果到达时或回合结束时结算，因此活过整个回合的后台任务会由后续边界补上，而不是即时出现。
+- 在以上捕获范围之外的删除（例如非 git 目录里的 shell `rm`）只能对已跟踪的文件感知：条目显示"文件已不存在"，回退即恢复。
 - VCS 导入通过部署环境的 shell 执行器运行只读的 Git / SVN / Perforce 命令，需要对应 CLI 在 `PATH` 中。包含版本控制未跟踪文件（默认关闭）会扫描整个工作区，目录很大时可能较慢。
 - 新建文件的整文件回退操作显示为**删除**并移除该文件。
 - 回退文件时会保留其当前换行符（LF / CRLF）。

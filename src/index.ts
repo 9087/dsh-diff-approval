@@ -13,6 +13,13 @@
  * restored by its revert). `open` launches the file with its default
  * application or reveals it in the file manager.
  *
+ * It also captures what a SHELL command changed. A shell's `tools/result` carries no mutation, so the
+ * revision the command started from is recorded at `tools/pre-execute` and the working tree is compared
+ * with it at the settle (`shell-capture.ts`). A `git commit` inside the command moves `HEAD` but not
+ * that baseline, so a `sed -i`, a heredoc or a `git apply` becomes a pending row even after — or
+ * instead of — the commit that used to hide it. Shells are recognised by name (`SHELL_TOOL_NAMES`), and
+ * the boundary capture is git-only.
+ *
  * Mount this row in any profile's `cordis.patch.yml`:
  *
  * ```yaml
@@ -36,7 +43,7 @@
 
 import { readFile, rm, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { expandHomePath } from '@deepseek-ai/dsh-home-paths'
@@ -64,8 +71,9 @@ import { annotateRun, annotateToolDefinition } from './annotate-tool.ts'
 import type { AnnotateRunDeps, ListFileOutcome } from './annotate-tool.ts'
 import { FONT_ASSET_DIR, FONT_ROUTE } from './font-slices.ts'
 import type { FontSlice } from './font-slices.ts'
-import { detectVcsRoot, listVcsChanges, readVcsBaseline } from './vcs.ts'
+import { detectVcsRoot, gitHeadRevision, listVcsChanges, readVcsBaseline } from './vcs.ts'
 import type { VcsChange, VcsImportInput, ShellExecutorLike } from './vcs.ts'
+import { JOB_TOOL_NAMES, SHELL_TOOL_NAMES, shellBoundaryChanges, shellCaptureRoots } from './shell-capture.ts'
 import { createUpdateCheck } from './version.ts'
 import type { DiffApprovalUpdateValue } from './types.ts'
 import type {
@@ -929,11 +937,19 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
    * `droppingComments`). The panel still asks before a press that drops an entry carrying comments
    * (see the `remove-one` / `remove-*` prompts): undo covers the paths that have a pair, and the ask
    * covers the reader's intent either way.
+   *
+   * `settledContent` is what the decision left on disk, for a press that decides a change (Keep,
+   * Revert, Remove): it is remembered so the next shell boundary cannot re-list bytes the reader has
+   * already settled. Callers that drop for another reason — a deleted file the list is collapsing, the
+   * redo of a removal — pass nothing.
    * @param id - the entry id (= path) leaving the list.
+   * @param settledContent - the content the file holds after the decision, when this is a decision.
    * @returns whether the entry was there.
    */
-  function dropEntry(id: string): boolean {
+  function dropEntry(id: string, settledContent?: string): boolean {
+    const entry = store.get(id)
     const removed = store.remove(id)
+    if (removed && entry !== undefined && settledContent !== undefined) rememberSettledContent(entry.path, settledContent)
     comments.removeForEntry(id)
     // …and the lines those comments resolved to, which are about content this path no longer lists.
     forgetCommentLinesForEntry(id)
@@ -1018,6 +1034,319 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     }
     await ensureLoaded()
     if (store.fold(entry)) persistSession()
+  }
+
+  /**
+   * The shell boundary: the revision one shell command started from, kept between its pre-execute and
+   * the settle that reads the working tree.
+   *
+   * A shell command is otherwise invisible to this plugin: its result carries no file mutation, and the
+   * VCS import answers "what is not committed yet", which a `git commit` inside the same command
+   * empties. Recording the starting revision BEFORE the command runs is what makes its change
+   * recoverable after the commit — the working tree is compared with a revision the command has already
+   * left behind, so the commit moves `HEAD` but not the baseline.
+   *
+   * Keyed by call id, because the two halves of one execution share nothing else: the settle receives
+   * the same execution the gate did. A boundary outlives its call when the command runs in the
+   * BACKGROUND — its result arrives when the job STARTS — so the map is also the list of boundaries
+   * still to settle at the turn's end.
+   */
+  interface ShellBoundary {
+    sessionId: SessionId
+    /** The live agent of the recording execution, for the lineage and the turn-end watch. */
+    agent: unknown
+    /** One revision per checkout the command could reach (see `shellCaptureRoots`). */
+    roots: { root: string; base: string }[]
+    /** `Date.now()` when the baseline was taken: the cut-off for "did this command write it?". */
+    startedAt: number
+    /** Whether the command runs as a job, whose result arrives before the command has finished. */
+    background: boolean
+  }
+  const shellBoundaries = new Map<string, ShellBoundary>()
+  /** Per session, the call ids whose boundary is still to settle. */
+  const shellBoundariesBySession = new Map<SessionId, Set<string>>()
+  /** One turn-end listener per session, so a background boundary settles even with no job tool called. */
+  const shellBoundaryWatches = new Map<string, { agent: unknown; detach: (() => void)[] }>()
+  /**
+   * One session's settle chain: boundaries are applied in the order their commands were recorded, so two
+   * commands that changed one path fold in the order they ran rather than the order their reads finished.
+   */
+  const shellSettleChains = new Map<SessionId, Promise<void>>()
+  /**
+   * The content a review decision has already settled for a path, by path identity: what keeps a
+   * boundary from re-listing work a Keep, a Revert or a Remove already decided. See
+   * {@link rememberSettledContent}.
+   */
+  const settledContent = new Map<string, Set<string>>()
+  /** How many paths remember their settled content; the oldest path is forgotten past this. */
+  const SETTLED_PATH_LIMIT = 1_024
+
+  /** The content hash a boundary compares against a path's settled content: line endings and a trailing
+   *  newline are tolerated exactly as the diff tolerates them, so "the same file" is judged the same way. */
+  function contentHashOf(text: string): string {
+    return createHash('sha1').update(contentLinesOf(normalizeEol(text)).join('\n')).digest('hex')
+  }
+
+  /**
+   * Remember what a review decision left on disk for one path, so the next shell boundary does not
+   * re-list it.
+   *
+   * The decision is about CONTENT, not about a timestamp: a Keep leaves the entry's new content, a Revert
+   * leaves its old content, and a Remove leaves the file untouched — the caller passes what the file now
+   * holds. A later command that changes those bytes again is captured normally, while a commit, a `git
+   * add`, or a formatter run that writes the same bytes cannot bring the settled row back.
+   * @param path - the entry's path.
+   * @param text - the content the file holds after the decision.
+   */
+  function rememberSettledContent(path: string, text: string): void {
+    const key = pathIdentity(path)
+    let hashes = settledContent.get(key)
+    if (hashes === undefined) {
+      hashes = new Set()
+      settledContent.set(key, hashes)
+      // The cap is on paths: one path's own history is a handful of decisions, and this map exists only
+      // to keep a boundary from re-listing what a reader already decided.
+      if (settledContent.size > SETTLED_PATH_LIMIT) {
+        const oldest = settledContent.keys().next().value
+        if (oldest !== undefined) settledContent.delete(oldest)
+      }
+    }
+    hashes.add(contentHashOf(text))
+  }
+
+  /** Whether a path's current content is one a review decision already settled (see {@link rememberSettledContent}). */
+  function isSettledContent(path: string, text: string): boolean {
+    return settledContent.get(pathIdentity(path))?.has(contentHashOf(text)) === true
+  }
+
+  /** One shell execution's arguments, as the record they are; `undefined` when the tool took none. */
+  function shellArgumentsOf(exec: ToolExecution): Record<string, unknown> | undefined {
+    const value = exec.arguments
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : undefined
+  }
+
+  /**
+   * The command line one shell execution runs.
+   *
+   * `bash` and `pwsh` carry it in `command`; `terminal_send` carries it in `text`, which is why both are
+   * read — the field name is the tool's own, and a capture must not depend on guessing which shell tool
+   * a deployment composed.
+   * @param exec - the shell execution.
+   * @returns the command line, or `undefined` for an execution that carries none.
+   */
+  function shellCommandOf(exec: ToolExecution): string | undefined {
+    const value = shellArgumentsOf(exec)?.command ?? shellArgumentsOf(exec)?.text
+    return typeof value === 'string' ? value : undefined
+  }
+
+  /** One shell execution's own working directory, when the tool accepts one (`bash`'s `workdir`). */
+  function shellWorkdirOf(exec: ToolExecution): string | undefined {
+    const value = shellArgumentsOf(exec)?.workdir
+    return typeof value === 'string' && value.length > 0 ? value : undefined
+  }
+
+  /** Whether one shell execution returns a job id instead of running in the foreground. */
+  function shellIsBackground(exec: ToolExecution): boolean {
+    return shellArgumentsOf(exec)?.run_in_background === true
+  }
+
+  /**
+   * Record one shell command's pre-command baseline, in `tools/pre-execute` and in front of the command.
+   *
+   * Read-only, and contained: every failure here costs a capture, never the command the model is waiting
+   * to run. The roots are the workspace's repository plus the linked worktrees the command can reach
+   * (`shellCaptureRoots`), one revision each, taken before a byte of the command has executed.
+   * @param exec - the execution about to run.
+   */
+  async function recordShellBoundary(exec: ToolExecution): Promise<void> {
+    const sessionId = sessionOfAgent(exec.agent)
+    if (sessionId === undefined) return
+    const shell = ctx.get('shell') as ShellExecutorLike | undefined
+    if (shell === undefined) return
+    const workspacePath = workspaceOf(sessionId)?.path ?? headerOf(sessionId, exec.agent)?.cwd
+    if (workspacePath === undefined) return
+    // Taken BEFORE the repository reads, so a file the command writes can never carry a time earlier
+    // than the baseline the boundary will compare against.
+    const startedAt = Date.now()
+    // A persistent terminal's current directory is not part of a later command's arguments, so every
+    // linked worktree is a candidate for it rather than only the ones the command names.
+    const terminal = exec.name === 'terminal_send'
+    let roots: string[]
+    try {
+      roots = await shellCaptureRoots({
+        workspacePath,
+        command: terminal ? undefined : shellCommandOf(exec),
+        workdir: terminal ? undefined : shellWorkdirOf(exec),
+        allWorktrees: terminal,
+        shell,
+      })
+    } catch (error: unknown) {
+      ctx.logger.debug(`diff-approval: a shell boundary could not read its repositories: ${errorMessage(error)}`)
+      return
+    }
+    const recorded: { root: string; base: string }[] = []
+    for (const root of roots) {
+      const base = await gitHeadRevision(root, shell, undefined)
+      if (base !== undefined) recorded.push({ root, base })
+    }
+    if (recorded.length === 0) return
+    const boundary: ShellBoundary = {
+      sessionId,
+      agent: exec.agent,
+      roots: recorded,
+      startedAt,
+      background: shellIsBackground(exec),
+    }
+    shellBoundaries.set(exec.callId, boundary)
+    let pending = shellBoundariesBySession.get(sessionId)
+    if (pending === undefined) {
+      pending = new Set()
+      shellBoundariesBySession.set(sessionId, pending)
+    }
+    pending.add(exec.callId)
+    watchShellTurnEnd(sessionId, exec.agent)
+  }
+
+  /**
+   * Watch one session's agent for the end of a turn, so a boundary a background command left pending is
+   * settled even when no job tool is called.
+   *
+   * Re-armed when the agent object is replaced (a resume, a rebuilt agent), one listener per live agent
+   * rather than one per shell command — the same rule the comment asker's watcher keeps.
+   * @param sessionId - the session whose turn end settles its boundaries.
+   * @param fallback - the recording execution's own agent, when the registry has none to hand.
+   */
+  function watchShellTurnEnd(sessionId: SessionId, fallback: unknown): void {
+    const key = String(sessionId)
+    const registry = ctx.get('agents') as AgentRegistrySurface | undefined
+    const agent = registry?.get?.(sessionId) ?? fallback
+    const on = (agent as TurnEndAgentSurface | undefined)?.ctx?.on
+    if (typeof on !== 'function') return
+    const watching = shellBoundaryWatches.get(key)
+    if (watching?.agent === agent) return
+    if (watching !== undefined) {
+      shellBoundaryWatches.delete(key)
+      for (const off of watching.detach) {
+        try {
+          off()
+        } catch {
+          // An agent that is already gone has nothing left to release.
+        }
+      }
+    }
+    const detach: (() => void)[] = []
+    try {
+      const handle = on.call((agent as TurnEndAgentSurface).ctx, 'agent/turn-stopping', () => {
+        settleSessionShellBoundaries(sessionId)
+      })
+      if (typeof handle === 'function') detach.push(handle as () => void)
+      shellBoundaryWatches.set(key, { agent, detach })
+    } catch (error: unknown) {
+      // A build that cannot be subscribed still settles foreground boundaries and job-tool ones; only the
+      // background command that outlives its whole turn is lost, and it is reported rather than silent.
+      ctx.logger.debug(`diff-approval: watching a session for a shell boundary's turn end failed: ${errorMessage(error)}`)
+    }
+  }
+
+  /** Drop one boundary from every map that holds it. */
+  function forgetShellBoundary(callId: string): void {
+    const boundary = shellBoundaries.get(callId)
+    if (boundary === undefined) return
+    shellBoundaries.delete(callId)
+    const pending = shellBoundariesBySession.get(boundary.sessionId)
+    if (pending === undefined) return
+    pending.delete(callId)
+    if (pending.size === 0) shellBoundariesBySession.delete(boundary.sessionId)
+  }
+
+  /**
+   * Queue the settle of some boundaries on their session's own chain, so fold order follows command
+   * order. Failures are logged and the chain continues: a boundary that could not be read must not
+   * strand the ones behind it.
+   * @param sessionId - the session that owns them.
+   * @param callIds - the boundaries to settle, in command order.
+   */
+  function queueShellSettle(sessionId: SessionId, callIds: readonly string[]): void {
+    if (callIds.length === 0) return
+    const previous = shellSettleChains.get(sessionId) ?? Promise.resolve()
+    const next = previous
+      .then(async () => {
+        for (const callId of callIds) await settleShellBoundary(callId)
+      })
+      .catch((error: unknown) => {
+        ctx.logger.warn(`diff-approval: settling a shell boundary failed: ${errorMessage(error)}`)
+      })
+    shellSettleChains.set(sessionId, next)
+    void next.finally(() => {
+      if (shellSettleChains.get(sessionId) === next) shellSettleChains.delete(sessionId)
+    })
+  }
+
+  /** Queue every boundary a session still holds, in the order its commands were recorded. */
+  function settleSessionShellBoundaries(sessionId: SessionId): void {
+    const pending = shellBoundariesBySession.get(sessionId)
+    if (pending === undefined) return
+    queueShellSettle(sessionId, [...pending])
+  }
+
+  /**
+   * Settle one boundary: read what its command changed in each checkout and fold those changes as
+   * pending entries, exactly as an `edit` or `write` result is folded.
+   *
+   * The boundary leaves its maps FIRST, so a second trigger — a job tool and a turn end, say — cannot
+   * record the same command twice.
+   * @param callId - the completed execution's call id.
+   */
+  async function settleShellBoundary(callId: string): Promise<void> {
+    const boundary = shellBoundaries.get(callId)
+    if (boundary === undefined) return
+    forgetShellBoundary(callId)
+    const shell = ctx.get('shell') as ShellExecutorLike | undefined
+    if (shell === undefined) return
+    await ensureLoaded()
+    let recorded = 0
+    for (const { root, base } of boundary.roots) {
+      let changes: VcsChange[]
+      try {
+        changes = await shellBoundaryChanges({
+          root,
+          base,
+          startedAt: boundary.startedAt,
+          shell,
+          // The same raw read the VCS import uses: a boundary is not a sandboxed write, and a file the
+          // backend cannot decode is tolerated as empty text rather than failing the whole settle.
+          readText: path => readFile(path, 'utf8').catch(() => undefined),
+          log: message => ctx.logger.warn(`diff-approval: ${message}`),
+        })
+      } catch (error: unknown) {
+        ctx.logger.debug(`diff-approval: a shell boundary in ${root} could not be read: ${errorMessage(error)}`)
+        continue
+      }
+      for (const change of changes) {
+        if (change.oldText === change.newText) continue
+        // The reader already decided what these bytes mean: do not put the row back.
+        if (isSettledContent(change.path, change.newText)) continue
+        const entry: PendingEntry = {
+          id: change.path,
+          sessionId: boundary.sessionId,
+          path: change.path,
+          earlierVersion: change.earlierVersion,
+          oldText: change.oldText,
+          newText: change.newText,
+          updatedAt: Date.now(),
+          sessionIds: [boundary.sessionId],
+          lineage: lineageOf(boundary.sessionId, boundary.agent),
+          unseen: true,
+        }
+        if (store.fold(entry)) recorded += 1
+      }
+    }
+    if (recorded > 0) {
+      persistSession()
+      ctx.logger.info(`diff-approval: shell boundary recorded ${recorded} pending change(s)`)
+    }
   }
 
   /** One observation of a tracked path's live file. Existence is decided solely
@@ -2779,7 +3108,9 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         }
         // Snapshotted BEFORE the drop: the threads are what that call is about to take away.
         const beforeDrop = droppingComments({ id: entry.path, path: entry.path, entry, fileText: undefined })
-        dropEntry(target.id)
+        // A Keep accepts the content the file already holds; that content is now settled, so a later
+        // shell boundary over the same path must not list it again.
+        dropEntry(target.id, entry.newText)
         pushUndo(target.sessionId, beforeDrop,
           { id: entry.path, path: entry.path, entry: undefined, fileText: undefined })
         persistSession(true)
@@ -2840,7 +3171,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // no pair for a snapshot to ride — the one revert whose threads cannot come back, which is the
         // same "this action is not undoable" the file itself already is.
         const pair = undo === undefined ? undefined : { before: droppingComments(undo.before), after: undo.after }
-        dropEntry(target.id)
+        // A Revert puts the old content back on disk; that content is the settled one now.
+        dropEntry(target.id, undo?.after.fileText ?? '')
         // The session that PRESSED, which is also the session whose policy the write above ran under: undo
         // is retrieved from the requester's own lineage stack (`undoStackOf`/`popOwnPair` are keyed
         // canonically, and the pop refuses a pair tagged with another root), so the pair and the write it
@@ -2863,7 +3195,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         for (const entry of entries) {
           before.push(droppingComments({ id: entry.id, path: entry.path, entry, fileText: undefined }))
           after.push({ id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
-          dropEntry(entry.id)
+          // A whole-list Keep accepts every row's new content, which is already in its file.
+          dropEntry(entry.id, entry.newText)
         }
         if (before.length > 0) pushBatchUndo(sessionId, before, after)
         persistSession(true)
@@ -2901,7 +3234,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             batchBefore.push(droppingComments(undo.before))
             batchAfter.push(undo.after)
           }
-          dropEntry(entry.id)
+          // A whole-list Revert puts each file's old content back; that is what the path now holds.
+          dropEntry(entry.id, undo?.after.fileText ?? '')
         }
         if (batchBefore.length > 0) pushBatchUndo(sessionId, batchBefore, batchAfter)
         persistSession(true)
@@ -2938,7 +3272,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           // first, and must NOT snapshot: its entry never leaves the list, so nothing was deleted).
           before.push(droppingComments({ id: entry.id, path: entry.path, entry, fileText: undefined }))
           after.push({ id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
-          dropEntry(id)
+          // A pick's Keep accepts the row's new content, which is already in its file.
+          dropEntry(id, entry.newText)
         }
         pushBatchUndo(request.sessionId, before, after)
         persistSession(true)
@@ -2995,7 +3330,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
             before.push(droppingComments(undo.before))
             after.push(undo.after)
           }
-          dropEntry(id)
+          // A pick's Revert puts the row's old content back, which is what the path now holds.
+          dropEntry(id, undo?.after.fileText ?? '')
         }
         pushBatchUndo(request.sessionId, before, after)
         persistSession(true)
@@ -3033,7 +3369,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           // Snapshotted before the drop: an entry whose last block just resolved leaves the list here,
           // and it takes its threads with it.
           const resolvedDrop = droppingComments({ id: entry.id, path: entry.path, entry: afterEntry, fileText: undefined })
-          dropEntry(blockTarget.id)
+          // The whole file is accepted: its audited new content is what it holds, and what is settled.
+          dropEntry(blockTarget.id, afterEntry.newText)
           pushUndo(blockTarget.sessionId, resolvedDrop,
             { id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
           persistSession(true)
@@ -3096,7 +3433,8 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
           // Snapshotted before the drop: an entry whose last block just resolved leaves the list here,
           // and it takes its threads with it.
           const resolvedDrop = droppingComments({ id: entry.id, path: entry.path, entry: afterEntry, fileText: undefined })
-          dropEntry(blockTarget.id)
+          // The whole file is back on its old content, which is what it holds and what is settled.
+          dropEntry(blockTarget.id, afterEntry.newText)
           pushUndo(blockTarget.sessionId, resolvedDrop,
             { id: entry.id, path: entry.path, entry: undefined, fileText: undefined })
           persistSession(true)
@@ -3657,6 +3995,43 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
     await stashEditorIntent(target, actor, 'none')
     return next()
   }, { prepend: true }), 'diff-approval: str_replace_editor create basis')
+
+  // The shell boundary, in two halves. The pre-execute half records the revision the command starts
+  // from, BEFORE the command can move `HEAD` or write a file; it must hand the chain on untouched
+  // (`return next()`), because it observes policy and never decides it. The result half settles a
+  // foreground command at once — a background command's result arrives when its job STARTS, so its
+  // boundary waits for the job tools or the turn's end (see `JOB_TOOL_NAMES` and `watchShellTurnEnd`).
+  ctx.effect(() => ctx.on('tools/pre-execute', async (exec, next) => {
+    if (SHELL_TOOL_NAMES.has(exec.name)) {
+      try {
+        await recordShellBoundary(exec)
+      } catch (error: unknown) {
+        // A capture that cannot be recorded is a lost review row, not a failed command: say so once at
+        // debug level and let the model's shell run.
+        ctx.logger.debug(`diff-approval: recording a shell boundary failed: ${errorMessage(error)}`)
+      }
+    }
+    return next()
+  }), 'diff-approval: shell boundary baseline')
+  ctx.effect(() => ctx.on('tools/result', (exec, result) => {
+    if (SHELL_TOOL_NAMES.has(exec.name)) {
+      const boundary = shellBoundaries.get(exec.callId)
+      if (boundary === undefined) return
+      if (result.isError) {
+        // A refused or failed command changed nothing this plugin should list.
+        forgetShellBoundary(exec.callId)
+        return
+      }
+      if (!boundary.background) queueShellSettle(boundary.sessionId, [exec.callId])
+      return
+    }
+    // A job tool's result is where a background shell's caller learns it is done: settle every boundary
+    // the session still holds, which is also how a second job settles the first one's if it had outlived
+    // its own `job_output`.
+    if (!JOB_TOOL_NAMES.has(exec.name)) return
+    const sessionId = sessionOfAgent(exec.agent)
+    if (sessionId !== undefined) settleSessionShellBoundaries(sessionId)
+  }), 'diff-approval: shell boundary settle')
 }
 
 /** One mutation's basis captured at its intent seam. */
@@ -3665,6 +4040,18 @@ interface IntentBasis {
   earlierVersion: PendingEntryKind
   before: string
   sessionId: SessionId | undefined
+}
+
+/** A live agent, narrowed to the turn-end subscription the shell boundary needs. */
+interface TurnEndAgentSurface {
+  ctx?: {
+    on?: (name: string, handler: () => void) => unknown
+  } | undefined
+}
+
+/** The agent registry's lookup, read structurally the way every optional service is (see `headerOf`). */
+interface AgentRegistrySurface {
+  get?: (id: SessionId) => unknown
 }
 
 /** Narrow a wire payload's `sessionId` field to a branded session id. */
