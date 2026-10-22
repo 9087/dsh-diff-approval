@@ -5412,6 +5412,55 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     applyPreviewUnitBoxes()
   }
 
+  /**
+   * Where the reader's eye is in the preview, so a Keep/Revert does not move it.
+   *
+   * An action re-renders the preview from new texts; whatever it resolved loses height (a no-rendering
+   * pair, a ghost paragraph), and the content UNDER the viewport slides up by that amount while the
+   * scroll offset stays put — a jump. The anchor names an unchanged block near the viewport top and the
+   * screen offset it had; after the re-render the same block is put back at that offset by moving the
+   * scroll by the difference.
+   */
+  const PREVIEW_ANCHOR_SELECTOR = 'h1,h2,h3,h4,h5,h6,p,ul,ol,pre,table,blockquote'
+  type PreviewScrollAnchor = { tag: string; text: string; ordinal: number; screenTop: number }
+  /** Every block the anchor may stand for, in document order: blocks with no change tag inside. */
+  const previewAnchorCandidates = (body: HTMLElement): HTMLElement[] => [...body.querySelectorAll<HTMLElement>(PREVIEW_ANCHOR_SELECTOR)]
+    .filter(element =>
+      element.closest('[data-diff-md-preview-content]') !== null &&
+      element.querySelector('[data-md-block]') === null)
+  const previewAnchorText = (element: HTMLElement): string => (element.textContent ?? '').replace(/\s+/g, ' ').trim()
+  const capturePreviewScrollAnchor = (): PreviewScrollAnchor | undefined => {
+    const body = mdPreviewBodyRef.current
+    if (body === null) return undefined
+    const bodyRect = body.getBoundingClientRect()
+    const candidates = previewAnchorCandidates(body)
+    const visible = candidates.findIndex(element => {
+      const rect = element.getBoundingClientRect()
+      return rect.bottom > bodyRect.top + 4 && rect.top < bodyRect.bottom
+    })
+    if (visible === -1) return undefined
+    const element = candidates[visible]!
+    const text = previewAnchorText(element)
+    const ordinal = candidates.slice(0, visible)
+      .filter(candidate => candidate.tagName === element.tagName && previewAnchorText(candidate) === text).length
+    return { tag: element.tagName, text, ordinal, screenTop: element.getBoundingClientRect().top - bodyRect.top }
+  }
+  const restorePreviewScrollAnchor = (anchor: PreviewScrollAnchor): void => {
+    const body = mdPreviewBodyRef.current
+    if (body === null || anchor.text === '') return
+    const candidates = previewAnchorCandidates(body)
+      .filter(element => element.tagName === anchor.tag && previewAnchorText(element) === anchor.text)
+    const target = candidates[anchor.ordinal]
+    if (target === undefined) return
+    const bodyRect = body.getBoundingClientRect()
+    const screenTop = target.getBoundingClientRect().top - bodyRect.top
+    const delta = screenTop - anchor.screenTop
+    if (Math.abs(delta) < 1) return
+    body.scrollTop = Math.max(0, body.scrollTop + delta)
+    previewScrollTopRef.current = body.scrollTop
+    applyPreviewOverlays()
+  }
+
   // Place the preview's hover frame and its outlines. A unit's outlines and toolbar follow its rendered
   // elements (see `previewUnitBoxesFor`): one box in the single column, one per side in the double column, so
   // both matched versions of the change are framed. The layouts that do not number units anchor to the
@@ -7585,6 +7634,11 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       if (unit === undefined) return
       // The line range says where in the source view the change sits; the character spans are what the host
       // acts on, so a change that shares its line with another is kept or reverted alone.
+      //
+      // The preview re-renders from the new texts and the resolved change loses height (a no-rendering pair,
+      // a ghost paragraph, a one-sided row); the content below slides up under a still scroll offset. Hold
+      // the reader's place across that re-render (see `capturePreviewScrollAnchor`).
+      const anchor = capturePreviewScrollAnchor()
       await runBlockAction(action, {
         oldStart: unit.oldLines.start,
         oldEnd: unit.oldLines.end,
@@ -7593,6 +7647,12 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
         oldChars: unit.oldChars,
         newChars: unit.newChars,
       }, operated)
+      if (anchor !== undefined) {
+        // Let the action's re-render (and the image pass that may follow it) commit before measuring again.
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => { restorePreviewScrollAnchor(anchor) })
+        })
+      }
       return
     }
     const range = blockRanges[operated]!
