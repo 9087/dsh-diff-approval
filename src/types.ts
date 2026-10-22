@@ -276,6 +276,25 @@ export interface DiffApprovalBlockRange {
   newStart: number
   /** Last new-file line; `newStart - 1` when the block has no new side. */
   newEnd: number
+  /**
+   * Character offsets into the two files, 0-based and end-exclusive, for a change finer than a whole line.
+   *
+   * Only the rendered-Markdown preview produces these, and only for changes that share a line with another
+   * change (a table row whose cell and whose link target both changed): such a change is kept or reverted on
+   * its own characters, while every line-based caller leaves these undefined and the host does exactly what
+   * it always did.
+   */
+  oldChars?: CharSpan
+  /** The same change's span in the new file — see `oldChars`. */
+  newChars?: CharSpan
+}
+
+/** One side's character span inside a file: `[start, end)`, 0-based. */
+export interface CharSpan {
+  /** First character offset of the change. */
+  start: number
+  /** Offset just past the last changed character; equal to `start` for a pure insertion. */
+  end: number
 }
 
 /** Target of one block-level keep/revert: the entry plus the block range. */

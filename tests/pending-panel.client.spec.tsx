@@ -28,7 +28,7 @@ import { createPendingDiffStore } from '../src/client/store.ts'
 import { directoryOfPath, resolveMarkdownHref } from '../src/client/path-match.ts'
 import { publishSessionId } from '../src/client/session-seat.ts'
 import type { DiffApprovalPort } from '../src/client/port.ts'
-import { renderMarkdownPreview } from '../src/client/markdown-preview.ts'
+import { previewUnits, renderMarkdownPreview } from '../src/client/markdown-preview.ts'
 import { highlightWindow } from '../src/client/highlight.ts'
 import type { PendingDiffSnapshot } from '../src/client/slots.ts'
 
@@ -58,6 +58,10 @@ afterEach(() => { for (const stale of document.querySelectorAll('[data-composer-
 // now, so a test that switches it OFF would otherwise leak into the next one — and the off-state behaviour
 // is asserted on its own below.
 beforeEach(() => { localStorage.setItem('diff-approval:comment-mode', '1') })
+// The new preview sits behind a TEMPORARY release gate that is OFF by default (see
+// `tempPreviewV2Enabled`); the preview tests are about the new preview, so the suite starts with it on. The
+// gate itself is asserted on its own below.
+beforeEach(() => { localStorage.setItem('diff-approval:temp-preview-v2', '1') })
 
 beforeAll(() => {
   // jsdom has no scrolling; the jump effect centers rows through it.
@@ -12899,6 +12903,27 @@ describe('PendingPanel', () => {
     }
   })
 
+  it('the DSH Settings tab carries ONE structure-render switch, off by default', () => {
+    // One row, not two: the structure renderer and the new preview were merged into a single switch, so the
+    // old second row is gone. Its STORAGE FIELD is still the temporary one (`diff-approval:temp-preview-v2`)
+    // until the new preview is ready — the row's name is the permanent one.
+    localStorage.removeItem('diff-approval:temp-preview-v2')
+    const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
+    render(<DiffApprovalSettingsTab {...props} />)
+    fireEvent.click(document.querySelector('[data-diff-view-toggle]') as HTMLButtonElement)
+    const toggle = () => document.querySelector('[data-diff-md-structure-select]') as HTMLButtonElement
+    expect(toggle()).not.toBeNull()
+    expect(toggle().getAttribute('aria-checked')).toBe('false')
+
+    fireEvent.click(toggle())
+    expect(localStorage.getItem('diff-approval:temp-preview-v2')).toBe('1')
+    expect(toggle().getAttribute('aria-checked')).toBe('true')
+
+    fireEvent.click(toggle())
+    expect(localStorage.getItem('diff-approval:temp-preview-v2')).toBe('0')
+    expect(toggle().getAttribute('aria-checked')).toBe('false')
+  })
+
   it('the DSH Settings tab exposes a folded diff-view group with editable appearance', () => {
     const props = { t: (key: string) => key } as unknown as ComponentProps<typeof DiffApprovalSettingsTab>
     render(<DiffApprovalSettingsTab {...props} />)
@@ -14118,11 +14143,18 @@ describe('PendingPanel', () => {
     const body = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
     expect(body).not.toBeNull()
     expect(body.dataset.diffMdMode).toBe('single')
-    expect(body.querySelector('.mdBlock, .mdAdd')).not.toBeNull()
-    // Single-column mirrors the source unified diff: whole-block tint only,
-    // no word-level highlight.
-    expect(body.querySelector('.mdWordDel')).toBeNull()
-    expect(body.querySelector('.mdWordAdd')).toBeNull()
+    expect(body.querySelector('[data-md-block]')).not.toBeNull()
+    // Single column merges both sides INTO the element that changed: the old words struck and the new
+    // ones highlighted, so one line reads as the edit rather than as two copies of the paragraph.
+    expect(body.querySelectorAll('.mdWordDel').length).toBeGreaterThan(0)
+    expect(body.querySelectorAll('.mdWordAdd').length).toBeGreaterThan(0)
+    // ONE element carries the block: the paragraph holds the struck and the added words, with no deleted
+    // copy of the paragraph standing beside it. The hover targets are the drawn RUNS, not the paragraph, so
+    // passing over its unchanged words (or the space between them) raises no toolbar.
+    const tagged = [...body.querySelectorAll('[data-md-block]')]
+    expect(tagged.length).toBeGreaterThan(0)
+    expect(tagged.every(element => element.tagName === 'SPAN')).toBe(true)
+    expect((body.querySelector('.mdWordAdd')!.closest('p') as HTMLElement).hasAttribute('data-md-block')).toBe(false)
     // The preview shows the diff ruler beside the scrollbar (both layouts do).
     expect(document.querySelector('[data-diff-approval-ruler]')).not.toBeNull()
     expect(document.querySelector('[data-diff-ruler-marker]')).not.toBeNull()
@@ -14135,12 +14167,11 @@ describe('PendingPanel', () => {
     const dbl = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
     expect(dbl.dataset.diffMdMode).toBe('double')
     expect(dbl.querySelectorAll('.mdDouble, .mdDoubleCol').length).toBeGreaterThan(0)
-    // Deleted lines render in the before column, added lines in the after column.
-    expect(dbl.querySelectorAll('.mdDoubleCol .mdDel').length).toBeGreaterThan(0)
-    expect(dbl.querySelectorAll('.mdDoubleCol .mdAdd').length).toBeGreaterThan(0)
-    // Word-level highlights survive in each column.
+    // The changed WORDS are what carries the diff — not a wash over the whole line: each column draws its own
+    // side's changed characters, in the same strong word highlight the single column uses.
     expect(dbl.querySelectorAll('.mdDoubleCol .mdWordDel').length).toBeGreaterThan(0)
     expect(dbl.querySelectorAll('.mdDoubleCol .mdWordAdd').length).toBeGreaterThan(0)
+    expect(dbl.querySelectorAll('.mdDoubleCol .mdDel, .mdDoubleCol .mdAdd').length).toBe(0)
     // The ruler is measured in both preview layouts: the double column's rows are
     // aligned, so their cells share the vertical extent a marker is placed by.
     expect(document.querySelector('[data-diff-approval-ruler]')).not.toBeNull()
@@ -14419,30 +14450,39 @@ describe('PendingPanel', () => {
     // Every changed run is tagged with its source block index; context is not.
     expect(document.querySelectorAll('[data-md-block="0"]').length).toBeGreaterThan(0)
     expect(document.querySelectorAll('[data-md-block="1"]').length).toBeGreaterThan(0)
-    expect(document.querySelectorAll('[data-md-block]').length).toBe(
-      document.querySelectorAll('.mdAdd, .mdDel').length,
-    )
+    // A tinted element is always a tagged one. (The reverse is no longer true: a merged paragraph carries word
+    // runs and the block tag, but no wash over the text that did not change.)
+    const tinted = [...document.querySelectorAll<HTMLElement>('.mdAdd, .mdDel')]
+    expect(tinted.length).toBeGreaterThan(0)
+    for (const element of tinted) expect(element.hasAttribute('data-md-block')).toBe(true)
 
-    // Hovering the second block shows the same frame the source view shows.
+    // Hovering the second block shows the same frame the source view shows, hung under the element the pointer
+    // is on — its left edge is the element's, not the pane's right edge.
     fireEvent.mouseOver(document.querySelector('[data-md-block="1"]') as HTMLElement)
     const frame = document.querySelector('[data-diff-block-actions]') as HTMLElement
     expect(frame).not.toBeNull()
     expect(frame.querySelector('[data-diff-block-position]')!.textContent)
       .toBe('panel.blockPosition {"current":2,"total":2}')
-    // Its offsets are ours: right of the content (the preview content is centred
-    // under a max width, so the pane edge would strand the frame in the margin),
-    // and at the block's bottom edge (jsdom reports every rect as 0, so that is
-    // 0 here; the inset is the constant the placement adds).
     expect(document.querySelector('[data-diff-md-preview-content]')).not.toBeNull()
-    expect(frame.style.right).toBe('8px')
+    expect(frame.hasAttribute('data-diff-anchored')).toBe(true)
+    // jsdom reports every rect as 0, so the anchored offsets are 0 here. The right edge is left to the
+    // stylesheet's `right: auto` rule for anchored frames, so nothing inline overrides it.
+    expect(frame.style.left).toBe('0px')
+    expect(frame.style.right).toBe('')
     expect(frame.style.top).toBe('0px')
 
-    // Keep runs on that block's source range (old 4-4 / new 4-4): the third
-    // line is context, so the block is the fourth line on both sides.
+    // Keep runs on that unit's own characters, inside the fourth line's source range: the third line is
+    // context, so the block is the fourth line on both sides, and the character span is what the host acts
+    // on — that is what lets a change sharing its line with another be kept alone.
     fireEvent.click(frame!.querySelector('[data-diff-block-keep]') as HTMLElement)
     await waitFor(() => {
-      expect((props.onBlockKeep as unknown as { mock: { calls: unknown[][] } }).mock.calls)
-        .toEqual([[S1, 'entry-md-blocks', { oldStart: 4, oldEnd: 4, newStart: 4, newEnd: 4 }]])
+      const calls = (props.onBlockKeep as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      expect(calls.length).toBe(1)
+      expect(calls[0]![0]).toBe(S1)
+      expect(calls[0]![1]).toBe('entry-md-blocks')
+      expect(calls[0]![2]).toMatchObject({ oldStart: 4, oldEnd: 4, newStart: 4, newEnd: 4 })
+      expect(calls[0]![2]!.oldChars).toEqual({ start: 17, end: 20 })
+      expect(calls[0]![2]!.newChars).toEqual({ start: 17, end: 20 })
     })
   })
 
@@ -14459,10 +14499,11 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByText('README.md'))
     fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
 
-    // Two blocks (a del run and its add run each), so the range spans old 2-3 /
-    // new 2-3 and resolves the whole file.
-    const blocks = [...document.querySelectorAll('[data-md-block="0"]')]
-    expect(blocks.length).toBe(2)
+    // The two lines are two units, each carried by its own word runs (the merged paragraph itself is not
+    // tagged), so the selection spans every outermost tagged run: start before the first, end after the last.
+    const blocks = [...document.querySelectorAll('[data-md-block]')]
+      .filter(element => element.parentElement?.closest('[data-md-block]') === null)
+    expect(blocks.length).toBeGreaterThan(0)
     const range = document.createRange()
     range.setStartBefore(blocks[0]!)
     range.setEndAfter(blocks[blocks.length - 1]!)
@@ -14501,11 +14542,15 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByText('README.md'))
     fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
     // The view toggle drives the double-column layout, which tags both cells of
-    // the aligned change row with the same block.
+    // the aligned change row with the same block (and the drawn runs inside them).
     fireEvent.click(document.querySelector('[data-diff-toggle-view]') as HTMLElement)
     const body = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
     expect(body.dataset.diffMdMode).toBe('double')
-    expect(document.querySelectorAll('[data-md-block="0"]').length).toBe(2)
+    const columns = [...document.querySelectorAll('.mdDoubleCol')]
+    expect(columns.length).toBe(2)
+    for (const column of columns) {
+      expect(column.querySelectorAll('[data-md-block="0"]').length).toBeGreaterThan(0)
+    }
 
     fireEvent.mouseOver(document.querySelector('[data-md-block="0"]') as HTMLElement)
     expect(document.querySelector('[data-diff-block-actions]')).not.toBeNull()
@@ -14513,7 +14558,7 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-block-actions]')).toBeNull()
   })
 
-  it('drops the preview frame over context and keeps it over the frame itself', () => {
+  it('keeps the preview frame over context and over its own buttons', () => {
     const file = entry({ id: 'entry-md-hover', path: '/repo/README.md', oldText: '# T\nold\n', newText: '# T\nnew\n' })
     const props = panelProps({ read: true, files: [file], busy: new Set() })
     render(<PendingPanel {...props} />)
@@ -14524,15 +14569,46 @@ describe('PendingPanel', () => {
     fireEvent.mouseOver(document.querySelector('[data-md-block="0"]') as HTMLElement)
     expect(document.querySelector('[data-diff-block-actions]')).not.toBeNull()
 
-    // A context block (the unchanged heading) clears it, exactly like hovering an
-    // unchanged line in the code view.
-    fireEvent.mouseOver(document.querySelector('.mdBlock:not([data-md-block])') as HTMLElement)
-    expect(document.querySelector('[data-diff-block-actions]')).toBeNull()
+    // Context does NOT clear it: the frame hangs under its change, so the arrows that move it would
+    // otherwise drop it on the next mouse-over of what the pointer now sits on. Leaving the preview clears
+    // it (and so does switching to another change).
+    fireEvent.mouseOver(document.querySelector('[data-src-start]:not([data-md-block])') as HTMLElement)
+    expect(document.querySelector('[data-diff-block-actions]')).not.toBeNull()
 
     // Moving onto the frame's own buttons keeps it, so it stays clickable.
-    fireEvent.mouseOver(document.querySelector('[data-md-block="0"]') as HTMLElement)
     const frame = document.querySelector('[data-diff-block-actions]') as HTMLElement
     fireEvent.mouseOver(frame)
+    expect(document.querySelector('[data-diff-block-actions]')).not.toBeNull()
+  })
+
+  it('raises the toolbar only over a changed run, not over the line around it', () => {
+    // The paragraph's unchanged words and the space between them are not a change: hovering them must not
+    // raise a toolbar for the line. Only the drawn runs (the words that changed) are hover targets.
+    const body = previewBodyOf(entry({
+      path: '/repo/README.md',
+      oldText: 'some unchanged words with old one inside\n',
+      newText: 'some unchanged words with new one inside\n',
+    }))
+    const paragraph = body.querySelector('p') as HTMLElement
+    expect(paragraph.hasAttribute('data-md-block')).toBe(false)
+    fireEvent.mouseOver(paragraph)
+    expect(document.querySelector('[data-diff-block-actions]')).toBeNull()
+
+    fireEvent.mouseOver(body.querySelector('.mdWordAdd') as HTMLElement)
+    expect(document.querySelector('[data-diff-block-actions]')).not.toBeNull()
+  })
+
+  it('raises the toolbar only over a changed cell run, not over the cell', () => {
+    const body = previewBodyOf(entry({
+      path: '/repo/README.md',
+      oldText: '| a | b |\n| --- | --- |\n| 3 | 4 |\n',
+      newText: '| a | b |\n| --- | --- |\n| 3 | FOUR |\n',
+    }))
+    const cell = body.querySelector('td') as HTMLElement
+    expect(cell.hasAttribute('data-md-block')).toBe(false)
+    fireEvent.mouseOver(cell)
+    expect(document.querySelector('[data-diff-block-actions]')).toBeNull()
+    fireEvent.mouseOver(body.querySelector('td .mdWordAdd') as HTMLElement)
     expect(document.querySelector('[data-diff-block-actions]')).not.toBeNull()
   })
 
@@ -14557,12 +14633,20 @@ describe('PendingPanel', () => {
       ({ top, bottom, left: 0, right: 400, width: 400, height: bottom - top, x: 0, y: top, toJSON: () => ({}) }) as DOMRect
     Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 300 })
     vi.spyOn(body, 'getBoundingClientRect').mockImplementation(() => rect(0, 300))
+    // The unit's box is the UNION of everything tagged with its number (the two word runs), so every tagged
+    // element gets the box: leaving one at jsdom's zero rect would drag the union's top to 0.
+    const mockUnitBox = (top: number, bottom: number): void => {
+      for (const element of document.querySelectorAll('[data-md-block="0"]')) {
+        vi.spyOn(element as HTMLElement, 'getBoundingClientRect').mockImplementation(() => rect(top - scrolled, bottom - scrolled))
+      }
+    }
+    mockUnitBox(100, 160)
     const block = document.querySelector('[data-md-block="0"]') as HTMLElement
-    vi.spyOn(block, 'getBoundingClientRect').mockImplementation(() => rect(100 - scrolled, 160 - scrolled))
 
     fireEvent.mouseOver(block)
     const frame = (): HTMLElement | null => document.querySelector('[data-diff-block-actions]')
-    await waitFor(() => { expect(frame()?.style.top).toBe('158px') })
+    // Hung under the block's bottom edge (160) with the few pixels of air the frame keeps (2).
+    await waitFor(() => { expect(frame()?.style.top).toBe('162px') })
 
     // The pane scrolls: the block moves up under the pointer and the frame follows
     // it in the same event — imperatively, with no re-render (re-rendering the
@@ -14570,16 +14654,17 @@ describe('PendingPanel', () => {
     const markdownRenders = vi.mocked(renderMarkdownPreview).mock.calls.length
     body.scrollTop = 40
     fireEvent.scroll(body)
-    expect(frame()?.style.top).toBe('118px')
+    expect(frame()?.style.top).toBe('122px')
     expect(vi.mocked(renderMarkdownPreview).mock.calls.length).toBe(markdownRenders)
 
-    // A block whose bottom edge sits past the pane's bottom keeps its frame inside,
-    // pinned to the pane's bottom edge — the code view's clamp (300 − 40).
-    vi.spyOn(block, 'getBoundingClientRect').mockImplementation(() => rect(360, 420))
-    fireEvent.mouseOver(document.querySelector('.mdBlock:not([data-md-block])') as HTMLElement)
+    // A change near the pane's bottom edge cannot hang its frame underneath without the pane clipping it, so
+    // the frame goes ABOVE the change instead: the change's top sits at 160 in the pane, and the frame's
+    // bottom keeps the same 2px of air above it (160 − 2 = 158).
+    mockUnitBox(200, 420)
+    fireEvent.mouseLeave(document.querySelector('[data-diff-md-preview-body]')!.parentElement as HTMLElement)
     expect(frame()).toBeNull()
     fireEvent.mouseOver(block)
-    await waitFor(() => { expect(frame()?.style.top).toBe('260px') })
+    await waitFor(() => { expect(frame()?.style.top).toBe('158px') })
   })
 
   it('jumps between preview blocks from the toolbar, the chord and the file list', () => {
@@ -14665,7 +14750,7 @@ describe('PendingPanel', () => {
     // The outline is a transient cue, not a marker that waits for the pointer:
     // hovering context in the preview must not take it away (that is what the
     // hover frame does, which is why a jump does not use one).
-    fireEvent.mouseOver(document.querySelector('.mdBlock:not([data-md-block])') as HTMLElement)
+    fireEvent.mouseOver(document.querySelector('[data-src-start]:not([data-md-block])') as HTMLElement)
     expect(flash()).not.toBeNull()
   })
 
@@ -14680,6 +14765,10 @@ describe('PendingPanel', () => {
       oldText: '# T\nkeep one\nkeep two\nkeep three\nkeep four\nkeep five\n',
       newText: '# T edited\nkeep one\nkeep two\nkeep four\nkeep five\n',
     })
+    // This case drives the FRAGMENT renderer's aligned double rows (`.mdDoubleRow`). The structure renderer
+    // draws two whole documents side by side instead — the jump machinery is shared, but the geometry this
+    // case stubs is the old layout's — so turn the structure-render switch OFF for it.
+    localStorage.setItem('diff-approval:temp-preview-v2', '0')
     const props = panelProps({ read: true, files: [file], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
@@ -14767,6 +14856,9 @@ describe('PendingPanel', () => {
       oldText: '# T\nkeep one\n',
       newText: '# T\nkeep one\nadded line\n',
     })
+    // The aligned-row layout this case measures is the fragment renderer's; the structure renderer shows two
+    // whole documents, where "the row" is not a thing to outline. Switch the structure renderer OFF.
+    localStorage.setItem('diff-approval:temp-preview-v2', '0')
     const props = panelProps({ read: true, files: [file], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
@@ -14815,8 +14907,8 @@ describe('PendingPanel', () => {
     const file = entry({
       id: 'entry-md-search',
       path: '/repo/README.md',
-      oldText: '# T\nalpha one\nshared tail\n',
-      newText: '# T\nbeta one\nshared tail\n',
+      oldText: '# T\nalpha one\nshared tail\none more\n',
+      newText: '# T\nbeta one\nshared tail\none more\n',
     })
     const props = panelProps({ read: true, files: [file], busy: new Set() })
     render(<PendingPanel {...props} />)
@@ -14833,8 +14925,8 @@ describe('PendingPanel', () => {
       target: { value: 'one' },
     })
     const hits = (): HTMLElement[] => [...document.querySelectorAll('[data-diff-search-match]')] as HTMLElement[]
-    // Both sides of the change are rendered, so the query is found twice — and the
-    // count is the preview's own, since rendered Markdown has no rows to count.
+    // The merged preview keeps ONE copy of the unchanged text, so the query is found as often as the new
+    // document says it (the old renderer counted both versions of every changed line).
     expect(hits().length).toBe(2)
     expect(document.querySelector('[data-diff-search-count]')!.textContent).toBe('1/2')
     expect(hits()[0]!.getAttribute('data-diff-search-match')).toBe('current')
@@ -14859,8 +14951,8 @@ describe('PendingPanel', () => {
     const file = entry({
       id: 'entry-md-search-scroll',
       path: '/repo/README.md',
-      oldText: '# T\nalpha one\nshared tail\n',
-      newText: '# T\nbeta one\nshared tail\n',
+      oldText: '# T\nalpha one\nshared tail\none more\n',
+      newText: '# T\nbeta one\nshared tail\none more\n',
     })
     const props = panelProps({ read: true, files: [file], busy: new Set() })
     render(<PendingPanel {...props} />)
@@ -14897,6 +14989,314 @@ describe('PendingPanel', () => {
     // and the side-by-side view follow too.
     fireEvent.click(document.querySelector('[data-diff-search-next]') as HTMLElement)
     expect(scrolled).toBe(300)
+  })
+
+  /**
+   * Open one Markdown file in the panel with the rendered preview showing.
+   * @param file - the pending entry to show.
+   * @returns the preview body.
+   */
+  function previewBodyOf(file: ReturnType<typeof entry>): HTMLElement {
+    render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+    return document.querySelector('[data-diff-md-preview-body]') as HTMLElement
+  }
+
+  it('keeps the ORIGINAL preview until the structure-render switch is turned on', () => {
+    // One switch gates the whole new preview, OFF by default (see `tempPreviewV2Enabled`; the STORAGE field
+    // is the temporary one, the row is the permanent one). The two renderers are told apart by what they
+    // draw — the original fragment renderer wraps each changed fragment in `mdBlock`, the new one keeps the
+    // document whole and tints the changed words inside it — and flipping the switch in Settings (which just
+    // dispatches the event) re-renders the open preview with the new one, no reload.
+    localStorage.setItem('diff-approval:temp-preview-v2', '0')
+    render(<PendingPanel {...panelProps({
+      read: true,
+      files: [entry({ path: '/repo/README.md', oldText: '- a\n- old item\n', newText: '- a\n- new item\n' })],
+      busy: new Set(),
+    })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+    const before = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
+    expect(before.querySelectorAll('.mdBlock').length).toBeGreaterThan(0)
+    expect(before.querySelectorAll('.mdWordDel, .mdWordAdd').length).toBe(0)
+    // The switch in Settings writes the flag and announces it; the open panel follows.
+    localStorage.setItem('diff-approval:temp-preview-v2', '1')
+    act(() => { window.dispatchEvent(new CustomEvent('diff-approval:temp-preview-v2-changed')) })
+    const after = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
+    expect(after.querySelectorAll('.mdBlock').length).toBe(0)
+    expect(after.querySelectorAll('.mdWordDel, .mdWordAdd').length).toBeGreaterThan(0)
+  })
+
+  it('names a no-rendering pair, and its source row, as invisible content', () => {
+    // The pair of tinted squares is the change the document cannot show; the panel captions it "invisible
+    // content" (localized) so the reader does not have to hover to learn what it is, and the hovered source
+    // row says the same before showing both versions.
+    const body = previewBodyOf(entry({
+      path: '/repo/README.md',
+      oldText: '---\ntitle: A\n---\n\nBody\n',
+      newText: '---\ntitle: B\n---\n\nBody\n',
+    }))
+    const phantom = body.querySelector('.mdTwinPhantom') as HTMLElement
+    expect(phantom).not.toBeNull()
+    expect(phantom.querySelector('[data-md-twin-caption]')?.textContent).toBe('panel.invisibleContent')
+    fireEvent.mouseOver(phantom)
+    const label = document.querySelector('[data-diff-block-sourcediff-label]') as HTMLElement
+    expect(label).not.toBeNull()
+    expect(label.textContent).toBe('panel.invisibleContent · panel.sourceDiff')
+  })
+
+  it('keeps one list and merges the changed item into it', () => {
+    // The fragment renderer cut the list into four `<ul>`s at a reworded item; the structure renderer
+    // renders the document once, so the list stays a list and the edit reads in place.
+    const body = previewBodyOf(entry({
+      path: '/repo/README.md',
+      oldText: '- first\n- second\n- third\n',
+      newText: '- first\n- SECOND\n- third\n',
+    }))
+    expect(body.querySelectorAll('ul').length).toBe(1)
+    expect(body.querySelectorAll('li').length).toBe(3)
+    // The changed ITEM holds the runs (both versions of the word); the runs are the hover targets, so the
+    // item's unchanged text is not one.
+    const changed = body.querySelector('[data-md-block="0"]') as HTMLElement
+    expect(changed.tagName).toBe('SPAN')
+    expect(changed.closest('li')!.textContent).toBe('secondSECOND')
+    // The struck run comes first in the item, then the added one — both are tagged.
+    expect(changed.classList.contains('mdWordDel')).toBe(true)
+    expect(changed.textContent).toBe('second')
+    expect(body.querySelector('li .mdWordAdd')!.hasAttribute('data-md-block')).toBe(true)
+  })
+
+  it('keeps the table and marks only the cell that changed', () => {
+    const body = previewBodyOf(entry({
+      path: '/repo/README.md',
+      oldText: '| a | b |\n| --- | --- |\n| 3 | 4 |\n',
+      newText: '| a | b |\n| --- | --- |\n| 3 | FOUR |\n',
+    }))
+    expect(body.querySelectorAll('table').length).toBe(1)
+    expect(body.querySelectorAll('tbody tr').length).toBe(1)
+    // The changed CELL is untouched by tags — its drawn runs are the hover targets.
+    const changed = body.querySelector('[data-md-block="0"]') as HTMLElement
+    expect(changed.tagName).toBe('SPAN')
+    expect(changed.closest('td')).not.toBeNull()
+    expect(changed.closest('td')!.hasAttribute('data-md-block')).toBe(false)
+    expect(body.querySelector('.mdWordDel')!.textContent).toBe('4')
+    expect(body.querySelector('.mdWordAdd')!.textContent).toBe('FOUR')
+    // The unchanged cell beside it shares the changed row line, and shares its own source byte for byte:
+    // it must NOT carry a hidden source row, or the row would claim a change where the reader sees none.
+    expect(body.querySelectorAll('[data-md-diff-old], [data-md-diff-new]').length).toBe(0)
+  })
+
+  it('keeps a fenced block code, and marks the characters that changed inside it', () => {
+    const body = previewBodyOf(entry({
+      path: '/repo/README.md',
+      oldText: '```ts\nconst b = 2\n```\n',
+      newText: '```ts\nconst b = 22\n```\n',
+    }))
+    // One code block, still code: the changed line did not fall out of the fence.
+    expect(body.querySelectorAll('pre').length).toBe(1)
+    expect(body.querySelector('pre code')!.textContent).toContain('const b = 22')
+    const changed = body.querySelector('[data-md-block="0"]') as HTMLElement
+    expect(changed.closest('pre')).not.toBeNull()
+    expect(body.querySelector('.mdWordDel')!.textContent).toBe('2')
+    expect(body.querySelector('.mdWordAdd')!.textContent).toBe('22')
+  })
+
+  it('makes a change the rendering cannot show VISIBLE as the two versions of the thing itself', () => {
+    // A link target's change renders identically, so the preview shows the link as its two versions side by
+    // side — the old red on the left, the new green on the right — with the target difference carried for the
+    // toolbar. No card takes a line of the document.
+    const body = previewBodyOf(entry({
+      path: '/repo/README.md',
+      oldText: 'See [the docs](https://example.com/old).\n',
+      newText: 'See [the docs](https://example.com/new).\n',
+    }))
+    expect(body.querySelectorAll('p').length).toBe(1)
+    const links = [...body.querySelectorAll<HTMLAnchorElement>('p a')]
+    expect(links.map(link => link.getAttribute('href'))).toEqual(['https://example.com/old', 'https://example.com/new'])
+    const twin = body.querySelector('[data-md-diff-old]') as HTMLElement
+    expect(twin.getAttribute('data-md-diff-old')).toBe('[the docs](https://example.com/old)')
+    expect(twin.getAttribute('data-md-diff-new')).toBe('[the docs](https://example.com/new)')
+    // Nothing in the document is a source card any more.
+    expect(body.querySelectorAll('.mdSourceDiff').length).toBe(0)
+  })
+
+  it('anchors the preview keep/revert toolbar on a twin, and shows its source row', async () => {
+    // A change with no rendered difference still belongs to a block, and the preview's own toolbar must reach
+    // it the way it reaches any changed element: hover the twin, see the source row, keep the block. The
+    // fixture holds TWO blocks (the link line and the tail line) so keeping one does not resolve the whole
+    // file and stop at the remove-the-file question.
+    const props = panelProps({
+      read: true,
+      files: [entry({
+        id: 'entry-md-card',
+        path: '/repo/README.md',
+        oldText: 'Before text.\n\nSee [the docs](https://example.com/old) today.\n\nMiddle context.\n\nOld tail line.\n',
+        newText: 'Before text.\n\nSee [the docs](https://example.com/new) today.\n\nMiddle context.\n\nNew tail line.\n',
+      })],
+      busy: new Set(),
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+
+    const twin = document.querySelector('[data-md-diff-old]') as HTMLElement
+    expect(twin.hasAttribute('data-md-block')).toBe(true)
+    fireEvent.mouseOver(twin)
+    const frame = document.querySelector('[data-diff-block-actions]') as HTMLElement
+    expect(frame).not.toBeNull()
+    expect(frame.querySelector('[data-diff-block-position]')!.textContent)
+      .toBe('panel.blockPosition {"current":1,"total":2}')
+    // The toolbar carries the hidden difference as a source row under its buttons.
+    expect(frame.hasAttribute('data-diff-block-with-source')).toBe(true)
+    expect(frame.querySelector('[data-diff-block-sourcediff]')).not.toBeNull()
+    expect(frame.querySelector('[data-diff-block-sourcediff-del]')!.textContent).toBe('[the docs](https://example.com/old)')
+    expect(frame.querySelector('[data-diff-block-sourcediff-add]')!.textContent).toBe('[the docs](https://example.com/new)')
+    // …and it is HIGHLIGHTED, not one grey run: the link source is tokenized as the Markdown it is, with the
+    // same colour sheet the code view's tokens use.
+    const rowRuns = [...frame.querySelectorAll('[data-diff-block-sourcediff-del] span')] as HTMLElement[]
+    expect(rowRuns.length).toBeGreaterThan(1)
+    expect(rowRuns.some(run => run.getAttribute('style')?.includes('color'))).toBe(true)
+    fireEvent.click(frame.querySelector('[data-diff-block-keep]') as HTMLElement)
+    await waitFor(() => {
+      const calls = (props.onBlockKeep as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      expect(calls.length).toBe(1)
+      expect(calls[0]![1]).toBe('entry-md-card')
+      const range = calls[0]![2] as { oldStart: number; oldChars: { start: number; end: number }; newChars: { start: number; end: number } }
+      // The link line is the source line, and the character span is exactly the retargeted piece: keeping it
+      // leaves the words around it alone.
+      expect(range.oldStart).toBe(3)
+      const oldText = 'Before text.\n\nSee [the docs](https://example.com/old) today.\n\nMiddle context.\n\nOld tail line.\n'
+      const newText = 'Before text.\n\nSee [the docs](https://example.com/new) today.\n\nMiddle context.\n\nNew tail line.\n'
+      expect(oldText.slice(range.oldChars.start, range.oldChars.end)).toBe('old')
+      expect(newText.slice(range.newChars.start, range.newChars.end)).toBe('new')
+    })
+  })
+
+  it('counts a deleted paragraph as its own change in the preview', () => {
+    // The paragraph that exists only in the old version is a change of its own, not part of the link's change:
+    // the two carry different numbers, so each can be kept/reverted on its own.
+    const props = panelProps({
+      read: true,
+      files: [entry({
+        id: 'entry-md-ghost',
+        path: '/repo/README.md',
+        oldText: 'A link to [the docs](https://example.com/old).\n\nThis paragraph exists only in the first version.\n\nClosing line.\n',
+        newText: 'A link to [the docs](https://example.com/new).\n\nClosing line.\n',
+      })],
+      busy: new Set(),
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+
+    const body = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
+    const position = (): string | null => document.querySelector('[data-diff-block-position]')?.textContent ?? null
+    fireEvent.mouseOver(body.querySelector('.mdTwin') as HTMLElement)
+    expect(position()).toBe('panel.blockPosition {"current":1,"total":2}')
+    fireEvent.mouseOver(body.querySelector('p.mdDel') as HTMLElement)
+    expect(position()).toBe('panel.blockPosition {"current":2,"total":2}')
+  })
+
+  it('keeps the outline on its own change, and hides it once the pointer leaves', async () => {
+    // ONE dashed box holds everything the hovered unit drew — the reworded phrase is an old run beside the
+    // added new run, and the frame hangs under both. The frame belongs to that change: leaving it for context
+    // or blank space hides it again (after a beat, so the buttons stay reachable on the way there).
+    const body = previewBodyOf(entry({
+      path: '/repo/README.md',
+      oldText: 'one\n\nold two\n\nthree\n',
+      newText: 'one\n\nnew two\n\nthree\n',
+    }))
+    const outline = (): HTMLElement | null => document.querySelector('[data-diff-unit-outline]')
+    const frame = (): HTMLElement | null => document.querySelector('[data-diff-block-actions]')
+    expect(outline()).toBeNull()
+    fireEvent.mouseOver(body.querySelector('.mdWordAdd') as HTMLElement)
+    expect(outline()).not.toBeNull()
+    expect(frame()).not.toBeNull()
+    // Leaving the change for the surrounding context hides it (after the crossing beat).
+    fireEvent.mouseOver(body.querySelector('p') as HTMLElement)
+    await waitFor(() => {
+      expect(outline()).toBeNull()
+      expect(frame()).toBeNull()
+    })
+  })
+
+  it('outlines BOTH matched versions of a change in the double column', () => {
+    // The double column shows the same change twice: the pointer on either version must frame both, so the
+    // reader sees which two blocks are the before and after of the one hovered change.
+    const props = panelProps({
+      read: true,
+      files: [entry({
+        id: 'entry-md-double-outline',
+        path: '/repo/README.md',
+        oldText: 'A link to [the docs](https://example.com/old).\n',
+        newText: 'A link to [the docs](https://example.com/new).\n',
+      })],
+      busy: new Set(),
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+    const outlines = (): HTMLElement[] => [...document.querySelectorAll('[data-diff-unit-outline]')] as HTMLElement[]
+    // Single column: one union box around the change.
+    fireEvent.mouseOver(document.querySelector('[data-md-block]') as HTMLElement)
+    expect(outlines().length).toBe(1)
+    // Double column: one box on each side, whichever side the pointer is on.
+    fireEvent.click(document.querySelector('[data-diff-toggle-view]') as HTMLElement)
+    const left = document.querySelector('.mdDoubleCellOld [data-md-block]') as HTMLElement
+    const right = document.querySelector('.mdDoubleCellNew [data-md-block]') as HTMLElement
+    expect(left).not.toBeNull()
+    expect(right).not.toBeNull()
+    fireEvent.mouseOver(left)
+    expect(outlines().length).toBe(2)
+    fireEvent.mouseOver(right)
+    expect(outlines().length).toBe(2)
+  })
+
+  it('shows BOTH sides of a change in the double column source row', () => {
+    // Each column keeps its own side's source on its own element; hovering either side must still show the
+    // before AND the after version in the toolbar's row.
+    const props = panelProps({
+      read: true,
+      files: [entry({
+        id: 'entry-md-double-source',
+        path: '/repo/README.md',
+        oldText: 'A link to [the docs](https://example.com/old).\n',
+        newText: 'A link to [the docs](https://example.com/new).\n',
+      })],
+      busy: new Set(),
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-toggle-view]') as HTMLElement)
+    const right = document.querySelector('.mdDoubleCellNew [data-md-diff-new]') as HTMLElement
+    expect(right).not.toBeNull()
+    fireEvent.mouseOver(right)
+    const frame = document.querySelector('[data-diff-block-actions]') as HTMLElement
+    expect(frame).not.toBeNull()
+    expect(frame.querySelector('[data-diff-block-sourcediff-del]')!.textContent)
+      .toBe('[the docs](https://example.com/old)')
+    expect(frame.querySelector('[data-diff-block-sourcediff-add]')!.textContent)
+      .toBe('[the docs](https://example.com/new)')
+  })
+
+  it('still offers the original fragment renderer with the switch off', () => {
+    // The old renderer is kept, and it is the one that splits the list: this case is what proves the
+    // structure-render switch really changes the renderer rather than only its name.
+    localStorage.setItem('diff-approval:temp-preview-v2', '0')
+    const body = previewBodyOf(entry({
+      path: '/repo/README.md',
+      oldText: '- first\n- second\n',
+      newText: '- first\n- SECOND\n',
+    }))
+    expect(body.querySelectorAll('ul').length).toBeGreaterThan(2)
   })
 
   it('restores the remembered coverage from the footer entry', () => {
@@ -16452,5 +16852,767 @@ describe('the newer-release notice', () => {
     openWith(NEWER)
     await waitFor(() => { expect(chip()).not.toBeNull() })
     expect(chip()?.textContent, 'the same version comes back on the next client lifetime').toContain('0.31.0')
+  })
+})
+
+/**
+ * The structure renderer against the shapes a real document is made of, one edge at a time.
+ *
+ * Each case asserts the two promises the renderer makes: the document's own STRUCTURE survives (the element
+ * counts are what the new text renders to), and the change is MARKED where it lives — a block index on the
+ * element, a word run inside it, or a dot when the rendering cannot show it.
+ */
+describe('Markdown preview · structure renderer edge cases', () => {
+  /** Render the merged single column and return a detached container holding it. */
+  function draw(oldText: string, newText: string): HTMLElement {
+    const holder = document.createElement('div')
+    holder.innerHTML = renderMarkdownPreview(oldText, newText, 'single', 'structure')
+    return holder
+  }
+  /** Every element carrying a change block. */
+  const marked = (root: HTMLElement): HTMLElement[] => [...root.querySelectorAll('[data-md-block]')] as HTMLElement[]
+  /** Every twin carrying a hidden source row — the part of a change the rendering cannot say. */
+  const twins = (root: HTMLElement): HTMLElement[] => [...root.querySelectorAll<HTMLElement>('[data-md-diff-old], [data-md-diff-new]')]
+  /** Every pair of modest blocks standing in for a change with no rendered content. */
+  const phantoms = (root: HTMLElement): HTMLElement[] => [...root.querySelectorAll<HTMLElement>('.mdTwinPhantom')]
+
+  it('keeps an ordered list ordered, and merges the reworded item', () => {
+    const root = draw('1. one\n2. two\n3. three\n', '1. one\n2. TWO\n3. three\n')
+    expect(root.querySelectorAll('ol').length).toBe(1)
+    expect(root.querySelectorAll('li').length).toBe(3)
+    // The item keeps its structure; its changed WORDS are the marked runs (a case-only rewrite wraps both).
+    const item = root.querySelector('li')!.parentElement!.children[1] as HTMLElement
+    expect(item.textContent).toBe('twoTWO')
+    expect(marked(root).length).toBeGreaterThan(0)
+    expect(marked(root).every(element => element.tagName === 'SPAN')).toBe(true)
+    expect(marked(root)[0]!.closest('li')).toBe(item)
+  })
+
+  it('keeps a task list a list when an item is ticked', () => {
+    // The box's state is VISIBLE, so both states are drawn: the old box struck beside the new one, inside the
+    // item, with no source card and no duplicate item.
+    const root = draw('- [ ] one\n- [x] two\n', '- [x] one\n- [x] two\n')
+    expect(root.querySelectorAll('ul').length).toBe(1)
+    expect(root.querySelectorAll('li').length).toBe(2)
+    // Two live boxes plus the struck copy of the old state.
+    expect(root.querySelectorAll('input[type="checkbox"]').length).toBe(3)
+    expect(root.querySelector('.mdWordDel input')).not.toBeNull()
+    expect(root.querySelector('.mdWordAdd input')).not.toBeNull()
+    expect(twins(root).length).toBe(0)
+    // BOTH states are the one change: each carries its number, so either can be hovered and the unit's
+    // outline holds the two boxes together.
+    const struck = root.querySelector('.mdWordDel') as HTMLElement
+    const added = root.querySelector('.mdWordAdd') as HTMLElement
+    expect(struck.getAttribute('data-md-block')).not.toBeNull()
+    expect(added.getAttribute('data-md-block')).toBe(struck.getAttribute('data-md-block'))
+  })
+
+  it('keeps a blockquote and merges the paragraph inside it', () => {
+    const root = draw('> quoted brown line\n', '> quoted red line\n')
+    expect(root.querySelectorAll('blockquote').length).toBe(1)
+    expect(root.querySelectorAll('blockquote p').length).toBe(1)
+    expect(root.querySelector('.mdWordDel')).not.toBeNull()
+    expect(root.querySelector('.mdWordAdd')).not.toBeNull()
+  })
+
+  it('marks the heading whose text changed', () => {
+    const root = draw('# Title one\n', '# Title two\n')
+    expect(root.querySelectorAll('h1').length).toBe(1)
+    // The heading stays a heading and the changed run is what carries the block: the heading's own
+    // unchanged words are not a hover target.
+    expect(marked(root).length).toBeGreaterThan(0)
+    expect(marked(root).every(element => element.tagName === 'SPAN')).toBe(true)
+    expect(marked(root)[0]!.closest('h1')).not.toBeNull()
+  })
+
+  it('keeps the heading and reports a LEVEL change on it', () => {
+    // `## A` → `# A` renders the same TEXT in a different element: nothing in the visible content changed, so
+    // the heading itself is kept and its own source difference (the tag) rides on it for the toolbar.
+    const root = draw('## Same words\n', '# Same words\n')
+    expect(root.querySelectorAll('h1').length + root.querySelectorAll('h2').length).toBe(1)
+    const heading = root.querySelector('h1, h2') as HTMLElement
+    expect(heading.getAttribute('data-md-diff-old')).toBe('## Same words')
+    expect(heading.getAttribute('data-md-diff-new')).toBe('# Same words')
+  })
+
+  it('keeps the code block and reports a language change on the code', () => {
+    const root = draw('```ts\nconst a = 1\n```\n', '```js\nconst a = 1\n```\n')
+    expect(root.querySelectorAll('pre').length).toBe(1)
+    expect(root.querySelector('pre code')!.textContent).toContain('const a = 1')
+    // The fence itself is not duplicated: the code element carries the change for the toolbar, which reads
+    // the whole fenced block — the language is its opening line.
+    const code = root.querySelector('pre code') as HTMLElement
+    expect(code.getAttribute('data-md-block')).not.toBeNull()
+    expect(code.getAttribute('data-md-diff-old') ?? '').toContain('```ts')
+    expect(code.getAttribute('data-md-diff-new') ?? '').toContain('```js')
+  })
+
+  it('keeps an image and shows its changed source as two frames with their paths', () => {
+    // For an image the PATH is the change, so each side is drawn as a frame that names its own path — no
+    // source row is needed, since both paths are on screen.
+    const root = draw('![alt](a.png)\n', '![alt](b.png)\n')
+    expect(root.querySelectorAll('img').length).toBe(0)
+    const frames = [...root.querySelectorAll<HTMLElement>('.mdImageFrame')]
+    expect(frames.length).toBe(2)
+    expect(frames.map(frame => frame.querySelector('.mdImagePath')!.textContent)).toEqual(['a.png', 'b.png'])
+    // The pair is one change: no hidden row for the paths, which the frames already show.
+    expect(root.querySelector('.mdTwin')!.hasAttribute('data-md-diff-old')).toBe(false)
+  })
+
+  it('adds a table row in place: one table, the row marked', () => {
+    const root = draw('| a |\n| --- |\n| 1 |\n', '| a |\n| --- |\n| 1 |\n| 2 |\n')
+    expect(root.querySelectorAll('table').length).toBe(1)
+    expect(root.querySelectorAll('tbody tr').length).toBe(2)
+    expect(marked(root).some(el => el.tagName === 'TD' || el.tagName === 'TR')).toBe(true)
+  })
+
+  it('keeps the table when a row is deleted, and shows the row struck', () => {
+    const root = draw('| a |\n| --- |\n| 1 |\n| 2 |\n', '| a |\n| --- |\n| 1 |\n')
+    expect(root.querySelectorAll('table').length).toBe(1)
+    // The deleted row is drawn as a struck row INSIDE the table, not as stray text after it.
+    const gone = [...root.querySelectorAll('tr.mdDel')]
+    expect(gone.length).toBe(1)
+    expect(gone[0]!.closest('table')).not.toBeNull()
+  })
+
+  it('keeps the list when an item is deleted, and shows the item struck', () => {
+    const root = draw('- one\n- two\n- three\n', '- one\n- three\n')
+    expect(root.querySelectorAll('ul').length).toBe(1)
+    expect(root.querySelectorAll('li').length).toBe(3)
+    const gone = [...root.querySelectorAll('li.mdDel')]
+    expect(gone.length).toBe(1)
+    expect(gone[0]!.textContent).toBe('two')
+  })
+
+  it('merges two separate change blocks that share one paragraph', () => {
+    // Both changed lines are one paragraph element with two blocks in it: the element is rewritten once and
+    // each changed run carries its own block, so neither change is lost and the paragraph appears once.
+    const root = draw('first old\nsecond old\nthird keep\n', 'first NEW\nsecond NEW\nthird keep\n')
+    expect(root.querySelectorAll('p').length).toBe(1)
+    const blocks = new Set(marked(root).map(el => el.getAttribute('data-md-block')))
+    expect(blocks.size).toBeGreaterThan(0)
+    expect(root.querySelectorAll('.mdWordAdd').length).toBe(2)
+  })
+
+  it('does not show a pure-syntax change', () => {
+    // `**x**` and `__x__` render to the same element with the same text: the reader asked not to see a
+    // source-diff card for a re-spelling, and the document stays exactly as the new version reads.
+    const root = draw('A **bold** word.\n', 'A __bold__ word.\n')
+    expect(root.querySelectorAll('strong').length).toBe(1)
+    expect(root.querySelectorAll('strong')[0]!.textContent).toBe('bold')
+    expect(twins(root).length).toBe(0)
+    expect(root.querySelectorAll('[data-md-block]').length).toBe(0)
+  })
+
+  it('does not show a whitespace-only change either', () => {
+    const root = draw('a line   \n', 'a line\n')
+    expect(root.querySelectorAll('p').length).toBe(1)
+    expect(twins(root).length).toBe(0)
+  })
+
+  it('shows the WHOLE source of the framed content in the toolbar row', () => {
+    // A link inside a sentence: the row reads the link's own Markdown — text and target together — because it
+    // is a source difference of the framed thing, not a list of which attributes changed. The sentence around
+    // it is not part of that thing and is not shown.
+    const root = draw('See [the docs](https://example.com/old) today.\n', 'See [the docs](https://example.com/new) today.\n')
+    const twin = root.querySelector('[data-md-diff-old]') as HTMLElement
+    expect(twin).not.toBeNull()
+    expect(twin.getAttribute('data-md-diff-old')).toBe('[the docs](https://example.com/old)')
+    expect(twin.getAttribute('data-md-diff-new')).toBe('[the docs](https://example.com/new)')
+    // Both versions are on screen as links, one per side.
+    const links = [...twin.querySelectorAll('a')]
+    expect(links.length).toBe(2)
+    expect(links.map(link => link.getAttribute('href'))).toEqual(['https://example.com/old', 'https://example.com/new'])
+    // The row is highlighted as Markdown source, the language the element was written in.
+    expect(twin.getAttribute('data-md-diff-grammar')).toBe('markdown')
+  })
+
+  it('keeps a table-cell link live, and draws its URL change inside the cell', () => {
+    const root = draw(
+      '| a | b |\n| --- | --- |\n| 1 | [docs](https://old.example/) |\n',
+      '| a | b |\n| --- | --- |\n| 1 | [docs](https://new.example/) |\n',
+    )
+    expect(root.querySelectorAll('table').length).toBe(1)
+    // The cell count did not change: the twin is the change itself, not a new cell.
+    expect(root.querySelectorAll('tbody td').length).toBe(2)
+    const links = [...root.querySelectorAll<HTMLAnchorElement>('td a')]
+    expect(links.map(link => link.getAttribute('href'))).toEqual(['https://old.example/', 'https://new.example/'])
+    const twin = links[1]!.closest('[data-md-diff-old]') as HTMLElement
+    expect(twin.closest('td')).not.toBeNull()
+    expect(twin.getAttribute('data-md-diff-new')).toContain('new.example')
+  })
+
+  it('renders a creation (empty baseline) without failing', () => {
+    const root = draw('', '# New\n\nA paragraph.\n')
+    expect(root.querySelectorAll('h1').length).toBe(1)
+    expect(root.querySelectorAll('p').length).toBe(1)
+    expect(marked(root).length).toBeGreaterThan(0)
+  })
+
+  it('keeps the deleted content visible when the whole file is emptied', () => {
+    // Everything is gone, so the merged reading shows what was removed — struck, in place — rather than an
+    // empty pane with no trace of the deletion.
+    const root = draw('# Gone\n\nA paragraph.\n', '')
+    expect(root.querySelectorAll('h1.mdDel').length).toBe(1)
+    expect(root.querySelectorAll('p.mdDel').length).toBe(1)
+    expect(root.querySelector('p.mdDel')!.textContent).toBe('A paragraph.')
+  })
+
+  it('marks changed CJK characters', () => {
+    const root = draw('这是一段中文说明。\n', '这是一段日文说明。\n')
+    expect(root.querySelector('.mdWordDel')!.textContent).toBe('中')
+    expect(root.querySelector('.mdWordAdd')!.textContent).toBe('日')
+  })
+
+  it('keeps an escaped pipe in a table cell from breaking the table', () => {
+    const root = draw('| a | b |\n| --- | --- |\n| x \\| y | 2 |\n', '| a | b |\n| --- | --- |\n| x \\| y | 3 |\n')
+    expect(root.querySelectorAll('table').length).toBe(1)
+    expect(root.querySelectorAll('tbody td').length).toBe(2)
+    expect(marked(root).length).toBeGreaterThan(0)
+  })
+
+  it('reports a reference-style link retarget as a block at the definition line', () => {
+    // The rendered anchor lives in the paragraph, but the change is in the DEFINITION line, which renders to
+    // nothing: it is reported there as a pair of blocks whose row is that line, and the link renders new.
+    const root = draw('[docs][d]\n\n[d]: https://example.com/old\n', '[docs][d]\n\n[d]: https://example.com/new\n')
+    const links = [...root.querySelectorAll('a')]
+    expect(links.length).toBe(1)
+    expect(links[0]!.getAttribute('href')).toBe('https://example.com/new')
+    const block = root.querySelector('.mdTwinPhantom') as HTMLElement
+    expect(block.getAttribute('data-md-diff-old')).toContain('https://example.com/old')
+    expect(block.getAttribute('data-md-diff-new')).toContain('https://example.com/new')
+  })
+
+  it('shows a paragraph that grew into a much longer one as two blocks, not one merged line', () => {
+    // A one-line bullet that kept its opening words and then grew ten times longer is "one changed line" to
+    // the diff, but merging it word by word would bury the old sentence inside the new text. It reads as a
+    // replacement: the old block struck above the new one.
+    const oldText = '- intro: the preview is documented here.\n'
+    const newText = `- intro: the preview is documented here.${' 补充了很长的说明。'.repeat(12)}\n`
+    const root = draw(oldText, newText)
+    expect(root.querySelectorAll('li').length).toBe(2)
+    expect(root.querySelector('li.mdDel')).not.toBeNull()
+    expect(root.querySelector('li.mdAdd')).not.toBeNull()
+    expect(root.querySelectorAll('.mdWordDel, .mdWordAdd').length).toBe(0)
+  })
+
+  it('aligns double-column list items one row each, even when one item grew much longer', () => {
+    // A list is laid out one item per row in the double column: the grown item's extra height must not push
+    // the following items out of line with their counterparts.
+    const oldText = '- first\n- second\n- third\n'
+    const newText = `- first\n- ${'second '.repeat(20)}\n- third\n`
+    const holder = document.createElement('div')
+    holder.innerHTML = renderMarkdownPreview(oldText, newText, 'double', 'structure')
+    const oldCells = [...holder.querySelectorAll('.mdDoubleCellOld')] as HTMLElement[]
+    const newCells = [...holder.querySelectorAll('.mdDoubleCellNew')] as HTMLElement[]
+    expect(oldCells.length).toBe(3)
+    expect(newCells.length).toBe(3)
+    const textOf = (cell: HTMLElement | undefined): string => (cell?.querySelector('li')?.textContent ?? '').trim()
+    expect(textOf(oldCells[0])).toBe('first')
+    expect(textOf(newCells[0])).toBe('first')
+    expect(textOf(oldCells[1])).toBe('second')
+    expect(textOf(newCells[1])).toContain('second')
+    expect(textOf(oldCells[2])).toBe('third')
+    expect(textOf(newCells[2])).toBe('third')
+  })
+
+  it('puts a deleted paragraph after the paragraph it followed, as its own change', () => {
+    // The `Saved/demo.md` shape: a retargeted link, and two lines below it a paragraph that exists only in the
+    // old version. The paragraph is a change of its OWN — separated from the link by the line boundary, so it
+    // can be kept/reverted alone — and it stays where the source has it: BELOW the link, not in front of the
+    // element the pairing happened to walk into first.
+    const oldText = 'A link to [the docs](https://example.com/old).\n\nThis paragraph exists only in the first version.\n\nClosing line.\n'
+    const newText = 'A link to [the docs](https://example.com/new).\n\nClosing line.\n'
+    const units = previewUnits(oldText, newText)
+    expect(units.length).toBe(2)
+    expect(units[0]!.newText).toBe('new')
+    expect(units[1]!.newText).toBe('')
+    const root = draw(oldText, newText)
+    const paragraphs = [...root.querySelectorAll('p')]
+    expect(paragraphs.map(paragraph => paragraph.textContent)).toEqual([
+      'A link to the docsthe docs.',
+      'This paragraph exists only in the first version.',
+      'Closing line.',
+    ])
+    // …and the two changes are numbered apart: the link's twin and the deleted paragraph carry different units.
+    const twin = root.querySelector('.mdTwin') as HTMLElement
+    const ghost = root.querySelector('p.mdDel') as HTMLElement
+    expect(twin.getAttribute('data-md-block')).not.toBe(ghost.getAttribute('data-md-block'))
+  })
+
+  it('reports a link target change even when the paragraph around it also changed', () => {
+    // The words are drawn as word runs; the target has no rendering of its own, so the link becomes a twin of
+    // its two versions — otherwise a URL edit would disappear behind the prose change next to it. The two
+    // changes are far enough apart to keep their own numbers.
+    const root = draw('See [the docs](https://example.com/old) really today.\n', 'See [the docs](https://example.com/new) really tomorrow.\n')
+    expect(root.querySelectorAll('p').length).toBe(1)
+    const wordRuns = [...root.querySelectorAll('.mdWordAdd')]
+    expect(wordRuns.length).toBeGreaterThan(0)
+    const twin = root.querySelector('[data-md-diff-old]') as HTMLElement
+    expect(twin).not.toBeNull()
+    expect(twin.getAttribute('data-md-diff-old')).toContain('example.com/old')
+    // The URL change is its OWN number beside the words' one.
+    const twinUnit = twin.getAttribute('data-md-block')
+    const runUnit = wordRuns[0]!.getAttribute('data-md-block')
+    expect(twinUnit).not.toBeNull()
+    expect(runUnit).not.toBeNull()
+    expect(twinUnit).not.toBe(runUnit)
+  })
+
+  it('puts a change with no element where its own lines are, not at the top', () => {
+    // A front-matter line and an HTML comment render to nothing. Their blocks must sit at their own place in
+    // the document: dropping them at the top would show a late change above the first one.
+    const root = draw(
+      '---\ntitle: A\n---\n\n# Doc\n\nbody\n\n<!-- old comment -->\n\ntail\n',
+      '---\ntitle: B\n---\n\n# Doc\n\nbody\n\n<!-- new comment -->\n\ntail\n',
+    )
+    const blocks = phantoms(root)
+    expect(blocks.length).toBe(2)
+    const kids = [...root.children]
+    const heading = root.querySelector('h1')!
+    const tail = root.querySelector('p:last-of-type')!
+    // Block 0 is the front matter: its pair is the document's very first child, and its row is the line that
+    // changed.
+    expect(blocks[0]!.getAttribute('data-md-diff-old')).toBe('title: A')
+    expect(blocks[0]!.getAttribute('data-md-diff-new')).toBe('title: B')
+    expect(kids.indexOf(blocks[0]!)).toBe(0)
+    // Block 1 is the comment: its pair comes after the body, before the tail paragraph.
+    expect(blocks[1]!.getAttribute('data-md-diff-old')).toBe('<!-- old comment -->')
+    expect(blocks[1]!.getAttribute('data-md-diff-new')).toBe('<!-- new comment -->')
+    expect(kids.indexOf(blocks[1]!)).toBeGreaterThan(kids.indexOf(heading))
+    expect(kids.indexOf(blocks[1]!)).toBeLessThan(kids.indexOf(tail))
+    // A front-matter row is highlighted as YAML, a comment as Markdown.
+    expect(blocks[0]!.getAttribute('data-md-diff-grammar')).toBe('yaml')
+    expect(blocks[1]!.getAttribute('data-md-diff-grammar')).toBe('markdown')
+  })
+
+  it('folds the units of an unrendered block into ONE pair of blocks', () => {
+    // A front-matter block is two changed lines and no rendered element. The reader sees no content there, so
+    // two changed lines are one invisible change: ONE pair of blocks, the before side naming both removed
+    // lines and the after side both added ones — not two pairs of squares for something nobody can see.
+    const root = draw(
+      '---\ntitle: A\nstatus: draft\n---\n\nBody\n',
+      '---\ntitle: B\nstatus: stable\n---\n\nBody\n',
+    )
+    const blocks = phantoms(root)
+    expect(blocks.length).toBe(1)
+    expect(blocks.map(block => block.getAttribute('data-md-block'))).toEqual(['0'])
+    // One block per side: the side IS the tinted square, not a marker drawn inside a second tinted box.
+    expect(blocks[0]!.querySelectorAll('.mdTwinBlock').length).toBe(2)
+    expect(blocks[0]!.querySelectorAll('.mdTwinMarker').length).toBe(0)
+    expect(blocks[0]!.getAttribute('data-md-diff-old')).toBe('title: A\nstatus: draft')
+    expect(blocks[0]!.getAttribute('data-md-diff-new')).toBe('title: B\nstatus: stable')
+    // The document's own content is untouched by the pair.
+    expect(root.querySelectorAll('p').length).toBe(1)
+  })
+
+  it('names a no-rendering pair with the caller\'s caption, and stays bare without one', () => {
+    // A pair of tinted squares does not say what it means; the panel passes a localized caption for it, so
+    // the reader can read "invisible content" beside the pair instead of hovering to find out. The label is
+    // the caller's — the renderer has no translator, and the bare rendering (which most cases read) has none.
+    const oldText = '---\ntitle: A\n---\n\nBody\n'
+    const newText = '---\ntitle: B\n---\n\nBody\n'
+    const bare = document.createElement('div')
+    bare.innerHTML = renderMarkdownPreview(oldText, newText, 'single', 'structure')
+    expect(bare.querySelector('[data-md-twin-caption]')).toBeNull()
+
+    const single = document.createElement('div')
+    single.innerHTML = renderMarkdownPreview(oldText, newText, 'single', 'structure', { invisible: '不可见内容' })
+    expect(single.querySelector('[data-md-twin-caption]')?.textContent).toBe('不可见内容')
+
+    // The double column captions each column's own marker, because each column shows only its side.
+    const double = document.createElement('div')
+    double.innerHTML = renderMarkdownPreview(oldText, newText, 'double', 'structure', { invisible: '不可见内容' })
+    for (const side of ['old', 'new'] as const) {
+      const column = double.querySelector(`[data-diff-doc-side="${side}"]`) as HTMLElement
+      expect(column.querySelector('[data-md-twin-caption]')?.textContent, side).toBe('不可见内容')
+    }
+  })
+
+  it('makes every numbered change reachable, even when a comment shares a block with a deletion', () => {
+    // A rich document hit this: an HTML comment changed and a paragraph was deleted in the SAME line block.
+    // The merge drew the deleted paragraph as a ghost and never drew the comment's unit — the numbering
+    // counted it while no element carried it, so it could not be hovered or kept from the preview. The
+    // deleted paragraph's ghost also took the WRONG number (a one-character unit matched inside its text).
+    const oldText = '# 标题\n\n<!-- 旧注释：说明 -->\n\n这一段只在旧版本里存在。\n\n收尾一行。\n'
+    const newText = '# 标题\n\n<!-- 新注释：说明 -->\n\n收尾一行。\n'
+    const units = previewUnits(oldText, newText)
+    const root = draw(oldText, newText)
+    const tags = new Set([...root.querySelectorAll('[data-md-block]')].map(element => element.getAttribute('data-md-block')))
+    expect(tags.size).toBe(units.length)
+    for (const unit of units) expect(tags.has(String(unit.index))).toBe(true)
+    // The ghost is in its source place: after the opening heading, before the closing line.
+    const ghost = root.querySelector('p.mdDel') as HTMLElement | null
+    expect(ghost).not.toBeNull()
+    expect(ghost!.textContent).toBe('这一段只在旧版本里存在。')
+    const ghostBlock = units.findIndex(unit => unit.oldText === '这一段只在旧版本里存在。')
+    expect(ghost!.getAttribute('data-md-block')).toBe(String(ghostBlock))
+    const kids = [...root.children]
+    const closing = kids.findIndex(child => (child.textContent ?? '').includes('收尾一行'))
+    expect(kids.indexOf(ghost!)).toBeGreaterThan(0)
+    expect(kids.indexOf(ghost!)).toBeLessThan(closing)
+    // The double column is reachable the same way, per side.
+    const holder = document.createElement('div')
+    holder.innerHTML = renderMarkdownPreview(oldText, newText, 'double', 'structure')
+    for (const side of ['old', 'new'] as const) {
+      const column = holder.querySelector(`[data-diff-doc-side="${side}"]`) as HTMLElement
+      const sideTags = new Set([...column.querySelectorAll('[data-md-block]')].map(element => element.getAttribute('data-md-block')))
+      for (const unit of units) {
+        const text = side === 'old' ? unit.oldText : unit.newText
+        if (text === '') continue
+        expect(sideTags.has(String(unit.index)), `${side} unit ${unit.index}`).toBe(true)
+      }
+    }
+  })
+
+  it('keeps the double column row-aligned after an insertion-only change before the changed blocks', () => {
+    // The rich demo broke here: an INSERTED word in a list item is a unit with no old side, and the
+    // reachability net drew a marker for it in the OLD column too. That phantom sat near the end of the left
+    // document, so the two columns' block orders differed and LCS stopped pairing everything after it — the
+    // quote, table, code block and image showed up as two one-sided runs instead of rows.
+    const oldText = [
+      '# T', '', '- item B', '', '> 旧引用文字。', '', '| a |', '| --- |', '| 旧格 |', '',
+      '```ts', 'const v = 1', '```', '', '![shot](./old-v1.png)', '',
+      '<!-- old comment -->', '', 'Only in old.', '', 'End.',
+    ].join('\n')
+    const newText = [
+      '# T', '', '- item B（更新）', '', '> 新引用文字。', '', '| a |', '| --- |', '| 新格 |', '',
+      '```ts', 'const v = 2', '```', '', '![shot](./new-v2.png)', '',
+      '<!-- new comment -->', '', 'Added paragraph.', '', 'End.',
+    ].join('\n')
+    const holder = document.createElement('div')
+    holder.innerHTML = renderMarkdownPreview(oldText, newText, 'double', 'structure')
+    const cells = [...holder.querySelectorAll('.mdDoubleCellOld, .mdDoubleCellNew')] as HTMLElement[]
+    const rowOf = (text: string): string | undefined => cells
+      .find(cell => (cell.textContent ?? '').includes(text))
+      ?.style.gridRow
+    // Every changed block is ONE row with both sides, in the same order on both sides.
+    for (const [oldSide, newSide] of [
+      ['旧引用文字', '新引用文字'],
+      ['旧格', '新格'],
+      ['const v = 1', 'const v = 2'],
+      ['old-v1.png', 'new-v2.png'],
+      ['Only in old.', 'Added paragraph.'],
+      ['End.', 'End.'],
+    ] as const) {
+      const oldRow = rowOf(oldSide)
+      const newRow = rowOf(newSide)
+      expect(oldRow, `row of ${oldSide}`).toBeDefined()
+      expect(newRow, `row of ${newSide}`).toBeDefined()
+      expect(oldRow).toBe(newRow)
+    }
+    // The insertion-only unit gets NO marker in the old column: one phantom for the comment, and no more.
+    for (const side of ['.mdDoubleCellOld', '.mdDoubleCellNew']) {
+      expect(holder.querySelectorAll(`${side} .mdTwinPhantom`).length, side).toBe(1)
+    }
+  })
+
+  it('shows both sides of a line whose VALUE was appended, the way the source diff does', () => {
+    // `title: A` → `title: A v2` is a character INSERTION, but the line itself changed: the source view shows
+    // it as a removed line and an added one, so the preview's pair must show both sides too. Reading the unit's
+    // characters to decide the sides showed only a green block (three blocks for two changed lines). A whole
+    // no-rendering block is one pair, so the appended value and the line beside it share that pair.
+    const root = draw('---\ntitle: A\nstatus: draft\n---\n\nBody\n', '---\ntitle: A v2\nstatus: stable\n---\n\nBody\n')
+    const blocks = phantoms(root)
+    expect(blocks.length).toBe(1)
+    // Both sides on the one pair, naming the whole changed lines.
+    expect(blocks[0]!.getAttribute('data-md-diff-old')).toBe('title: A\nstatus: draft')
+    expect(blocks[0]!.getAttribute('data-md-diff-new')).toBe('title: A v2\nstatus: stable')
+  })
+
+  it('numbers the two changes of one line separately', () => {
+    // A table row whose cell text AND whose link target changed is ONE source line but TWO changes: the
+    // preview numbers them apart, each with its own character span, so either can be kept or reverted alone.
+    const oldText = '| m | 说明 | 链接 |\n| --- | --- | --- |\n| core | 旧说明 | [core](https://example.com/core/v1) |\n'
+    const newText = '| m | 说明 | 链接 |\n| --- | --- | --- |\n| core | 新说明 | [core](https://example.com/core/v2) |\n'
+    const units = previewUnits(oldText, newText)
+    expect(units.length).toBe(2)
+    // Each unit's span slices back to exactly its own changed source, on both sides.
+    for (const unit of units) {
+      expect(oldText.slice(unit.oldChars.start, unit.oldChars.end)).toBe(unit.oldText)
+      expect(newText.slice(unit.newChars.start, unit.newChars.end)).toBe(unit.newText)
+    }
+    // They are in document order on the same line.
+    expect(units[0]!.oldChars.start).toBeLessThan(units[1]!.oldChars.start)
+    expect(units[0]!.oldLines).toEqual({ start: 3, end: 3 })
+    expect(units[1]!.oldLines).toEqual({ start: 3, end: 3 })
+
+    // …and the rendered row carries both numbers: the merged cell is one unit, the source-diff card the other.
+    const holder = document.createElement('div')
+    holder.innerHTML = renderMarkdownPreview(oldText, newText, 'single', 'structure')
+    const tagged = [...holder.querySelectorAll('[data-md-block]')].map(element => element.getAttribute('data-md-block'))
+    expect(new Set(tagged)).toEqual(new Set(['0', '1']))
+  })
+
+  it('numbers the two words of one line separately, in the panel', async () => {
+    // The preview's own numbering: hovering the SECOND change of a line shows 2/2 and its own number…
+    const props = panelProps({
+      read: true,
+      files: [entry({
+        id: 'entry-md-units',
+        path: '/repo/README.md',
+        oldText: 'alpha one beta two\n',
+        newText: 'alpha ONE beta TWO\n',
+      })],
+      busy: new Set(),
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+
+    const second = document.querySelector('[data-md-block="1"]') as HTMLElement
+    expect(second).not.toBeNull()
+    fireEvent.mouseOver(second)
+    const frame = document.querySelector('[data-diff-block-actions]') as HTMLElement
+    expect(frame).not.toBeNull()
+    expect(frame.querySelector('[data-diff-block-position]')!.textContent)
+      .toBe('panel.blockPosition {"current":2,"total":2}')
+
+    // …and keeping it sends only those characters, so the other change on the line stays pending.
+    fireEvent.click(frame.querySelector('[data-diff-block-keep]') as HTMLElement)
+    await waitFor(() => {
+      const calls = (props.onBlockKeep as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      expect(calls.length).toBe(1)
+      const range = calls[0]![2] as { oldChars: { start: number; end: number }; newChars: { start: number; end: number } }
+      // The unit is the changed word as the character diff cut it — here the whole of "two".
+      expect('alpha one beta two\n'.slice(range.oldChars.start, range.oldChars.end)).toBe('two')
+      expect('alpha ONE beta TWO\n'.slice(range.newChars.start, range.newChars.end)).toBe('TWO')
+    })
+  })
+
+  it('numbers the double column by unit too, cards included', () => {
+    // The double column draws the same changes as the single one, so it counts the same units: a front-matter
+    // change first (its card), then the table row's cell text and link target as separate numbers — in BOTH
+    // columns, each side showing its own half.
+    const oldText = '---\ntitle: A\n---\n\n| m | 说明 | 链接 |\n| --- | --- | --- |\n| core | 旧说明 | [core](https://example.com/v1) |\n'
+    const newText = '---\ntitle: B\n---\n\n| m | 说明 | 链接 |\n| --- | --- | --- |\n| core | 新说明 | [core](https://example.com/v2) |\n'
+    const units = previewUnits(oldText, newText)
+    expect(units.length).toBe(3)
+    const holder = document.createElement('div')
+    holder.innerHTML = renderMarkdownPreview(oldText, newText, 'double', 'structure')
+    const columns = [...holder.querySelectorAll('.mdDoubleCol')] as HTMLElement[]
+    expect(columns.length).toBe(2)
+    for (const column of columns) {
+      const tags = [...new Set([...column.querySelectorAll('[data-md-block]')].map(element => element.getAttribute('data-md-block')))]
+      expect(tags.sort()).toEqual(['0', '1', '2'])
+    }
+  })
+
+  it('numbers the double column preview by unit in the toolbar', () => {
+    const oldText = '---\ntitle: A\n---\n\n| m | 说明 | 链接 |\n| --- | --- | --- |\n| core | 旧说明 | [core](https://example.com/v1) |\n'
+    const newText = '---\ntitle: B\n---\n\n| m | 说明 | 链接 |\n| --- | --- | --- |\n| core | 新说明 | [core](https://example.com/v2) |\n'
+    const props = panelProps({
+      read: true,
+      files: [entry({ id: 'entry-md-double-units', path: '/repo/README.md', oldText, newText })],
+      busy: new Set(),
+    })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+    fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
+    fireEvent.click(document.querySelector('[data-diff-toggle-view]') as HTMLElement)
+
+    // The URL change of the row is the THIRD unit, and the toolbar says so in the double column as well.
+    const card = document.querySelector('[data-md-block="2"]') as HTMLElement
+    expect(card).not.toBeNull()
+    fireEvent.mouseOver(card)
+    expect(document.querySelector('[data-diff-block-position]')!.textContent)
+      .toBe('panel.blockPosition {"current":3,"total":3}')
+  })
+
+  it('does not double-render a duplicate heading', () => {
+    const root = draw('## Notes\n\nbody\n\n## Notes\n\nmore\n', '## Notes\n\nchanged body\n\n## Notes\n\nmore\n')
+    expect(root.querySelectorAll('h2').length).toBe(2)
+    expect(root.querySelectorAll('p').length).toBe(2)
+  })
+
+  it('keeps a link a link when its TEXT changes beside it', () => {
+    // The paragraph's own words changed while it carried a link: the link element must survive, because the
+    // merge edits the text nodes in place rather than re-serializing the paragraph.
+    const root = draw('See [the docs](https://example.com/x) today.\n', 'See [the docs](https://example.com/x) tomorrow.\n')
+    expect(root.querySelectorAll('a').length).toBe(1)
+    expect(root.querySelector('a')!.getAttribute('href')).toBe('https://example.com/x')
+    expect(root.querySelector('.mdWordDel')!.textContent).toBe('today')
+    expect(root.querySelector('.mdWordAdd')!.textContent).toBe('tomorrow')
+  })
+
+  it('keeps bold bold when a word inside it changes', () => {
+    const root = draw('A **bold** word.\n', 'A **BOLD** word.\n')
+    expect(root.querySelectorAll('strong').length).toBe(1)
+    expect(root.querySelector('strong')!.textContent).toContain('BOLD')
+    expect(root.querySelectorAll('.mdWordDel').length).toBeGreaterThan(0)
+  })
+
+  it('keeps inline code code when its content changes', () => {
+    const root = draw('Run `npm test` now.\n', 'Run `npm run test` now.\n')
+    expect(root.querySelectorAll('code').length).toBe(1)
+    expect(root.querySelector('code')!.textContent).toBe('npm run test')
+    expect(root.querySelector('code .mdWordAdd')!.textContent).toBe('run ')
+  })
+
+  it('adds a horizontal rule where it belongs', () => {
+    const root = draw('one\n\ntwo\n', 'one\n\n---\n\ntwo\n')
+    expect(root.querySelectorAll('hr').length).toBe(1)
+    expect(root.querySelectorAll('p').length).toBe(2)
+    expect(root.querySelector('hr')!.hasAttribute('data-md-block')).toBe(true)
+  })
+
+  it('keeps a list inside a blockquote inside the blockquote', () => {
+    const root = draw('> - a\n> - b\n', '> - a\n> - B!\n')
+    expect(root.querySelectorAll('blockquote').length).toBe(1)
+    expect(root.querySelectorAll('blockquote ul').length).toBe(1)
+    // Two items: the changed one carries both versions itself, rather than a second item appearing.
+    expect(root.querySelectorAll('blockquote li').length).toBe(2)
+    const changed = root.querySelector('blockquote li [data-md-block]') as HTMLElement
+    expect(changed.closest('li')).not.toBeNull()
+    expect(changed.classList.contains('mdWordDel')).toBe(true)
+    expect(changed.textContent).toBe('b')
+    expect(root.querySelector('blockquote li .mdWordAdd')!.textContent).toBe('B!')
+  })
+
+  it('marks a table header cell that changed, inside the table', () => {
+    const root = draw('| a | b |\n| --- | --- |\n| 1 | 2 |\n', '| a | B |\n| --- | --- |\n| 1 | 2 |\n')
+    expect(root.querySelectorAll('table').length).toBe(1)
+    const markedHeader = root.querySelector('th [data-md-block], th .mdWordAdd')
+    expect(markedHeader).not.toBeNull()
+    expect(markedHeader!.closest('table')).not.toBeNull()
+  })
+
+  it('reports nothing for a line-ending-only change', () => {
+    // The whole-file diff normalizes CRLF/LF before comparing (the panel already treats them as the same
+    // content), so a file that only had its line endings rewritten is not a change at all.
+    const root = draw('a\nb\n', 'a\r\nb\r\n')
+    expect(root.querySelectorAll('p').length).toBe(1)
+    expect(root.querySelectorAll('[data-md-block]').length).toBe(0)
+    expect(twins(root).length).toBe(0)
+  })
+
+  it('hides YAML front matter instead of rendering it as content', () => {
+    // Without this, `---` / `title: …` / `---` renders as a rule plus a setext heading: the metadata would
+    // appear in the document as content it never was.
+    const root = draw('---\ntitle: A\n---\n\nBody\n', '---\ntitle: A\n---\n\nBody\n')
+    expect(root.querySelectorAll('hr').length).toBe(0)
+    expect(root.querySelectorAll('h1, h2, h3').length).toBe(0)
+    expect(root.querySelectorAll('p').length).toBe(1)
+    expect(root.querySelector('p')!.textContent).toBe('Body')
+  })
+
+  it('reports a front-matter change as blocks with its source row, keeping the body intact', () => {
+    const root = draw('---\ntitle: A\n---\n\nBody\n', '---\ntitle: B\n---\n\nBody\n')
+    expect(root.querySelectorAll('hr').length).toBe(0)
+    expect(root.querySelectorAll('p').length).toBe(1)
+    expect(root.querySelector('p')!.textContent).toContain('Body')
+    // No rendered content of its own: a pair of modest blocks, with the changed line carried for the toolbar.
+    const block = root.querySelector('.mdTwinPhantom') as HTMLElement
+    expect(block).not.toBeNull()
+    expect(block.getAttribute('data-md-diff-old')).toBe('title: A')
+    expect(block.getAttribute('data-md-diff-new')).toBe('title: B')
+  })
+
+  it('draws each side of an invisible change in the double column, one column each', () => {
+    // The two layouts report the same thing: each column shows ITS own version of the change, and the hidden
+    // source line rides on it for the toolbar.
+    const oldText = '---\ntitle: A\n---\n\nA link to [the docs](https://example.com/old).\n'
+    const newText = '---\ntitle: B\n---\n\nA link to [the docs](https://example.com/new).\n'
+    const holder = document.createElement('div')
+    holder.innerHTML = renderMarkdownPreview(oldText, newText, 'double', 'structure')
+    expect(holder.querySelectorAll('.mdDoubleDocs').length).toBe(1)
+    const columns = [...holder.querySelectorAll('.mdDoubleCol')] as HTMLElement[]
+    expect(columns.length).toBe(2)
+    // The front-matter change: ONE block per column — the before column shows only the removed side, the
+    // after column only the added one (the other side is marked `hidden`, which the stylesheet must honour
+    // over the block's own display rule; showing both sides in each column would read as two pairs).
+    expect(columns[0]!.querySelector('.mdTwinPhantom')!.getAttribute('data-md-diff-old')).toBe('title: A')
+    expect(columns[0]!.querySelector('.mdTwinPhantom')!.getAttribute('data-md-diff-new')).toBeNull()
+    expect(columns[1]!.querySelector('.mdTwinPhantom')!.getAttribute('data-md-diff-new')).toBe('title: B')
+    expect(columns[1]!.querySelector('.mdTwinPhantom')!.getAttribute('data-md-diff-old')).toBeNull()
+    for (const [column, own, other] of [
+      [columns[0]!, 'mdTwinOld', 'mdTwinNew'],
+      [columns[1]!, 'mdTwinNew', 'mdTwinOld'],
+    ] as const) {
+      const phantom = column.querySelector('.mdTwinPhantom')!
+      expect(phantom.querySelector(`.${own}`)!.hasAttribute('hidden')).toBe(false)
+      expect(phantom.querySelector(`.${other}`)!.hasAttribute('hidden')).toBe(true)
+    }
+    // The link target: each column shows its own link, tinted, carrying its own side of the href.
+    const linksBefore = [...columns[0]!.querySelectorAll<HTMLAnchorElement>('a')]
+    const linksAfter = [...columns[1]!.querySelectorAll<HTMLAnchorElement>('a')]
+    expect(linksBefore.map(link => link.getAttribute('href'))).toEqual(['https://example.com/old'])
+    expect(linksAfter.map(link => link.getAttribute('href'))).toEqual(['https://example.com/new'])
+    expect(linksBefore[0]!.getAttribute('data-md-diff-old')).toContain('example.com/old')
+    expect(linksAfter[0]!.getAttribute('data-md-diff-new')).toContain('example.com/new')
+  })
+
+  it('puts matching blocks of the double column on the same row, with a gap for a one-sided one', () => {
+    // The two documents are laid out as ONE grid: a block that exists on one side only takes its own row (the
+    // other side's cell is empty) instead of pushing everything below it out of line with the other column.
+    const oldText = '# T\n\nA link to [the docs](https://example.com/old).\n\nThis paragraph exists only in the first version.\n\nClosing line.\n'
+    const newText = '# T\n\nA link to [the docs](https://example.com/new).\n\nClosing line.\n'
+    const holder = document.createElement('div')
+    holder.innerHTML = renderMarkdownPreview(oldText, newText, 'double', 'structure')
+    const rowOf = (element: Element): number => {
+      const cell = element.closest('.mdDoubleCell')
+      return Number((cell?.getAttribute('style') ?? '').match(/grid-row:\s*(\d+)/)?.[1] ?? -1)
+    }
+    const paragraph = (column: 'old' | 'new', text: string): HTMLElement | undefined =>
+      [...holder.querySelectorAll(`.mdDoubleCell${column === 'old' ? 'Old' : 'New'} p`)]
+        .find(element => (element.textContent ?? '').trim() === text) as HTMLElement | undefined
+    const closingOld = paragraph('old', 'Closing line.')
+    const closingNew = paragraph('new', 'Closing line.')
+    expect(closingOld).toBeDefined()
+    expect(closingNew).toBeDefined()
+    // The same block starts on the same grid row in both columns…
+    expect(rowOf(closingOld!)).toBe(rowOf(closingNew!))
+    // …and the deleted paragraph's row is real, with nothing on the after side.
+    const deleted = paragraph('old', 'This paragraph exists only in the first version.')
+    expect(deleted).toBeDefined()
+    expect(rowOf(deleted!)).toBeLessThan(rowOf(closingOld!))
+    const afterSideOfRow = [...holder.querySelectorAll('.mdDoubleCellNew')]
+      .find(cell => Number((cell.getAttribute('style') ?? '').match(/grid-row:\s*(\d+)/)?.[1]) === rowOf(deleted!))
+    expect(afterSideOfRow?.innerHTML).toBe('')
+  })
+
+  it('marks only the changed WORDS of a list item in the double column', () => {
+    // `second item` → `SECOND item` is a change of two words, not of the item: the whole list used to get a
+    // light wash, so a case-only edit read as if everything had changed. Only the changed words carry the
+    // strong word highlight now — the item and the list stay untinted.
+    const oldText = '- first item\n- second item\n  - nested a\n  - nested b\n- third item\n'
+    const newText = '- first item\n- SECOND item\n  - nested a\n  - nested B!\n- third item\n'
+    const holder = document.createElement('div')
+    holder.innerHTML = renderMarkdownPreview(oldText, newText, 'double', 'structure')
+    expect(holder.querySelectorAll('.mdDel, .mdAdd').length).toBe(0)
+    const del = [...holder.querySelectorAll('.mdWordDel')].map(element => element.textContent)
+    const add = [...holder.querySelectorAll('.mdWordAdd')].map(element => element.textContent)
+    expect(del).toEqual(['second', 'b'])
+    expect(add).toEqual(['SECOND', 'B!'])
+    for (const run of holder.querySelectorAll('.mdWordDel, .mdWordAdd')) {
+      expect(run.closest('li')).not.toBeNull()
+      expect((run.closest('li') as HTMLElement).classList.contains('mdDel')).toBe(false)
+      expect((run.closest('li') as HTMLElement).classList.contains('mdAdd')).toBe(false)
+    }
+  })
+
+  it('marks only the ticked BOX in the double column, not the whole item', () => {
+    // A ticked task is a change of the CHECKBOX: the box carries the diff colour and the unit's number, and
+    // the rest of the line stays untouched — the whole item is not a change.
+    const oldText = '- [ ] todo item\n- keep\n'
+    const newText = '- [x] todo item\n- keep\n'
+    const holder = document.createElement('div')
+    holder.innerHTML = renderMarkdownPreview(oldText, newText, 'double', 'structure')
+    const oldItem = holder.querySelector('.mdDoubleCellOld li') as HTMLElement
+    const newItem = holder.querySelector('.mdDoubleCellNew li') as HTMLElement
+    expect(oldItem.classList.contains('mdDel')).toBe(false)
+    expect(newItem.classList.contains('mdAdd')).toBe(false)
+    const oldBox = oldItem.querySelector('.mdWordDel') as HTMLElement
+    const newBox = newItem.querySelector('.mdWordAdd') as HTMLElement
+    expect(oldBox).not.toBeNull()
+    expect(newBox).not.toBeNull()
+    expect((oldBox.querySelector('input') as HTMLInputElement).checked).toBe(false)
+    expect((newBox.querySelector('input') as HTMLInputElement).checked).toBe(true)
+    // Both boxes are the one change: same number, and only the box is a hover target.
+    expect(oldBox.getAttribute('data-md-block')).toBe(newBox.getAttribute('data-md-block'))
+    expect(oldItem.hasAttribute('data-md-block')).toBe(false)
+    expect(oldItem.querySelectorAll('[data-md-block]').length).toBe(1)
   })
 })

@@ -778,23 +778,202 @@
   border-radius: 4px;
   padding: 2px 6px;
 }
+/* Whole changed blocks (an added or removed paragraph, row, cell): the SAME tint strength as the changed
+   words and the version pairs — one colour, one opacity for every deletion mark and the same for every
+   addition mark. A deleted paragraph does not read as a lighter kind of change than a deleted word. */
 .mdPreviewBody :global(.mdAdd) {
-  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 10%, transparent);
+  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
 }
 .mdPreviewBody :global(.mdDel) {
-  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
+  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
 }
-/* Word-level highlight inside a changed block: the specific changed words,
-   deeper than the whole-block tint so they read as the actual edit. */
+/* Word-level highlight inside a changed block: the specific changed words. */
 .mdPreviewBody :global(.mdWordDel) {
   background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
   border-radius: 2px;
   padding: 0 1px;
+  /* A hair of air before the replacement, so "4" and "FOUR" read as two words rather than one. */
+  margin-right: 1px;
 }
 .mdPreviewBody :global(.mdWordAdd) {
   background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
   border-radius: 2px;
   padding: 0 1px;
+}
+
+/* A preview frame that hangs under the change it belongs to: it is placed by its LEFT edge (the element's
+   own), so the toolbar reads as attached to that change rather than pinned to the pane's corner. */
+.blockActions[data-diff-anchored] {
+  right: auto;
+}
+
+/* The layer the hover outlines live in: it covers the pane so their `left`/`right` insets are measured from
+   the pane, and it never takes the pointer (a box is decoration, not a target). */
+.mdUnitOutlineLayer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+/* The hovered change's frame: a dashed rule in the PRODUCT colour (the same accent links and the diff's own
+   chrome use), a touch heavier than before so it reads as a highlight rather than a hairline. */
+.mdUnitOutline {
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: none;
+  border: 2px dashed var(--dsw-alias-state-business-primary, var(--dsw-alias-label-secondary, #4b7bf5));
+  border-radius: 5px;
+}
+
+/* A change the rendering cannot SHOW — a link's target, an image's source, a box's state, a front-matter
+   line — drawn as its two versions side by side: the old on the left in the removed colour, the new on the
+   right in the added one. The pair IS the change; what neither version can show (a target, a caption) is a
+   source row in the toolbar, shown only while the change is hovered. */
+.mdPreviewBody :global(.mdTwin) {
+  display: inline-flex;
+  align-items: baseline;
+  /* One pixel between a pair's two versions, the same gap a changed word pair leaves. */
+  gap: 1px;
+  max-width: 100%;
+}
+.mdPreviewBody :global(.mdTwinOld),
+.mdPreviewBody :global(.mdTwinNew) {
+  border-radius: 3px;
+  padding: 0 1px;
+}
+.mdPreviewBody :global(.mdTwinOld) {
+  /* The same tint as a changed WORD run: a pair of versions is a change drawn at full strength, not a
+     contextual wash. */
+  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
+}
+.mdPreviewBody :global(.mdTwinNew) {
+  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
+}
+/* An image's pair takes the whole line, like the image itself did: two frames sharing the width. */
+.mdPreviewBody :global(.mdTwin.mdTwinImages) {
+  display: flex;
+  width: 100%;
+  gap: 1px;
+  align-items: stretch;
+  margin: 2px 0 8px;
+}
+.mdPreviewBody :global(.mdTwinImages > .mdTwinOld),
+.mdPreviewBody :global(.mdTwinImages > .mdTwinNew) {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0;
+}
+/* A change with no rendered content at all: one square block per side — what went, what came. The block IS
+   the side, so it carries the same 34% tint as every other change; the square is about one line tall. */
+.mdPreviewBody :global(.mdTwinBlock) {
+  display: inline-block;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: 3px;
+  vertical-align: middle;
+}
+/* A side that does not exist on this document: the phantom pair shows only its own side (in the double column
+   the OTHER column holds the other side). The hidden attribute needs to beat the block's own display rule. */
+.mdPreviewBody :global(.mdTwinOld[hidden]),
+.mdPreviewBody :global(.mdTwinNew[hidden]) {
+  display: none;
+}
+/* A change with no rendered content at all: ONE labeled chip. Its background carries the sides' tints — the
+   old side's tint on the left half, the new side's on the right — and the caption sits INSIDE it, so the words
+   and the change are one thing: "invisible content" written on the change itself, not floating beside it.
+   The two little squares are the same information, so they are not drawn inside the chip. */
+.mdPreviewBody :global(.mdTwin.mdTwinPhantom) {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  margin: 3px 0 8px;
+  padding: 1px 8px;
+  border-radius: 4px;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent) 0 50%,
+    color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent) 50% 100%);
+}
+/* In the double column a column shows only ITS side, so the chip is that one colour, not a split. */
+.mdPreviewBody :global(.mdTwinPhantom:has(.mdTwinNew[hidden])) {
+  background: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
+}
+.mdPreviewBody :global(.mdTwinPhantom:has(.mdTwinOld[hidden])) {
+  background: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
+}
+.mdPreviewBody :global(.mdTwinPhantom > .mdTwinBlock) {
+  display: none;
+}
+/* The chip's caption: inside the tinted background, so the marker says what the change is. */
+.mdPreviewBody :global(.mdTwinCaption) {
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+  user-select: none;
+}
+/* An image's twin: the frame names the path, because for an image the path IS the change. */
+.mdPreviewBody :global(.mdImageFrame) {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px dashed var(--dsw-alias-border-l2);
+  border-radius: 4px;
+  font: 10px/1.45 ui-monospace, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+.mdPreviewBody :global(.mdImagePath) {
+  color: var(--dsw-alias-label-secondary, var(--dsw-alias-label-primary));
+}
+.mdPreviewBody :global(.mdImageAlt) {
+  color: var(--dsw-alias-label-tertiary);
+}
+/* The double column: each column shows its own side of a change. An image frame fills the column the way the
+   image did. */
+.mdPreviewBody :global(.mdTwinColumn) {
+  display: block;
+  width: 100%;
+}
+.mdPreviewBody :global(.mdTwinColumn .mdImageFrame) {
+  width: 100%;
+  box-sizing: border-box;
+}
+/* Structure mode's double column: the two WHOLE documents, block by block in ONE grid, so matching blocks
+   share a row. A block that exists on one side only takes its row with the other side empty, instead of
+   pushing the rest of that side out of line. */
+.mdPreviewBody :global(.mdDouble.mdDoubleDocs) {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: start;
+  column-gap: 0;
+}
+.mdPreviewBody :global(.mdDoubleDocs > .mdDoubleCol) {
+  display: contents;
+}
+.mdPreviewBody :global(.mdDoubleDocs .mdDoubleCell) {
+  min-width: 0;
+}
+.mdPreviewBody :global(.mdDoubleDocs .mdDoubleCellOld) {
+  padding-right: 12px;
+  border-right: 1px solid var(--dsw-alias-border-l2);
+}
+.mdPreviewBody :global(.mdDoubleDocs .mdDoubleCellNew) {
+  padding-left: 12px;
+}
+/* A list is laid out one item per row (see `layoutUnits`): the per-item list copy must not re-introduce the
+   list's block margins, or every item row would gain a gap the original list did not have. */
+.mdPreviewBody :global(.mdDoubleDocs .mdDoubleCell > ul),
+.mdPreviewBody :global(.mdDoubleDocs .mdDoubleCell > ol) {
+  margin: 0;
+}
+.mdPreviewBody :global(.mdDoubleDocs .mdDoubleCell > ul > li),
+.mdPreviewBody :global(.mdDoubleDocs .mdDoubleCell > ol > li) {
+  margin: 2px 0;
 }
 /* Double column: before | after, aligned row by row (a deletion and its
    replacement addition share one row, context sits on both sides), so the two
@@ -2645,6 +2824,46 @@
   background: var(--dsw-alias-markdown-code-block);
   box-shadow: var(--dsw-shadow-lv1);
   z-index: 2;
+}
+
+/* The preview's toolbar with the change's source row under it: the buttons line up on top, the hidden part of
+   the change (a target, a caption) reads underneath. Only a change whose rendering cannot say it all carries
+   the row, so the toolbar stays a single line everywhere else. */
+.blockActionsWithSource {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+.blockActionsRow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.blockSourceDiff {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-width: 460px;
+  padding: 3px 2px 1px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  font: 11px/1.5 ui-monospace, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.blockSourceDiffLabel {
+  font: 10px/1.4 -apple-system, "Segoe UI", sans-serif;
+  color: var(--dsw-alias-label-tertiary);
+  letter-spacing: .02em;
+}
+.blockSourceDiffDel {
+  /* The same surface a removed code row uses: a red band, not struck-through text — at the same opacity as
+     the added band, so a pair of source lines reads as one change, not as two strengths. */
+  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 20%, transparent);
+  border-radius: 2px;
+}
+.blockSourceDiffAdd {
+  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 20%, transparent);
+  border-radius: 2px;
 }
 
 /* ONLY the selection frame gives its own surface away. It holds the actions for a selection, and a drag that

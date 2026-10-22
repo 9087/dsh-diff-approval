@@ -477,6 +477,46 @@ export function setCommentModeEnabled(value: boolean): void {
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(COMMENT_MODE_CHANGED_EVENT))
 }
 
+/** How the Markdown preview draws a diff (see `renderMarkdownPreview`). */
+export type MarkdownDiffStyle = 'structure' | 'blocks'
+
+/**
+ * TEMPORARY: the single switch for the structure-rendered Markdown diff — the NEW preview.
+ *
+ * The new preview — the document rendered once with the diff marked on the elements that changed, line-first
+ * matching, character-level units, the twin presentation of invisible changes — ships behind this one switch
+ * while it is being finished. It is OFF by default: without it the preview keeps the original fragment
+ * renderer (`blocks`) and the source view's line blocks, exactly as before.
+ *
+ * There used to be a second row choosing between the two renderers; it is merged into this one, so the
+ * preference key (`diff-approval:md-diff-style`) is gone and nothing reads it.
+ *
+ * THE FIELD NAME IS TEMPORARY. It carries `temp` exactly so nothing new is built on it: when the new preview
+ * is ready this switch is renamed, defaulted ON and migrated, and the temporary name disappears. The stored
+ * key below shares that fate; do not expose it as a supported setting.
+ */
+const TEMP_PREVIEW_V2_KEY = 'diff-approval:temp-preview-v2'
+
+/** Window event: the temporary structure-render switch was flipped (see {@link setTempPreviewV2Enabled}). */
+export const TEMP_PREVIEW_V2_CHANGED_EVENT = 'diff-approval:temp-preview-v2-changed'
+
+/**
+ * Whether the temporary switch for the structure-rendered Markdown diff is on.
+ *
+ * Absent means OFF — the old preview keeps working exactly as before for a reader who never flips it.
+ *
+ * @returns whether the new preview is enabled.
+ */
+export function tempPreviewV2Enabled(): boolean {
+  return localStorage.getItem(TEMP_PREVIEW_V2_KEY) === '1'
+}
+
+/** Persist the temporary structure-render switch, and tell the open panel to redraw. */
+export function setTempPreviewV2Enabled(value: boolean): void {
+  localStorage.setItem(TEMP_PREVIEW_V2_KEY, value ? '1' : '0')
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(TEMP_PREVIEW_V2_CHANGED_EVENT))
+}
+
 /**
  * Whether the diff's code uses the font this plugin bundles.
  *

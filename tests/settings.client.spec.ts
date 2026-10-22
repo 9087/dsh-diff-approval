@@ -15,6 +15,7 @@ import {
   setDiffAddColor, setDiffDelColor, setDiffFontScale, setDiffLineHeight, setFileListFloat, setLanguageForSuffix, setMdMaxWidth, setMdPreviewEnabled, setQuickSummonKey, setTabWidth, tabWidth,
   setPanelCover, setPanelPresentation,
   chipMenuEnabled, setChipMenuEnabled,
+  TEMP_PREVIEW_V2_CHANGED_EVENT, setTempPreviewV2Enabled, tempPreviewV2Enabled,
 } from '../src/client/settings.ts'
 import { en, zh } from '../src/client/locales.ts'
 
@@ -57,6 +58,42 @@ describe('settings.commentMode', () => {
     expect(COMMENT_MODE_CHANGED_EVENT).not.toBe('diff-approval:comment-mode')
     expect(COMMENT_MODE_CHANGED_EVENT).toBe('diff-approval:comment-mode-changed')
     expect(CODE_FONT_CHANGED_EVENT).not.toBe('diff-approval:mono-font')
+  })
+})
+
+describe('settings.tempPreviewV2', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('defaults OFF, and only an explicit 1 turns it on', () => {
+    // The new preview ships behind a TEMPORARY release gate: absent means the original preview keeps working
+    // for everyone, and only a reader who switches it on gets the new one. The stored key carries `temp`
+    // on purpose — it is not the final field and will be renamed (and migrated) with the flag.
+    expect(tempPreviewV2Enabled()).toBe(false)
+    localStorage.setItem('diff-approval:temp-preview-v2', '1')
+    expect(tempPreviewV2Enabled()).toBe(true)
+
+    setTempPreviewV2Enabled(false)
+    expect(localStorage.getItem('diff-approval:temp-preview-v2')).toBe('0')
+    expect(tempPreviewV2Enabled()).toBe(false)
+    setTempPreviewV2Enabled(true)
+    expect(localStorage.getItem('diff-approval:temp-preview-v2')).toBe('1')
+    expect(tempPreviewV2Enabled()).toBe(true)
+  })
+
+  it('announces a flip on its own event, distinct from the storage key', () => {
+    // The open panel re-renders off this event (the Settings tab is a different mount), so a flip has to
+    // announce itself — and the event name must not be the key literal, or every grep becomes a guess.
+    expect(TEMP_PREVIEW_V2_CHANGED_EVENT).not.toBe('diff-approval:temp-preview-v2')
+    const seen: string[] = []
+    const listener = (): void => { seen.push('changed') }
+    window.addEventListener(TEMP_PREVIEW_V2_CHANGED_EVENT, listener)
+    try {
+      setTempPreviewV2Enabled(true)
+      setTempPreviewV2Enabled(false)
+    } finally {
+      window.removeEventListener(TEMP_PREVIEW_V2_CHANGED_EVENT, listener)
+    }
+    expect(seen.length).toBe(2)
   })
 })
 

@@ -69,7 +69,7 @@ import type { VcsChange, VcsImportInput, ShellExecutorLike } from './vcs.ts'
 import { createUpdateCheck } from './version.ts'
 import type { DiffApprovalUpdateValue } from './types.ts'
 import type {
-  DiffApprovalActionValue, DiffApprovalAddOutcome, DiffApprovalAddValue, DiffApprovalBlockTarget, DiffApprovalBrowseEntry, DiffApprovalBrowseValue,
+  DiffApprovalActionValue, DiffApprovalAddOutcome, DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBlockTarget, DiffApprovalBrowseEntry, DiffApprovalBrowseValue,
   DiffApprovalBulkValue, DiffApprovalListCountValue, DiffApprovalListValue, DiffApprovalOpenAction, DiffApprovalOpenValue, DiffApprovalPreviewImageValue, DiffApprovalRefreshValue,
   CommentAnchor, CommentQuoteLine, CommentRecord, DiffApprovalCommentAddValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue,
   LineageDirection, PendingEntry, PendingEntryKind, PendingFileDiff, SessionLineage, VcsImportValue,
@@ -3020,8 +3020,21 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // last change and the caller asked to remove it, the entry leaves the
         // list now (the panel's prompt rides this same request); otherwise it
         // stays listed with no pending diff, removed by a later keep/revert.
-        const accepted = contentRangeOf(entry.newText, blockTarget.block.newStart, blockTarget.block.newEnd)
-        const updatedOld = replaceContentLines(entry.oldText, blockTarget.block.oldStart, blockTarget.block.oldEnd, accepted)
+        //
+        // A block that names CHARACTER spans (a change smaller than a line, from the rendered preview) is
+        // accepted on exactly those characters; every other caller names line ranges and takes the path it
+        // always took.
+        const chars = charSpansOf(blockTarget.block)
+        let updatedOld: string
+        if (chars === undefined) {
+          const accepted = contentRangeOf(entry.newText, blockTarget.block.newStart, blockTarget.block.newEnd)
+          updatedOld = replaceContentLines(entry.oldText, blockTarget.block.oldStart, blockTarget.block.oldEnd, accepted)
+        } else {
+          const accepted = entry.newText.slice(chars.new.start, chars.new.end)
+          const spliced = spliceChars(entry.oldText, chars.old.start, chars.old.end, accepted)
+          if (spliced === undefined) return rpcError('block character span does not fit the file')
+          updatedOld = spliced
+        }
         store.update(blockTarget.id, { oldText: updatedOld })
         const afterEntry: PendingEntry = { ...entry, oldText: updatedOld, updatedAt: Date.now() }
         pushUndo(blockTarget.sessionId,
@@ -3056,12 +3069,21 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // Undo this block: restore its old side into the new text and write
         // the file back. The entry stays even when now fully reverted
         // (newText === oldText): the file stays listed with no pending diff.
-        const restored = contentRangeOf(entry.oldText, blockTarget.block.oldStart, blockTarget.block.oldEnd)
-        const updatedNew = replaceContentLines(entry.newText, blockTarget.block.newStart, blockTarget.block.newEnd, restored)
+        const revertChars = charSpansOf(blockTarget.block)
+        let revertedText: string
+        if (revertChars === undefined) {
+          const restored = contentRangeOf(entry.oldText, blockTarget.block.oldStart, blockTarget.block.oldEnd)
+          revertedText = replaceContentLines(entry.newText, blockTarget.block.newStart, blockTarget.block.newEnd, restored)
+        } else {
+          const restored = entry.oldText.slice(revertChars.old.start, revertChars.old.end)
+          const spliced = spliceChars(entry.newText, revertChars.new.start, revertChars.new.end, restored)
+          if (spliced === undefined) return rpcError('block character span does not fit the file')
+          revertedText = spliced
+        }
         // Write the file in the entry's current EOL (uniform), and keep the
         // store's newText in step with the bytes actually written, so a later
         // read never sees a line-ending-only drift.
-        const content = reencodeEol(updatedNew, detectEol(entry.newText))
+        const content = reencodeEol(revertedText, detectEol(entry.newText))
         store.update(blockTarget.id, { newText: content })
         const afterEntry: PendingEntry = { ...entry, newText: content, updatedAt: Date.now() }
         // A block-revert that empties a created file deletes it and is not
@@ -3091,7 +3113,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // one gesture would be undoable from one view and not another.
         if (undo !== undefined) pushUndo(blockTarget.sessionId, undo.before, undo.after)
         persistSession()
-        const fullyResolved = contentEqual(updatedNew, entry.oldText)
+        const fullyResolved = contentEqual(revertedText, entry.oldText)
         if (fullyResolved && blockTarget.removeWhenResolved === true) {
           // Snapshotted before the drop: an entry whose last block just resolved leaves the list here,
           // and it takes its threads with it.
@@ -3723,12 +3745,61 @@ function blockTargetOf(payload: unknown): DiffApprovalBlockTarget | undefined {
   const { oldStart, oldEnd, newStart, newEnd } = block as Record<string, unknown>
   const numbers = [oldStart, oldEnd, newStart, newEnd]
   if (!numbers.every((value) => typeof value === 'number' && Number.isFinite(value))) return undefined
+  // The optional character spans ride along with a change finer than a line; a malformed one is ignored
+  // rather than refused, so the line range the block still carries stays usable.
+  const oldChars = charSpanOf((block as Record<string, unknown>).oldChars)
+  const newChars = charSpanOf((block as Record<string, unknown>).newChars)
   const removeWhenResolved = (payload as Record<string, unknown>).removeWhenResolved
   return {
     ...target,
-    block: { oldStart, oldEnd, newStart, newEnd } as DiffApprovalBlockTarget['block'],
+    block: {
+      oldStart, oldEnd, newStart, newEnd,
+      ...(oldChars !== undefined && newChars !== undefined ? { oldChars, newChars } : {}),
+    } as DiffApprovalBlockTarget['block'],
     removeWhenResolved: typeof removeWhenResolved === 'boolean' ? removeWhenResolved : undefined,
   }
+}
+
+/** Narrow one wire character span: two finite, non-negative, ordered offsets. */
+function charSpanOf(value: unknown): { start: number; end: number } | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const { start, end } = value as Record<string, unknown>
+  if (typeof start !== 'number' || typeof end !== 'number') return undefined
+  if (!Number.isInteger(start) || !Number.isInteger(end)) return undefined
+  if (start < 0 || end < start) return undefined
+  return { start, end }
+}
+
+/**
+ * The pair of character spans a block names, when it names both.
+ *
+ * A block carries either both spans (a preview's sub-line change) or neither (every line-based caller); one
+ * without the other is meaningless and is treated as absent.
+ *
+ * @param block - the incoming block range.
+ * @returns the two spans, or undefined for a line-based block.
+ */
+function charSpansOf(block: DiffApprovalBlockRange): { old: { start: number; end: number }; new: { start: number; end: number } } | undefined {
+  if (block.oldChars === undefined || block.newChars === undefined) return undefined
+  return { old: block.oldChars, new: block.newChars }
+}
+
+/**
+ * Replace `[start, end)` of `text` with `insert`, refusing a span that does not fit.
+ *
+ * The character-level counterpart of `replaceContentLines` (which works in whole lines): a Markdown preview
+ * block can be smaller than a line — a changed table cell beside an unchanged one — and keeping or reverting
+ * just that change must not touch its neighbours on the same line.
+ *
+ * @param text - the file the span indexes.
+ * @param start - first character to replace, 0-based.
+ * @param end - offset just past the last character to replace.
+ * @param insert - what takes its place.
+ * @returns the new text, or undefined when the span is out of range.
+ */
+function spliceChars(text: string, start: number, end: number, insert: string): string | undefined {
+  if (start > end || end > text.length) return undefined
+  return text.slice(0, start) + insert + text.slice(end)
 }
 
 /** Narrow a wire payload to one keep/revert target. */

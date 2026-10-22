@@ -2,7 +2,7 @@
 
 import { Component, Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
+import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactElement, ReactNode } from 'react'
 import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconEllipsisOutline16, IconFolderOpenOutline16, IconListPenOutline16, IconPanelLeftOutline16, IconPlusOutline16, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from './dsh-icons.ts'
 import type { MenuEntry } from './dsh-icons.ts'
 import { usePublishedSessionId, selectedSessionOf, unreviewableSession } from './session-seat.ts'
@@ -31,7 +31,7 @@ import {
 } from './discussion.ts'
 import type { Discussion, DiscussionMessage, DiscussionQuoteLine } from './discussion.ts'
 import { frameFollowIsAnimated, frameFollowKeyframes } from './scroll-follow.ts'
-import { renderMarkdownPreview } from './markdown-preview.ts'
+import { previewUnits, renderMarkdownPreview } from './markdown-preview.ts'
 import { resolvePreviewImages } from './markdown-images.ts'
 import type { ChangeBlock, DiffPairRows, IntraRun, WholeFileDiffRow } from './whole-file-diff.ts'
 import { computeSideBySideDiff, searchPairs } from './split-diff.ts'
@@ -55,7 +55,7 @@ import { dismissedUpdateVersion, dismissUpdate, forgetPlacedThreadsNotIn, lastPa
 import type { PlacedThread, ThreadLocal } from './panel-memory.ts'
 import { composerCoveredByPanel, leaveComposerCaret } from './composer-cover.ts'
 import { categoryColor } from './category-color.ts'
-import { chipMenuEnabled, commentModeEnabled, COMMENT_MODE_CHANGED_EVENT, confirmFileRemoveEnabled, COVER_CHANGED_EVENT, discussionRoundLimit, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
+import { chipMenuEnabled, commentModeEnabled, COMMENT_MODE_CHANGED_EVENT, confirmFileRemoveEnabled, COVER_CHANGED_EVENT, discussionRoundLimit, fileListFloat, includeUntrackedEnabled, keybindingOf, languageForSuffix, matchesShortcut, mdMaxWidth, mdPreviewEnabled, navLeadRows, panelCover, panelPresentation, pasteOnCopyEnabled, quickSummonKey, searchCaseSensitive, searchWholeWord, setFileListFloat, setLanguageForSuffix, setMdPreviewEnabled, setPanelCover, setPanelPresentation, setSearchCaseSensitive, setSearchWholeWord, setSplitMode, setWrapEnabled, splitMode, tabWidth, TEMP_PREVIEW_V2_CHANGED_EVENT, tempPreviewV2Enabled, wrapEnabled, diffAddColor, diffDelColor, diffFontScale, diffLineHeight } from './settings.ts'
 import type { DiffApprovalCover } from './settings.ts'
 import { matchRangesOf } from './search.ts'
 import type { SearchOptions } from './search.ts'
@@ -742,14 +742,36 @@ const BLOCK_ACTIONS_FRAME_PX = 40
  *  view). */
 const FRAME_INSET_PX = 8
 
+/** One dashed outline box in the preview's content coordinates, moved on scroll by `top`. */
+interface PreviewUnitBox {
+  contentTop: number
+  height: number
+  left: number
+  right: number
+}
+
 /** One Markdown-preview frame's measured placement. `contentBottom` is the block
- *  group's bottom edge in content coordinates (scroll independent), `maxTop` the
- *  lowest top the frame may take inside the pane, `right` its inset from the
- *  pane's right edge. */
+ *  group's bottom edge in content coordinates (scroll independent), `right` its
+ *  inset from the pane's right edge. */
 interface PreviewFramePlacement {
   contentBottom: number
-  maxTop: number
+  /**
+   * The hovered change's TOP edge in content coordinates, for the hover frame.
+   *
+   * The frame prefers the space under the change, but a frame with a source row is tall: when it would run
+   * past the pane's bottom edge it hangs ABOVE the change instead, off this edge. Undefined for the selection
+   * frame, which spans blocks and is only clamped into the pane.
+   */
+  contentTop?: number
   right: number
+  /**
+   * The hovered element's own left edge, in the pane's content coordinates.
+   *
+   * Set for the HOVER frame, which belongs under the change it is about: a rendered document has no rows,
+   * so the reader has to see the toolbar attached to the element the pointer is on. Undefined for the
+   * selection frame, which spans blocks and keeps the code view's right-edge anchor.
+   */
+  contentLeft?: number
 }
 
 /** One Markdown-preview flash box's measured placement: the jumped-to block's
@@ -3788,6 +3810,84 @@ function previewBlockAt(node: Node | null): number | undefined {
   return Number.isInteger(index) && index >= 0 ? index : undefined
 }
 
+/** One side of the preview's source row, with the grammar it is written in. */
+interface PreviewSourceRow {
+  old?: string
+  new?: string
+  /** The grammar the row is highlighted with: Markdown source, or YAML for front matter. */
+  grammar: string
+  /** The change draws nothing in the document (a pair of no-rendering blocks), so the row says so. */
+  invisible?: boolean
+}
+
+/**
+ * The source row a hovered twin carries, for the preview's toolbar.
+ *
+ * A change the rendering cannot show is drawn as the two versions side by side, with the part that is STILL
+ * invisible (a link's target, an image's caption) carried as data attributes on the twin. The toolbar shows
+ * them while that change is hovered, highlighted in the file's own language.
+ *
+ * @param element - the hovered change's element (or one inside it).
+ * @returns the two source lines and their grammar, or undefined when the rendering already says it all.
+ */
+function previewSourceRowOf(element: Element | null | undefined): PreviewSourceRow | undefined {
+  const unit = element?.closest('[data-md-block]') as HTMLElement | null
+  if (unit === null || unit === undefined) return undefined
+  let before = unit.dataset.mdDiffOld
+  let after = unit.dataset.mdDiffNew
+  let grammar = unit.dataset.mdDiffGrammar
+  // The double column draws the change in BOTH columns and keeps each side's source on its own element, so a
+  // hovered element may carry only half of it: read the same unit's element in the other column too. The
+  // toolbar's row then always shows the before AND the after version, whichever side was pointed at.
+  const id = unit.dataset.mdBlock
+  if ((before === undefined || after === undefined) && id !== undefined) {
+    const root = unit.closest('[data-diff-md-preview-body]') ?? unit.ownerDocument
+    for (const other of root.querySelectorAll<HTMLElement>(`[data-md-block="${id}"]`)) {
+      if (other === unit) continue
+      before ??= other.dataset.mdDiffOld
+      after ??= other.dataset.mdDiffNew
+      grammar ??= other.dataset.mdDiffGrammar
+      if (before !== undefined && after !== undefined) break
+    }
+  }
+  if (before === undefined && after === undefined) return undefined
+  return {
+    ...(before !== undefined ? { old: before } : {}),
+    ...(after !== undefined ? { new: after } : {}),
+    grammar: grammar ?? 'markdown',
+    // A no-rendering pair: what it stands for is not on the page at all, so the row names it as such.
+    ...(unit.classList.contains('mdTwinPhantom') ? { invisible: true } : {}),
+  }
+}
+
+/**
+ * One line (or a few lines) of the preview's source row, syntax-highlighted.
+ *
+ * The row is source: a link reads as the Markdown it was written in, a front-matter line as YAML. It is
+ * tokenized with the same windowed highlighter the code view uses, on the same `--shiki-*` colour sheet, so a
+ * link's text, brackets and target are told apart instead of reading as one grey run.
+ *
+ * @param props.text - the source to show.
+ * @param props.grammar - the grammar to tokenize it with.
+ * @returns the highlighted content.
+ */
+function PreviewSourceLine({ text, grammar }: { text: string; grammar: string }): ReactElement {
+  const nodes = useMemo(() => {
+    const lines = text.split('\n')
+    const highlighted = highlightWindow(lines, grammar, 0, lines.length)
+    if (highlighted === undefined) return text
+    return highlighted.runs.map((line, lineIndex) => (
+      <Fragment key={lineIndex}>
+        {lineIndex > 0 ? '\n' : null}
+        {line.map((run, runIndex) => (
+          <span key={runIndex} style={run.style}>{run.text}</span>
+        ))}
+      </Fragment>
+    ))
+  }, [text, grammar])
+  return <>{nodes}</>
+}
+
 /** Character offset of a selection boundary within its line's code text. A
  * boundary outside the code cell (the line-number gutter) sits at the line's
  * start — offset 0, never the line's end — so it never skips the line. */
@@ -4148,12 +4248,62 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   // is single-column (merged, unified-like) or double-column (before | after).
   // The default comes from the persisted setting (settable in DSH Settings).
   const [mdPreview, setMdPreview] = useState(() => mdPreviewEnabled())
+  /**
+   * Which renderer draws the preview: the ONE switch for the structure-rendered Markdown diff. It is read
+   * once here and re-read on the switch's own event, because the Settings section is a different mount:
+   * without the listener a flip there would only reach the open panel on the next file or reload.
+   *
+   * The STORAGE FIELD is temporary (`tempPreviewV2Enabled`, renamed once the new preview is ready); the
+   * behaviour is not: ON is the structure renderer, OFF is the original fragment renderer and the source
+   * view's line blocks, exactly as before.
+   */
+  const [newPreview, setNewPreview] = useState(tempPreviewV2Enabled)
+  useEffect(() => {
+    const onFlag = (): void => { setNewPreview(tempPreviewV2Enabled()) }
+    window.addEventListener(TEMP_PREVIEW_V2_CHANGED_EVENT, onFlag)
+    return () => {
+      window.removeEventListener(TEMP_PREVIEW_V2_CHANGED_EVENT, onFlag)
+    }
+  }, [])
+  /** The renderer actually in use (see the switch above). */
+  const mdStyle = newPreview ? 'structure' : 'blocks'
   // The preview replaces the code view only for a Markdown file while the
   // preference is on. The stored preference alone (a non-Markdown file, or a
   // manual language override) must never hide the source view's own controls —
   // so everything below that asks "is the preview showing?" asks this, not
   // `mdPreview`.
   const previewActive = mdPreview && lang === 'markdown'
+  /**
+   * The rendered preview, and how many of its changes the rendering cannot show.
+   *
+   * ONE figure feeds both the body and the toolbar's count, so the button can never disagree with the dots
+   * on screen; the dots themselves are counted off the same HTML the body is filled with.
+   */
+  /**
+   * The caption a pair of no-rendering blocks carries, so the reader knows what those tinted squares are
+   * without hovering. It is localization, so the renderer takes it from here rather than inventing text.
+   */
+  const invisibleContentLabel = t('panel.invisibleContent')
+  const previewHtml = useMemo(
+    () => (previewActive
+      ? renderMarkdownPreview(file.oldText, file.newText, splitView ? 'double' : 'single', mdStyle, { invisible: invisibleContentLabel })
+      : ''),
+    [previewActive, splitView, file.oldText, file.newText, mdStyle, invisibleContentLabel],
+  )
+  /**
+   * The preview's own change units: character-level changes, so a line holding two changes (a table row's
+   * reworded cell and its retargeted link) numbers them separately and keeps each on its own characters.
+   *
+   * BOTH preview layouts number units — the single merged column and the double column draw the same changes,
+   * and a toolbar that counted lines in one and characters in the other would renumber everything on a view
+   * switch (a change on a shared line would read as one block in one layout and two in the other). The
+   * original fragment renderer keeps the source view's line blocks, so nothing about it changes.
+   */
+  const previewUnitMode = previewActive && mdStyle === 'structure'
+  const previewUnitsList = useMemo(
+    () => (previewUnitMode ? previewUnits(file.oldText, file.newText) : []),
+    [previewUnitMode, file.oldText, file.newText],
+  )
   /**
    * A link pressed inside the Markdown PREVIEW is a file reference, not a navigation.
    *
@@ -4405,6 +4555,22 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   const flashRowRef = useRef<number | undefined>(undefined)
   const [hScrollbarPx, setHScrollbarPx] = useState(0)
   const [hoveredBlock, setHoveredBlock] = useState<number | undefined>(undefined)
+  /**
+   * The changed ELEMENT the preview's pointer is on.
+   *
+   * `hoveredBlock` is the source line the keep/revert acts on; this is the rendered piece the reader is
+   * pointing at — one cell, one card, one list item of a line that may hold several changes. The frame and
+   * the outline follow it, so each change reads as its own place.
+   */
+  const [previewUnit, setPreviewUnit] = useState<HTMLElement | undefined>(undefined)
+  /**
+   * The source row the hovered change's twin carries, shown in the toolbar.
+   *
+   * A twin shows BOTH versions of a change the rendering could not otherwise express; whatever the rendering
+   * still does not say (a link's target, an image's caption) rides on the twin as data attributes and is read
+   * here on hover — so the source difference is a detail on demand rather than a card in the document.
+   */
+  const [previewSourceRow, setPreviewSourceRow] = useState<PreviewSourceRow | undefined>(undefined)
   const [selection, setSelection] = useState<RowRange | undefined>(undefined)
   // Comment mode (ON by default — see `commentModeEnabled`): whether the panel
   // offers to comment on a range at all. The event below is what re-renders the panel when
@@ -4592,6 +4758,16 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   const [previewFrame, setPreviewFrame] = useState<PreviewFramePlacement | undefined>(undefined)
   const [previewCovered, setPreviewCovered] = useState<number[]>([])
   const [previewSelectionFrame, setPreviewSelectionFrame] = useState<PreviewFramePlacement | undefined>(undefined)
+  /**
+   * The hovered unit's dashed outline, in content coordinates so the scroll path can move it without a render.
+   *
+   * ONE box around everything the unit drew in the single column (the struck words and the added ones
+   * together). In the DOUBLE column the change has a version in each column, so there is one box per side —
+   * both matched versions are framed.
+   */
+  const [previewUnitBoxes, setPreviewUnitBoxes] = useState<PreviewUnitBox[]>([])
+  const previewUnitOutlineLayerRef = useRef<HTMLDivElement>(null)
+  const previewUnitBoxesStateRef = useRef<PreviewUnitBox[]>([])
   const previewScrollTopRef = useRef(0)
   const previewHoverFrameRef = useRef<HTMLDivElement>(null)
   const previewSelectionFrameRef = useRef<HTMLDivElement>(null)
@@ -4720,6 +4896,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   useEffect(() => {
     bodyRef.current?.focus()
     setHoveredBlock(undefined)
+    setPreviewUnit(undefined)
     setSelection(undefined)
     setLangOverride(undefined)
     setLangMenuOpen(false)
@@ -4885,6 +5062,20 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   // `selectionTargetRanges`), which is what lets a partial selection act on part of a block.
   const selectionRange = useMemo(() => {
     if (coveredBlockIndices.length === 0) return undefined
+    // The preview's covered indices are its UNITS: their line ranges give the host a line range to fold in,
+    // which is the same rule the preview has always used for a selection.
+    if (previewActive && previewUnitMode) {
+      const covered = coveredBlockIndices
+        .map(index => previewUnitsList[index])
+        .filter((unit): unit is NonNullable<typeof unit> => unit !== undefined)
+      if (covered.length === 0) return undefined
+      return {
+        oldStart: Math.min(...covered.map(unit => unit.oldLines.start)),
+        oldEnd: Math.max(...covered.map(unit => unit.oldLines.end)),
+        newStart: Math.min(...covered.map(unit => unit.newLines.start)),
+        newEnd: Math.max(...covered.map(unit => unit.newLines.end)),
+      }
+    }
     const firstIndex = coveredBlockIndices[0]
     const lastIndex = coveredBlockIndices[coveredBlockIndices.length - 1]
     if (firstIndex === undefined || lastIndex === undefined) return undefined
@@ -4892,7 +5083,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const last = model.blocks[lastIndex]
     if (first === undefined || last === undefined) return undefined
     return blockRangesOf(model.diff.rows, { start: first.start, end: last.end })
-  }, [coveredBlockIndices, model])
+  }, [coveredBlockIndices, model, previewActive, previewUnitMode, previewUnitsList])
 
   // In-file search: matching lines over the whole diff (not just the rendered
   // window), so the count and jumps stay correct while the virtual list
@@ -4921,6 +5112,139 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    * @param indices - the block indices the frame acts on.
    * @returns the placement, or undefined when nothing is rendered.
    */
+  /** An estimate of the frame's width, for clamping it inside the pane when it hangs under an element. */
+  const PREVIEW_FRAME_WIDTH_PX = 270
+  /**
+   * Air the hover outline keeps around the change's own extent.
+   *
+   * Enough that the dashed rule WRAPS the change instead of sitting on its glyph edge, and the same on both
+   * axes so the frame reads as centred; not so much that the rule drifts away from the tinted block it
+   * frames (the horizontal gap is the one the eye notices, so it stays smaller than the label's own padding).
+   */
+  const PREVIEW_OUTLINE_AIR_X = 3
+  const PREVIEW_OUTLINE_AIR_Y = 2
+
+  /**
+   * The hovered unit's outline boxes.
+   *
+   * In the single column the unit is ONE box, however many elements it drew. In the DOUBLE column each side
+   * holds its own version of the change (inside its `data-diff-doc-side` wrapper), so there is one box per
+   * side: pointing at either version frames both matched versions of the change.
+   *
+   * @param index - the unit number.
+   * @returns the boxes in content coordinates, in document order; empty when the unit is not rendered.
+   */
+  const previewUnitBoxesFor = useCallback((index: number): PreviewUnitBox[] => {
+    const body = mdPreviewBodyRef.current
+    if (body === null) return []
+    const elements = [...body.querySelectorAll<HTMLElement>(`[data-md-block="${index}"]`)]
+    if (elements.length === 0) return []
+    const bodyRect = body.getBoundingClientRect()
+    previewScrollTopRef.current = body.scrollTop
+    // Group by rendered side: no wrapper in the single column means one group (one union box).
+    const groups = new Map<Element | null, HTMLElement[]>()
+    for (const element of elements) {
+      const side = element.closest('[data-diff-doc-side]')
+      const list = groups.get(side) ?? []
+      list.push(element)
+      groups.set(side, list)
+    }
+    const boxes: PreviewUnitBox[] = []
+    for (const group of groups.values()) {
+      let top = Number.POSITIVE_INFINITY
+      let bottom = Number.NEGATIVE_INFINITY
+      let left = Number.POSITIVE_INFINITY
+      let right = Number.NEGATIVE_INFINITY
+      for (const element of group) {
+        const rect = element.getBoundingClientRect()
+        top = Math.min(top, rect.top)
+        bottom = Math.max(bottom, rect.bottom)
+        left = Math.min(left, rect.left)
+        right = Math.max(right, rect.right)
+      }
+      if (!Number.isFinite(top) || !Number.isFinite(left)) continue
+      // A couple of pixels of air, so the dashed rule does not sit on the glyphs' edge.
+      boxes.push({
+        contentTop: top - bodyRect.top + body.scrollTop - PREVIEW_OUTLINE_AIR_Y,
+        height: Math.max(2, bottom - top) + PREVIEW_OUTLINE_AIR_Y * 2,
+        left: Math.max(0, left - bodyRect.left - PREVIEW_OUTLINE_AIR_X),
+        right: Math.max(0, bodyRect.right - right - PREVIEW_OUTLINE_AIR_X),
+      })
+    }
+    return boxes
+  }, [])
+
+  /**
+   * One change unit's rendered extent: the union of every element tagged with its number.
+   *
+   * A unit is usually TWO runs (the struck old words and the added new ones). Framing only the run under the
+   * pointer would clip the change in half, so the outline and the toolbar both follow the union: hovering
+   * either side reads as the whole edit, and the dashed box goes round both words.
+   *
+   * @param index - the unit number.
+   * @returns the box in content coordinates and the matching frame placement, or undefined when the unit is
+   *   not rendered.
+   */
+  const previewUnitGeometry = useCallback((index: number): { contentTop: number; height: number; left: number; right: number; frame: PreviewFramePlacement } | undefined => {
+    const body = mdPreviewBodyRef.current
+    if (body === null) return undefined
+    const elements = [...body.querySelectorAll<HTMLElement>(`[data-md-block="${index}"]`)]
+    if (elements.length === 0) return undefined
+    const bodyRect = body.getBoundingClientRect()
+    let top = Number.POSITIVE_INFINITY
+    let bottom = Number.NEGATIVE_INFINITY
+    let left = Number.POSITIVE_INFINITY
+    let right = Number.NEGATIVE_INFINITY
+    for (const element of elements) {
+      const rect = element.getBoundingClientRect()
+      top = Math.min(top, rect.top)
+      bottom = Math.max(bottom, rect.bottom)
+      left = Math.min(left, rect.left)
+      right = Math.max(right, rect.right)
+    }
+    if (!Number.isFinite(top) || !Number.isFinite(left)) return undefined
+    previewScrollTopRef.current = body.scrollTop
+    const contentTop = top - bodyRect.top + body.scrollTop
+    const height = Math.max(2, bottom - top)
+    // A couple of pixels of air, so the dashed rule does not sit on the glyphs' edge.
+    const leftInset = Math.max(0, left - bodyRect.left - 3)
+    const rightInset = Math.max(0, bodyRect.right - right - 3)
+    return {
+      contentTop,
+      height,
+      left: leftInset,
+      right: rightInset,
+      frame: {
+        contentTop,
+        contentBottom: contentTop + height,
+        contentLeft: Math.max(0, Math.min(leftInset, Math.max(0, body.clientWidth - PREVIEW_FRAME_WIDTH_PX))),
+        right: 0,
+      },
+    }
+  }, [])
+
+  /**
+   * Place the hover frame under the ELEMENT the pointer is on (the layouts that do not number units — the
+   * original fragment renderer, and the double column).
+   *
+   * @param element - the changed element under the pointer.
+   * @returns the placement, or undefined when the element has no measurable box.
+   */
+  const previewFrameForUnit = useCallback((element: HTMLElement): PreviewFramePlacement | undefined => {
+    const body = mdPreviewBodyRef.current
+    if (body === null || !body.contains(element)) return undefined
+    const bodyRect = body.getBoundingClientRect()
+    const rect = element.getBoundingClientRect()
+    previewScrollTopRef.current = body.scrollTop
+    const left = rect.left - bodyRect.left + body.scrollLeft
+    return {
+      contentTop: rect.top - bodyRect.top + body.scrollTop,
+      contentBottom: rect.bottom - bodyRect.top + body.scrollTop,
+      contentLeft: Math.max(0, Math.min(left, Math.max(0, body.clientWidth - PREVIEW_FRAME_WIDTH_PX))),
+      right: 0,
+    }
+  }, [])
+
   const previewFrameFor = useCallback((indices: readonly number[]): PreviewFramePlacement | undefined => {
     const body = mdPreviewBodyRef.current
     if (body === null || indices.length === 0) return undefined
@@ -4937,23 +5261,60 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     previewScrollTopRef.current = body.scrollTop
     return {
       contentBottom: bottom - bodyRect.top + body.scrollTop,
-      maxTop: Math.max(0, body.clientHeight - BLOCK_ACTIONS_FRAME_PX),
       right: Math.max(0, bodyRect.right - contentRight) + FRAME_INSET_PX,
     }
   }, [])
 
-  /** One placement's viewport top at a given scroll offset, clamped into the pane. */
-  const previewFrameTop = (frame: PreviewFramePlacement | undefined, scrollTop: number): number | undefined =>
-    frame === undefined ? undefined : Math.min(Math.max(0, frame.contentBottom - scrollTop - 2), frame.maxTop)
+  /**
+   * The few pixels between a change and its hover frame — above its bottom edge, or under its top edge when
+   * the frame has to hang upwards. Positive on purpose: the old formula put the frame's top ON the change's
+   * bottom (a 2px overlap), which read as a negative gap.
+   */
+  const PREVIEW_FRAME_GAP_PX = 2
+
+  /**
+   * One placement's viewport top at a given scroll offset.
+   *
+   * The frame prefers the space UNDER the change. A frame carrying a source row is tall, so when it would run
+   * past the pane's bottom edge it hangs ABOVE the change instead — the same small gap, measured up from the
+   * change's top — and if neither side has room it is kept inside the pane rather than clipped. The height is
+   * the frame's MEASURED height: assuming a fixed one is what let a tall frame run off the bottom.
+   *
+   * @param frame - the placement.
+   * @param scrollTop - the pane's current scroll offset.
+   * @param height - the frame's measured height.
+   * @returns the frame's top in pane coordinates.
+   */
+  const previewFrameTop = (frame: PreviewFramePlacement | undefined, scrollTop: number, height = BLOCK_ACTIONS_FRAME_PX): number | undefined => {
+    if (frame === undefined) return undefined
+    const paneHeight = mdPreviewBodyRef.current?.clientHeight ?? 0
+    const highestTop = Math.max(0, paneHeight - height)
+    const below = frame.contentBottom - scrollTop + PREVIEW_FRAME_GAP_PX
+    const fitsBelow = below >= 0 && below + height <= paneHeight
+    if (fitsBelow || frame.contentTop === undefined) return Math.max(0, Math.min(below, highestTop))
+    const above = frame.contentTop - scrollTop - height - PREVIEW_FRAME_GAP_PX
+    if (above >= 0 && above + height <= paneHeight) return above
+    // Neither side fits (a change taller than the pane, or one scrolled to an edge): stay inside the pane.
+    return Math.max(0, Math.min(below, highestTop))
+  }
 
   /** Write one placement onto its element right away, so a scroll tracks the pane
    *  in the same frame as the content instead of waiting for a React render. */
   const applyPreviewFrame = (element: HTMLDivElement | null, frame: PreviewFramePlacement | undefined): void => {
     if (element === null || frame === undefined) return
-    const top = previewFrameTop(frame, previewScrollTopRef.current)
+    const top = previewFrameTop(frame, previewScrollTopRef.current, element.offsetHeight)
     if (top === undefined) return
     element.style.top = `${top}px`
-    element.style.right = `${frame.right}px`
+    // A frame that hangs under an element is placed by its LEFT edge, so it travels with the words it belongs
+    // to; the others stay pinned to the pane's right edge as the code view's does. The unused side is dropped
+    // rather than written, so the stylesheet's own rule for it stays in charge.
+    if (frame.contentLeft === undefined) {
+      element.style.removeProperty('left')
+      element.style.right = `${frame.right}px`
+    } else {
+      element.style.removeProperty('right')
+      element.style.left = `${frame.contentLeft}px`
+    }
   }
 
   /**
@@ -5024,23 +5385,57 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     applyPreviewFrame(previewSelectionFrameRef.current, previewSelectionFrame)
   }
 
+  /** Re-place the unit outlines at the mirrored scroll offset (one box per rendered side). */
+  const applyPreviewUnitBoxes = (): void => {
+    const layer = previewUnitOutlineLayerRef.current
+    const boxes = previewUnitBoxesStateRef.current
+    if (layer === null || boxes.length === 0) return
+    boxes.forEach((box, index) => {
+      const element = layer.children[index] as HTMLElement | undefined
+      if (element === undefined) return
+      element.style.top = `${box.contentTop - previewScrollTopRef.current}px`
+      element.style.height = `${box.height}px`
+      element.style.left = `${box.left}px`
+      element.style.right = `${box.right}px`
+    })
+  }
+
   /** Re-place every preview overlay: the frames follow the pointer and the
-   *  selection, the flash box the last jump. Only a user scroll uses this — the
-   *  landing path re-measures the flash instead, and writing the previous
-   *  placement there would stomp the element that React then declines to
-   *  rewrite (its style values come out equal, so the write is skipped). */
+   *  selection, the flash box the last jump, the outlines the hovered unit. Only a
+   *  user scroll uses this — the landing path re-measures the flash instead, and
+   *  writing the previous placement there would stomp the element that React then
+   *  declines to rewrite (its style values come out equal, so the write is
+   *  skipped). */
   const applyPreviewOverlays = (): void => {
     applyPreviewFrames()
     applyPreviewFlash(previewFlashRef.current, previewFlash)
+    applyPreviewUnitBoxes()
   }
 
-  // Place the preview's hover frame on the hovered block. Re-runs on a content
-  // change (a keep/revert rewrites the preview) and after images inline, since
-  // both move the block; scrolling is handled imperatively (see `onScroll`).
+  // Place the preview's hover frame and its outlines. A unit's outlines and toolbar follow its rendered
+  // elements (see `previewUnitBoxesFor`): one box in the single column, one per side in the double column, so
+  // both matched versions of the change are framed. The layouts that do not number units anchor to the
+  // hovered element. Re-runs on a content change (a keep/revert rewrites the preview) and after images inline,
+  // since both move the change; scrolling is handled imperatively (see `onScroll`).
   useLayoutEffect(() => {
     if (!previewActive) return
-    setPreviewFrame(hoveredBlock === undefined ? undefined : previewFrameFor([hoveredBlock]))
-  }, [mdPreview, lang, hoveredBlock, file.oldText, file.newText, splitView, mdImageTick, previewFrameFor])
+    const geometry = previewUnitMode && !splitView && hoveredBlock !== undefined
+      ? previewUnitGeometry(hoveredBlock)
+      : undefined
+    if (geometry !== undefined) {
+      setPreviewFrame(geometry.frame)
+      const boxes = previewUnitBoxesFor(hoveredBlock!)
+      setPreviewUnitBoxes(boxes)
+      previewUnitBoxesStateRef.current = boxes
+      return
+    }
+    setPreviewFrame(previewUnit === undefined ? undefined : previewFrameForUnit(previewUnit))
+    const boxes = previewUnitMode && splitView && hoveredBlock !== undefined
+      ? previewUnitBoxesFor(hoveredBlock)
+      : []
+    setPreviewUnitBoxes(boxes)
+    previewUnitBoxesStateRef.current = boxes
+  }, [mdPreview, lang, previewUnit, hoveredBlock, previewUnitMode, splitView, file.oldText, file.newText, mdImageTick, previewFrameForUnit, previewUnitGeometry, previewUnitBoxesFor])
 
   // Likewise for the selection frame: the last covered block's bottom edge.
   useLayoutEffect(() => {
@@ -5048,15 +5443,74 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     setPreviewSelectionFrame(previewFrameFor(previewCovered))
   }, [mdPreview, lang, previewCovered, file.oldText, file.newText, splitView, mdImageTick, previewFrameFor])
 
+  // The hover frame's own height decides which side of its change it hangs on: a short frame fits underneath,
+  // a tall one (the one carrying a source row) flips ABOVE the change near the pane's bottom instead of being
+  // clipped. The height is measurable only once the frame is mounted, so it is placed again right after the
+  // render that mounts or reshapes it — in a layout effect, before the first paint of the wrong position.
+  useLayoutEffect(() => {
+    if (!previewActive) return
+    applyPreviewFrames()
+  }, [previewActive, previewFrame, previewSourceRow, previewSelectionFrame])
+
   // A mode switch starts both preview interactions clean: a hover or a selection
   // from the other view must not carry over onto freshly rendered elements.
   useEffect(() => {
     setHoveredBlock(undefined)
+    setPreviewUnit(undefined)
+    setPreviewSourceRow(undefined)
     setPreviewCovered([])
   }, [mdPreview, lang])
 
-  /** The change blocks a live native selection inside the preview fully covers,
-   *  in order — the preview's counterpart of the code view's row-range rule. */
+  /**
+   * A short window after a frame button steps the preview in which content hover does not move it.
+   *
+   * The frame hangs under the change it belongs to, so stepping moves the buttons — the pointer travelling to
+   * their new place crosses whatever is between, and without this the hover would jump to that crossed change
+   * and the next press would step from the wrong place (or stop advancing at all). A deliberate hover after
+   * the window still moves it.
+   */
+  const hoverGuardRef = useRef(0)
+  const HOVER_GUARD_MS = 700
+
+  /**
+   * The preview's pending "hide the frame" timer.
+   *
+   * The frame shows while the pointer is ON the change it belongs to (or on the frame itself); leaving for
+   * context or blank space hides it. The hide waits only long enough for the pointer to cross the couple of
+   * pixels between the change and the buttons hanging under it — a longer grace reads as the toolbar lagging
+   * behind the pointer after it has already left the change.
+   */
+  const previewHideTimerRef = useRef<number | undefined>(undefined)
+  const PREVIEW_HIDE_DELAY_MS = 120
+
+  /** Forget a scheduled hide: the pointer is on a change, or has reached the frame. */
+  const cancelPreviewFrameHide = (): void => {
+    if (previewHideTimerRef.current === undefined) return
+    window.clearTimeout(previewHideTimerRef.current)
+    previewHideTimerRef.current = undefined
+  }
+
+  /** Hide the preview's frame (and its source row) right away. */
+  const hidePreviewFrame = (): void => {
+    cancelPreviewFrameHide()
+    setHoveredBlock(undefined)
+    setPreviewUnit(undefined)
+    setPreviewSourceRow(undefined)
+  }
+
+  /** Hide the frame in a moment, unless the pointer reaches it first. */
+  const schedulePreviewFrameHide = (): void => {
+    cancelPreviewFrameHide()
+    previewHideTimerRef.current = window.setTimeout(() => {
+      previewHideTimerRef.current = undefined
+      setHoveredBlock(undefined)
+      setPreviewUnit(undefined)
+      setPreviewSourceRow(undefined)
+    }, PREVIEW_HIDE_DELAY_MS)
+  }
+
+  /** The change blocks a live native selection inside the preview fully covers, in order — the preview's
+   *  counterpart of the code view's row-range rule. */
   const coveredPreviewBlocks = (): number[] => {
     const body = mdPreviewBodyRef.current
     const live = window.getSelection()
@@ -5064,20 +5518,23 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const range = live.getRangeAt(0)
     if (!body.contains(range.commonAncestorContainer)) return []
     const covered: number[] = []
-    for (let index = 0; index < model.blocks.length; index++) {
-      const elements = body.querySelectorAll(`[data-md-block="${index}"]`)
+    // The preview's indices are its units (see `previewUnitMode`) — the same numbers its toolbar shows.
+    const count = previewUnitMode ? previewUnitsList.length : model.blocks.length
+    for (let index = 0; index < count; index++) {
+      // Only the OUTERMOST tagged elements matter: a merged paragraph carries the block and so do the word
+      // runs inside it, and a selection that covers the paragraph must not be asked to cover each run too.
+      const elements = [...body.querySelectorAll(`[data-md-block="${index}"]`)].filter(element =>
+        element.parentElement?.closest(`[data-md-block="${index}"]`) === null)
       if (elements.length === 0) continue
-      let inside = true
-      for (const element of elements) {
+      // ANY of the unit's elements inside the selection covers it: in the double column the same change is
+      // rendered in both columns, and a selection is made in one of them.
+      const inside = elements.some(element => {
         const blockRange = document.createRange()
         blockRange.selectNode(element)
-        // The selection must start at or before the block and end at or after it.
-        if (range.compareBoundaryPoints(Range.START_TO_START, blockRange) > 0
-          || range.compareBoundaryPoints(Range.END_TO_END, blockRange) < 0) {
-          inside = false
-          break
-        }
-      }
+        // The selection must start at or before the element and end at or after it.
+        return range.compareBoundaryPoints(Range.START_TO_START, blockRange) <= 0
+          && range.compareBoundaryPoints(Range.END_TO_END, blockRange) >= 0
+      })
       if (inside) covered.push(index)
     }
     return covered
@@ -5124,15 +5581,40 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const bodyRect = body.getBoundingClientRect()
     const hitTop = hit.getBoundingClientRect().top - bodyRect.top + body.scrollTop
     const hitBottom = hit.getBoundingClientRect().bottom - bodyRect.top + body.scrollTop
-    // Its only caller is the search JUMP, so the hit goes to the middle of the pane — the rule the code
-    // view and the side-by-side view follow there too: the point of the jump is to read the occurrence it
-    // landed on.
+    // Its callers are the search JUMP and the invisible-change step, so the hit goes to the middle of the
+    // pane — the rule the code view and the side-by-side view follow there too: the point of the jump is to
+    // read the occurrence it landed on.
     const target = (hitTop + hitBottom) / 2 - body.clientHeight / 2
     const maxTop = Math.max(0, body.scrollHeight - body.clientHeight)
     const clamped = Math.max(0, Math.min(target, maxTop))
     if (body.scrollTop !== clamped) body.scrollTop = clamped
     previewScrollTopRef.current = body.scrollTop
     applyPreviewOverlays()
+  }
+
+  /**
+   * Step to the next/previous change UNIT in the preview, and centre the element that carries it.
+   *
+   * The preview counts its own units (see `previewUnits`), so its arrows walk those rather than the source
+   * view's line blocks — that is what lets the two changes of one table row be visited one at a time.
+   *
+   * @param direction - +1 forward, -1 back; both wrap.
+   */
+  const stepPreviewUnit = (direction: 1 | -1): void => {
+    const total = previewUnitsList.length
+    if (total === 0) return
+    hoverGuardRef.current = Date.now() + HOVER_GUARD_MS
+    cancelPreviewFrameHide()
+    const from = hoveredBlock ?? 0
+    const next = (from + direction + total) % total
+    setHoveredBlock(next)
+    const body = mdPreviewBodyRef.current
+    const element = body?.querySelector(`[data-md-block="${next}"]`)
+    if (element instanceof HTMLElement) {
+      setPreviewUnit(element)
+      setPreviewSourceRow(previewSourceRowOf(element))
+      scrollPreviewHitIntoView(element)
+    }
   }
 
   /**
@@ -5398,6 +5880,10 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   const onRowHover = useCallback((index: number) => {
     setHoveredBlock(blockIndexByRow.get(index))
   }, [blockIndexByRow])
+
+  // The hovered unit's outlines are drawn as overlay boxes around what the unit drew (see
+  // `previewUnitBoxesFor`): one union box in the single column, one per side in the double column, so the
+  // struck words and the added ones — or both matched versions — are framed together.
 
   // Virtual window over the fixed-height diff rows: only rows near the viewport
   // render, so a huge file never mounts tens of thousands of nodes. An unmounted
@@ -7073,11 +7559,20 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     await (action === 'keep'
       ? onBlockKeep(sessionId, file.id, range)
       : onBlockRevert(sessionId, file.id, range))
+    if (range.oldChars !== undefined) {
+      // A preview UNIT was resolved on its own characters: the source-line blocks keep their numbering, so
+      // there is no next slot to move to — just drop the pointer and let the re-render show what is left.
+      setHoveredBlock(undefined)
+      setPreviewUnit(undefined)
+      setPreviewSourceRow(undefined)
+      return
+    }
     const count = blockCountRef.current
     if (count === 0) return
     const next = blockAfterAction(operated, count)
     setFocus(next)
     setHoveredBlock(undefined)
+    setPreviewUnit(undefined)
     setScrollTick(tick => tick + 1)
     bumpFlash(false)
   }
@@ -7085,6 +7580,21 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   const handleBlockAction = async (action: 'keep' | 'revert'): Promise<void> => {
     if (busy || hoveredBlock === undefined) return
     const operated = hoveredBlock
+    if (previewUnitMode) {
+      const unit = previewUnitsList[operated]
+      if (unit === undefined) return
+      // The line range says where in the source view the change sits; the character spans are what the host
+      // acts on, so a change that shares its line with another is kept or reverted alone.
+      await runBlockAction(action, {
+        oldStart: unit.oldLines.start,
+        oldEnd: unit.oldLines.end,
+        newStart: unit.newLines.start,
+        newEnd: unit.newLines.end,
+        oldChars: unit.oldChars,
+        newChars: unit.newChars,
+      }, operated)
+      return
+    }
     const range = blockRanges[operated]!
     await runBlockAction(action, range, operated)
   }
@@ -8158,7 +8668,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       {failedMessage !== undefined && <p className={css.actionError} data-diff-action-error>{failedMessage}</p>}
       {previewActive ? (
         <MarkdownPreviewBoundary fallback={<div className={css.mdPreviewFallback} data-diff-md-preview-fallback>{t('panel.mdPreviewFailed')}</div>}>
-          <div className={css.mdPreviewWrap} onMouseLeave={() => { setHoveredBlock(undefined) }}>
+          <div className={css.mdPreviewWrap} onMouseLeave={hidePreviewFrame}>
             <div
               className={`${css.mdPreviewBody} ${splitView ? css.mdPreviewDouble : css.mdPreviewSingle}`}
               data-diff-md-preview-body
@@ -8172,25 +8682,43 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
                 previewScrollTopRef.current = event.currentTarget.scrollTop
                 applyPreviewOverlays()
               }}
+              onMouseLeave={(event) => {
+                // Moving onto the frame's own buttons keeps it; leaving the content anywhere else hides it.
+                const next = event.relatedTarget as Node | null
+                if (next instanceof Element
+                  && next.closest('[data-diff-block-actions],[data-diff-selection-actions]') !== null) return
+                hidePreviewFrame()
+              }}
               onMouseOver={(event) => {
                 // The rendered HTML is a flat blob to React: resolve the block from
-                // the event's target instead of wiring a handler per block. A
-                // pointer over the frames themselves keeps the current block (so
-                // moving onto the buttons never makes them disappear), while a
-                // pointer over context clears it — exactly like the code view,
-                // where hovering an unchanged line drops the frame.
+                // the event's target instead of wiring a handler per block. The frame belongs to ONE change:
+                // staying on it keeps it, and leaving for context or blank space hides it (after a beat, so
+                // crossing the gap to the buttons on the way does not make them vanish). Just below a step
+                // the pointer is travelling to the relocated buttons: what it crosses on the way is not a
+                // hover the reader asked for (see `hoverGuardRef`).
                 const target = event.target as Node | null
                 if (target instanceof Element
                   && target.closest('[data-diff-block-actions],[data-diff-selection-actions]') !== null) return
+                if (Date.now() < hoverGuardRef.current) return
+                const unit = target instanceof Element
+                  ? (target.closest('[data-md-block]') as HTMLElement | null)
+                  : null
                 const index = previewBlockAt(target)
+                if (index === undefined) {
+                  schedulePreviewFrameHide()
+                  return
+                }
+                cancelPreviewFrameHide()
                 if (index !== hoveredBlock) setHoveredBlock(index)
+                if (unit !== previewUnit) setPreviewUnit(unit ?? undefined)
+                setPreviewSourceRow(previewSourceRowOf(unit))
               }}
             >
               <div
                 className={css.mdPreviewContent}
                 data-diff-md-preview-content
                 style={{ maxWidth: splitView ? mdPreviewMaxWidthPx * 2 : mdPreviewMaxWidthPx }}
-                dangerouslySetInnerHTML={{ __html: renderMarkdownPreview(file.oldText, file.newText, splitView ? 'double' : 'single') }}
+                dangerouslySetInnerHTML={{ __html: previewHtml }}
               />
             </div>
             {searchBar}
@@ -8207,6 +8735,23 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
                   right: previewFlash.right,
                 }}
               />
+            )}
+            {previewUnitBoxes.length > 0 && (
+              <div ref={previewUnitOutlineLayerRef} className={css.mdUnitOutlineLayer} aria-hidden="true">
+                {previewUnitBoxes.map((box, index) => (
+                  <div
+                    key={index}
+                    className={css.mdUnitOutline}
+                    data-diff-unit-outline
+                    style={{
+                      top: box.contentTop - previewScrollTopRef.current,
+                      height: box.height,
+                      left: box.left,
+                      right: box.right,
+                    }}
+                  />
+                ))}
+              </div>
             )}
             {previewCovered.length > 0 && selectionRange !== undefined && previewSelectionFrame !== undefined ? (
               <div
@@ -8235,54 +8780,89 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
                   {t('action.revert')}
                 </button>
               </div>
-            ) : hoveredBlock !== undefined && model.blocks[hoveredBlock] !== undefined && previewFrame !== undefined ? (
+            ) : hoveredBlock !== undefined
+              && (previewUnitMode ? previewUnitsList[hoveredBlock] !== undefined : model.blocks[hoveredBlock] !== undefined)
+              && previewFrame !== undefined ? (
               <div
                 ref={previewHoverFrameRef}
-                className={css.blockActions}
+                className={previewSourceRow === undefined ? css.blockActions : `${css.blockActions} ${css.blockActionsWithSource}`}
                 data-diff-block-actions
-                style={{ top: previewFrameTop(previewFrame, previewScrollTopRef.current) ?? 0, right: previewFrame.right }}
+                data-diff-anchored={previewFrame.contentLeft === undefined ? undefined : ''}
+                data-diff-block-with-source={previewSourceRow === undefined ? undefined : ''}
+                style={{
+                  top: previewFrameTop(previewFrame, previewScrollTopRef.current) ?? 0,
+                  ...(previewFrame.contentLeft === undefined
+                    ? { right: previewFrame.right }
+                    : { left: previewFrame.contentLeft }),
+                }}
+                onMouseEnter={cancelPreviewFrameHide}
+                onMouseLeave={schedulePreviewFrameHide}
               >
-                <span className={css.blockPosition} data-diff-block-position>
-                  {t('panel.blockPosition', { current: hoveredBlock + 1, total: model.blocks.length })}
-                </span>
-                <button
-                  type="button"
-                  className={`${css.action} ${css.iconAction}`}
-                  data-diff-block-prev
-                  aria-label={t('action.prevDiff')}
-                  disabled={busy}
-                  onClick={() => { stepBlock(-1) }}
-                >
-                  <IconChevronUpOutline14 size={14} />
-                </button>
-                <button
-                  type="button"
-                  className={`${css.action} ${css.iconAction}`}
-                  data-diff-block-next
-                  aria-label={t('action.nextDiff')}
-                  disabled={busy}
-                  onClick={() => { stepBlock(1) }}
-                >
-                  <IconChevronDownOutline14 size={14} />
-                </button>
-                <button
-                  type="button"
-                  className={`${css.action} ${css.actionPrimary}`}
-                  data-diff-block-keep
-                  disabled={busy}
-                  onClick={() => { void handleBlockAction('keep') }}
-                >
-                  {t('action.keep')}
-                </button>
-                <button
-                  type="button"
-                  className={css.action}
-                  data-diff-block-revert
-                  disabled={busy}
-                  onClick={() => { void handleBlockAction('revert') }}
-                >
-                  {t('action.revert')}
-                </button>
+                <div className={css.blockActionsRow}>
+                  <span className={css.blockPosition} data-diff-block-position>
+                    {t('panel.blockPosition', { current: hoveredBlock + 1, total: previewUnitMode ? previewUnitsList.length : model.blocks.length })}
+                  </span>
+                  <button
+                    type="button"
+                    className={`${css.action} ${css.iconAction}`}
+                    data-diff-block-prev
+                    aria-label={t('action.prevDiff')}
+                    disabled={busy}
+                    onClick={() => { if (previewUnitMode) stepPreviewUnit(-1); else stepBlock(-1) }}
+                  >
+                    <IconChevronUpOutline14 size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className={`${css.action} ${css.iconAction}`}
+                    data-diff-block-next
+                    aria-label={t('action.nextDiff')}
+                    disabled={busy}
+                    onClick={() => { if (previewUnitMode) stepPreviewUnit(1); else stepBlock(1) }}
+                  >
+                    <IconChevronDownOutline14 size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className={`${css.action} ${css.actionPrimary}`}
+                    data-diff-block-keep
+                    disabled={busy}
+                    onClick={() => { void handleBlockAction('keep') }}
+                  >
+                    {t('action.keep')}
+                  </button>
+                  <button
+                    type="button"
+                    className={css.action}
+                    data-diff-block-revert
+                    disabled={busy}
+                    onClick={() => { void handleBlockAction('revert') }}
+                  >
+                    {t('action.revert')}
+                  </button>
+                </div>
+                {/* The change's own source, shown only when the rendering could not carry it: the hidden
+                    difference (a link's target, a caption) reads here while the change is hovered, highlighted
+                    as the source it is. */}
+                {previewSourceRow !== undefined && (
+                  <div className={css.blockSourceDiff} data-diff-block-sourcediff>
+                    <span className={css.blockSourceDiffLabel} data-diff-block-sourcediff-label>
+                      {previewSourceRow.invisible === true
+                        ? `${t('panel.invisibleContent')} · ${t('panel.sourceDiff')}`
+                        : t('panel.sourceDiff')}
+                    </span>
+                    {previewSourceRow.old !== undefined && (
+                      <span className={css.blockSourceDiffDel} data-diff-block-sourcediff-del>
+                        <PreviewSourceLine text={previewSourceRow.old} grammar={previewSourceRow.grammar} />
+                      </span>
+                    )}
+                    {previewSourceRow.new !== undefined && (
+                      <span className={css.blockSourceDiffAdd} data-diff-block-sourcediff-add>
+                        <PreviewSourceLine text={previewSourceRow.new} grammar={previewSourceRow.grammar} />
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
             ) : null}
             {mdRulerMarkers.length > 0 && (
@@ -9819,7 +10399,11 @@ export function PendingPanel({
   // each file's text) keeps one interception point for both view modes.
   const blockKeepWithPrompt: PendingPanelFace['onBlockKeep'] = (sessionId, id, block, removeWhenResolved) => {
     const file = files.find(entry => entry.id === id)
-    if (removeWhenResolved === undefined && file !== undefined && blockResolvesWholeFile(file, block)) {
+    // A character-level block (from the rendered preview) is one change smaller than a line: keeping it
+    // cannot settle the file even when its line range spans everything, so the remove-the-file question is
+    // not asked for it.
+    const characterBlock = block.oldChars !== undefined || block.newChars !== undefined
+    if (removeWhenResolved === undefined && !characterBlock && file !== undefined && blockResolvesWholeFile(file, block)) {
       // The reader has already answered this question for THIS SESSION (the keep-and-stop-asking
       // button in the dialog): run the action with the row left in the list, for them to take out
       // by hand when they are done.
@@ -9831,7 +10415,8 @@ export function PendingPanel({
   }
   const blockRevertWithPrompt: PendingPanelFace['onBlockRevert'] = (sessionId, id, block, removeWhenResolved) => {
     const file = files.find(entry => entry.id === id)
-    if (removeWhenResolved === undefined && file !== undefined && blockResolvesWholeFile(file, block)) {
+    const characterBlock = block.oldChars !== undefined || block.newChars !== undefined
+    if (removeWhenResolved === undefined && !characterBlock && file !== undefined && blockResolvesWholeFile(file, block)) {
       if (removalAskQuiet(current)) return onBlockRevert(sessionId, id, block, false)
       setBlockPrompt({ action: 'revert', sessionId, id, block })
       return Promise.resolve()

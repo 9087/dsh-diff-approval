@@ -790,6 +790,43 @@ describe('block keep/revert', () => {
     expect(kept!.oldText).toBe('a\nb\nc\nd\n')
   })
 
+  it('keeps one CHARACTER span of a line, leaving the other change on that line pending', async () => {
+    // The rendered preview numbers changes smaller than a line (a table row's cell and its link), so a keep
+    // can name the characters it means. Here one line holds two changes: keep only the second one's.
+    const { ctx, fs, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'x one y two\n', 'x ONE y TWO\n'))
+    const [entry] = await listEntries(handle, 'session-1')
+    await expect(handle('block-keep', {
+      sessionId: 'session-1',
+      id: entry!.id,
+      block: { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1, oldChars: { start: 8, end: 11 }, newChars: { start: 8, end: 11 } },
+    }, signal())).resolves.toEqual({ ok: true, value: { outcome: 'kept' } })
+    expect(fs.writeText).not.toHaveBeenCalled()
+    const [kept] = await listEntries(handle, 'session-1')
+    // Only "two"→"TWO" folded into the baseline; "one"→"ONE" is still pending.
+    expect(kept!.oldText).toBe('x one y TWO\n')
+    expect(kept!.newText).toBe('x ONE y TWO\n')
+  })
+
+  it('reverts one CHARACTER span, writing only those characters back', async () => {
+    const { ctx, fs, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'x one y two\n', 'x ONE y TWO\n'))
+    const [entry] = await listEntries(handle, 'session-1')
+    await expect(handle('block-revert', {
+      sessionId: 'session-1',
+      id: entry!.id,
+      block: { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1, oldChars: { start: 2, end: 5 }, newChars: { start: 2, end: 5 } },
+    }, signal())).resolves.toEqual({ ok: true, value: { outcome: 'reverted' } })
+    // The file keeps the other change: only the reverted characters went back.
+    expect(fs.writeText).toHaveBeenCalledWith(
+      { displayPath: '/repo/a.txt', targetKey: 'key:/repo/a.txt' }, 'x one y TWO\n', undefined, expect.anything() as AbortSignal,
+    )
+    const [kept] = await listEntries(handle, 'session-1')
+    expect(kept!.newText).toBe('x one y TWO\n')
+    // The baseline is untouched: the reverted span is gone from the diff, the kept one stays.
+    expect(kept!.oldText).toBe('x one y two\n')
+  })
+
   it('keeps the entry with no pending diff when the last block is kept', async () => {
     const { ctx, fs, handle } = await harness()
     const entry = await twoBlocks({ ctx, fs, handle })
