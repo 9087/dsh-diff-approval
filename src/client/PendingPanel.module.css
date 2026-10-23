@@ -881,10 +881,12 @@
 .mdPreviewBody :global(.mdTwinNew[hidden]) {
   display: none;
 }
-/* A change with no rendered content at all: ONE labeled chip. Its background carries the sides' tints — the
-   old side's tint on the left half, the new side's on the right — and the caption sits INSIDE it, so the words
-   and the change are one thing: "invisible content" written on the change itself, not floating beside it.
-   The two little squares are the same information, so they are not drawn inside the chip. */
+/* A change with no rendered content at all: ONE labeled chip per SIDE. The chip is tinted by the side it stands
+   for — a red one for what went, a green one for what came — never one split chip joining both: a removal and
+   an addition are two things everywhere else in the diff, and each side's source line rides on its own chip for
+   the toolbar. The caption sits INSIDE the chip, so the words and the change are one thing: "invisible content"
+   written on the change itself, not floating beside it. The little square is the block; it is not drawn inside
+   the chip (see the `.mdTwinBlock` rule). */
 .mdPreviewBody :global(.mdTwin.mdTwinPhantom) {
   display: inline-flex;
   width: fit-content;
@@ -892,11 +894,9 @@
   margin: 3px 0 8px;
   padding: 1px 8px;
   border-radius: 4px;
-  background: linear-gradient(90deg,
-    color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent) 0 50%,
-    color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent) 50% 100%);
 }
-/* In the double column a column shows only ITS side, so the chip is that one colour, not a split. */
+/* The side this chip does NOT stand for is hidden (see `phantomBlock`): the visible side's colour is the chip's,
+   in the single column and the double one alike. */
 .mdPreviewBody :global(.mdTwinPhantom:has(.mdTwinNew[hidden])) {
   background: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
 }
@@ -905,6 +905,11 @@
 }
 .mdPreviewBody :global(.mdTwinPhantom > .mdTwinBlock) {
   display: none;
+}
+/* The two chips of one invisible change stand side by side (removal, then addition): a small gap keeps them two
+   blocks rather than one two-toned blob. */
+.mdPreviewBody :global(.mdTwin.mdTwinPhantom + .mdTwin.mdTwinPhantom) {
+  margin-left: 4px;
 }
 /* The chip's caption: inside the tinted background, so the marker says what the change is. */
 .mdPreviewBody :global(.mdTwinCaption) {

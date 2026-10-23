@@ -15078,19 +15078,30 @@ describe('PendingPanel', () => {
     expect(after.querySelectorAll('.mdWordDel, .mdWordAdd').length).toBeGreaterThan(0)
   })
 
-  it('names a no-rendering pair, and its source row, as invisible content', () => {
-    // The pair of tinted squares is the change the document cannot show; the panel captions it "invisible
-    // content" (localized) so the reader does not have to hover to learn what it is, and the hovered source
-    // row says the same before showing both versions.
+  it('names each side of a no-rendering change as its own invisible-content block', () => {
+    // A change the document cannot show is reported as blocks: ONE per side — the red block is what went, the
+    // green one what came — never one split block joining the two, because everywhere else a removal and an
+    // addition read as two things. Each block carries its own side's source line for the toolbar, and the panel
+    // captions the invisible change so the reader does not have to hover to learn what it is.
     const body = previewBodyOf(entry({
       path: '/repo/README.md',
       oldText: '---\ntitle: A\n---\n\nBody\n',
       newText: '---\ntitle: B\n---\n\nBody\n',
     }))
-    const phantom = body.querySelector('.mdTwinPhantom') as HTMLElement
-    expect(phantom).not.toBeNull()
-    expect(phantom.querySelector('[data-md-twin-caption]')?.textContent).toBe('panel.invisibleContent')
-    fireEvent.mouseOver(phantom)
+    const blocks = [...body.querySelectorAll<HTMLElement>('.mdTwinPhantom')]
+    expect(blocks.length).toBe(2)
+    expect(blocks[0]!.getAttribute('data-md-diff-old')).toBe('title: A')
+    expect(blocks[0]!.getAttribute('data-md-diff-new')).toBeNull()
+    expect(blocks[1]!.getAttribute('data-md-diff-new')).toBe('title: B')
+    expect(blocks[1]!.getAttribute('data-md-diff-old')).toBeNull()
+    // One block either red or green: each chip hides the side it does not stand for (see the stylesheet).
+    expect(blocks[0]!.querySelector('.mdTwinNew')!.hasAttribute('hidden')).toBe(true)
+    expect(blocks[0]!.querySelector('.mdTwinOld')!.hasAttribute('hidden')).toBe(false)
+    expect(blocks[1]!.querySelector('.mdTwinOld')!.hasAttribute('hidden')).toBe(true)
+    for (const block of blocks) {
+      expect(block.querySelector('[data-md-twin-caption]')?.textContent).toBe('panel.invisibleContent')
+    }
+    fireEvent.mouseOver(blocks[0]!)
     const label = document.querySelector('[data-diff-block-sourcediff-label]') as HTMLElement
     expect(label).not.toBeNull()
     expect(label.textContent).toBe('panel.invisibleContent · panel.sourceDiff')
@@ -17121,14 +17132,17 @@ describe('Markdown preview · structure renderer edge cases', () => {
 
   it('reports a reference-style link retarget as a block at the definition line', () => {
     // The rendered anchor lives in the paragraph, but the change is in the DEFINITION line, which renders to
-    // nothing: it is reported there as a pair of blocks whose row is that line, and the link renders new.
+    // nothing: it is reported there as a block per side whose rows are that line, and the link renders new.
     const root = draw('[docs][d]\n\n[d]: https://example.com/old\n', '[docs][d]\n\n[d]: https://example.com/new\n')
     const links = [...root.querySelectorAll('a')]
     expect(links.length).toBe(1)
     expect(links[0]!.getAttribute('href')).toBe('https://example.com/new')
-    const block = root.querySelector('.mdTwinPhantom') as HTMLElement
-    expect(block.getAttribute('data-md-diff-old')).toContain('https://example.com/old')
-    expect(block.getAttribute('data-md-diff-new')).toContain('https://example.com/new')
+    const blocks = [...root.querySelectorAll<HTMLElement>('.mdTwinPhantom')]
+    expect(blocks.length).toBe(2)
+    expect(blocks[0]!.getAttribute('data-md-diff-old')).toContain('https://example.com/old')
+    expect(blocks[0]!.getAttribute('data-md-diff-new')).toBeNull()
+    expect(blocks[1]!.getAttribute('data-md-diff-new')).toContain('https://example.com/new')
+    expect(blocks[1]!.getAttribute('data-md-diff-old')).toBeNull()
   })
 
   it('shows a paragraph that grew into a much longer one as two blocks, not one merged line', () => {
@@ -17215,41 +17229,47 @@ describe('Markdown preview · structure renderer edge cases', () => {
       '---\ntitle: B\n---\n\n# Doc\n\nbody\n\n<!-- new comment -->\n\ntail\n',
     )
     const blocks = phantoms(root)
-    expect(blocks.length).toBe(2)
+    // Two invisible changes, each with both sides: one block per side, the red one before the green one.
+    expect(blocks.length).toBe(4)
     const kids = [...root.children]
     const heading = root.querySelector('h1')!
     const tail = root.querySelector('p:last-of-type')!
-    // Block 0 is the front matter: its pair is the document's very first child, and its row is the line that
-    // changed.
+    // Block 0 is the front matter: its red block is the document's very first child, and its row is the line
+    // that changed; its green block follows it.
     expect(blocks[0]!.getAttribute('data-md-diff-old')).toBe('title: A')
-    expect(blocks[0]!.getAttribute('data-md-diff-new')).toBe('title: B')
+    expect(blocks[0]!.getAttribute('data-md-diff-new')).toBeNull()
+    expect(blocks[1]!.getAttribute('data-md-diff-new')).toBe('title: B')
+    expect(blocks[1]!.getAttribute('data-md-diff-old')).toBeNull()
     expect(kids.indexOf(blocks[0]!)).toBe(0)
-    // Block 1 is the comment: its pair comes after the body, before the tail paragraph.
-    expect(blocks[1]!.getAttribute('data-md-diff-old')).toBe('<!-- old comment -->')
-    expect(blocks[1]!.getAttribute('data-md-diff-new')).toBe('<!-- new comment -->')
-    expect(kids.indexOf(blocks[1]!)).toBeGreaterThan(kids.indexOf(heading))
-    expect(kids.indexOf(blocks[1]!)).toBeLessThan(kids.indexOf(tail))
+    expect(kids.indexOf(blocks[1]!)).toBe(1)
+    // Block 1 is the comment: its blocks come after the body, before the tail paragraph.
+    expect(blocks[2]!.getAttribute('data-md-diff-old')).toBe('<!-- old comment -->')
+    expect(blocks[3]!.getAttribute('data-md-diff-new')).toBe('<!-- new comment -->')
+    expect(kids.indexOf(blocks[2]!)).toBeGreaterThan(kids.indexOf(heading))
+    expect(kids.indexOf(blocks[3]!)).toBeLessThan(kids.indexOf(tail))
     // A front-matter row is highlighted as YAML, a comment as Markdown.
     expect(blocks[0]!.getAttribute('data-md-diff-grammar')).toBe('yaml')
-    expect(blocks[1]!.getAttribute('data-md-diff-grammar')).toBe('markdown')
+    expect(blocks[2]!.getAttribute('data-md-diff-grammar')).toBe('markdown')
   })
 
-  it('folds the units of an unrendered block into ONE pair of blocks', () => {
+  it('folds the units of an unrendered block into ONE block per side', () => {
     // A front-matter block is two changed lines and no rendered element. The reader sees no content there, so
-    // two changed lines are one invisible change: ONE pair of blocks, the before side naming both removed
-    // lines and the after side both added ones — not two pairs of squares for something nobody can see.
+    // two changed lines are one invisible change: the red block names both removed lines and the green block
+    // both added ones — but they stay TWO blocks, one per side, never one two-toned block.
     const root = draw(
       '---\ntitle: A\nstatus: draft\n---\n\nBody\n',
       '---\ntitle: B\nstatus: stable\n---\n\nBody\n',
     )
     const blocks = phantoms(root)
-    expect(blocks.length).toBe(1)
-    expect(blocks.map(block => block.getAttribute('data-md-block'))).toEqual(['0'])
-    // One block per side: the side IS the tinted square, not a marker drawn inside a second tinted box.
+    expect(blocks.length).toBe(2)
+    expect(blocks.map(block => block.getAttribute('data-md-block'))).toEqual(['0', '0'])
+    // One side per block: the hidden side is what the stylesheet reads for the tint.
+    expect(blocks[0]!.querySelector('.mdTwinNew')!.hasAttribute('hidden')).toBe(true)
+    expect(blocks[1]!.querySelector('.mdTwinOld')!.hasAttribute('hidden')).toBe(true)
     expect(blocks[0]!.querySelectorAll('.mdTwinBlock').length).toBe(2)
     expect(blocks[0]!.querySelectorAll('.mdTwinMarker').length).toBe(0)
     expect(blocks[0]!.getAttribute('data-md-diff-old')).toBe('title: A\nstatus: draft')
-    expect(blocks[0]!.getAttribute('data-md-diff-new')).toBe('title: B\nstatus: stable')
+    expect(blocks[1]!.getAttribute('data-md-diff-new')).toBe('title: B\nstatus: stable')
     // The document's own content is untouched by the pair.
     expect(root.querySelectorAll('p').length).toBe(1)
   })
@@ -17387,15 +17407,15 @@ describe('Markdown preview · structure renderer edge cases', () => {
 
   it('shows both sides of a line whose VALUE was appended, the way the source diff does', () => {
     // `title: A` → `title: A v2` is a character INSERTION, but the line itself changed: the source view shows
-    // it as a removed line and an added one, so the preview's pair must show both sides too. Reading the unit's
-    // characters to decide the sides showed only a green block (three blocks for two changed lines). A whole
-    // no-rendering block is one pair, so the appended value and the line beside it share that pair.
+    // it as a removed line and an added one, so the preview must show both sides too — one block per side.
+    // Reading the unit's characters to decide the sides showed only a green block (three blocks for two
+    // changed lines). A whole no-rendering block is one change, so the appended value and the line beside it
+    // share the change's two blocks.
     const root = draw('---\ntitle: A\nstatus: draft\n---\n\nBody\n', '---\ntitle: A v2\nstatus: stable\n---\n\nBody\n')
     const blocks = phantoms(root)
-    expect(blocks.length).toBe(1)
-    // Both sides on the one pair, naming the whole changed lines.
+    expect(blocks.length).toBe(2)
     expect(blocks[0]!.getAttribute('data-md-diff-old')).toBe('title: A\nstatus: draft')
-    expect(blocks[0]!.getAttribute('data-md-diff-new')).toBe('title: A v2\nstatus: stable')
+    expect(blocks[1]!.getAttribute('data-md-diff-new')).toBe('title: A v2\nstatus: stable')
   })
 
   it('numbers the two changes of one line separately', () => {
@@ -17576,16 +17596,19 @@ describe('Markdown preview · structure renderer edge cases', () => {
     expect(root.querySelector('p')!.textContent).toBe('Body')
   })
 
-  it('reports a front-matter change as blocks with its source row, keeping the body intact', () => {
+  it('reports a front-matter change as one block per side with its source row, keeping the body intact', () => {
     const root = draw('---\ntitle: A\n---\n\nBody\n', '---\ntitle: B\n---\n\nBody\n')
     expect(root.querySelectorAll('hr').length).toBe(0)
     expect(root.querySelectorAll('p').length).toBe(1)
     expect(root.querySelector('p')!.textContent).toContain('Body')
-    // No rendered content of its own: a pair of modest blocks, with the changed line carried for the toolbar.
-    const block = root.querySelector('.mdTwinPhantom') as HTMLElement
-    expect(block).not.toBeNull()
-    expect(block.getAttribute('data-md-diff-old')).toBe('title: A')
-    expect(block.getAttribute('data-md-diff-new')).toBe('title: B')
+    // No rendered content of its own: a red block for the removed line and a green one for the added line,
+    // each with its own side's source line carried for the toolbar — not one split block.
+    const blocks = phantoms(root)
+    expect(blocks.length).toBe(2)
+    expect(blocks[0]!.getAttribute('data-md-diff-old')).toBe('title: A')
+    expect(blocks[0]!.getAttribute('data-md-diff-new')).toBeNull()
+    expect(blocks[1]!.getAttribute('data-md-diff-new')).toBe('title: B')
+    expect(blocks[1]!.getAttribute('data-md-diff-old')).toBeNull()
   })
 
   it('draws each side of an invisible change in the double column, one column each', () => {

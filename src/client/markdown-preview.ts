@@ -2003,9 +2003,58 @@ function applyTwin(previous: HTMLElement, next: HTMLElement, index: number, hidd
 }
 
 /**
- * A change with NO rendered element at all — a front-matter line, an HTML comment: two modest blocks, red for
- * what went and green for what came, with the changed source carried for the toolbar. A pure insertion has no
- * red block, a pure deletion no green one.
+ * The blocks for a change with NO rendered element at all — a front-matter line, an HTML comment.
+ *
+ * ONE block per side the change has: a red block for the removed line, a green one for the added line, never one
+ * split block joining the two. That is how every drawn change reads (a removal and an addition are two things),
+ * and it is what lets each side's source line ride on its own block for the toolbar. A pure insertion has only
+ * the green block, a pure deletion only the red one.
+ *
+ * @param index - the change unit's number.
+ * @param oldLine - the removed source line, when there is one.
+ * @param newLine - the added source line, when there is one.
+ * @param grammar - the grammar the toolbar highlights these lines with.
+ * @returns one block per existing side, in the order removal then addition.
+ */
+function placeholderTwins(
+  index: number,
+  oldLine: string | undefined,
+  newLine: string | undefined,
+  grammar: SourceGrammar = 'markdown',
+): HTMLElement[] {
+  const blocks: HTMLElement[] = []
+  if (oldLine !== undefined) blocks.push(phantomBlock(index, oldLine, 'old', grammar))
+  if (newLine !== undefined) blocks.push(phantomBlock(index, newLine, 'new', grammar))
+  return blocks
+}
+
+/**
+ * ONE side's modest block for a change with no rendered content: the wrapper is tinted red (removal) or green
+ * (addition) by the stylesheet, from the side that is NOT hidden.
+ *
+ * @param index - the change unit's number.
+ * @param line - that side's changed source line(s).
+ * @param side - which side this block stands for.
+ * @param grammar - the grammar the toolbar highlights the line with.
+ * @returns the block.
+ */
+function phantomBlock(index: number, line: string, side: 'old' | 'new', grammar: SourceGrammar): HTMLElement {
+  const wrapper = document.createElement('span')
+  wrapper.className = 'mdTwin mdTwinPhantom'
+  markBlock(wrapper, index, side === 'old' ? 'del' : 'add')
+  setSourceDiff(wrapper, side === 'old' ? { old: line } : { new: line }, undefined, grammar)
+  const oldSide = blockSide('old')
+  const newSide = blockSide('new')
+  // The other side does not exist on THIS block: the stylesheet reads the hidden side for the tint.
+  if (side === 'old') newSide.hidden = true
+  else oldSide.hidden = true
+  wrapper.append(oldSide, newSide)
+  return wrapper
+}
+
+/**
+ * A change with NO rendered element at all, both sides in ONE element — the double column's own shape, where each
+ * column holds only ITS side (see `phantomBlock`, which the single column uses per side).
  *
  * @param index - the change unit's number.
  * @param oldLine - the removed source line, when there is one.
@@ -2259,15 +2308,21 @@ function renderMerged(oldText: string, newText: string, invisibleLabel?: string)
       oldEl: entry.oldEls[0],
     })))
     if (drawn) continue
-    // The one element carrying several changes could not be merged: stand a pair of modest blocks per unit
+    // The one element carrying several changes could not be merged: stand the blocks for each side of a unit
     // beside it, so each change keeps its number and its source line on hover.
     for (const unit of unitsOfBlock.get(first.index) ?? []) {
-      const twin = placeholderTwin(
+      const blocks = placeholderTwins(
         unit.index,
         unitSourceLines(oldText, first.span.old, unit.oldChars),
         unitSourceLines(newText, first.span.new, unit.newChars),
       )
-      el.parentNode?.insertBefore(twin, el.nextSibling)
+      if (el.parentNode !== null) {
+        let cursor: Node = el
+        for (const block of blocks) {
+          el.parentNode.insertBefore(block, cursor.nextSibling)
+          cursor = block
+        }
+      }
     }
   }
 
@@ -2280,21 +2335,29 @@ function renderMerged(oldText: string, newText: string, invisibleLabel?: string)
     const outcome = mergeBlock(fresh.root, entry.freshEls, entry.oldEls, entry.index, blockUnits)
     if (outcome === 'syntax') syntaxBlocks.add(entry.index)
     if (outcome !== 'none') continue
-    // Nothing rendered on either side: an HTML comment, a front-matter line. Each UNIT becomes its own pair of
-    // modest blocks — the red block is that side's line(s), the green one the other side's — placed where the
-    // block sits, and hovering them shows the changed source in the toolbar. Per unit, so two changed lines are
-    // two numbered changes; and BOTH sides of a unit are shown whenever that side of the block exists, so an
-    // appended value (`title: A` → `title: A v2`) reads as a removed line and an added one, like the source.
+    // Nothing rendered on either side: an HTML comment, a front-matter line. Each UNIT becomes its own blocks,
+    // ONE per side — the red block is that side's line(s), the green one the other side's, never one split block
+    // joining the two — placed where the block sits, and hovering either shows its own source in the toolbar.
+    // Per unit, so two changed lines are two numbered changes; and BOTH sides of a unit are shown whenever that
+    // side of the block exists, so an appended value (`title: A` → `title: A v2`) reads as a removed line and an
+    // added one, like the source.
     const anchor = entry.freshEls[0]?.el
     for (const unit of blockUnits) {
-      const twin = placeholderTwin(
+      const blocks = placeholderTwins(
         unit.index,
         unitSourceLines(oldText, entry.span.old, unit.oldChars),
         unitSourceLines(newText, entry.span.new, unit.newChars),
         grammarOf(unit),
       )
-      if (anchor !== undefined) anchor.parentNode?.insertBefore(twin, anchor.nextSibling)
-      else insertCardInSourceOrder(fresh.root, twin, entry.span)
+      if (anchor !== undefined) {
+        let cursor: Node = anchor
+        for (const block of blocks) {
+          anchor.parentNode?.insertBefore(block, cursor.nextSibling)
+          cursor = block
+        }
+      } else {
+        for (const block of blocks) insertCardInSourceOrder(fresh.root, block, entry.span)
+      }
     }
   }
   // A unit whose text the document already draws (a paragraph Markdown itself swallowed into a GFM table is
@@ -2315,8 +2378,9 @@ function renderMerged(oldText: string, newText: string, invisibleLabel?: string)
     const oldLine = unit.oldText === '' ? undefined : unitSourceLines(oldText, span.old, unit.oldChars)
     const newLine = unit.newText === '' ? undefined : unitSourceLines(newText, span.new, unit.newChars)
     if (oldLine === undefined && newLine === undefined) continue
-    const twin = placeholderTwin(unit.index, oldLine, newLine, grammarOf(unit))
-    insertCardInSourceOrder(fresh.root, twin, span)
+    for (const block of placeholderTwins(unit.index, oldLine, newLine, grammarOf(unit))) {
+      insertCardInSourceOrder(fresh.root, block, span)
+    }
   }
   captionHiddenPairs(fresh.root, invisibleLabel)
   return fresh.root.innerHTML
