@@ -1283,6 +1283,182 @@ function insertOwnRun(el: HTMLElement, at: number, text: string, cls: string): v
 }
 
 /**
+ * Normalize one piece of text for the "is this change ALREADY on the page?" match, keeping a map back.
+ *
+ * The units come from the SOURCE (so they carry Markdown's own characters: `**`, backticks, escapes) while
+ * the rendered document carries the marked-UP text. Removing the syntax characters and folding whitespace on
+ * both sides makes the two comparable; the map lets a match in the normalized text be turned back into the
+ * character range of the DOM's own text, which is what gets wrapped.
+ *
+ * @param text - raw text (source or rendered).
+ * @returns the normalized text and, per normalized character, its index in `text`.
+ */
+function normalizeForMatch(text: string): { text: string; map: number[] } {
+  let out = ''
+  const map: number[] = []
+  let space = false
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]!
+    if (character === '*' || character === '`' || character === '_' || character === '\\') continue
+    if (/\s/.test(character)) {
+      if (space || out === '') continue
+      out += ' '
+      map.push(index)
+      space = true
+      continue
+    }
+    out += character
+    map.push(index)
+    space = false
+  }
+  // Trailing folded space is not part of a match; the leading one was already dropped.
+  while (out.endsWith(' ')) {
+    out = out.slice(0, -1)
+    map.pop()
+  }
+  return { text: out, map }
+}
+
+/** Every text node under one element, in reading order, skipping inside a run this plugin already drew. */
+function textNodesUnder(element: HTMLElement): Text[] {
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
+  const nodes: Text[] = []
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    const parent = node.parentElement
+    // Only runs are skipped: the element being tagged is itself a `data-md-block` carrier, so checking that
+    // attribute would skip every node under the very cell the text is in.
+    if (parent !== null && parent.closest('.mdWordAdd, .mdWordDel') !== null) continue
+    nodes.push(node as Text)
+  }
+  return nodes
+}
+
+/**
+ * Wrap the characters `[start, end)` of one element's whole text in tagged runs.
+ *
+ * The range may cross inline boundaries (a bold word, a code span), so the pieces are collected first and
+ * wrapped from LAST to first: splitting a later text node then cannot move the offsets of an earlier one.
+ *
+ * @param nodes - the element's text nodes, in reading order.
+ * @param offsets - each node's start offset in the element's text.
+ * @param start - first character offset.
+ * @param end - last character offset (exclusive).
+ * @param unit - the unit the wrapped characters belong to.
+ * @param side - which side of the change they are.
+ */
+function wrapTextRangeWithUnit(
+  nodes: readonly Text[],
+  offsets: readonly number[],
+  start: number,
+  end: number,
+  unit: PreviewUnit,
+  side: 'old' | 'new',
+): void {
+  interface Piece { node: Text; from: number; to: number }
+  const pieces: Piece[] = []
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index]!
+    const nodeStart = offsets[index]!
+    const from = Math.max(start, nodeStart) - nodeStart
+    const to = Math.min(end, nodeStart + node.data.length) - nodeStart
+    if (from < to) pieces.push({ node, from, to })
+  }
+  for (const piece of [...pieces].reverse()) {
+    const tail = piece.to < piece.node.data.length ? piece.node.splitText(piece.to) : null
+    const middle = piece.from > 0 ? piece.node.splitText(piece.from) : piece.node
+    const span = document.createElement('span')
+    span.className = side === 'new' ? 'mdWordAdd' : 'mdWordDel'
+    span.dataset.mdBlock = String(unit.index)
+    span.dataset.mdKind = side === 'new' ? 'add' : 'del'
+    middle.parentNode?.insertBefore(span, middle)
+    span.appendChild(middle)
+    void tail
+  }
+}
+
+/**
+ * Mark a unit where the document ALREADY draws it, when the pair merge could not tag it.
+ *
+ * A changed line is usually drawn by the element the pair merge expected, but not always: a paragraph that
+ * follows a GFM table without a blank line is parsed as more table rows by Markdown itself, so the renderer
+ * sees no paragraph to merge — the text is on the page (inside the table), yet the unit had no element and
+ * the reachability net below would have called it "invisible content". If the unit's text is on screen at the
+ * unit's own line, it is tagged there instead: a real, hoverable change, not a phantom.
+ *
+ * @param root - the rendered document to search.
+ * @param unit - the unit to place.
+ * @param side - which side's text to look for.
+ * @returns whether the unit was placed.
+ */
+function tagVisibleUnit(root: HTMLElement, unit: PreviewUnit, side: 'old' | 'new'): boolean {
+  const raw = side === 'new' ? unit.newText : unit.oldText
+  if (raw.trim() === '') return false
+  const range = side === 'new' ? unit.newLines : unit.oldLines
+  const wanted = normalizeForMatch(raw).text.trim()
+  if (wanted === '') return false
+  const candidates = [...root.querySelectorAll<HTMLElement>('[data-src-start]')]
+    .filter(element => {
+      const start = Number(element.dataset.srcStart)
+      const end = Number(element.dataset.srcEnd ?? element.dataset.srcStart)
+      return Number.isFinite(start) && Number.isFinite(end) && end >= range.start - 1 && start <= range.end - 1
+    })
+    // The DEEPEST element that carries the text is the cell/row that draws it; wrapping the whole table
+    // instead would tag unrelated text as this unit.
+    .filter(element => {
+      const nodes = textNodesUnder(element)
+      const text = nodes.map(node => node.data).join('')
+      return normalizeForMatch(text).text.includes(wanted)
+    })
+    .sort((left, right) => (left.textContent ?? '').length - (right.textContent ?? '').length)
+  const element = candidates[0]
+  if (element === undefined) return false
+  const nodes = textNodesUnder(element)
+  const offsets: number[] = []
+  let total = 0
+  for (const node of nodes) {
+    offsets.push(total)
+    total += node.data.length
+  }
+  const plain = nodes.map(node => node.data).join('')
+  const normalized = normalizeForMatch(plain)
+  const at = normalized.text.indexOf(wanted)
+  if (at === -1) return false
+  const start = normalized.map[at]
+  const end = normalized.map[at + wanted.length - 1]
+  if (start === undefined || end === undefined) return false
+  wrapTextRangeWithUnit(nodes, offsets, start, end + 1, unit, side)
+  return true
+}
+
+/**
+ * Place every unit the pair merge left untagged, where the document already draws its text.
+ *
+ * This runs BEFORE the reachability net: a unit whose text is visibly on the page is a drawn change, and a
+ * phantom "invisible content" pair for it would be a lie (the reported table case). Only units with no
+ * element AND no visible text remain for the net below.
+ *
+ * @param root - the rendered document.
+ * @param units - the document's units.
+ * @param side - which side's document this root is, in the double column; absent in the single column,
+ *   where both sides' ghosts and merged runs live in one tree and either side may hold the text.
+ */
+function tagVisibleUnits(root: HTMLElement, units: readonly PreviewUnit[], side?: 'old' | 'new'): void {
+  for (const unit of units) {
+    if (root.querySelector(`[data-md-block="${unit.index}"]`) !== null) continue
+    if (side === 'old') {
+      tagVisibleUnit(root, unit, 'old')
+      continue
+    }
+    if (side === 'new') {
+      tagVisibleUnit(root, unit, 'new')
+      continue
+    }
+    if (tagVisibleUnit(root, unit, 'new')) continue
+    tagVisibleUnit(root, unit, 'old')
+  }
+}
+
+/**
  * Elements whose two versions are merged word by word only when the change is genuinely INLINE.
  *
  * The line diff pairs two LINES, so a one-line bullet that kept its opening words and then grew ten times
@@ -2121,6 +2297,10 @@ function renderMerged(oldText: string, newText: string, invisibleLabel?: string)
       else insertCardInSourceOrder(fresh.root, twin, entry.span)
     }
   }
+  // A unit whose text the document already draws (a paragraph Markdown itself swallowed into a GFM table is
+  // the reported case) is a DRAWN change even when the pair merge never tagged it: mark it where it shows
+  // instead of letting the reachability net below call it invisible content.
+  tagVisibleUnits(fresh.root, units)
   // Every unit must be REACHABLE. A merge can leave one unplaced on its own — an HTML comment sharing a line
   // block with a deleted paragraph is handled as part of that block's ghost, and its own unit would otherwise
   // have no element at all (hoverable nowhere, never keepable from the preview, while the numbering still
@@ -2440,6 +2620,10 @@ function renderDocuments(oldText: string, newText: string, invisibleLabel?: stri
       }
     }
   }
+  // Same as the single column: a unit the document already draws is marked where it shows, per side, and
+  // only the genuinely invisible ones reach the reachability net below.
+  tagVisibleUnits(baseline.root, units, 'old')
+  tagVisibleUnits(fresh.root, units, 'new')
   ensureReachable(baseline.root, 'old')
   ensureReachable(fresh.root, 'new')
   captionHiddenPairs(baseline.root, invisibleLabel)

@@ -324,6 +324,20 @@ function ReturnIcon({ size = 12 }: { size?: number }) {
 /** Total width of the two line-number gutters, subtracted from the code width
  *  when measuring wrapped line heights. */
 const WRAP_GUTTERS_PX = 88
+
+/**
+ * How wide a sideways offset may be before it counts as a DELIBERATE pan.
+ *
+ * A trackpad scrolling down leaves a little horizontal drift in its wheel events; forwarded to `scrollLeft`, it
+ * accumulates a character at a time and quietly hides the first characters of every line under the pinned
+ * line-number columns (the reported "每" case — the reader never panned, yet the line starts were gone). After
+ * a wheel burst settles inside this width the offset snaps back to the left edge. A scrollbar drag or a wide
+ * sideways swipe passes it, and THAT kind of pan legitimately slides the code under the pinned columns.
+ */
+const PAN_SNAP_PX = 32
+
+/** How long after the last wheel event a drifted-in sideways offset is given to settle before it is snapped. */
+const PAN_SNAP_SETTLE_MS = 180
 /** The dsh shell's sidebar auto-collapse breakpoint (ui-layout columns.ts):
  * below it the sidebar auto-collapses, and the file list floats on the same
  * breakpoint so the two stay consistent. */
@@ -2638,6 +2652,13 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
     setSearchOpen(false)
     setSearchQuery('')
     setSearchIndex(0)
+    // A new file opens at its own beginning, not at the sideways place the previous file was panned to.
+    for (const col of [leftColRef.current, rightColRef.current]) {
+      if (col !== null) col.scrollLeft = 0
+    }
+    for (const strip of [leftHScrollRef.current, rightHScrollRef.current]) {
+      if (strip !== null) strip.scrollLeft = 0
+    }
   }, [file.id])
 
   useEffect(() => {
@@ -4904,6 +4925,10 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     setSearchOpen(false)
     setSearchQuery('')
     setSearchIndex(0)
+    // The file opens at its own left edge again: a sideways pan is about the code that was being read, not
+    // about the next file.
+    const body = bodyRef.current
+    if (body !== null) body.scrollLeft = 0
   }, [file.id])
 
   // Where this file opens. The panel decides that per selection and says so with a
@@ -6347,10 +6372,25 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   useEffect(() => {
     const wrap = bodyWrapRef.current
     if (wrap === null) return
+    // A trackpad scrolled DOWN drifts sideways a little; forwarded to `scrollLeft`, that drift accumulates and
+    // hides the line starts under the PINNED line-number columns (see PAN_SNAP_PX). Once a burst of wheel
+    // events settles, a small sideways offset goes back to the left edge — a deliberate pan is wider and is
+    // left alone, so dragging the scrollbar still pans the code. The timer lives with the listener.
+    let snapTimer: number | undefined
+    const scheduleSnap = (): void => {
+      if (snapTimer !== undefined) window.clearTimeout(snapTimer)
+      snapTimer = window.setTimeout(() => {
+        snapTimer = undefined
+        const body = bodyRef.current
+        if (body !== null && body.scrollLeft > 0 && body.scrollLeft <= PAN_SNAP_PX) body.scrollLeft = 0
+      }, PAN_SNAP_SETTLE_MS)
+    }
     const onWheel = (event: WheelEvent): void => {
       const body = bodyRef.current
       const target = event.target
       if (body === null || !(target instanceof Element)) return
+      // Any wheel over the panel can leave drift behind, including the wheel the browser applies to the code.
+      scheduleSnap()
       // Over the code itself the browser already scrolls the box; only the chrome
       // floating above it needs this.
       if (target.closest('[data-diff-body]') !== null) return
@@ -6364,7 +6404,10 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     // Not passive: this handler is the only thing that can stop the wheel from
     // scrolling whatever is outside the panel instead.
     wrap.addEventListener('wheel', onWheel, { passive: false })
-    return () => { wrap.removeEventListener('wheel', onWheel) }
+    return () => {
+      wrap.removeEventListener('wheel', onWheel)
+      if (snapTimer !== undefined) window.clearTimeout(snapTimer)
+    }
   }, [ROW_HEIGHT_PX])
 
   /** Start a discussion on the current selection (no-op on a range that has one). */

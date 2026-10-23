@@ -13719,6 +13719,54 @@ describe('PendingPanel', () => {
     expect(leftCol.scrollLeft).toBe(40)
   })
 
+  it('snaps an accidental sideways drift back so the pinned line numbers never eat a line start', () => {
+    // A trackpad scrolled DOWN leaves a little sideways drift in its wheel events. Forwarded to
+    // `scrollLeft`, it accumulates a character at a time and hides the beginning of every line under the
+    // PINNED line-number columns (the reported "每" case: the reader never panned, yet the line starts were
+    // gone). Once a wheel burst settles, a small sideways offset goes back to the left edge — the line
+    // numbers are pinned for good, so the left edge is where the code's first character belongs.
+    vi.useFakeTimers()
+    try {
+      const file = entry({
+        id: 'entry-drift',
+        path: '/repo/drift.txt',
+        oldText: 'one\nshort\n',
+        newText: 'one\nshort changed\n',
+      })
+      render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      fireEvent.click(screen.getByText('drift.txt'))
+
+      const body = (): HTMLElement => document.querySelector('[data-diff-body]') as HTMLElement
+      // The wheel over the code: the browser itself is what scrolls the box, this view only schedules the snap.
+      body().scrollLeft = 18
+      fireEvent.wheel(body(), { deltaX: 18, deltaY: 0 })
+      act(() => { vi.advanceTimersByTime(250) })
+      expect(body().scrollLeft).toBe(0)
+
+      // A DELIBERATE pan is wider than the drift allowance: it is left where the reader put it.
+      body().scrollLeft = 120
+      fireEvent.wheel(body(), { deltaX: 120, deltaY: 0 })
+      act(() => { vi.advanceTimersByTime(250) })
+      expect(body().scrollLeft).toBe(120)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('opens a new file at the left edge, not at the sideways pan the last file was read at', () => {
+    const first = entry({ id: 'entry-pan-a', path: '/repo/pan-a.txt', oldText: 'aaa\n', newText: 'bbb\n' })
+    const second = entry({ id: 'entry-pan-b', path: '/repo/pan-b.txt', oldText: 'ccc\n', newText: 'ddd\n' })
+    render(<PendingPanel {...panelProps({ read: true, files: [first, second], busy: new Set() })} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('pan-a.txt'))
+
+    const body = (): HTMLElement => document.querySelector('[data-diff-body]') as HTMLElement
+    body().scrollLeft = 120
+    fireEvent.click(screen.getByText('pan-b.txt'))
+    expect(body().scrollLeft).toBe(0)
+  })
+
   it('marks a side-by-side comment outdated by the same rule the one-column view uses', () => {
     // The outdated decision is made from the model, not from the view: a file rewritten under a
     // side-by-side comment leaves that comment outdated exactly as it would in one column, with the
@@ -17263,6 +17311,36 @@ describe('Markdown preview · structure renderer edge cases', () => {
         expect(sideTags.has(String(unit.index)), `${side} unit ${unit.index}`).toBe(true)
       }
     }
+  })
+
+  it('marks a paragraph Markdown swallowed into a table as DRAWN, not as invisible content', () => {
+    // The reported shape: a table, and immediately after its last row (no blank line) a paragraph whose text
+    // changed. GFM parses that line as more table rows, so the pair merge finds no paragraph to merge — the
+    // text is ON the page (inside the table) yet its units had no element, and the reachability net called
+    // the change "invisible content". Such a unit is tagged where the document draws it instead.
+    const table = [
+      '# 说明', '',
+      '| 场景 | `TryShowApplyConfirmTips` 应返回 | 汇总行数 |',
+      '| --- | --- | --- |',
+      '| `None` | `false`（且不调 `AddPopupByConfig`） | 0 |',
+      '| `All` | `true` | 4 |',
+    ].join('\n')
+    const oldText = `${table}\n每行文案都取**对应弹窗自己的正文**（\`DialogPopUpData.Content\`），不为汇总新增文案 key。\n\n# E2E 出口\n\ntail\n`
+    const newText = `${table}\n每行文案取自汇总弹窗**自己的专属 key**（\`DungeonTeamStart.APPLY_CONFIRM_TEXT\` →\n\`DUNGEON_APPLY_CONFIRM_*\`），不再复用被合并弹窗的 \`DialogPopUpData.Content\`。载体是\n\`WBP_Dungeon_Notice_Panel\`（列表式面板），**不依赖《DialogPopUp 弹窗提醒》的配置行**。\n\n# E2E 出口\n\ntail\n`
+    const units = previewUnits(oldText, newText)
+    const holder = document.createElement('div')
+    holder.innerHTML = renderMarkdownPreview(oldText, newText, 'single', 'structure')
+    // No pair of "invisible content" blocks: every unit is a drawn change somewhere on the page.
+    expect(holder.querySelectorAll('.mdTwinPhantom').length).toBe(0)
+    const tags = new Set([...holder.querySelectorAll('[data-md-block]')].map(element => element.getAttribute('data-md-block')))
+    for (const unit of units) expect(tags.has(String(unit.index)), `unit ${unit.index}`).toBe(true)
+    // The text the table swallowed is still visible, and the unit that only lives inside those rows is marked
+    // on its own characters: a real hover/keep target, not a phantom pair.
+    expect(holder.textContent).toContain('DungeonTeamStart.APPLY_CONFIRM_TEXT')
+    const marked = [...holder.querySelectorAll<HTMLElement>('.mdWordAdd, .mdWordDel')]
+      .filter(element => element.getAttribute('data-md-block') === '1')
+    expect(marked.length).toBeGreaterThan(0)
+    expect(marked.map(element => element.textContent).join('')).toContain('ungeonTeamStart')
   })
 
   it('keeps the double column row-aligned after an insertion-only change before the changed blocks', () => {
