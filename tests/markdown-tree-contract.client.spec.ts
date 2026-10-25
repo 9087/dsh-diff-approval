@@ -150,6 +150,32 @@ describe('requirement contract: the real rich/demo documents', () => {
     expect(adjacent[0]!.units).toHaveLength(2)
   })
 
+  it('code: a changed line keeps the fence content intact (no duplicated/leaked characters)', () => {
+    const demo = CASES[1]!
+    const holder = document.createElement('div')
+    holder.innerHTML = renderTreeMerged(demo.oldText, demo.newText)
+    const pre = holder.querySelector('pre')
+    expect(pre).not.toBeNull()
+    const code = pre!.querySelector('code')!
+    const text = code.textContent ?? ''
+    // The old line (struck) then the new line on the same code line, plus the untouched line, and NOTHING
+    // duplicated around them.
+    expect(text).toContain('const version = 1')
+    expect(text).toContain('const version = 2\nconsole.log(version)\n')
+    expect(text).not.toContain('const const')
+    expect(text.replace(/\s+/g, '')).toBe('constversion=1constversion=2console.log(version)')
+    expect(text).not.toContain('```')
+    expect(code.querySelectorAll('.mdWordDel')).toHaveLength(1)
+    expect(code.querySelectorAll('.mdWordAdd')).toHaveLength(1)
+    // Double column: each column's CODE text is exactly its own version's code.
+    const doubleHolder = document.createElement('div')
+    doubleHolder.innerHTML = renderTreeDocuments(demo.oldText, demo.newText)
+    const oldCode = doubleHolder.querySelector<HTMLElement>('[data-diff-doc-side="old"] pre code')!.textContent
+    const newCode = doubleHolder.querySelector<HTMLElement>('[data-diff-doc-side="new"] pre code')!.textContent
+    expect(oldCode).toBe('const version = 1\nconsole.log(version)\n')
+    expect(newCode).toBe('const version = 2\nconsole.log(version)\n')
+  })
+
   it('demo table: two changed cells are two blocks, each inside its own cell; the row is not a block', () => {
     const demo = CASES[1]!
     const holder = document.createElement('div')

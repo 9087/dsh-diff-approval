@@ -5351,6 +5351,27 @@ function renderedOffsetOfNode(container: MarkdownTreeNode, node: MarkdownTreeNod
   return renderedOffsetOf(container, node, node.start)
 }
 
+/**
+ * The DOM own-text offset of one CODE line unit.
+ *
+ * The CODE element holds only the fence's CONTENT lines; the opening ``` line is part of the code node's raw
+ * source but not of the element's text. The tree offset must drop that opening line, or the run lands six
+ * characters into the first code line (the reported broken fence).
+ */
+function renderedOffsetOfCodeUnit(
+  container: MarkdownTreeNode,
+  node: MarkdownTreeNode,
+  unit: TreePreviewUnit,
+  side: 'old' | 'new',
+): number {
+  if (node.type !== 'code') return renderedOffsetOfUnit(container, node, unit, side)
+  const chars = side === 'new' ? unit.newChars : unit.oldChars
+  const raw = container.raw
+  const opening = raw.indexOf('\n')
+  const prefix = opening === -1 ? 0 : opening + 1
+  return Math.max(0, chars.start - container.start - prefix)
+}
+
 /** The newly created `.cls` run, once a wrap/insert has run on the element. */
 function newestRun(element: HTMLElement, cls: string, before: ReadonlySet<Element>): HTMLElement | undefined {
   return [...element.querySelectorAll<HTMLElement>(`.${cls}`)]
@@ -5543,7 +5564,12 @@ function renderInlineChildBlock(block: TreePreviewBlock, fresh: RenderedDoc, bas
     let drew = false
     // Back to front: inserting one unit's old words must not move the offsets of units still to draw.
     const orderedUnits = [...block.units as unknown as TreePreviewUnit[]]
-      .map(blockUnit => ({ blockUnit, offset: renderedOffsetOfUnit(containerNodeNew, newNode, blockUnit, 'new') }))
+      .map(blockUnit => ({
+        blockUnit,
+        offset: block.kind === 'code'
+          ? renderedOffsetOfCodeUnit(containerNodeNew, newNode, blockUnit, 'new')
+          : renderedOffsetOfUnit(containerNodeNew, newNode, blockUnit, 'new'),
+      }))
       .sort((left, right) => right.offset - left.offset)
     for (const { blockUnit, offset } of orderedUnits) {
       if (blockUnit.newText === '') {
@@ -5626,12 +5652,19 @@ function renderInlineContainerGroup(blocks: readonly TreePreviewBlock[], fresh: 
     .filter(block => (block.kind === 'text' || block.kind === 'code') && block.units.length > 0 && block.inlineContainer?.new !== undefined)
     .map(block => ({
       block,
-      offset: renderedOffsetOfUnit(
-        block.inlineContainer!.new!,
-        block.newNodes[0]!,
-        block.units[0] as unknown as TreePreviewUnit,
-        'new',
-      ),
+      offset: block.kind === 'code'
+        ? renderedOffsetOfCodeUnit(
+          block.inlineContainer!.new!,
+          block.newNodes[0]!,
+          block.units[0] as unknown as TreePreviewUnit,
+          'new',
+        )
+        : renderedOffsetOfUnit(
+          block.inlineContainer!.new!,
+          block.newNodes[0]!,
+          block.units[0] as unknown as TreePreviewUnit,
+          'new',
+        ),
     }))
     .sort((left, right) => right.offset - left.offset)
   for (const entry of textRuns) renderInlineChildBlock(entry.block, fresh, baseline)
@@ -5744,8 +5777,12 @@ function renderInlineChildBlockDouble(block: TreePreviewBlock, fresh: RenderedDo
     && oldNode !== undefined && newNode !== undefined && containerNodeOld !== undefined && containerNodeNew !== undefined) {
     let drew = false
     for (const blockUnit of block.units as unknown as TreePreviewUnit[]) {
-      const oldOffset = renderedOffsetOfUnit(containerNodeOld, oldNode, blockUnit, 'old')
-      const newOffset = renderedOffsetOfUnit(containerNodeNew, newNode, blockUnit, 'new')
+      const oldOffset = block.kind === 'code'
+        ? renderedOffsetOfCodeUnit(containerNodeOld, oldNode, blockUnit, 'old')
+        : renderedOffsetOfUnit(containerNodeOld, oldNode, blockUnit, 'old')
+      const newOffset = block.kind === 'code'
+        ? renderedOffsetOfCodeUnit(containerNodeNew, newNode, blockUnit, 'new')
+        : renderedOffsetOfUnit(containerNodeNew, newNode, blockUnit, 'new')
       const oldRun = drawUnitAt(containerOld, oldOffset, blockUnit, block, 'del')
       const newRun = drawUnitAt(containerNew, newOffset, blockUnit, block, 'add')
       if (oldRun !== undefined) drew = true
