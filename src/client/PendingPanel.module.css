@@ -849,6 +849,15 @@
 .mdPreviewBody :global(.mdTwinNew) {
   background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
 }
+/* A word run INSIDE a twin side must not paint the same colour a second time: 34% over 34% reads as ~57%, a
+   darker patch that looks like a different (stronger) change even though it is part of the version the side
+   already shows as changed. This happens when one element carries a visible text edit AND an invisible one
+   (`项目文档` → `项目文档 v2` with a retargeted link): the side is the wash, the run keeps only its own block
+   number, so hover and keep still address the word (the reported "backgrounds overlap" case). */
+.mdPreviewBody :global(.mdTwinNew .mdWordAdd),
+.mdPreviewBody :global(.mdTwinOld .mdWordDel) {
+  background-color: transparent;
+}
 /* An image's pair takes the whole line, like the image itself did: two frames sharing the width. */
 .mdPreviewBody :global(.mdTwin.mdTwinImages) {
   display: flex;
@@ -881,19 +890,24 @@
 .mdPreviewBody :global(.mdTwinNew[hidden]) {
   display: none;
 }
-/* A change with no rendered content at all: ONE labeled chip per SIDE. The chip is tinted by the side it stands
-   for — a red one for what went, a green one for what came — never one split chip joining both: a removal and
-   an addition are two things everywhere else in the diff, and each side's source line rides on its own chip for
-   the toolbar. The caption sits INSIDE the chip, so the words and the change are one thing: "invisible content"
-   written on the change itself, not floating beside it. The little square is the block; it is not drawn inside
-   the chip (see the `.mdTwinBlock` rule). */
+/* A change with no rendered content at all: ONE icon chip per SIDE. The chip is tinted by the side it stands
+   for — a red one for what went, a green one for what came — never one split chip joining both: a removal and an
+   addition are two things everywhere else in the diff, and each side's source line rides on its own chip for the
+   toolbar. The words that used to be written here are now the marker's accessible name (`aria-label`/`title`,
+   see `invisibleContentIcon`): the visible mark is an eye with a slash, in a box that wears the image twin's own
+   dashed edge and radius so the two "no rendering" markers read as one family. The little square behind the chip
+   is the block; it is not drawn (see the `.mdTwinBlock` rule). */
 .mdPreviewBody :global(.mdTwin.mdTwinPhantom) {
   display: inline-flex;
   width: fit-content;
   align-items: center;
+  justify-content: center;
   margin: 3px 0 8px;
-  padding: 1px 8px;
+  padding: 2px 4px;
+  border: 1px dashed var(--dsw-alias-border-l2);
   border-radius: 4px;
+  color: var(--dsw-alias-label-secondary);
+  vertical-align: middle;
 }
 /* The side this chip does NOT stand for is hidden (see `phantomBlock`): the visible side's colour is the chip's,
    in the single column and the double one alike. */
@@ -911,13 +925,21 @@
 .mdPreviewBody :global(.mdTwin.mdTwinPhantom + .mdTwin.mdTwinPhantom) {
   margin-left: 4px;
 }
-/* The chip's caption: inside the tinted background, so the marker says what the change is. */
+/* The marker's icon: an eye with a slash, sized like the chip's own text line and inheriting its colour. */
 .mdPreviewBody :global(.mdTwinCaption) {
-  font-size: 11px;
-  line-height: 16px;
-  color: var(--dsw-alias-label-secondary);
-  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  line-height: 0;
+  color: inherit;
   user-select: none;
+}
+.mdPreviewBody :global(.mdTwinCaption svg) {
+  display: block;
+  width: 14px;
+  height: 14px;
 }
 /* An image's twin: the frame names the path, because for an image the path IS the change. */
 .mdPreviewBody :global(.mdImageFrame) {
@@ -937,6 +959,10 @@
 }
 .mdPreviewBody :global(.mdImageAlt) {
   color: var(--dsw-alias-label-tertiary);
+}
+.mdPreviewBody :global(.mdImageTitle) {
+  color: var(--dsw-alias-label-tertiary);
+  font-style: italic;
 }
 /* The double column: each column shows its own side of a change. An image frame fills the column the way the
    image did. */
@@ -2869,6 +2895,73 @@
 .blockSourceDiffAdd {
   background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 20%, transparent);
   border-radius: 2px;
+}
+.blockSourceDiffContext {
+  /* The untouched lines around an invisible change: source, not a change — no band, only a quieter colour, so
+     the red/green lines stay the ones the eye lands on. */
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* A merged block can hold SEVERAL invisible differences (the front matter, a comment, a link definition). The
+   toolbar lists them as vertical tabs down its left edge and shows one at a time: the frame is as tall as the
+   TALLEST tab (see the pane's `--md-source-tab-lines`), so switching tabs never resizes it. */
+.blockSourceDiffTabs {
+  flex-direction: row;
+  align-items: stretch;
+  gap: 6px;
+}
+.blockSourceTabList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: none;
+  padding-top: 1px;
+}
+.blockSourceTab {
+  appearance: none;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: 10px/1.4 ui-monospace, Consolas, monospace;
+  padding: 1px 5px;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+}
+.blockSourceTab:hover {
+  background: var(--dsw-alias-bg-l2);
+}
+.blockSourceTabActive {
+  /* The tab being read: the surface the source pane uses, and the stronger label. */
+  border-color: var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-l2);
+  color: var(--dsw-alias-label-primary);
+}
+.blockSourceDiffPane {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* Fixed to the tallest tab: the toolbar must not jump when a shorter difference is selected. */
+  height: calc(var(--md-source-tab-lines, 1) * 1.5em);
+  overflow: auto;
+}
+.blockSourceTabContent {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+/* One numbered source line of a tab: the number is a fixed column so the source stays aligned. */
+.blockSourceDiffLine {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+.blockSourceDiffLineNumber {
+  flex: none;
+  min-width: 2.2em;
+  text-align: right;
+  color: var(--dsw-alias-label-tertiary);
+  user-select: none;
 }
 
 /* ONLY the selection frame gives its own surface away. It holds the actions for a selection, and a drag that

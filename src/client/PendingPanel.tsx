@@ -31,7 +31,8 @@ import {
 } from './discussion.ts'
 import type { Discussion, DiscussionMessage, DiscussionQuoteLine } from './discussion.ts'
 import { frameFollowIsAnimated, frameFollowKeyframes } from './scroll-follow.ts'
-import { previewUnits, renderMarkdownPreview } from './markdown-preview.ts'
+import { previewBlocks, renderMarkdownPreview } from './markdown-preview.ts'
+import type { PreviewBlock, PreviewInvisibleDiff } from './markdown-preview.ts'
 import { resolvePreviewImages } from './markdown-images.ts'
 import type { ChangeBlock, DiffPairRows, IntraRun, WholeFileDiffRow } from './whole-file-diff.ts'
 import { computeSideBySideDiff, searchPairs } from './split-diff.ts'
@@ -3815,21 +3816,32 @@ function codeCellAt(node: Node): HTMLElement | null {
 }
 
 /**
- * The change block a rendered Markdown-preview node belongs to, or undefined (a
- * context block, or a node outside any tagged block). The preview tags every
- * changed run's element with `data-md-block`, carrying the same block index the
- * source view's `changeBlocksOf` derives over the same contents — so a preview
- * element and a source block name the same keep/revert target.
+ * The difference BLOCK a rendered Markdown-preview node belongs to, or undefined (a context block, a table
+ * row whose changed runs are the hover targets, or a node outside any tagged block). The preview stamps every
+ * element that carries a block with `data-md-block` — the same index `previewBlocks` numbers — so a preview
+ * element and the toolbar always name the same keep/revert target.
  * @param node - the node under the pointer.
  * @returns the block index, or undefined.
  */
 function previewBlockAt(node: Node | null): number | undefined {
   const element = node instanceof Element ? node : node?.parentElement ?? null
-  const raw = element?.closest('[data-md-block]')?.getAttribute('data-md-block')
+  const block = element?.closest('[data-md-block]') as HTMLElement | null
+  if (block === null || block === undefined) return undefined
+  // A table ROW carries its block so the hover frame can enclose the whole row (rule A). The row is not
+  // itself a hover target there: the changed CELL runs are, and hovering an unchanged cell must not raise a
+  // toolbar for a row it merely sits in. A whole-row block (rule B) IS the change, so it stays hoverable.
+  if (block.tagName === 'TR' && !block.hasAttribute('data-md-whole-row')
+    && (element?.closest('[data-md-unit]') === null || element?.closest('[data-md-unit]') === undefined)) {
+    return undefined
+  }
+  const raw = block.getAttribute('data-md-block')
   if (raw === null || raw === undefined) return undefined
   const index = Number(raw)
   return Number.isInteger(index) && index >= 0 ? index : undefined
 }
+
+/** How many untouched source lines the invisible-content row shows on each side of the change. */
+const PREVIEW_SOURCE_CONTEXT_LINES = 3
 
 /** One side of the preview's source row, with the grammar it is written in. */
 interface PreviewSourceRow {
@@ -3839,6 +3851,42 @@ interface PreviewSourceRow {
   grammar: string
   /** The change draws nothing in the document (a pair of no-rendering blocks), so the row says so. */
   invisible?: boolean
+  /** The unit's own changed line numbers (1-based), when its marker carries them. */
+  lines?: { old?: { start: number; end: number }; new?: { start: number; end: number } }
+  /** Up to three UNCHANGED lines before/after the change, for the invisible-content row. */
+  contextBefore?: string[]
+  contextAfter?: string[]
+}
+
+/** One invisible difference of a merged block, as a vertical tab in the toolbar. */
+interface PreviewSourceTab {
+  /** The tab's label: the changed line range, e.g. `12–14`. */
+  label: string
+  /** The source the tab shows (with the line numbers its range carries). */
+  row: PreviewSourceRow
+  /** How many rendered lines the tab needs; the toolbar is as tall as the tallest tab. */
+  lines: number
+}
+
+/** How many lines one source row renders (old + new + their context). */
+function sourceRowLineCount(row: PreviewSourceRow): number {
+  const count = (text: string | undefined): number => (text === undefined ? 0 : text.split('\n').length)
+  return count(row.old) + count(row.new) + (row.contextBefore?.length ?? 0) + (row.contextAfter?.length ?? 0)
+}
+
+/** A changed line range as a tab label: one number for one line, `start–end` for several. */
+function sourceTabLabel(range: { start: number; end: number } | undefined): string {
+  if (range === undefined) return ''
+  return range.start === range.end ? String(range.start) : `${range.start}\u2013${range.end}`
+}
+
+/** Read a marker block's `data-md-diff-{side}-lines` range (`"3-5"`). */
+function markerLinesOf(element: HTMLElement, side: 'old' | 'new'): { start: number; end: number } | undefined {
+  const raw = side === 'old' ? element.dataset.mdDiffOldLines : element.dataset.mdDiffNewLines
+  if (raw === undefined) return undefined
+  const match = /^(\d+)-(\d+)$/.exec(raw)
+  if (match === null) return undefined
+  return { start: Number(match[1]), end: Number(match[2]) }
 }
 
 /**
@@ -3857,6 +3905,8 @@ function previewSourceRowOf(element: Element | null | undefined): PreviewSourceR
   let before = unit.dataset.mdDiffOld
   let after = unit.dataset.mdDiffNew
   let grammar = unit.dataset.mdDiffGrammar
+  let oldLines = markerLinesOf(unit, 'old')
+  let newLines = markerLinesOf(unit, 'new')
   // The double column draws the change in BOTH columns and keeps each side's source on its own element, so a
   // hovered element may carry only half of it: read the same unit's element in the other column too. The
   // toolbar's row then always shows the before AND the after version, whichever side was pointed at.
@@ -3868,14 +3918,20 @@ function previewSourceRowOf(element: Element | null | undefined): PreviewSourceR
       before ??= other.dataset.mdDiffOld
       after ??= other.dataset.mdDiffNew
       grammar ??= other.dataset.mdDiffGrammar
+      oldLines ??= markerLinesOf(other, 'old')
+      newLines ??= markerLinesOf(other, 'new')
       if (before !== undefined && after !== undefined) break
     }
   }
   if (before === undefined && after === undefined) return undefined
+  const lines = oldLines === undefined && newLines === undefined
+    ? undefined
+    : { ...(oldLines !== undefined ? { old: oldLines } : {}), ...(newLines !== undefined ? { new: newLines } : {}) }
   return {
     ...(before !== undefined ? { old: before } : {}),
     ...(after !== undefined ? { new: after } : {}),
     grammar: grammar ?? 'markdown',
+    ...(lines !== undefined ? { lines } : {}),
     // A no-rendering pair: what it stands for is not on the page at all, so the row names it as such.
     ...(unit.classList.contains('mdTwinPhantom') ? { invisible: true } : {}),
   }
@@ -3907,6 +3963,38 @@ function PreviewSourceLine({ text, grammar }: { text: string; grammar: string })
     ))
   }, [text, grammar])
   return <>{nodes}</>
+}
+
+/**
+ * One tab's source in the toolbar, EVERY line prefixed with its own source line number.
+ *
+ * The vertical tabs exist so several invisible differences of one merged block can be read one at a time; the
+ * line numbers are what make the tab label (`12–14`) mean something in the file. The removed lines are red and
+ * numbered from the old side, the added ones green and numbered from the new side.
+ */
+function PreviewTabSource({ row }: { row: PreviewSourceRow }): ReactElement {
+  const linesOf = (text: string | undefined, start: number | undefined, kind: 'del' | 'add'): ReactElement[] => {
+    if (text === undefined) return []
+    return text.split('\n').map((line, index) => (
+      <span
+        key={`${kind}-${index}`}
+        className={`${css.blockSourceDiffLine} ${kind === 'del' ? css.blockSourceDiffDel : css.blockSourceDiffAdd}`}
+        data-diff-source-line
+        {...(kind === 'del' ? { 'data-diff-block-sourcediff-del': '' } : { 'data-diff-block-sourcediff-add': '' })}
+      >
+        <span className={css.blockSourceDiffLineNumber} data-diff-source-line-number>
+          {start === undefined ? '' : start + index}
+        </span>
+        <PreviewSourceLine text={line === '' ? '\u00a0' : line} grammar={row.grammar} />
+      </span>
+    ))
+  }
+  return (
+    <>
+      {linesOf(row.old, row.lines?.old?.start, 'del')}
+      {linesOf(row.new, row.lines?.new?.start, 'add')}
+    </>
+  )
 }
 
 /** Character offset of a selection boundary within its line's code text. A
@@ -4312,17 +4400,20 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     [previewActive, splitView, file.oldText, file.newText, mdStyle, invisibleContentLabel],
   )
   /**
-   * The preview's own change units: character-level changes, so a line holding two changes (a table row's
-   * reworded cell and its retargeted link) numbers them separately and keeps each on its own characters.
+   * The preview's DIFFERENCE BLOCKS: what its navigation counts, its dashed frame frames and its toolbar
+   * keeps/reverts.
    *
-   * BOTH preview layouts number units — the single merged column and the double column draw the same changes,
+   * A block is not a unit: a pure addition/deletion hunk is ONE block however many character-level changes
+   * its lines hold (a whole new document is one block, not one per line), a table row is one block, and a
+   * block can hold only invisible content. The units remain inside the blocks for the highlighting.
+   *
+   * BOTH preview layouts number blocks — the single merged column and the double column draw the same changes,
    * and a toolbar that counted lines in one and characters in the other would renumber everything on a view
-   * switch (a change on a shared line would read as one block in one layout and two in the other). The
-   * original fragment renderer keeps the source view's line blocks, so nothing about it changes.
+   * switch. The original fragment renderer keeps the source view's line blocks, so nothing about it changes.
    */
   const previewUnitMode = previewActive && mdStyle === 'structure'
-  const previewUnitsList = useMemo(
-    () => (previewUnitMode ? previewUnits(file.oldText, file.newText) : []),
+  const previewBlocksList = useMemo(
+    () => (previewUnitMode ? previewBlocks(file.oldText, file.newText) : []),
     [previewUnitMode, file.oldText, file.newText],
   )
   /**
@@ -4432,6 +4523,95 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const intra = splitView ? computeIntraLineDiff(diff.rows, true) : new Map<number, IntraRun[]>()
     return { diff, blocks: changeBlocksOf(diff), intra }
   }, [file.oldText, file.newText, splitView])
+  /**
+   * Add the untouched lines around an INVISIBLE change to its source row.
+   *
+   * The invisible-content row names only the lines that changed, which is hard to read: three unchanged lines
+   * before and after put the change in its document (the reported request). The walk STOPS at another changed
+   * line, so a second change next door is never passed off as untouched context — the row shows the unchanged
+   * run between the two changes instead.
+   */
+  const previewContextAround = useCallback((row: PreviewSourceRow | undefined): PreviewSourceRow | undefined => {
+    if (row === undefined || row.invisible !== true || row.lines === undefined) return row
+    // The row is shown for the side the document reads as current: the new side; a deletion with no new side
+    // takes its context from the old file.
+    const side: 'old' | 'new' = row.lines.new !== undefined ? 'new' : 'old'
+    const range = side === 'new' ? row.lines.new : row.lines.old
+    if (range === undefined) return row
+    const texts = (side === 'new' ? file.newText : file.oldText).split('\n')
+    const changed = new Set<number>()
+    for (const line of model.diff.rows) {
+      const number = side === 'new' ? line.newLine : line.oldLine
+      if (number !== undefined && line.kind !== 'context') changed.add(number)
+    }
+    const contextBefore: string[] = []
+    for (let number = range.start - 1; number >= 1 && contextBefore.length < PREVIEW_SOURCE_CONTEXT_LINES; number--) {
+      if (changed.has(number)) break
+      contextBefore.unshift(texts[number - 1] ?? '')
+    }
+    const contextAfter: string[] = []
+    for (let number = range.end + 1; number <= texts.length && contextAfter.length < PREVIEW_SOURCE_CONTEXT_LINES; number++) {
+      if (changed.has(number)) break
+      contextAfter.push(texts[number - 1] ?? '')
+    }
+    return { ...row, contextBefore, contextAfter }
+  }, [file.oldText, file.newText, model])
+  /**
+   * The invisible differences of one block, as the toolbar's vertical tabs.
+   *
+   * A merged pure block (a whole new document, a new list, a new table…) can hold several parts the rendering
+   * cannot show — the front matter, an HTML comment, a link definition. Each is listed as its own tab, named
+   * with the line range it changes (`12–14`), so the reader can inspect them one by one without the toolbar
+   * growing a card per difference in the document.
+   *
+   * @param block - the hovered preview block.
+   * @returns one tab per invisible difference, in source order.
+   */
+  const previewTabsOf = useCallback((block: PreviewBlock | undefined): PreviewSourceTab[] => {
+    if (block === undefined || block.invisible.length === 0) return []
+    return block.invisible.map((diff: PreviewInvisibleDiff) => {
+      const lines = diff.oldLines === undefined && diff.newLines === undefined
+        ? undefined
+        : {
+          ...(diff.oldLines !== undefined ? { old: diff.oldLines } : {}),
+          ...(diff.newLines !== undefined ? { new: diff.newLines } : {}),
+        }
+      const row: PreviewSourceRow = {
+        ...(diff.oldText !== undefined ? { old: diff.oldText } : {}),
+        ...(diff.newText !== undefined ? { new: diff.newText } : {}),
+        grammar: diff.grammar,
+        invisible: true,
+        ...(lines !== undefined ? { lines } : {}),
+      }
+      const withContext = previewContextAround(row) ?? row
+      return {
+        label: sourceTabLabel(diff.newLines ?? diff.oldLines),
+        row: withContext,
+        lines: sourceRowLineCount(withContext),
+      }
+    })
+  }, [previewContextAround])
+  /**
+   * The source row the toolbar shows for one hovered block.
+   *
+   * The element's own hidden part (a link target, an image caption) wins when it has one: it is the difference
+   * the pointer is actually on. A merged block whose rendering carries no source at all falls back to its first
+   * invisible difference; when it has several, the tabs show them instead (the row stays undefined here).
+   *
+   * @param index - the hovered block's index.
+   * @param element - the element under the pointer.
+   * @returns the row to show beside the buttons, or undefined when the tabs carry the source.
+   */
+  const previewBlockSourceRow = useCallback((index: number, element: HTMLElement | undefined): PreviewSourceRow | undefined => {
+    const block = previewBlocksList[index]
+    const tabs = previewTabsOf(block)
+    // A merged block with SEVERAL invisible parts reads as tabs, even when the pointed-at element carries a
+    // source row of its own (the marker of a block that renders nothing): one row would hide the rest.
+    if (block?.merged === true && tabs.length > 1) return undefined
+    const elementRow = previewContextAround(previewSourceRowOf(element))
+    if (elementRow !== undefined) return elementRow
+    return tabs.length === 1 ? tabs[0]!.row : undefined
+  }, [previewContextAround, previewTabsOf, previewBlocksList])
   // The aligned split pairs (only in split mode): used to map a left/right
   // selection to the old/new line numbers for the copy reference.
   const splitModel = useMemo(() => (
@@ -4592,6 +4772,8 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    * here on hover — so the source difference is a detail on demand rather than a card in the document.
    */
   const [previewSourceRow, setPreviewSourceRow] = useState<PreviewSourceRow | undefined>(undefined)
+  /** Which invisible difference's vertical tab the toolbar shows for the hovered block. */
+  const [previewSourceTab, setPreviewSourceTab] = useState(0)
   const [selection, setSelection] = useState<RowRange | undefined>(undefined)
   // Comment mode (ON by default — see `commentModeEnabled`): whether the panel
   // offers to comment on a range at all. The event below is what re-renders the panel when
@@ -5087,18 +5269,18 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   // `selectionTargetRanges`), which is what lets a partial selection act on part of a block.
   const selectionRange = useMemo(() => {
     if (coveredBlockIndices.length === 0) return undefined
-    // The preview's covered indices are its UNITS: their line ranges give the host a line range to fold in,
+    // The preview's covered indices are its BLOCKS: their line ranges give the host a line range to fold in,
     // which is the same rule the preview has always used for a selection.
     if (previewActive && previewUnitMode) {
       const covered = coveredBlockIndices
-        .map(index => previewUnitsList[index])
-        .filter((unit): unit is NonNullable<typeof unit> => unit !== undefined)
+        .map(index => previewBlocksList[index])
+        .filter((block): block is NonNullable<typeof block> => block !== undefined)
       if (covered.length === 0) return undefined
       return {
-        oldStart: Math.min(...covered.map(unit => unit.oldLines.start)),
-        oldEnd: Math.max(...covered.map(unit => unit.oldLines.end)),
-        newStart: Math.min(...covered.map(unit => unit.newLines.start)),
-        newEnd: Math.max(...covered.map(unit => unit.newLines.end)),
+        oldStart: Math.min(...covered.map(block => block.oldStart)),
+        oldEnd: Math.max(...covered.map(block => block.oldEnd)),
+        newStart: Math.min(...covered.map(block => block.newStart)),
+        newEnd: Math.max(...covered.map(block => block.newEnd)),
       }
     }
     const firstIndex = coveredBlockIndices[0]
@@ -5108,7 +5290,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const last = model.blocks[lastIndex]
     if (first === undefined || last === undefined) return undefined
     return blockRangesOf(model.diff.rows, { start: first.start, end: last.end })
-  }, [coveredBlockIndices, model, previewActive, previewUnitMode, previewUnitsList])
+  }, [coveredBlockIndices, model, previewActive, previewUnitMode, previewBlocksList])
 
   // In-file search: matching lines over the whole diff (not just the rendered
   // window), so the count and jumps stay correct while the virtual list
@@ -5148,13 +5330,18 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    */
   const PREVIEW_OUTLINE_AIR_X = 3
   const PREVIEW_OUTLINE_AIR_Y = 2
+  /** What a change is painted with: the outline hugs these pieces, not the block carrier around them. */
+  const PREVIEW_PAINTED_SELECTOR = '.mdWordAdd, .mdWordDel, .mdTwin, .mdTwinOld, .mdTwinNew, .mdAdd, .mdDel, .mdTwinPhantom'
 
   /**
    * The hovered unit's outline boxes.
    *
-   * In the single column the unit is ONE box, however many elements it drew. In the DOUBLE column each side
-   * holds its own version of the change (inside its `data-diff-doc-side` wrapper), so there is one box per
-   * side: pointing at either version frames both matched versions of the change.
+   * One box per VISUAL LINE the change covers, not one bounding box around the whole change: a change that
+   * wraps over two lines is framed as two rectangles that hug each line (the reported wrapped-paragraph
+   * outline, whose single box also stretched across the empty end of a short line). Runs on the same line of
+   * the same rendered CONTAINER share one box, while a table row's two changed cells are two containers and
+   * get two boxes (the reported "one dashed box around the whole row while the tint is inside two cells").
+   * In the DOUBLE column each side is framed on its own: the boxes never join the two columns.
    *
    * @param index - the unit number.
    * @returns the boxes in content coordinates, in document order; empty when the unit is not rendered.
@@ -5162,43 +5349,101 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   const previewUnitBoxesFor = useCallback((index: number): PreviewUnitBox[] => {
     const body = mdPreviewBodyRef.current
     if (body === null) return []
-    const elements = [...body.querySelectorAll<HTMLElement>(`[data-md-block="${index}"]`)]
+    // The outline follows what the reader SEES as the change: the tinted characters/twins of this block. A
+    // table row's TR is only the block's carrier — its two changed cells are the change — so measuring the
+    // carrier would draw one dashed box around the whole row (the reported "highlight is the whole row while
+    // the difference is inside two cells").
+    const block = previewBlocksList[index]
+    const unitIndices = new Set<number>((block?.units ?? []).map(unit => unit.index))
+    const unitElements = unitIndices.size === 0
+      ? []
+      : [...body.querySelectorAll<HTMLElement>('[data-md-unit]')]
+        .filter(element => {
+          if (!unitIndices.has(Number(element.dataset.mdUnit))) return false
+          // Unit numbers and block numbers are separate sequences: an invisible block's marker can carry unit
+          // 12 while THIS block is 13. Only units whose block carrier is this block belong to the outline.
+          const owner = element.closest('[data-md-block]')
+          return owner !== null && owner.getAttribute('data-md-block') === String(index)
+        })
+    const elements = unitElements.length > 0
+      ? unitElements
+      : [...body.querySelectorAll<HTMLElement>(`[data-md-block="${index}"]`)]
     if (elements.length === 0) return []
     const bodyRect = body.getBoundingClientRect()
     previewScrollTopRef.current = body.scrollTop
-    // Group by rendered side: no wrapper in the single column means one group (one union box).
-    const groups = new Map<Element | null, HTMLElement[]>()
-    for (const element of elements) {
-      const side = element.closest('[data-diff-doc-side]')
-      const list = groups.get(side) ?? []
-      list.push(element)
-      groups.set(side, list)
-    }
-    const boxes: PreviewUnitBox[] = []
-    for (const group of groups.values()) {
-      let top = Number.POSITIVE_INFINITY
-      let bottom = Number.NEGATIVE_INFINITY
-      let left = Number.POSITIVE_INFINITY
-      let right = Number.NEGATIVE_INFINITY
-      for (const element of group) {
-        const rect = element.getBoundingClientRect()
-        top = Math.min(top, rect.top)
-        bottom = Math.max(bottom, rect.bottom)
-        left = Math.min(left, rect.left)
-        right = Math.max(right, rect.right)
-      }
-      if (!Number.isFinite(top) || !Number.isFinite(left)) continue
-      // A couple of pixels of air, so the dashed rule does not sit on the glyphs' edge.
-      boxes.push({
-        contentTop: top - bodyRect.top + body.scrollTop - PREVIEW_OUTLINE_AIR_Y,
-        height: Math.max(2, bottom - top) + PREVIEW_OUTLINE_AIR_Y * 2,
-        left: Math.max(0, left - bodyRect.left - PREVIEW_OUTLINE_AIR_X),
-        right: Math.max(0, bodyRect.right - right - PREVIEW_OUTLINE_AIR_X),
+    /** The tinted pieces a selected element actually paints (its own colour, or its tinted descendants). */
+    const paintedPiecesOf = (element: HTMLElement): HTMLElement[] => {
+      if (element.matches(PREVIEW_PAINTED_SELECTOR)) return [element]
+      const descendants = [...element.querySelectorAll<HTMLElement>(PREVIEW_PAINTED_SELECTOR)]
+      // Outermost tinted descendants only: a word run inside a twin wrapper is the wrapper's paint, not a
+      // second box.
+      return descendants.filter(descendant => {
+        const paintedAncestor = descendant.parentElement?.closest<HTMLElement>(PREVIEW_PAINTED_SELECTOR) ?? null
+        return paintedAncestor === null || !element.contains(paintedAncestor)
       })
     }
+    /** One marked piece's per-line rectangles: a Range over the contents yields one rect per line of text. */
+    const lineRectsOf = (element: HTMLElement): DOMRect[] => {
+      // A whole-row block (rule B) has no per-cell change to hug: the row's own box IS its extent.
+      if (element.tagName === 'TR') return [element.getBoundingClientRect()]
+      // A piece with no text (an image frame, a rule) has no line boxes of its own: its element box is it.
+      if ((element.textContent ?? '') === '') return [element.getBoundingClientRect()]
+      const range = document.createRange()
+      range.selectNodeContents(element)
+      const rects = (typeof range.getClientRects === 'function' ? [...range.getClientRects()] : [])
+        .filter(rect => rect.width > 0 && rect.height > 0)
+      // No layout information (a test environment without geometry): the element's own box still names it.
+      return rects.length > 0 ? rects : [element.getBoundingClientRect()]
+    }
+    // Group the painted pieces by the RENDERED CONTAINER they live in (a table CELL, a paragraph, a list
+    // item), inside their side: one outline per changed cell/line region, never one box around the block
+    // carrier (a table row's TR) when the tint is inside two of its cells.
+    const groups = new Map<Element | null, Map<HTMLElement, HTMLElement[]>>()
+    for (const element of elements) {
+      for (const piece of paintedPiecesOf(element)) {
+        const side = element.closest('[data-diff-doc-side]')
+        const container = piece.closest<HTMLElement>('td, th')
+          ?? piece.closest<HTMLElement>('p, li, h1, h2, h3, h4, h5, h6, pre, blockquote, tr')
+          ?? piece
+        const sideGroups = groups.get(side) ?? new Map<HTMLElement, HTMLElement[]>()
+        const list = sideGroups.get(container) ?? []
+        list.push(piece)
+        sideGroups.set(container, list)
+        groups.set(side, sideGroups)
+      }
+    }
+    const boxes: PreviewUnitBox[] = []
+    const groupsFlat = [...groups.values()].flatMap(sideGroups => [...sideGroups.values()])
+    for (const group of groupsFlat) {
+      // Collect the line rectangles, merging the runs that share a line into one box. `top < bottom` overlap is
+      // what "shares a line" means here: adjacent lines' boxes touch but do not overlap.
+      const lines: { top: number; bottom: number; left: number; right: number }[] = []
+      for (const element of group) {
+        for (const rect of lineRectsOf(element)) {
+          const line = lines.find(existing => rect.top < existing.bottom && rect.bottom > existing.top)
+          if (line === undefined) {
+            lines.push({ top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right })
+          } else {
+            line.top = Math.min(line.top, rect.top)
+            line.bottom = Math.max(line.bottom, rect.bottom)
+            line.left = Math.min(line.left, rect.left)
+            line.right = Math.max(line.right, rect.right)
+          }
+        }
+      }
+      lines.sort((start, end) => start.top - end.top || start.left - end.left)
+      for (const line of lines) {
+        // A couple of pixels of air, so the dashed rule does not sit on the glyphs' edge.
+        boxes.push({
+          contentTop: line.top - bodyRect.top + body.scrollTop - PREVIEW_OUTLINE_AIR_Y,
+          height: Math.max(2, line.bottom - line.top) + PREVIEW_OUTLINE_AIR_Y * 2,
+          left: Math.max(0, line.left - bodyRect.left - PREVIEW_OUTLINE_AIR_X),
+          right: Math.max(0, bodyRect.right - line.right - PREVIEW_OUTLINE_AIR_X),
+        })
+      }
+    }
     return boxes
-  }, [])
-
+  }, [previewBlocksList])
   /**
    * One change unit's rendered extent: the union of every element tagged with its number.
    *
@@ -5471,7 +5716,10 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     return { tag: element.tagName, text, ordinal, screenTop: element.getBoundingClientRect().top - bodyRect.top }
   }
   const restorePreviewScrollAnchor = (anchor: PreviewScrollAnchor): void => {
+    // The preview body may have been re-mounted by the action's re-render (the component's own ref is then a
+    // detached node): restore against whatever preview body the panel is showing NOW.
     const body = mdPreviewBodyRef.current
+      ?? document.querySelector<HTMLElement>('[data-diff-md-preview-body]')
     if (body === null || anchor.text === '') return
     const candidates = previewAnchorCandidates(body)
       .filter(element => element.tagName === anchor.tag && previewAnchorText(element) === anchor.text)
@@ -5535,6 +5783,11 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     setPreviewCovered([])
   }, [mdPreview, lang])
 
+  // A new hovered block starts on its first invisible difference's tab.
+  useEffect(() => {
+    setPreviewSourceTab(0)
+  }, [hoveredBlock, previewUnitMode])
+
   /**
    * A short window after a frame button steps the preview in which content hover does not move it.
    *
@@ -5592,8 +5845,8 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const range = live.getRangeAt(0)
     if (!body.contains(range.commonAncestorContainer)) return []
     const covered: number[] = []
-    // The preview's indices are its units (see `previewUnitMode`) — the same numbers its toolbar shows.
-    const count = previewUnitMode ? previewUnitsList.length : model.blocks.length
+    // The preview's indices are its BLOCKS (see `previewUnitMode`) — the same numbers its toolbar shows.
+    const count = previewUnitMode ? previewBlocksList.length : model.blocks.length
     for (let index = 0; index < count; index++) {
       // Only the OUTERMOST tagged elements matter: a merged paragraph carries the block and so do the word
       // runs inside it, and a selection that covers the paragraph must not be asked to cover each run too.
@@ -5667,15 +5920,16 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   }
 
   /**
-   * Step to the next/previous change UNIT in the preview, and centre the element that carries it.
+   * Step to the next/previous change BLOCK in the preview, and centre the element that carries it.
    *
-   * The preview counts its own units (see `previewUnits`), so its arrows walk those rather than the source
-   * view's line blocks — that is what lets the two changes of one table row be visited one at a time.
+   * The preview counts its own BLOCKS (see `previewBlocks`), so its arrows walk those rather than the source
+   * view's line blocks or the character-level units: a whole new document is one step, and a changed table
+   * row is one step however many cells changed in it.
    *
    * @param direction - +1 forward, -1 back; both wrap.
    */
-  const stepPreviewUnit = (direction: 1 | -1): void => {
-    const total = previewUnitsList.length
+  const stepPreviewBlock = (direction: 1 | -1): void => {
+    const total = previewBlocksList.length
     if (total === 0) return
     hoverGuardRef.current = Date.now() + HOVER_GUARD_MS
     cancelPreviewFrameHide()
@@ -5686,7 +5940,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const element = body?.querySelector(`[data-md-block="${next}"]`)
     if (element instanceof HTMLElement) {
       setPreviewUnit(element)
-      setPreviewSourceRow(previewSourceRowOf(element))
+      setPreviewSourceRow(previewBlockSourceRow(next, element))
       scrollPreviewHitIntoView(element)
     }
   }
@@ -7647,13 +7901,14 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   // flashes the following change. Shared by the hover frame and the selection
   // frame so the two stay aligned; an operated range that reached the end of the
   // diff wraps to the first block (see `blockAfterAction`).
-  const runBlockAction = async (action: 'keep' | 'revert', range: DiffApprovalBlockRange, operated: number): Promise<void> => {
+  const runBlockAction = async (action: 'keep' | 'revert', range: DiffApprovalBlockRange, operated: number, advance = true): Promise<void> => {
     await (action === 'keep'
       ? onBlockKeep(sessionId, file.id, range)
       : onBlockRevert(sessionId, file.id, range))
-    if (range.oldChars !== undefined) {
-      // A preview UNIT was resolved on its own characters: the source-line blocks keep their numbering, so
-      // there is no next slot to move to — just drop the pointer and let the re-render show what is left.
+    if (!advance || range.oldChars !== undefined) {
+      // A preview UNIT was resolved on its own characters — or the preview's blocks do not share the source
+      // view's line-block numbering: there is no next slot to move to, so just drop the pointer and let the
+      // re-render show what is left.
       setHoveredBlock(undefined)
       setPreviewUnit(undefined)
       setPreviewSourceRow(undefined)
@@ -7673,27 +7928,58 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     if (busy || hoveredBlock === undefined) return
     const operated = hoveredBlock
     if (previewUnitMode) {
-      const unit = previewUnitsList[operated]
-      if (unit === undefined) return
-      // The line range says where in the source view the change sits; the character spans are what the host
-      // acts on, so a change that shares its line with another is kept or reverted alone.
+      const block = previewBlocksList[operated]
+      if (block === undefined) return
+      // Keep/revert acts on the WHOLE block: a merged block (a whole new paragraph/list/table, a whole new
+      // document) folds or removes every line it covers. Only a block that is exactly one unit — a change that
+      // shares its line with another — acts on its own characters, so it can be kept alone.
       //
       // The preview re-renders from the new texts and the resolved change loses height (a no-rendering pair,
       // a ghost paragraph, a one-sided row); the content below slides up under a still scroll offset. Hold
       // the reader's place across that re-render (see `capturePreviewScrollAnchor`).
       const anchor = capturePreviewScrollAnchor()
+      // Record the anchor the panel is about to hold (`data-preview-scroll-anchor` on the document element):
+      // the scroll-restore promise is about THIS element, and an end-to-end test measures it back from here
+      // after the re-render. It survives the preview body being re-mounted.
+      if (anchor !== undefined) document.documentElement.dataset.previewScrollAnchor = JSON.stringify(anchor)
       await runBlockAction(action, {
-        oldStart: unit.oldLines.start,
-        oldEnd: unit.oldLines.end,
-        newStart: unit.newLines.start,
-        newEnd: unit.newLines.end,
-        oldChars: unit.oldChars,
-        newChars: unit.newChars,
-      }, operated)
+        oldStart: block.oldStart,
+        oldEnd: block.oldEnd,
+        newStart: block.newStart,
+        newEnd: block.newEnd,
+        ...(block.oldChars !== undefined && block.newChars !== undefined
+          ? { oldChars: block.oldChars, newChars: block.newChars }
+          : {}),
+      }, operated, false)
       if (anchor !== undefined) {
         // Let the action's re-render (and the image pass that may follow it) commit before measuring again.
+        // Restoring is idempotent (a sub-pixel delta is a no-op), and the preview is a large DOM update whose
+        // height can change AFTER the first frames: a web font finishing its load, an image resolving, the
+        // action's toolbar/source row going away. While the preview height is still changing, keep the anchor
+        // where it was; once the height is stable nothing runs, and a reader who scrolls in that first second
+        // is not fought (their scroll does not change the content height).
+        const restore = (): void => { restorePreviewScrollAnchor(anchor) }
         window.requestAnimationFrame(() => {
-          window.requestAnimationFrame(() => { restorePreviewScrollAnchor(anchor) })
+          window.requestAnimationFrame(restore)
+          // Hold the anchor across the WHOLE settle, not just while the total height changes: a reflow (a web
+          // font swapping in, the action's toolbar appearing/disappearing) can redistribute line heights while
+          // the document's total height stays the same. Frames stop at the deadline, and the first real scroll
+          // gesture from the reader hands the view back to them.
+          const deadline = performance.now() + 1500
+          let cancelled = false
+          const bodyForGesture = document.querySelector<HTMLElement>('[data-diff-md-preview-body]')
+          const cancel = (): void => { cancelled = true }
+          for (const event of ['wheel', 'touchstart', 'keydown'] as const) {
+            bodyForGesture?.addEventListener(event, cancel, { once: true, passive: true } as AddEventListenerOptions)
+          }
+          const keepAnchorWhileReflowing = (): void => {
+            if (cancelled) return
+            restore()
+            if (performance.now() < deadline) window.requestAnimationFrame(keepAnchorWhileReflowing)
+          }
+          window.requestAnimationFrame(keepAnchorWhileReflowing)
+          const fonts = (document as Document & { fonts?: FontFaceSet }).fonts
+          if (fonts !== undefined) void fonts.ready.then(() => { restore() }).catch(() => {})
         })
       }
       return
@@ -8588,6 +8874,24 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   // could have drawn one, before the reader could see it at the wrong column.
   useLayoutEffect(() => { syncQuoteScroll(bodyRef.current) })
 
+  /**
+   * The hovered preview block's source in the toolbar.
+   *
+   * A change with ONE invisible part keeps the single row it always had (the twin's own hidden difference,
+   * or the block's one no-rendering part). A merged block with SEVERAL gets the vertical tabs: a list down
+   * the frame's left side, one per difference, each labelled with its line range, and the frame is as tall as
+   * the tallest tab so switching between them never resizes the toolbar.
+   */
+  const hoveredPreviewBlock = previewUnitMode && hoveredBlock !== undefined
+    ? previewBlocksList[hoveredBlock]
+    : undefined
+  const previewSourceTabs = previewTabsOf(hoveredPreviewBlock)
+  const previewSourceTabIndex = previewSourceTabs.length === 0 ? 0 : previewSourceTab % previewSourceTabs.length
+  const showPreviewSourceTabs = previewSourceRow === undefined && previewSourceTabs.length > 1
+  const previewToolbarRow = previewSourceRow
+    ?? (previewSourceTabs.length === 1 ? previewSourceTabs[0]!.row : undefined)
+  const previewSourceTabHeight = previewSourceTabs.reduce((tallest, tab) => Math.max(tallest, tab.lines), 1)
+
   return (
     <div
       className={css.diff}
@@ -8803,7 +9107,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
                 if (target instanceof Element
                   && target.closest('[data-diff-block-actions],[data-diff-selection-actions]') !== null) return
                 if (Date.now() < hoverGuardRef.current) return
-                const unit = target instanceof Element
+                const blockElement = target instanceof Element
                   ? (target.closest('[data-md-block]') as HTMLElement | null)
                   : null
                 const index = previewBlockAt(target)
@@ -8813,8 +9117,8 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
                 }
                 cancelPreviewFrameHide()
                 if (index !== hoveredBlock) setHoveredBlock(index)
-                if (unit !== previewUnit) setPreviewUnit(unit ?? undefined)
-                setPreviewSourceRow(previewSourceRowOf(unit))
+                if (blockElement !== previewUnit) setPreviewUnit(blockElement ?? undefined)
+                setPreviewSourceRow(previewBlockSourceRow(index, blockElement ?? undefined))
               }}
             >
               <div
@@ -8884,14 +9188,14 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
                 </button>
               </div>
             ) : hoveredBlock !== undefined
-              && (previewUnitMode ? previewUnitsList[hoveredBlock] !== undefined : model.blocks[hoveredBlock] !== undefined)
+              && (previewUnitMode ? previewBlocksList[hoveredBlock] !== undefined : model.blocks[hoveredBlock] !== undefined)
               && previewFrame !== undefined ? (
               <div
                 ref={previewHoverFrameRef}
-                className={previewSourceRow === undefined ? css.blockActions : `${css.blockActions} ${css.blockActionsWithSource}`}
+                className={previewToolbarRow === undefined && !showPreviewSourceTabs ? css.blockActions : `${css.blockActions} ${css.blockActionsWithSource}`}
                 data-diff-block-actions
                 data-diff-anchored={previewFrame.contentLeft === undefined ? undefined : ''}
-                data-diff-block-with-source={previewSourceRow === undefined ? undefined : ''}
+                data-diff-block-with-source={previewToolbarRow === undefined && !showPreviewSourceTabs ? undefined : ''}
                 style={{
                   top: previewFrameTop(previewFrame, previewScrollTopRef.current) ?? 0,
                   ...(previewFrame.contentLeft === undefined
@@ -8903,7 +9207,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
               >
                 <div className={css.blockActionsRow}>
                   <span className={css.blockPosition} data-diff-block-position>
-                    {t('panel.blockPosition', { current: hoveredBlock + 1, total: previewUnitMode ? previewUnitsList.length : model.blocks.length })}
+                    {t('panel.blockPosition', { current: hoveredBlock + 1, total: previewUnitMode ? previewBlocksList.length : model.blocks.length })}
                   </span>
                   <button
                     type="button"
@@ -8911,7 +9215,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
                     data-diff-block-prev
                     aria-label={t('action.prevDiff')}
                     disabled={busy}
-                    onClick={() => { if (previewUnitMode) stepPreviewUnit(-1); else stepBlock(-1) }}
+                    onClick={() => { if (previewUnitMode) stepPreviewBlock(-1); else stepBlock(-1) }}
                   >
                     <IconChevronUpOutline14 size={14} />
                   </button>
@@ -8921,7 +9225,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
                     data-diff-block-next
                     aria-label={t('action.nextDiff')}
                     disabled={busy}
-                    onClick={() => { if (previewUnitMode) stepPreviewUnit(1); else stepBlock(1) }}
+                    onClick={() => { if (previewUnitMode) stepPreviewBlock(1); else stepBlock(1) }}
                   >
                     <IconChevronDownOutline14 size={14} />
                   </button>
@@ -8946,24 +9250,71 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
                 </div>
                 {/* The change's own source, shown only when the rendering could not carry it: the hidden
                     difference (a link's target, a caption) reads here while the change is hovered, highlighted
-                    as the source it is. */}
-                {previewSourceRow !== undefined && (
+                    as the source it is. A merged block with SEVERAL invisible differences lists them as vertical
+                    tabs, each labelled with its line range, in a pane as tall as the tallest one. */}
+                {showPreviewSourceTabs ? (
+                  <div className={`${css.blockSourceDiff} ${css.blockSourceDiffTabs}`} data-diff-block-sourcediff data-diff-block-sourcediff-tabs>
+                    <div className={css.blockSourceTabList} role="tablist" data-diff-source-tablist>
+                      {previewSourceTabs.map((tab, index) => (
+                        <button
+                          key={`${tab.label}-${index}`}
+                          type="button"
+                          role="tab"
+                          className={index === previewSourceTabIndex ? `${css.blockSourceTab} ${css.blockSourceTabActive}` : css.blockSourceTab}
+                          data-diff-source-tab
+                          data-diff-source-tab-lines={tab.label}
+                          data-active={index === previewSourceTabIndex ? '' : undefined}
+                          aria-selected={index === previewSourceTabIndex}
+                          onClick={() => { setPreviewSourceTab(index) }}
+                        >
+                          {tab.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div
+                      className={css.blockSourceDiffPane}
+                      data-diff-source-tab-pane
+                      style={{ '--md-source-tab-lines': previewSourceTabHeight } as CSSProperties}
+                    >
+                      {previewSourceTabs.map((tab, index) => (
+                        <div
+                          key={`${tab.label}-content-${index}`}
+                          className={css.blockSourceTabContent}
+                          data-diff-source-tab-content
+                          hidden={index !== previewSourceTabIndex}
+                        >
+                          <PreviewTabSource row={tab.row} />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : previewToolbarRow !== undefined && (
                   <div className={css.blockSourceDiff} data-diff-block-sourcediff>
                     <span className={css.blockSourceDiffLabel} data-diff-block-sourcediff-label>
-                      {previewSourceRow.invisible === true
+                      {previewToolbarRow.invisible === true
                         ? `${t('panel.invisibleContent')} · ${t('panel.sourceDiff')}`
                         : t('panel.sourceDiff')}
                     </span>
-                    {previewSourceRow.old !== undefined && (
+                    {previewToolbarRow.contextBefore?.map((line, index) => (
+                      <span key={`context-before-${index}`} className={css.blockSourceDiffContext} data-diff-block-sourcediff-context>
+                        <PreviewSourceLine text={line === '' ? '\u00a0' : line} grammar={previewToolbarRow.grammar} />
+                      </span>
+                    ))}
+                    {previewToolbarRow.old !== undefined && (
                       <span className={css.blockSourceDiffDel} data-diff-block-sourcediff-del>
-                        <PreviewSourceLine text={previewSourceRow.old} grammar={previewSourceRow.grammar} />
+                        <PreviewSourceLine text={previewToolbarRow.old} grammar={previewToolbarRow.grammar} />
                       </span>
                     )}
-                    {previewSourceRow.new !== undefined && (
+                    {previewToolbarRow.new !== undefined && (
                       <span className={css.blockSourceDiffAdd} data-diff-block-sourcediff-add>
-                        <PreviewSourceLine text={previewSourceRow.new} grammar={previewSourceRow.grammar} />
+                        <PreviewSourceLine text={previewToolbarRow.new} grammar={previewToolbarRow.grammar} />
                       </span>
                     )}
+                    {previewToolbarRow.contextAfter?.map((line, index) => (
+                      <span key={`context-after-${index}`} className={css.blockSourceDiffContext} data-diff-block-sourcediff-context>
+                        <PreviewSourceLine text={line === '' ? '\u00a0' : line} grammar={previewToolbarRow.grammar} />
+                      </span>
+                    ))}
                   </div>
                 )}
               </div>

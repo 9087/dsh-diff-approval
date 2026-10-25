@@ -119,51 +119,81 @@ test.describe('the preview keeps its scroll across a Keep', () => {
 
   /**
    * Scroll into the middle, keep the no-rendering pair that sits ABOVE the viewport (the chip loses its
-   * height when kept), and return where the anchor heading stood on screen before and after.
+   * height when kept), and return where the panel's OWN scroll anchor stood on screen before and after.
+   *
+   * The panel records the anchor it captures in `data-preview-scroll-anchor` (on the document element) right
+   * before the action. That record is the promise this spec verifies: after the re-render, the SAME element is
+   * still at the SAME screen position. It is deliberately not an arbitrary heading: the anchor is the first
+   * visible unchanged block — the place the reader's eye actually rests.
    */
   const keepAboveAndMeasure = async (): Promise<{ before: number; after: number; scrollBefore: number; scrollAfter: number }> => {
     const setup = await page.evaluate(() => {
       const body = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
       body.scrollTop = Math.round((body.scrollHeight - body.clientHeight) * 0.55)
+      delete document.documentElement.dataset.previewScrollAnchor
       const bodyRect = body.getBoundingClientRect()
       const chip = [...body.querySelectorAll<HTMLElement>('[data-md-block="0"]')].find(element =>
         element.classList.contains('mdTwinPhantom'))
-      const heading = [...body.querySelectorAll<HTMLElement>('h2')].find(element => {
-        const rect = element.getBoundingClientRect()
-        return rect.top > bodyRect.top && rect.top < bodyRect.bottom - 20
-      })
-      if (chip === undefined || heading === undefined) return null
+      if (chip === undefined) return null
       chip.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
       return {
-        heading: heading.textContent ?? '',
-        top: Math.round(heading.getBoundingClientRect().top - bodyRect.top),
         scrollTop: body.scrollTop,
         chipAbove: chip.getBoundingClientRect().bottom < bodyRect.top,
       }
     })
-    expect(setup, 'the fixture must render the front-matter chip and a visible heading').not.toBeNull()
+    expect(setup, 'the fixture must render the front-matter chip').not.toBeNull()
     expect(setup!.chipAbove, 'the kept change must sit above the viewport').toBe(true)
     await sleep(250)
     await page.evaluate(() => {
       document.querySelector('[data-diff-block-keep]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
-    // The re-render lands, and the scroll anchor is restored in the frames that follow it.
+    // The panel records its anchor before it starts the action; wait for that record.
+    let anchor: { tag: string; text: string; ordinal: number; screenTop: number } | null = null
+    for (let attempt = 0; attempt < 40 && anchor === null; attempt++) {
+      await sleep(50)
+      anchor = await page.evaluate(() => {
+        const raw = document.documentElement.dataset.previewScrollAnchor
+        return raw === undefined ? null : JSON.parse(raw) as { tag: string; text: string; ordinal: number; screenTop: number }
+      })
+    }
+    expect(anchor, 'the panel must record the scroll anchor it captures').not.toBeNull()
+    // The re-render lands and the anchor is restored in the frames after it; a web font settling can reflow the
+    // preview later (the panel keeps holding the anchor through that first second), so measure only once the
+    // anchor's position is STABLE for two consecutive samples.
+    const selector = 'h1,h2,h3,h4,h5,h6,p,ul,ol,pre,table,blockquote'
     let after: { top: number | null; scrollTop: number } = { top: null, scrollTop: 0 }
-    for (let attempt = 0; attempt < 30; attempt++) {
+    let lastTop: number | null = null
+    let stable = 0
+    for (let attempt = 0; attempt < 50; attempt++) {
       await sleep(100)
-      after = await page.evaluate((headingText) => {
+      after = await page.evaluate(({ anchor: wanted, selector: anchorSelector }) => {
         const body = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
         const bodyRect = body.getBoundingClientRect()
-        const heading = [...body.querySelectorAll<HTMLElement>('h2')].find(element => element.textContent === headingText)
+        const same = [...body.querySelectorAll<HTMLElement>(anchorSelector)].filter(element =>
+          element.closest('[data-diff-md-preview-content]') !== null &&
+          element.querySelector('[data-md-block]') === null &&
+          element.tagName === wanted.tag &&
+          (element.textContent ?? '').replace(/\s+/g, ' ').trim() === wanted.text)
+        const target = same[wanted.ordinal]
         return {
-          top: heading === undefined ? null : Math.round(heading.getBoundingClientRect().top - bodyRect.top),
+          top: target === undefined ? null : Math.round(target.getBoundingClientRect().top - bodyRect.top),
           scrollTop: body.scrollTop,
         }
-      }, setup!.heading)
-      if (after.top !== null) break
+      }, { anchor, selector })
+      if (after.top === null) {
+        stable = 0
+        continue
+      }
+      if (lastTop !== null && Math.abs(after.top - lastTop) <= 1) {
+        stable++
+        if (stable >= 2) break
+      } else {
+        stable = 0
+      }
+      lastTop = after.top
     }
-    expect(after.top, 'the anchor heading must still be on screen').not.toBeNull()
-    return { before: setup!.top, after: after.top!, scrollBefore: setup!.scrollTop, scrollAfter: after.scrollTop }
+    expect(after.top, 'the anchor block must still be on screen').not.toBeNull()
+    return { before: anchor!.screenTop, after: after.top!, scrollBefore: setup!.scrollTop, scrollAfter: after.scrollTop }
   }
 
   test('single column: the anchor stays put', async () => {

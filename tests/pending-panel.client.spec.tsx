@@ -15099,12 +15099,70 @@ describe('PendingPanel', () => {
     expect(blocks[0]!.querySelector('.mdTwinOld')!.hasAttribute('hidden')).toBe(false)
     expect(blocks[1]!.querySelector('.mdTwinOld')!.hasAttribute('hidden')).toBe(true)
     for (const block of blocks) {
-      expect(block.querySelector('[data-md-twin-caption]')?.textContent).toBe('panel.invisibleContent')
+      // The visible mark is an eye-with-a-slash icon (no words in the reading line); the caller's words are its
+      // accessible name and the pointer's title.
+      const icon = block.querySelector('[data-md-twin-caption]') as HTMLElement
+      expect(icon).not.toBeNull()
+      expect(icon.querySelector('svg')).not.toBeNull()
+      expect(icon.getAttribute('aria-label')).toBe('panel.invisibleContent')
+      expect(block.getAttribute('title')).toBe('panel.invisibleContent')
     }
     fireEvent.mouseOver(blocks[0]!)
     const label = document.querySelector('[data-diff-block-sourcediff-label]') as HTMLElement
     expect(label).not.toBeNull()
     expect(label.textContent).toBe('panel.invisibleContent · panel.sourceDiff')
+  })
+
+  it('counts a whole new file as ONE block in the toolbar', () => {
+    const body = previewBodyOf(entry({
+      path: '/repo/README.md',
+      oldText: '',
+      newText: '# T\n\nA body paragraph.\n\n- one\n- two\n',
+    }))
+    // Every top-level element of the new document carries the same block…
+    const blocks = [...new Set([...body.querySelectorAll('[data-md-block]')].map(element => element.getAttribute('data-md-block')))]
+    expect(blocks).toEqual(['0'])
+    fireEvent.mouseOver(body.querySelector('h1') as HTMLElement)
+    const frame = document.querySelector('[data-diff-block-actions]') as HTMLElement
+    expect(frame).not.toBeNull()
+    expect(frame.querySelector('[data-diff-block-position]')!.textContent)
+      .toBe('panel.blockPosition {"current":1,"total":1}')
+    // …and stepping cannot leave it: the whole document is one block.
+    fireEvent.click(frame.querySelector('[data-diff-block-next]') as HTMLElement)
+    expect(document.querySelector('[data-diff-block-position]')!.textContent)
+      .toBe('panel.blockPosition {"current":1,"total":1}')
+  })
+
+  it('lists a merged block\'s invisible differences as vertical tabs, each with line numbers', () => {
+    // A whole new document is ONE block. Its front matter and its HTML comments render nothing, so they are not
+    // chunks of their own in the page: the toolbar lists them as vertical tabs, each named with its line range,
+    // in a pane as tall as the TALLEST tab so switching never resizes the frame.
+    const body = previewBodyOf(entry({
+      path: '/repo/README.md',
+      oldText: '',
+      newText: '---\ntitle: A\n---\n\n# H\n\n<!-- one -->\n\nBody\n\n<!-- two -->\n',
+    }))
+    expect(body.querySelectorAll('.mdTwinPhantom')).toHaveLength(0)
+    fireEvent.mouseOver(body.querySelector('h1') as HTMLElement)
+    const tabs = [...document.querySelectorAll<HTMLElement>('[data-diff-source-tab]')]
+    expect(tabs.length).toBe(3)
+    expect(tabs.map(tab => tab.getAttribute('data-diff-source-tab-lines'))).toEqual(['1\u20133', '7', '11'])
+    const pane = document.querySelector('[data-diff-source-tab-pane]') as HTMLElement
+    expect(pane).not.toBeNull()
+    // The pane's height is driven by the tallest tab (the three front-matter lines), fixed across switches.
+    expect(pane.style.getPropertyValue('--md-source-tab-lines')).toBe('3')
+    // The source is numbered: the front matter reads as lines 1, 2, 3 of the file.
+    const numbers = [...document.querySelectorAll<HTMLElement>('[data-diff-source-line-number]')]
+      .map(element => element.textContent)
+    expect(numbers.slice(0, 3)).toEqual(['1', '2', '3'])
+    // Switching to the second tab shows that comment and hides the first, without moving the height.
+    fireEvent.click(tabs[1]!)
+    expect(tabs[1]!.getAttribute('data-active')).toBe('')
+    const contents = [...document.querySelectorAll<HTMLElement>('[data-diff-source-tab-content]')]
+    expect(contents[0]!.hasAttribute('hidden')).toBe(true)
+    expect(contents[1]!.hasAttribute('hidden')).toBe(false)
+    expect(contents[1]!.textContent).toContain('<!-- one -->')
+    expect(pane.style.getPropertyValue('--md-source-tab-lines')).toBe('3')
   })
 
   it('keeps one list and merges the changed item into it', () => {
@@ -15136,12 +15194,17 @@ describe('PendingPanel', () => {
     }))
     expect(body.querySelectorAll('table').length).toBe(1)
     expect(body.querySelectorAll('tbody tr').length).toBe(1)
-    // The changed CELL is untouched by tags — its drawn runs are the hover targets.
-    const changed = body.querySelector('[data-md-block="0"]') as HTMLElement
-    expect(changed.tagName).toBe('SPAN')
-    expect(changed.closest('td')).not.toBeNull()
+    // Rule A: the ROW is the block (the frame encloses the whole row) — but the changed cell's drawn runs are
+    // what the pointer targets, and an unchanged cell carries nothing.
+    const row = body.querySelector('tbody tr') as HTMLElement
+    expect(row.getAttribute('data-md-block')).toBe('0')
+    expect(row.hasAttribute('data-md-whole-row')).toBe(false)
+    const changed = row.querySelector('.mdWordDel') as HTMLElement
+    expect(changed).not.toBeNull()
     expect(changed.closest('td')!.hasAttribute('data-md-block')).toBe(false)
-    expect(body.querySelector('.mdWordDel')!.textContent).toBe('4')
+    expect(changed.getAttribute('data-md-block')).toBe('0')
+    expect(changed.getAttribute('data-md-unit')).toBe('0')
+    expect(changed.textContent).toBe('4')
     expect(body.querySelector('.mdWordAdd')!.textContent).toBe('FOUR')
     // The unchanged cell beside it shares the changed row line, and shares its own source byte for byte:
     // it must NOT carry a hidden source row, or the row would claim a change where the reader sees none.
@@ -15161,6 +15224,32 @@ describe('PendingPanel', () => {
     expect(changed.closest('pre')).not.toBeNull()
     expect(body.querySelector('.mdWordDel')!.textContent).toBe('2')
     expect(body.querySelector('.mdWordAdd')!.textContent).toBe('22')
+  })
+
+  it('shows untouched source lines around an invisible change, stopping at the next change', () => {
+    // The invisible-content row used to name only the changed lines, which is hard to read. Three unchanged
+    // lines on each side put the change in its document — and the walk STOPS at another changed line, so the
+    // second change below is not passed off as context (the reported review of `不可见内容 · 源码差异`).
+    const body = previewBodyOf(entry({
+      path: '/repo/README.md',
+      oldText: 'one\ntwo\nthree\nfour\n<!-- old comment -->\nsix\nseven\nEIGHT\nnine\n',
+      newText: 'one\ntwo\nthree\nfour\n<!-- new comment -->\nsix\nseven\neight\nnine\n',
+    }))
+    const chip = [...body.querySelectorAll<HTMLElement>('.mdTwinPhantom')]
+      .find(element => (element.getAttribute('data-md-diff-old') ?? '').includes('old comment'))
+    expect(chip, 'the invisible change is rendered as a marker block').toBeDefined()
+    fireEvent.mouseOver(chip!)
+    const frame = document.querySelector('[data-diff-block-actions]') as HTMLElement
+    expect(frame).not.toBeNull()
+    const context = [...frame.querySelectorAll('[data-diff-block-sourcediff-context]')]
+      .map(element => (element.textContent ?? '').trim())
+    // Three untouched lines before; two after, because `EIGHT` → `eight` is another change.
+    expect(context.slice(0, 3)).toEqual(['two', 'three', 'four'])
+    expect(context.slice(3)).toEqual(['six', 'seven'])
+    // The changed lines themselves are NOT context rows; they stay in the red/green rows.
+    expect(context).not.toContain('<!-- old comment -->')
+    expect(context).not.toContain('eight')
+    expect(frame.querySelector('[data-diff-block-sourcediff-del]')!.textContent).toContain('<!-- old comment -->')
   })
 
   it('makes a change the rendering cannot show VISIBLE as the two versions of the thing itself', () => {
@@ -16984,14 +17073,19 @@ describe('Markdown preview · structure renderer edge cases', () => {
     expect(marked(root)[0]!.closest('h1')).not.toBeNull()
   })
 
-  it('keeps the heading and reports a LEVEL change on it', () => {
-    // `## A` → `# A` renders the same TEXT in a different element: nothing in the visible content changed, so
-    // the heading itself is kept and its own source difference (the tag) rides on it for the toolbar.
+  it('draws BOTH heading levels of a LEVEL change, with the old one struck above the new', () => {
+    // `## A` → `# A` keeps the words but changes the element AND the heading's size. The rendering can show
+    // that: the old level stands struck above the new one, each tinted for its side, sharing one number (the
+    // reported "色和增删框都没有" complaint about a phantom block with a dashed frame only).
     const root = draw('## Same words\n', '# Same words\n')
-    expect(root.querySelectorAll('h1').length + root.querySelectorAll('h2').length).toBe(1)
-    const heading = root.querySelector('h1, h2') as HTMLElement
-    expect(heading.getAttribute('data-md-diff-old')).toBe('## Same words')
-    expect(heading.getAttribute('data-md-diff-new')).toBe('# Same words')
+    const oldHeading = root.querySelector('h2') as HTMLElement
+    const newHeading = root.querySelector('h1') as HTMLElement
+    expect(oldHeading, 'the old level is drawn').not.toBeNull()
+    expect(newHeading, 'the new level is drawn').not.toBeNull()
+    expect(oldHeading.classList.contains('mdDel')).toBe(true)
+    expect(newHeading.classList.contains('mdAdd')).toBe(true)
+    expect(oldHeading.getAttribute('data-md-block')).toBe(newHeading.getAttribute('data-md-block'))
+    expect(oldHeading.compareDocumentPosition(newHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
   it('keeps the code block and reports a language change on the code', () => {
@@ -17053,14 +17147,117 @@ describe('Markdown preview · structure renderer edge cases', () => {
     expect(root.querySelectorAll('.mdWordAdd').length).toBe(2)
   })
 
-  it('does not show a pure-syntax change', () => {
-    // `**x**` and `__x__` render to the same element with the same text: the reader asked not to see a
-    // source-diff card for a re-spelling, and the document stays exactly as the new version reads.
+  it('COMPARES the two spellings of a styled word, side by side', () => {
+    // `A **bold** word.` → `A __bold__ word.` renders the same bold word, so there is no tint that could show
+    // the change — but the reader asked to COMPARE the two styles. The word is drawn twice: the old spelling's
+    // version tinted red, the new one green, both real bold elements, one change number for the pair.
     const root = draw('A **bold** word.\n', 'A __bold__ word.\n')
-    expect(root.querySelectorAll('strong').length).toBe(1)
-    expect(root.querySelectorAll('strong')[0]!.textContent).toBe('bold')
-    expect(twins(root).length).toBe(0)
-    expect(root.querySelectorAll('[data-md-block]').length).toBe(0)
+    expect(root.querySelectorAll('strong').length).toBe(2)
+    expect((root.textContent ?? '').replace(/\s+/g, ' ').trim()).toBe('A boldbold word.')
+    const twin = root.querySelector('.mdTwin') as HTMLElement
+    expect(twin, 'the two styled versions are drawn side by side').not.toBeNull()
+    expect(twin.querySelector('.mdTwinOld strong')).not.toBeNull()
+    expect(twin.querySelector('.mdTwinNew strong')).not.toBeNull()
+    expect(twin.getAttribute('data-md-block')).not.toBeNull()
+  })
+
+  it('compares a re-spelled style in each double column on its own side', () => {
+    const holder = document.createElement('div')
+    holder.innerHTML = renderMarkdownPreview('A **bold** word.\n', 'A __bold__ word.\n', 'double', 'structure')
+    const columns = [...holder.querySelectorAll<HTMLElement>('[data-diff-doc-side]')]
+    expect(columns.length).toBe(2)
+    const oldStrong = columns[0]!.querySelector('strong') as HTMLElement
+    const newStrong = columns[1]!.querySelector('strong') as HTMLElement
+    expect(oldStrong.classList.contains('mdDel')).toBe(true)
+    expect(newStrong.classList.contains('mdAdd')).toBe(true)
+    expect(oldStrong.getAttribute('data-md-block')).toBe(newStrong.getAttribute('data-md-block'))
+  })
+
+  it('draws a re-spelled RULE as two tinted rules of ONE block, never as nothing', () => {
+    // The reported shape: `---` became `***`. Both spellings draw a horizontal rule, and the two source lines
+    // share nothing — by the block rules that is a pure deletion plus a pure addition, merged into ONE block.
+    // Both versions are drawn: the old rule struck red above the new one tinted green, sharing one number, so
+    // the source-view difference stays reviewable without an invisible-content chip.
+    const root = draw('Above.\n\n---\n\nBelow.\n', 'Above.\n\n***\n\nBelow.\n')
+    const rules = [...root.querySelectorAll<HTMLElement>('hr')]
+    expect(rules.length).toBe(2)
+    const ghost = rules.find(rule => rule.classList.contains('mdDel'))
+    const added = rules.find(rule => rule.classList.contains('mdAdd'))
+    expect(ghost, 'the old rule is drawn struck').toBeDefined()
+    expect(added, 'the new rule is drawn tinted').toBeDefined()
+    expect(ghost!.getAttribute('data-md-block')).toBe(added!.getAttribute('data-md-block'))
+    expect(ghost!.compareDocumentPosition(added!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(phantoms(root)).toHaveLength(0)
+    expect(root.textContent).toContain('Above.')
+    expect(root.textContent).toContain('Below.')
+  })
+
+  it('draws the re-spelled rule in each double column, tinted on its own side', () => {
+    const holder = document.createElement('div')
+    holder.innerHTML = renderMarkdownPreview('Above.\n\n---\n\nBelow.\n', 'Above.\n\n***\n\nBelow.\n', 'double', 'structure')
+    const columns = [...holder.querySelectorAll<HTMLElement>('[data-diff-doc-side]')]
+    expect(columns.length).toBe(2)
+    const oldRule = columns[0]!.querySelector('hr') as HTMLElement
+    const newRule = columns[1]!.querySelector('hr') as HTMLElement
+    expect(oldRule.classList.contains('mdDel')).toBe(true)
+    expect(newRule.classList.contains('mdAdd')).toBe(true)
+    expect(oldRule.getAttribute('data-md-block')).toBe(newRule.getAttribute('data-md-block'))
+    expect(columns[0]!.querySelector('.mdTwinPhantom')).toBeNull()
+    expect(columns[1]!.querySelector('.mdTwinPhantom')).toBeNull()
+  })
+
+  it('draws a heading LEVEL change with both versions, not as a colorless phantom', () => {
+    // The reported shape: `#### 标题` became `### 标题`. The words are unchanged, so the change is the heading's
+    // SIZE — and it used to end up as a phantom block that hovered with a dashed frame but no tint. Both
+    // versions are drawn now: the old level struck above, the new one tinted green, sharing one number.
+    const root = draw('#### 会被降级的小标题\n', '### 会被降级的小标题\n')
+    const headings = [...root.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6')]
+    const added = headings.find(heading => heading.classList.contains('mdAdd'))
+    const ghost = headings.find(heading => heading.classList.contains('mdDel'))
+    expect(added, 'the new heading is drawn in its own level').toBeDefined()
+    expect(ghost, 'the old heading level stands struck above it').toBeDefined()
+    expect(added!.tagName).toBe('H3')
+    expect(ghost!.tagName).toBe('H4')
+    expect(added!.getAttribute('data-md-block')).toBe(ghost!.getAttribute('data-md-block'))
+    // Reading order: the old level first.
+    expect(ghost!.compareDocumentPosition(added!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(phantoms(root).length).toBe(0)
+  })
+
+  it('draws a heading level change in each double column too, tinted on its own side', () => {
+    const holder = document.createElement('div')
+    holder.innerHTML = renderMarkdownPreview('#### 会被降级的小标题\n', '### 会被降级的小标题\n', 'double', 'structure')
+    const columns = [...holder.querySelectorAll<HTMLElement>('[data-diff-doc-side]')]
+    expect(columns.length).toBe(2)
+    const oldHeading = columns[0]!.querySelector<HTMLElement>('h3, h4')!
+    const newHeading = columns[1]!.querySelector<HTMLElement>('h3, h4')!
+    expect(oldHeading.tagName).toBe('H4')
+    expect(oldHeading.classList.contains('mdDel')).toBe(true)
+    expect(newHeading.tagName).toBe('H3')
+    expect(newHeading.classList.contains('mdAdd')).toBe(true)
+    expect(oldHeading.getAttribute('data-md-block')).toBe(newHeading.getAttribute('data-md-block'))
+  })
+
+  it('keeps a word swap and an appended clause in one line as TWO changes', () => {
+    // The reported shape: `旧写法` → `新写法，内容更长一些` inside a list item. The word swap (`旧`→`新`) and
+    // the appended clause are two edits, and the unchanged `写法` between them is not part of either; one unit
+    // framed all of it (and the neutral word in the middle read as if the frame had grabbed unrelated text).
+    // Each is its own change now: its own number, its own hover frame, keepable on its own.
+    const oldText = '- 会被改写的列表项：旧写法\n'
+    const newText = '- 会被改写的列表项：新写法，内容更长一些\n'
+    const units = previewUnits(oldText, newText)
+    expect(units.length).toBe(2)
+    expect(units[0]!.oldText).toBe('旧')
+    expect(units[0]!.newText).toBe('新')
+    expect(units[1]!.oldText).toBe('')
+    expect(units[1]!.newText).toBe('，内容更长一些')
+    const root = draw(oldText, newText)
+    const textsOf = (index: number): (string | null)[] => [...root.querySelectorAll<HTMLElement>(`[data-md-block="${index}"]`)]
+      .map(element => element.textContent)
+    expect(textsOf(units[0]!.index)).toEqual(expect.arrayContaining(['旧', '新']))
+    expect(textsOf(units[1]!.index)).toEqual(['，内容更长一些'])
+    // Neither change's own source spans the unchanged `写法` between them.
+    for (const unit of units) expect(`${unit.oldText}${unit.newText}`).not.toContain('写法')
   })
 
   it('does not show a whitespace-only change either', () => {
@@ -17274,26 +17471,32 @@ describe('Markdown preview · structure renderer edge cases', () => {
     expect(root.querySelectorAll('p').length).toBe(1)
   })
 
-  it('names a no-rendering pair with the caller\'s caption, and stays bare without one', () => {
-    // A pair of tinted squares does not say what it means; the panel passes a localized caption for it, so
-    // the reader can read "invisible content" beside the pair instead of hovering to find out. The label is
-    // the caller's — the renderer has no translator, and the bare rendering (which most cases read) has none.
+  it('names a no-rendering pair with the caller\'s words, and stays unnamed without them', () => {
+    // The marker's visible mark is an eye-with-a-slash icon, which says what it means on its own; the panel
+    // passes the localized words for its accessible name (and the pointer's title). The words are the caller's —
+    // the renderer has no translator, and the bare rendering (which most cases read) has none.
     const oldText = '---\ntitle: A\n---\n\nBody\n'
     const newText = '---\ntitle: B\n---\n\nBody\n'
     const bare = document.createElement('div')
     bare.innerHTML = renderMarkdownPreview(oldText, newText, 'single', 'structure')
-    expect(bare.querySelector('[data-md-twin-caption]')).toBeNull()
+    const bareIcon = bare.querySelector('[data-md-twin-caption]') as HTMLElement
+    expect(bareIcon).not.toBeNull()
+    expect(bareIcon.getAttribute('aria-label')).toBeNull()
+    expect(bareIcon.getAttribute('aria-hidden')).toBe('true')
+    expect(bare.querySelector('.mdTwinPhantom')!.getAttribute('title')).toBeNull()
 
     const single = document.createElement('div')
     single.innerHTML = renderMarkdownPreview(oldText, newText, 'single', 'structure', { invisible: '不可见内容' })
-    expect(single.querySelector('[data-md-twin-caption]')?.textContent).toBe('不可见内容')
+    const singleIcon = single.querySelector('[data-md-twin-caption]') as HTMLElement
+    expect(singleIcon.getAttribute('aria-label')).toBe('不可见内容')
+    expect(singleIcon.getAttribute('title')).toBe('不可见内容')
 
-    // The double column captions each column's own marker, because each column shows only its side.
+    // The double column decorates each column's own marker, because each column shows only its side.
     const double = document.createElement('div')
     double.innerHTML = renderMarkdownPreview(oldText, newText, 'double', 'structure', { invisible: '不可见内容' })
     for (const side of ['old', 'new'] as const) {
       const column = double.querySelector(`[data-diff-doc-side="${side}"]`) as HTMLElement
-      expect(column.querySelector('[data-md-twin-caption]')?.textContent, side).toBe('不可见内容')
+      expect(column.querySelector('[data-md-twin-caption]')?.getAttribute('aria-label'), side).toBe('不可见内容')
     }
   })
 
@@ -17333,11 +17536,11 @@ describe('Markdown preview · structure renderer edge cases', () => {
     }
   })
 
-  it('marks a paragraph Markdown swallowed into a table as DRAWN, not as invisible content', () => {
+  it('renders the lines GFM would swallow into a table as the paragraph they read as, and marks them', () => {
     // The reported shape: a table, and immediately after its last row (no blank line) a paragraph whose text
-    // changed. GFM parses that line as more table rows, so the pair merge finds no paragraph to merge — the
-    // text is ON the page (inside the table) yet its units had no element, and the reachability net called
-    // the change "invisible content". Such a unit is tagged where the document draws it instead.
+    // changed. GFM would read that line as more table rows — the preview used to render it INSIDE the table,
+    // which read as the diff having moved text into the table. The renderer now reparses it as its own paragraph
+    // (see `repairSwallowedTableLines`), where the change is a normal, marked paragraph change.
     const table = [
       '# 说明', '',
       '| 场景 | `TryShowApplyConfirmTips` 应返回 | 汇总行数 |',
@@ -17350,17 +17553,30 @@ describe('Markdown preview · structure renderer edge cases', () => {
     const units = previewUnits(oldText, newText)
     const holder = document.createElement('div')
     holder.innerHTML = renderMarkdownPreview(oldText, newText, 'single', 'structure')
-    // No pair of "invisible content" blocks: every unit is a drawn change somewhere on the page.
+    // One old line became THREE source lines: that is ONE change — a block whose two sides hold a different
+    // number of lines — so it numbers once.
+    expect(units.length).toBe(1)
+    // The table holds its OWN rows only; the paragraph is outside it.
+    const renderedTable = holder.querySelector('table') as HTMLElement
+    expect(renderedTable.textContent).not.toContain('每行文案')
+    expect(renderedTable.querySelectorAll('tr').length).toBe(3)
+    const paragraph = [...holder.querySelectorAll<HTMLElement>('p')]
+      .find(element => (element.textContent ?? '').includes('DungeonTeamStart.APPLY_CONFIRM_TEXT'))
+    expect(paragraph, 'the table-following lines are a paragraph of their own, with the new words').toBeDefined()
+    // The rewrite is bigger than an inline edit, so the old paragraph stands struck ABOVE the new one — both
+    // OUTSIDE the table, each carrying the change's own number.
+    expect(paragraph!.closest('table')).toBeNull()
+    expect(paragraph!.getAttribute('data-md-block')).toBe(String(units[0]!.index))
+    expect(paragraph!.classList.contains('mdAdd')).toBe(true)
+    const ghost = [...holder.querySelectorAll<HTMLElement>('p.mdDel')]
+      .find(element => (element.textContent ?? '').includes('每行文案都取'))
+    expect(ghost, 'the old paragraph is drawn struck above the new one').toBeDefined()
+    expect(ghost!.closest('table')).toBeNull()
+    expect(ghost!.getAttribute('data-md-block')).toBe(String(units[0]!.index))
+    // No pair of "invisible content" blocks: the change is a drawn, marked change in that paragraph.
     expect(holder.querySelectorAll('.mdTwinPhantom').length).toBe(0)
     const tags = new Set([...holder.querySelectorAll('[data-md-block]')].map(element => element.getAttribute('data-md-block')))
     for (const unit of units) expect(tags.has(String(unit.index)), `unit ${unit.index}`).toBe(true)
-    // The text the table swallowed is still visible, and the unit that only lives inside those rows is marked
-    // on its own characters: a real hover/keep target, not a phantom pair.
-    expect(holder.textContent).toContain('DungeonTeamStart.APPLY_CONFIRM_TEXT')
-    const marked = [...holder.querySelectorAll<HTMLElement>('.mdWordAdd, .mdWordDel')]
-      .filter(element => element.getAttribute('data-md-block') === '1')
-    expect(marked.length).toBeGreaterThan(0)
-    expect(marked.map(element => element.textContent).join('')).toContain('ungeonTeamStart')
   })
 
   it('keeps the double column row-aligned after an insertion-only change before the changed blocks', () => {
@@ -17418,9 +17634,10 @@ describe('Markdown preview · structure renderer edge cases', () => {
     expect(blocks[1]!.getAttribute('data-md-diff-new')).toBe('title: A v2\nstatus: stable')
   })
 
-  it('numbers the two changes of one line separately', () => {
-    // A table row whose cell text AND whose link target changed is ONE source line but TWO changes: the
-    // preview numbers them apart, each with its own character span, so either can be kept or reverted alone.
+  it('numbers a table row as ONE block, keeping its two changes as separate units', () => {
+    // A table row whose cell text AND whose link target changed is ONE source line but TWO character-level
+    // changes. Under the block rules the ROW is the block (rule A): the reader counts it once, while each
+    // change keeps its own unit, its own character span and its own highlight inside the row.
     const oldText = '| m | 说明 | 链接 |\n| --- | --- | --- |\n| core | 旧说明 | [core](https://example.com/core/v1) |\n'
     const newText = '| m | 说明 | 链接 |\n| --- | --- | --- |\n| core | 新说明 | [core](https://example.com/core/v2) |\n'
     const units = previewUnits(oldText, newText)
@@ -17435,11 +17652,16 @@ describe('Markdown preview · structure renderer edge cases', () => {
     expect(units[0]!.oldLines).toEqual({ start: 3, end: 3 })
     expect(units[1]!.oldLines).toEqual({ start: 3, end: 3 })
 
-    // …and the rendered row carries both numbers: the merged cell is one unit, the source-diff card the other.
+    // …and the rendered row is ONE block: the row carries it, and the drawn runs name their own units under it.
     const holder = document.createElement('div')
     holder.innerHTML = renderMarkdownPreview(oldText, newText, 'single', 'structure')
-    const tagged = [...holder.querySelectorAll('[data-md-block]')].map(element => element.getAttribute('data-md-block'))
-    expect(new Set(tagged)).toEqual(new Set(['0', '1']))
+    const blocks = [...holder.querySelectorAll('[data-md-block]')].map(element => element.getAttribute('data-md-block'))
+    expect(new Set(blocks)).toEqual(new Set(['0']))
+    const row = holder.querySelector('tbody tr') as HTMLElement
+    expect(row.getAttribute('data-md-block')).toBe('0')
+    const unitTags = [...new Set([...holder.querySelectorAll('[data-md-unit]')]
+      .map(element => element.getAttribute('data-md-unit')))].sort()
+    expect(unitTags).toEqual(['0', '1'])
   })
 
   it('numbers the two words of one line separately, in the panel', async () => {
@@ -17479,10 +17701,10 @@ describe('Markdown preview · structure renderer edge cases', () => {
     })
   })
 
-  it('numbers the double column by unit too, cards included', () => {
-    // The double column draws the same changes as the single one, so it counts the same units: a front-matter
-    // change first (its card), then the table row's cell text and link target as separate numbers — in BOTH
-    // columns, each side showing its own half.
+  it('numbers the double column by block too, its units kept inside', () => {
+    // The double column draws the same changes as the single one, so it counts the same BLOCKS: a front-matter
+    // change first (its card), then the table row (ONE block, rule A) whose cell text and link target are two
+    // units inside it — in BOTH columns, each side showing its own half.
     const oldText = '---\ntitle: A\n---\n\n| m | 说明 | 链接 |\n| --- | --- | --- |\n| core | 旧说明 | [core](https://example.com/v1) |\n'
     const newText = '---\ntitle: B\n---\n\n| m | 说明 | 链接 |\n| --- | --- | --- |\n| core | 新说明 | [core](https://example.com/v2) |\n'
     const units = previewUnits(oldText, newText)
@@ -17492,12 +17714,14 @@ describe('Markdown preview · structure renderer edge cases', () => {
     const columns = [...holder.querySelectorAll('.mdDoubleCol')] as HTMLElement[]
     expect(columns.length).toBe(2)
     for (const column of columns) {
-      const tags = [...new Set([...column.querySelectorAll('[data-md-block]')].map(element => element.getAttribute('data-md-block')))]
-      expect(tags.sort()).toEqual(['0', '1', '2'])
+      const blocks = [...new Set([...column.querySelectorAll('[data-md-block]')].map(element => element.getAttribute('data-md-block')))]
+      expect(blocks.sort()).toEqual(['0', '1'])
+      const unitTags = [...new Set([...column.querySelectorAll('[data-md-unit]')].map(element => element.getAttribute('data-md-unit')))]
+      expect(unitTags.sort()).toEqual(['0', '1', '2'])
     }
   })
 
-  it('numbers the double column preview by unit in the toolbar', () => {
+  it('numbers the double column preview by block in the toolbar', () => {
     const oldText = '---\ntitle: A\n---\n\n| m | 说明 | 链接 |\n| --- | --- | --- |\n| core | 旧说明 | [core](https://example.com/v1) |\n'
     const newText = '---\ntitle: B\n---\n\n| m | 说明 | 链接 |\n| --- | --- | --- |\n| core | 新说明 | [core](https://example.com/v2) |\n'
     const props = panelProps({
@@ -17511,12 +17735,13 @@ describe('Markdown preview · structure renderer edge cases', () => {
     fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
     fireEvent.click(document.querySelector('[data-diff-toggle-view]') as HTMLElement)
 
-    // The URL change of the row is the THIRD unit, and the toolbar says so in the double column as well.
-    const card = document.querySelector('[data-md-block="2"]') as HTMLElement
-    expect(card).not.toBeNull()
-    fireEvent.mouseOver(card)
+    // The table row is the SECOND block; its URL change is unit 2 inside the row's block.
+    const urlRun = document.querySelector('[data-md-unit="2"]') as HTMLElement
+    expect(urlRun).not.toBeNull()
+    expect(urlRun.getAttribute('data-md-block')).toBe('1')
+    fireEvent.mouseOver(urlRun)
     expect(document.querySelector('[data-diff-block-position]')!.textContent)
-      .toBe('panel.blockPosition {"current":3,"total":3}')
+      .toBe('panel.blockPosition {"current":2,"total":2}')
   })
 
   it('does not double-render a duplicate heading', () => {
