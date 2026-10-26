@@ -5420,45 +5420,50 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       }
     }
     const boxes: PreviewUnitBox[] = []
-    const groupsFlat = [...groups.values()].flatMap(sideGroups => [...sideGroups.values()])
-    for (const group of groupsFlat) {
-      // Collect the line rectangles, merging the runs that share a line into one box. `top < bottom` overlap is
-      // what "shares a line" means here: adjacent lines' boxes touch but do not overlap.
-      const lines: { top: number; bottom: number; left: number; right: number }[] = []
-      for (const element of group) {
-        for (const rect of lineRectsOf(element)) {
-          const line = lines.find(existing => rect.top < existing.bottom && rect.bottom > existing.top)
-          if (line === undefined) {
-            lines.push({ top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right })
-          } else {
-            line.top = Math.min(line.top, rect.top)
-            line.bottom = Math.max(line.bottom, rect.bottom)
-            line.left = Math.min(line.left, rect.left)
-            line.right = Math.max(line.right, rect.right)
+    // In the double column each column frames ITS OWN side: a change has an old box on the left and a new box
+    // on the right, never one box bridging the two documents.
+    for (const sideGroups of groups.values()) {
+      const sideBoxes: PreviewUnitBox[] = []
+      for (const group of sideGroups.values()) {
+        // Collect the line rectangles, merging the runs that share a line into one box. `top < bottom` overlap
+        // is what "shares a line" means here: adjacent lines' boxes touch but do not overlap.
+        const lines: { top: number; bottom: number; left: number; right: number }[] = []
+        for (const element of group) {
+          for (const rect of lineRectsOf(element)) {
+            const line = lines.find(existing => rect.top < existing.bottom && rect.bottom > existing.top)
+            if (line === undefined) {
+              lines.push({ top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right })
+            } else {
+              line.top = Math.min(line.top, rect.top)
+              line.bottom = Math.max(line.bottom, rect.bottom)
+              line.left = Math.min(line.left, rect.left)
+              line.right = Math.max(line.right, rect.right)
+            }
           }
         }
+        lines.sort((start, end) => start.top - end.top || start.left - end.left)
+        for (const line of lines) {
+          sideBoxes.push({
+            contentTop: line.top - bodyRect.top + body.scrollTop - PREVIEW_OUTLINE_AIR_Y,
+            height: Math.max(2, line.bottom - line.top) + PREVIEW_OUTLINE_AIR_Y * 2,
+            left: Math.max(0, line.left - bodyRect.left - PREVIEW_OUTLINE_AIR_X),
+            right: Math.max(0, bodyRect.right - line.right - PREVIEW_OUTLINE_AIR_X),
+          })
+        }
       }
-      lines.sort((start, end) => start.top - end.top || start.left - end.left)
-      for (const line of lines) {
-        boxes.push({
-          contentTop: line.top - bodyRect.top + body.scrollTop - PREVIEW_OUTLINE_AIR_Y,
-          height: Math.max(2, line.bottom - line.top) + PREVIEW_OUTLINE_AIR_Y * 2,
-          left: Math.max(0, line.left - bodyRect.left - PREVIEW_OUTLINE_AIR_X),
-          right: Math.max(0, bodyRect.right - line.right - PREVIEW_OUTLINE_AIR_X),
-        })
+      // MERGED blocks, CODE pairs and INVISIBLE pairs are ONE change PER SIDE: the dashed frame is the outer
+      // boundary of that side's painted pieces. Other blocks keep following their own red/green pieces.
+      const blockKind = (block as unknown as { kind?: string } | undefined)?.kind
+      const oneFrame = block?.merged === true || blockKind === 'code' || (block?.invisible.length ?? 0) > 0
+      if (oneFrame && sideBoxes.length > 1) {
+        const top = Math.min(...sideBoxes.map(box => box.contentTop))
+        const bottom = Math.max(...sideBoxes.map(box => box.contentTop + box.height))
+        const left = Math.min(...sideBoxes.map(box => box.left))
+        const right = Math.min(...sideBoxes.map(box => box.right))
+        boxes.push({ contentTop: top, height: bottom - top, left, right })
+      } else {
+        boxes.push(...sideBoxes)
       }
-    }
-    // MERGED blocks, CODE pairs (struck line above its green replacement) and INVISIBLE pairs (the two marker
-    // chips of one comment/definition change) are ONE change: their dashed frame is the outer boundary of
-    // everything they paint. Other blocks keep following their own red/green pieces.
-    const blockKind = (block as unknown as { kind?: string } | undefined)?.kind
-    const oneFrame = block?.merged === true || blockKind === 'code' || (block?.invisible.length ?? 0) > 0
-    if (oneFrame && boxes.length > 1) {
-      const top = Math.min(...boxes.map(box => box.contentTop))
-      const bottom = Math.max(...boxes.map(box => box.contentTop + box.height))
-      const left = Math.min(...boxes.map(box => box.left))
-      const right = Math.min(...boxes.map(box => box.right))
-      return [{ contentTop: top, height: bottom - top, left, right }]
     }
     return boxes
   }, [previewBlocksList])

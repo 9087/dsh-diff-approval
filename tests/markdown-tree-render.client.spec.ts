@@ -278,10 +278,21 @@ describe('tree-first renderer: character edits', () => {
     expect(root.querySelector('code')!.textContent).toContain('const c = 3')
   })
 
-  it('shows a heading LEVEL change as the old heading struck beside the new one', () => {
+  it('shows a heading LEVEL change as old and new headings side by side', () => {
     const root = bodyOf('#### 标题\n', '### 标题\n')
-    expect(root.querySelectorAll('h4.mdDel')).toHaveLength(1)
-    expect(root.querySelectorAll('h3.mdAdd')).toHaveLength(1)
+    const pair = root.querySelector<HTMLElement>('.mdTwin.mdTwinBlockPair')
+    expect(pair).not.toBeNull()
+    expect(pair!.querySelector('.mdTwinOld h4')?.textContent).toBe('标题')
+    expect(pair!.querySelector('.mdTwinNew h3')?.textContent).toBe('标题')
+    expect(pair!.dataset.mdDiffOld).toContain('#### 标题')
+    expect(pair!.dataset.mdDiffNew).toContain('### 标题')
+    // One block, one hover target.
+    expect(blocksOf(root)).toHaveLength(1)
+    // Double column keeps one whole heading per column.
+    const holder = document.createElement('div')
+    holder.innerHTML = renderTreeDocuments('#### 标题\n', '### 标题\n')
+    expect(holder.querySelector('[data-diff-doc-side="old"] h4')).not.toBeNull()
+    expect(holder.querySelector('[data-diff-doc-side="new"] h3')).not.toBeNull()
   })
 
   it('draws a nested item change where it sits, never tinting the whole parent item', () => {

@@ -2113,6 +2113,45 @@ function renderCodePairBlock(
   wrapper.append(oldHolder, newHolder)
 }
 
+/**
+ * A block-level matched pair whose only change is its shell (a heading level, a horizontal rule style) reads
+ * best as two versions side by side — old tinted left, new tinted right — like images and code fences, instead
+ * of one above the other with a big gap. The pair is ONE block.
+ *
+ * @param block - the replacement block.
+ * @param oldElement - the old block element (e.g. the H4).
+ * @param freshElement - the new block element (e.g. the H3).
+ */
+function renderBlockPairBlock(block: TreePreviewBlock, oldElement: HTMLElement, freshElement: HTMLElement): void {
+  const parent = freshElement.parentNode
+  if (parent === null) return
+  const wrapper = document.createElement('div')
+  wrapper.className = 'mdTwin mdTwinBlockPair'
+  wrapper.dataset.mdBlock = String(block.index)
+  wrapper.dataset.mdKind = 'add'
+  setSourceDiff(wrapper, {
+    old: block.oldNodes.map(node => node.raw).join('\n'),
+    new: block.newNodes.map(node => node.raw).join('\n'),
+  })
+  const oldHolder = document.createElement('div')
+  oldHolder.className = 'mdTwinOld'
+  oldHolder.append(oldElement.cloneNode(true))
+  const newHolder = document.createElement('div')
+  newHolder.className = 'mdTwinNew'
+  parent.insertBefore(wrapper, freshElement)
+  newHolder.append(freshElement)
+  wrapper.append(oldHolder, newHolder)
+}
+
+/** The matched pairs that read as two block versions side by side: a heading LEVEL change, or a rule pair. */
+function isBlockPairElement(oldElement: HTMLElement, freshElement: HTMLElement): boolean {
+  const heading = /^H[1-6]$/u
+  if (heading.test(oldElement.tagName) && heading.test(freshElement.tagName)) {
+    return oldElement.tagName !== freshElement.tagName
+  }
+  return oldElement.tagName === 'HR' && freshElement.tagName === 'HR'
+}
+
 function markChangedBlock(el: HTMLElement, block: number, kind: 'add' | 'del'): void {
   el.classList.add(kind === 'add' ? 'mdAdd' : 'mdDel')
   stampBlock(el, block, kind)
@@ -6061,6 +6100,13 @@ export function renderTreeMerged(oldText: string, newText: string, labels?: { re
       continue
     }
     if (isInlineUnitBlock(block)) {
+      const pairOld = treeBlockElements(block, baseline, 'old')
+      const pairNew = treeBlockElements(block, fresh, 'new')
+      if (pairOld.length === 1 && pairNew.length === 1 && isBlockPairElement(pairOld[0]!, pairNew[0]!)) {
+        renderBlockPairBlock(block, pairOld[0]!, pairNew[0]!)
+        index++
+        continue
+      }
       const end = inlineUnitGroupEnd(model.blocks, index)
       const group = model.blocks.slice(index, end)
       renderInlineUnitGroup(
@@ -6113,6 +6159,13 @@ export function renderTreeMerged(oldText: string, newText: string, labels?: { re
       } else {
         for (const element of freshElements) markChangedBlock(element, block.index, 'add')
       }
+      index++
+      continue
+    }
+    if (oldElements.length === 1 && freshElements.length === 1
+      && isBlockPairElement(oldElements[0]!, freshElements[0]!)) {
+      // A matched heading/rule whose shell changed (level, rule style): old left red, new right green, small gap.
+      renderBlockPairBlock(block, oldElements[0]!, freshElements[0]!)
       index++
       continue
     }

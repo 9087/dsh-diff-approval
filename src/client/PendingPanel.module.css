@@ -896,6 +896,27 @@
   width: 100%;
   box-sizing: border-box;
 }
+/* A matched heading/rule pair: old left, new right, one tiny gap — the image pair's tight rhythm. */
+.mdPreviewBody :global(.mdTwin.mdTwinBlockPair) {
+  display: flex;
+  width: 100%;
+  gap: 2px;
+  align-items: stretch;
+  margin: 2px 0 6px;
+}
+.mdPreviewBody :global(.mdTwinBlockPair > .mdTwinOld),
+.mdPreviewBody :global(.mdTwinBlockPair > .mdTwinNew) {
+  display: block;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0 2px;
+}
+.mdPreviewBody :global(.mdTwinBlockPair > .mdTwinOld > *),
+.mdPreviewBody :global(.mdTwinBlockPair > .mdTwinNew > *) {
+  margin: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
 .mdPreviewBody :global(.mdTwinImages > .mdTwinOld),
 .mdPreviewBody :global(.mdTwinImages > .mdTwinNew) {
   display: flex;
