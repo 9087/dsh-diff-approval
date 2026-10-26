@@ -233,7 +233,8 @@ describe('tree preview model: blocks and units', () => {
     const language = modelOf('```ts\nconst a = 1\n```\n', '```tsx\nconst a = 1\n```\n')
     expect(language.blocks).toHaveLength(1)
     expect(language.blocks[0]!.kind).toBe('code')
-    expect(language.blocks[0]!.merged).toBe(false)
+    // Different languages: the fence pair is a whole replacement, never a line-by-line comparison.
+    expect(language.blocks[0]!.merged).toBe(true)
   })
 
   it('blocks a deleted paragraph as a merged deletion whose empty new range inserts at its old position', () => {

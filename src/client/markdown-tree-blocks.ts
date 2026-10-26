@@ -492,6 +492,15 @@ class BlockBuilder {
    * fence. Adjacent changed lines stay one block (the reader sees them as one edit).
    */
   codeBlocks(pair: TreeMatchPair, pieces: readonly MergePlanPiece[]): void {
+    // DIFFERENT fence languages: the two fences are not the same kind of code, so line-by-line comparison would
+    // be meaningless. The whole fence pair is one replacement block (old version shown red, new version green),
+    // and the language itself is an invisible difference carried as the source of that block.
+    const oldLanguage = String(pair.old.attrs.lang ?? '')
+    const newLanguage = String(pair.new.attrs.lang ?? '')
+    if (oldLanguage !== newLanguage) {
+      this.push({ kind: 'code', oldNodes: [pair.old], newNodes: [pair.new], units: [], invisible: [], merged: true })
+      return
+    }
     let run: RawUnit[] = []
     let lineChanged = false
     const flush = (): void => {

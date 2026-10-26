@@ -876,6 +876,26 @@
   align-items: stretch;
   margin: 2px 0 8px;
 }
+/* A code fence pair whose languages differ: two whole code blocks, old left / new right. */
+.mdPreviewBody :global(.mdTwin.mdTwinCodePair) {
+  display: flex;
+  width: 100%;
+  gap: 6px;
+  align-items: stretch;
+  margin: 2px 0 8px;
+}
+.mdPreviewBody :global(.mdTwinCodePair > .mdTwinOld),
+.mdPreviewBody :global(.mdTwinCodePair > .mdTwinNew) {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0;
+}
+.mdPreviewBody :global(.mdTwinCodePair pre) {
+  margin: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
 .mdPreviewBody :global(.mdTwinImages > .mdTwinOld),
 .mdPreviewBody :global(.mdTwinImages > .mdTwinNew) {
   display: flex;

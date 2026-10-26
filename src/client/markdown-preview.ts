@@ -2078,6 +2078,41 @@ function wrapBlockUnion(block: TreePreviewBlock, elements: readonly HTMLElement[
   return wrapper
 }
 
+/**
+ * Draw a code fence pair whose LANGUAGES differ as two whole code blocks side by side — old red on the left,
+ * new green on the right — like every other paired change. Line-by-line comparison would be meaningless across
+ * languages; the language itself is invisible, so the toolbar gets both complete fences.
+ *
+ * @param block - the replacement code block.
+ * @param oldElements - the old fence's rendered CODE element(s).
+ * @param freshElements - the new fence's rendered CODE element(s).
+ */
+function renderCodePairBlock(
+  block: TreePreviewBlock,
+  oldElements: readonly HTMLElement[],
+  freshElements: readonly HTMLElement[],
+): void {
+  const oldPre = oldElements[0]?.closest('pre') ?? oldElements[0]
+  const newPre = freshElements[0]?.closest('pre') ?? freshElements[0]
+  const parent = newPre?.parentNode
+  if (oldPre === undefined || newPre === undefined || parent === null || parent === undefined) return
+  const oldSource = block.oldNodes.map(node => node.raw).join('\n')
+  const newSource = block.newNodes.map(node => node.raw).join('\n')
+  const wrapper = document.createElement('div')
+  wrapper.className = 'mdTwin mdTwinCodePair'
+  wrapper.dataset.mdBlock = String(block.index)
+  wrapper.dataset.mdKind = 'add'
+  setSourceDiff(wrapper, { old: oldSource, new: newSource })
+  const oldHolder = document.createElement('div')
+  oldHolder.className = 'mdTwinOld'
+  oldHolder.append(oldPre.cloneNode(true))
+  const newHolder = document.createElement('div')
+  newHolder.className = 'mdTwinNew'
+  parent.insertBefore(wrapper, newPre)
+  newHolder.append(newPre)
+  wrapper.append(oldHolder, newHolder)
+}
+
 function markChangedBlock(el: HTMLElement, block: number, kind: 'add' | 'del'): void {
   el.classList.add(kind === 'add' ? 'mdAdd' : 'mdDel')
   stampBlock(el, block, kind)
@@ -5694,16 +5729,26 @@ function renderCodeLines(blocks: readonly TreePreviewBlock[], codeNode: Markdown
     if (entry !== undefined) stampDrawnRun(span, entry.block, entry.unit, cls === 'mdWordDel' ? 'del' : 'add')
     parts.push(span)
   }
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index]!
+  for (let index = 0; index < lines.length;) {
     const entry = changed.get(index)
     if (entry === undefined) {
-      appendLine(line, undefined, undefined)
+      appendLine(lines[index]!, undefined, undefined)
       if (index < lines.length - 1) parts.push(document.createTextNode('\n'))
+      index++
       continue
     }
-    if (entry.unit.oldText !== '') appendLine(entry.unit.oldText, 'mdWordDel', entry)
-    if (entry.unit.newText !== '') appendLine(entry.unit.newText, 'mdWordAdd', entry)
+    // One contiguous changed run: ALL old lines on top (red), then ALL new lines below (green).
+    let end = index
+    while (end + 1 < lines.length && changed.has(end + 1)) end++
+    for (let at = index; at <= end; at++) {
+      const run = changed.get(at)!
+      if (run.unit.oldText !== '') appendLine(run.unit.oldText, 'mdWordDel', run)
+    }
+    for (let at = index; at <= end; at++) {
+      const run = changed.get(at)!
+      if (run.unit.newText !== '') appendLine(run.unit.newText, 'mdWordAdd', run)
+    }
+    index = end + 1
   }
   codeElement.replaceChildren(...parts)
 }
@@ -6035,6 +6080,12 @@ export function renderTreeMerged(oldText: string, newText: string, labels?: { re
     const freshElements = treeBlockElements(block, fresh, 'new')
     const oldElements = treeBlockElements(block, baseline, 'old')
     if (block.merged) {
+      if (block.kind === 'code' && oldElements.length > 0 && freshElements.length > 0) {
+        // Languages differ: two whole code blocks, old red LEFT and new green RIGHT.
+        renderCodePairBlock(block, oldElements, freshElements)
+        index++
+        continue
+      }
       // A pure addition is tinted where it renders; a pure deletion is cloned as a struck ghost. A merged pair
       // that exists on both sides (an unrelated replacement) is drawn as the old version above the new one.
       const ghosts: HTMLElement[] = []
@@ -6044,6 +6095,13 @@ export function renderTreeMerged(oldText: string, newText: string, labels?: { re
         if (next !== undefined && next.parentNode !== null) next.parentNode.insertBefore(ghost, next)
         else treeInsertGhost(block, element, fresh.root)
         ghosts.push(ghost)
+      }
+      if (block.kind === 'code' && oldElements.length > 0 && freshElements.length > 0) {
+        // Different fence language: the language is invisible, so the whole fence source rides on both versions
+        // for the toolbar (` ```ts ` vs ` ```tsx `).
+        const oldSource = block.oldNodes.map(node => node.raw).join('\n')
+        const newSource = block.newNodes.map(node => node.raw).join('\n')
+        for (const element of [...ghosts, ...freshElements]) setSourceDiff(element, { old: oldSource, new: newSource })
       }
       if (oldElements.length === 0 && freshElements.length > 0) {
         // A run of adjacent wholly-added blocks: ONE continuous green area (no white gaps between them).
@@ -6266,6 +6324,12 @@ export function renderTreeDocuments(oldText: string, newText: string, labels?: {
     if (block.merged) {
       for (const element of oldElements) markChangedBlock(element, block.index, 'del')
       for (const element of freshElements) markChangedBlock(element, block.index, 'add')
+      if (block.kind === 'code' && oldElements.length > 0 && freshElements.length > 0) {
+        // Languages differ: each column keeps its own code block; the language difference is invisible and the
+        // toolbar shows each fence's source.
+        for (const element of oldElements) setSourceDiff(element, { old: block.oldNodes.map(node => node.raw).join('\n') }, 'old')
+        for (const element of freshElements) setSourceDiff(element, { new: block.newNodes.map(node => node.raw).join('\n') }, 'new')
+      }
       index++
       continue
     }

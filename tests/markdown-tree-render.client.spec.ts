@@ -246,10 +246,36 @@ describe('tree-first renderer: character edits', () => {
     expect(code.querySelectorAll('.mdWordDel, .mdWordAdd').length).toBeGreaterThan(0)
   })
 
-  it('shows a fence-language change as both whole versions', () => {
+  it('shows a fence-language change as two whole code blocks, old red left / new green right', () => {
     const root = bodyOf('```ts\nconst a = 1\n```\n', '```tsx\nconst a = 1\n```\n')
-    expect(blocksOf(root).length).toBe(2)
-    expect(root.querySelectorAll('code.mdDel, code.mdAdd').length).toBeGreaterThanOrEqual(2)
+    // ONE block: two complete code fences side by side, not a line-by-line comparison.
+    expect(blocksOf(root)).toHaveLength(1)
+    const pair = root.querySelector<HTMLElement>('.mdTwin.mdTwinCodePair')
+    expect(pair).not.toBeNull()
+    expect(pair!.querySelectorAll('pre')).toHaveLength(2)
+    expect(pair!.querySelector('.mdTwinOld pre')?.textContent).toBe('const a = 1\n')
+    expect(pair!.querySelector('.mdTwinNew pre')?.textContent).toBe('const a = 1\n')
+    // The language itself is invisible: the toolbar's source row has both complete fences.
+    expect(pair!.dataset.mdDiffOld).toContain('```ts')
+    expect(pair!.dataset.mdDiffNew).toContain('```tsx')
+    // Double column: left keeps the old fence, right keeps the new one.
+    const holder = document.createElement('div')
+    holder.innerHTML = renderTreeDocuments('```ts\nconst a = 1\n```\n', '```tsx\nconst a = 1\n```\n')
+    const oldSide = holder.querySelector<HTMLElement>('[data-diff-doc-side="old"] pre code')!
+    const newSide = holder.querySelector<HTMLElement>('[data-diff-doc-side="new"] pre code')!
+    expect(oldSide.className).toContain('mdDel')
+    expect(newSide.className).toContain('mdAdd')
+    expect(oldSide.textContent).toBe('const a = 1\n')
+    expect(newSide.textContent).toBe('const a = 1\n')
+  })
+
+  it('groups changed code lines: all old lines on top, all new lines below', () => {
+    const root = bodyOf('```ts\nconst a = 1\nconst b = 2\nconst c = 3\n```\n', '```ts\nconst a = 10\nconst b = 20\nconst c = 3\n```\n')
+    const lines = [...root.querySelectorAll<HTMLElement>('.mdCodeLine')]
+    expect(lines.map(line => line.className.includes('mdWordDel') ? `del:${line.textContent}` : `add:${line.textContent}`))
+      .toEqual(['del:const a = 1', 'del:const b = 2', 'add:const a = 10', 'add:const b = 20'])
+    // The untouched line stays below the pair, unchanged (not part of the changed run).
+    expect(root.querySelector('code')!.textContent).toContain('const c = 3')
   })
 
   it('shows a heading LEVEL change as the old heading struck beside the new one', () => {
