@@ -100,6 +100,11 @@ const WHOLE_NEW = [
   '',
 ].join('\n')
 
+const INVISIBLE_OLD = 'A.\n\n<!-- 旧注释 -->\n\nB.\n'
+const INVISIBLE_NEW = 'A.\n\n<!-- 新注释 -->\n\nB.\n'
+const CODE_OLD = '```ts\nconst a = 1\n```\n'
+const CODE_NEW = '```ts\nconst a = 2\n```\n'
+
 let fixture: Fixture
 let browser: Browser
 let page: Page
@@ -111,6 +116,8 @@ let cellsFileId: string
 let imageFileId: string
 let replaceFileId: string
 let wholeFileId: string
+let invisibleFileId: string
+let codeFileId: string
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => { setTimeout(resolve, ms) })
 
@@ -131,6 +138,8 @@ test.describe('tree-first preview is the shipped default', () => {
       { name: 'tree-image.md', oldText: IMAGE_OLD, newText: IMAGE_NEW },
       { name: 'tree-replace.md', oldText: REPLACE_OLD, newText: REPLACE_NEW },
       { name: 'tree-whole.md', oldText: '', newText: WHOLE_NEW },
+      { name: 'tree-invisible.md', oldText: INVISIBLE_OLD, newText: INVISIBLE_NEW },
+      { name: 'tree-code.md', oldText: CODE_OLD, newText: CODE_NEW },
     ]
     fixture = makeFixture('tree-default')
     const workspaceId = await bootstrapHome(dsh, fixture)
@@ -152,6 +161,8 @@ test.describe('tree-first preview is the shipped default', () => {
     imageFileId = seeded.entries[3]!.id
     replaceFileId = seeded.entries[4]!.id
     wholeFileId = seeded.entries[5]!.id
+    invisibleFileId = seeded.entries[6]!.id
+    codeFileId = seeded.entries[7]!.id
     claimSession(fixture, workspaceId, sessionId)
 
     host = await startHost(dsh, fixture.home, fixture.workspace, fixture.logFile)
@@ -528,5 +539,84 @@ test.describe('tree-first preview is the shipped default', () => {
     expect(Math.abs(outline.left - measured.tintLeft)).toBeLessThanOrEqual(2)
     expect(Math.abs(outline.right - measured.tintRight)).toBeLessThanOrEqual(2)
     expect(measured.position).toMatch(/\d+\s*\/\s*\d+/u)
+  })
+
+  test('an invisible change has ONE frame around its two chips, spaced tightly', async () => {
+    test.setTimeout(300_000)
+    await row(page, invisibleFileId).click({ timeout: 20_000 })
+    await page.locator('[data-diff-body], [data-diff-md-preview-body]').first().waitFor({ timeout: 20_000 })
+    if (await page.locator('[data-diff-md-preview-body]').count() === 0) {
+      await page.locator('[data-diff-md-preview]').first().click({ timeout: 20_000 })
+      await page.waitForTimeout(500)
+    }
+    await sleep(500)
+    const chips = page.locator('[data-diff-md-preview-body] .mdTwinPhantom')
+    await expect(chips).toHaveCount(2)
+    const chipBoxes = await chips.evaluateAll(elements => elements.map(element => {
+      const rect = element.getBoundingClientRect()
+      return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
+    }))
+    const gap = chipBoxes[1]!.left - chipBoxes[0]!.right
+    expect(gap).toBeLessThan(8)
+    const firstChip = await chips.first().boundingBox()
+    expect(firstChip).not.toBeNull()
+    await page.mouse.move(firstChip!.x + firstChip!.width / 2, firstChip!.y + firstChip!.height / 2)
+    await sleep(700)
+    const measured = await page.evaluate(() => ({
+      outlines: [...document.querySelectorAll<HTMLElement>('[data-diff-unit-outline]')].map(element => {
+        const rect = element.getBoundingClientRect()
+        return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
+      }),
+      chips: [...document.querySelectorAll<HTMLElement>('[data-diff-md-preview-body] .mdTwinPhantom')].map(element => {
+        const rect = element.getBoundingClientRect()
+        return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
+      }),
+    }))
+    console.log('[invisible outline]', JSON.stringify({ gap, ...measured }))
+    // ONE frame around BOTH chips of the change.
+    expect(measured.outlines).toHaveLength(1)
+    const outline = measured.outlines[0]!
+    const left = Math.min(...measured.chips.map(chip => chip.left))
+    const right = Math.max(...measured.chips.map(chip => chip.right))
+    const top = Math.min(...measured.chips.map(chip => chip.top))
+    const bottom = Math.max(...measured.chips.map(chip => chip.bottom))
+    expect(Math.abs(outline.left - left)).toBeLessThanOrEqual(2)
+    expect(Math.abs(outline.right - right)).toBeLessThanOrEqual(2)
+    expect(Math.abs(outline.top - top)).toBeLessThanOrEqual(2)
+    expect(Math.abs(outline.bottom - bottom)).toBeLessThanOrEqual(2)
+  })
+
+  test('a code line pair has ONE frame around the red line and its green replacement', async () => {
+    test.setTimeout(300_000)
+    await row(page, codeFileId).click({ timeout: 20_000 })
+    await page.locator('[data-diff-body], [data-diff-md-preview-body]').first().waitFor({ timeout: 20_000 })
+    if (await page.locator('[data-diff-md-preview-body]').count() === 0) {
+      await page.locator('[data-diff-md-preview]').first().click({ timeout: 20_000 })
+      await page.waitForTimeout(500)
+    }
+    await sleep(500)
+    const lines = page.locator('[data-diff-md-preview-body] .mdCodeLine')
+    await expect(lines).toHaveCount(2)
+    const lineBox = await lines.first().boundingBox()
+    expect(lineBox).not.toBeNull()
+    await page.mouse.move(lineBox!.x + lineBox!.width / 2, lineBox!.y + lineBox!.height / 2)
+    await sleep(700)
+    const measured = await page.evaluate(() => ({
+      outlines: [...document.querySelectorAll<HTMLElement>('[data-diff-unit-outline]')].map(element => {
+        const rect = element.getBoundingClientRect()
+        return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
+      }),
+      lines: [...document.querySelectorAll<HTMLElement>('[data-diff-md-preview-body] .mdCodeLine')].map(element => {
+        const rect = element.getBoundingClientRect()
+        return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
+      }),
+    }))
+    console.log('[code outline]', JSON.stringify(measured))
+    expect(measured.outlines).toHaveLength(1)
+    const outline = measured.outlines[0]!
+    expect(Math.abs(outline.top - Math.min(...measured.lines.map(line => line.top)))).toBeLessThanOrEqual(2)
+    expect(Math.abs(outline.bottom - Math.max(...measured.lines.map(line => line.bottom)))).toBeLessThanOrEqual(2)
+    expect(Math.abs(outline.left - Math.min(...measured.lines.map(line => line.left)))).toBeLessThanOrEqual(2)
+    expect(Math.abs(outline.right - Math.max(...measured.lines.map(line => line.right)))).toBeLessThanOrEqual(2)
   })
 })

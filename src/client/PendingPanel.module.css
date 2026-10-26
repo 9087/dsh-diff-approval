@@ -930,10 +930,10 @@
 .mdPreviewBody :global(.mdTwinPhantom > .mdTwinBlock) {
   display: none;
 }
-/* The two chips of one invisible change stand side by side (removal, then addition): a small gap keeps them two
-   blocks rather than one two-toned blob. */
+/* The two chips of one invisible change stand side by side (removal, then addition): a hair of gap keeps them
+   two blocks rather than one two-toned blob, matching the tight spacing of the other red/green pairs. */
 .mdPreviewBody :global(.mdTwin.mdTwinPhantom + .mdTwin.mdTwinPhantom) {
-  margin-left: 4px;
+  margin-left: 1px;
 }
 /* The marker's icon: an eye with a slash, sized like the chip's own text line and inheriting its colour. */
 .mdPreviewBody :global(.mdTwinCaption) {

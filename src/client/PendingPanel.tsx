@@ -5406,8 +5406,11 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     for (const element of elements) {
       for (const piece of paintedPiecesOf(element)) {
         const side = element.closest('[data-diff-doc-side]')
+        // A loose painted piece (an invisible change's marker chips) groups under its PARENT, so the chips of
+        // one change share a line and one outline, instead of one box per chip.
         const container = piece.closest<HTMLElement>('td, th')
           ?? piece.closest<HTMLElement>('p, li, h1, h2, h3, h4, h5, h6, pre, blockquote, tr')
+          ?? piece.parentElement
           ?? piece
         const sideGroups = groups.get(side) ?? new Map<HTMLElement, HTMLElement[]>()
         const list = sideGroups.get(container) ?? []
@@ -5445,10 +5448,12 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
         })
       }
     }
-    // A MERGED block (a wholly new document, a run of added/deleted blocks) is ONE tint region: its dashed
-    // frame is the outer boundary of everything it paints, not one box per block inside it. Unmerged blocks
-    // keep following their own red/green pieces.
-    if (block?.merged === true && boxes.length > 1) {
+    // MERGED blocks, CODE pairs (struck line above its green replacement) and INVISIBLE pairs (the two marker
+    // chips of one comment/definition change) are ONE change: their dashed frame is the outer boundary of
+    // everything they paint. Other blocks keep following their own red/green pieces.
+    const blockKind = (block as unknown as { kind?: string } | undefined)?.kind
+    const oneFrame = block?.merged === true || blockKind === 'code' || (block?.invisible.length ?? 0) > 0
+    if (oneFrame && boxes.length > 1) {
       const top = Math.min(...boxes.map(box => box.contentTop))
       const bottom = Math.max(...boxes.map(box => box.contentTop + box.height))
       const left = Math.min(...boxes.map(box => box.left))
