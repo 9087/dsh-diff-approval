@@ -278,12 +278,16 @@ describe('tree-first renderer: character edits', () => {
     expect(root.querySelector('code')!.textContent).toContain('const c = 3')
   })
 
-  it('shows a heading LEVEL change as old and new headings side by side', () => {
+  it('shows a heading LEVEL change as old heading ABOVE new heading with a tight gap', () => {
     const root = bodyOf('#### 标题\n', '### 标题\n')
-    const pair = root.querySelector<HTMLElement>('.mdTwin.mdTwinBlockPair')
+    const pair = root.querySelector<HTMLElement>('.mdTwin.mdTwinStackPair')
     expect(pair).not.toBeNull()
-    expect(pair!.querySelector('.mdTwinOld h4')?.textContent).toBe('标题')
-    expect(pair!.querySelector('.mdTwinNew h3')?.textContent).toBe('标题')
+    // Stacked, in document order: the OLD h4 first, the NEW h3 after it.
+    const children = [...pair!.children] as HTMLElement[]
+    expect(children[0]!.className).toContain('mdTwinOld')
+    expect(children[1]!.className).toContain('mdTwinNew')
+    expect(children[0]!.querySelector('h4')?.textContent).toBe('标题')
+    expect(children[1]!.querySelector('h3')?.textContent).toBe('标题')
     expect(pair!.dataset.mdDiffOld).toContain('#### 标题')
     expect(pair!.dataset.mdDiffNew).toContain('### 标题')
     // One block, one hover target.

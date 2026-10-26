@@ -2114,9 +2114,9 @@ function renderCodePairBlock(
 }
 
 /**
- * A block-level matched pair whose only change is its shell (a heading level, a horizontal rule style) reads
- * best as two versions side by side — old tinted left, new tinted right — like images and code fences, instead
- * of one above the other with a big gap. The pair is ONE block.
+ * A block-level matched pair whose only change is its shell (a heading level, a horizontal rule style) is
+ * drawn as the old version ABOVE the new one — like the document reads — but with a tight gap instead of the
+ * normal paragraph spacing. The pair is ONE block and one hover target.
  *
  * @param block - the replacement block.
  * @param oldElement - the old block element (e.g. the H4).
@@ -2126,7 +2126,7 @@ function renderBlockPairBlock(block: TreePreviewBlock, oldElement: HTMLElement, 
   const parent = freshElement.parentNode
   if (parent === null) return
   const wrapper = document.createElement('div')
-  wrapper.className = 'mdTwin mdTwinBlockPair'
+  wrapper.className = 'mdTwin mdTwinStackPair'
   wrapper.dataset.mdBlock = String(block.index)
   wrapper.dataset.mdKind = 'add'
   setSourceDiff(wrapper, {
