@@ -91,6 +91,15 @@ const REPLACE_NEW = [
   '',
 ].join('\n')
 
+const WHOLE_NEW = [
+  '# 全新标题',
+  '',
+  '一段全新的正文。',
+  '',
+  '- 全新列表项',
+  '',
+].join('\n')
+
 let fixture: Fixture
 let browser: Browser
 let page: Page
@@ -101,6 +110,7 @@ let inlineFileId: string
 let cellsFileId: string
 let imageFileId: string
 let replaceFileId: string
+let wholeFileId: string
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => { setTimeout(resolve, ms) })
 
@@ -120,6 +130,7 @@ test.describe('tree-first preview is the shipped default', () => {
       { name: 'tree-cells.md', oldText: CELLS_OLD, newText: CELLS_NEW },
       { name: 'tree-image.md', oldText: IMAGE_OLD, newText: IMAGE_NEW },
       { name: 'tree-replace.md', oldText: REPLACE_OLD, newText: REPLACE_NEW },
+      { name: 'tree-whole.md', oldText: '', newText: WHOLE_NEW },
     ]
     fixture = makeFixture('tree-default')
     const workspaceId = await bootstrapHome(dsh, fixture)
@@ -140,6 +151,7 @@ test.describe('tree-first preview is the shipped default', () => {
     cellsFileId = seeded.entries[2]!.id
     imageFileId = seeded.entries[3]!.id
     replaceFileId = seeded.entries[4]!.id
+    wholeFileId = seeded.entries[5]!.id
     claimSession(fixture, workspaceId, sessionId)
 
     host = await startHost(dsh, fixture.home, fixture.workspace, fixture.logFile)
@@ -473,5 +485,48 @@ test.describe('tree-first preview is the shipped default', () => {
       expect(outline.top).toBeGreaterThanOrEqual(outline.paragraphTop - 4)
       expect(outline.bottom).toBeLessThanOrEqual(outline.paragraphBottom + 4)
     }
+  })
+
+  test('a MERGED block (whole new document) gets ONE frame on the tint union', async () => {
+    test.setTimeout(300_000)
+    await row(page, wholeFileId).click({ timeout: 20_000 })
+    await page.locator('[data-diff-body], [data-diff-md-preview-body]').first().waitFor({ timeout: 20_000 })
+    if (await page.locator('[data-diff-md-preview-body]').count() === 0) {
+      await page.locator('[data-diff-md-preview]').first().click({ timeout: 20_000 })
+      await page.waitForTimeout(500)
+    }
+    await sleep(500)
+    const heading = page.locator('[data-diff-md-preview-body] h1').first()
+    const headingBox = await heading.boundingBox()
+    expect(headingBox).not.toBeNull()
+    await page.mouse.move(headingBox!.x + 20, headingBox!.y + headingBox!.height / 2)
+    await sleep(700)
+    const measured = await page.evaluate(() => {
+      const body = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
+      const tinted = [...body.querySelectorAll<HTMLElement>('[class*="mdAdd"], [class*="mdDel"]')]
+        .filter(element => element.dataset.mdBlock !== undefined)
+      const outlines = [...document.querySelectorAll<HTMLElement>('[data-diff-unit-outline]')]
+        .map(element => {
+          const rect = element.getBoundingClientRect()
+          return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
+        })
+      return {
+        tintTop: Math.min(...tinted.map(element => element.getBoundingClientRect().top)),
+        tintBottom: Math.max(...tinted.map(element => element.getBoundingClientRect().bottom)),
+        tintLeft: Math.min(...tinted.map(element => element.getBoundingClientRect().left)),
+        tintRight: Math.max(...tinted.map(element => element.getBoundingClientRect().right)),
+        outlines,
+        position: document.querySelector('[data-diff-block-position]')?.textContent ?? '',
+      }
+    })
+    console.log('[merged outline]', JSON.stringify(measured))
+    // ONE frame for the merged block, covering the union of everything it tints.
+    expect(measured.outlines).toHaveLength(1)
+    const outline = measured.outlines[0]!
+    expect(Math.abs(outline.top - measured.tintTop)).toBeLessThanOrEqual(2)
+    expect(Math.abs(outline.bottom - measured.tintBottom)).toBeLessThanOrEqual(2)
+    expect(Math.abs(outline.left - measured.tintLeft)).toBeLessThanOrEqual(2)
+    expect(Math.abs(outline.right - measured.tintRight)).toBeLessThanOrEqual(2)
+    expect(measured.position).toMatch(/\d+\s*\/\s*\d+/u)
   })
 })

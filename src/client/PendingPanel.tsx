@@ -5328,8 +5328,10 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    * axes so the frame reads as centred; not so much that the rule drifts away from the tinted block it
    * frames (the horizontal gap is the one the eye notices, so it stays smaller than the label's own padding).
    */
-  const PREVIEW_OUTLINE_AIR_X = 3
-  const PREVIEW_OUTLINE_AIR_Y = 2
+  // The dashed frame sits ON the tint's own edge: no air, and the painted element's client rects (its border
+  // boxes, one per visual line) are used instead of a text Range, so the dashes coincide with the colour block.
+  const PREVIEW_OUTLINE_AIR_X = 0
+  const PREVIEW_OUTLINE_AIR_Y = 0
   /** What a change is painted with: the outline hugs these pieces, not the block carrier around them. */
   const PREVIEW_PAINTED_SELECTOR = '.mdWordAdd, .mdWordDel, .mdTwin, .mdTwinOld, .mdTwinNew, .mdAdd, .mdDel, .mdTwinPhantom'
 
@@ -5382,15 +5384,17 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
         return paintedAncestor === null || !element.contains(paintedAncestor)
       })
     }
-    /** One marked piece's per-line rectangles: a Range over the contents yields one rect per line of text. */
+    /**
+     * One painted piece's boxes: the element's own CLIENT rectangles are exactly the boxes its background
+     * paints (one per visual line for inline runs, the whole bar for a block tint), so the dashed frame lies on
+     * the tint's edge instead of a padded text range around it.
+     */
     const lineRectsOf = (element: HTMLElement): DOMRect[] => {
       // A whole-row block (rule B) has no per-cell change to hug: the row's own box IS its extent.
       if (element.tagName === 'TR') return [element.getBoundingClientRect()]
       // A piece with no text (an image frame, a rule) has no line boxes of its own: its element box is it.
       if ((element.textContent ?? '') === '') return [element.getBoundingClientRect()]
-      const range = document.createRange()
-      range.selectNodeContents(element)
-      const rects = (typeof range.getClientRects === 'function' ? [...range.getClientRects()] : [])
+      const rects = (typeof element.getClientRects === 'function' ? [...element.getClientRects()] : [])
         .filter(rect => rect.width > 0 && rect.height > 0)
       // No layout information (a test environment without geometry): the element's own box still names it.
       return rects.length > 0 ? rects : [element.getBoundingClientRect()]
@@ -5433,7 +5437,6 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       }
       lines.sort((start, end) => start.top - end.top || start.left - end.left)
       for (const line of lines) {
-        // A couple of pixels of air, so the dashed rule does not sit on the glyphs' edge.
         boxes.push({
           contentTop: line.top - bodyRect.top + body.scrollTop - PREVIEW_OUTLINE_AIR_Y,
           height: Math.max(2, line.bottom - line.top) + PREVIEW_OUTLINE_AIR_Y * 2,
@@ -5441,6 +5444,16 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
           right: Math.max(0, bodyRect.right - line.right - PREVIEW_OUTLINE_AIR_X),
         })
       }
+    }
+    // A MERGED block (a wholly new document, a run of added/deleted blocks) is ONE tint region: its dashed
+    // frame is the outer boundary of everything it paints, not one box per block inside it. Unmerged blocks
+    // keep following their own red/green pieces.
+    if (block?.merged === true && boxes.length > 1) {
+      const top = Math.min(...boxes.map(box => box.contentTop))
+      const bottom = Math.max(...boxes.map(box => box.contentTop + box.height))
+      const left = Math.min(...boxes.map(box => box.left))
+      const right = Math.min(...boxes.map(box => box.right))
+      return [{ contentTop: top, height: bottom - top, left, right }]
     }
     return boxes
   }, [previewBlocksList])
