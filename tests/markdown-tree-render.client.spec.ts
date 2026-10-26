@@ -24,15 +24,33 @@ const bodyOf = (oldText: string, newText: string): HTMLElement => {
 const blocksOf = (root: HTMLElement): HTMLElement[] => [...root.querySelectorAll<HTMLElement>('[data-md-block]')]
 
 describe('tree-first renderer: pure changes', () => {
-  it('tints every element of a wholly new document as ONE merged block', () => {
+  it('wraps a wholly new document in ONE tinted union (no white gaps between blocks)', () => {
     const root = bodyOf('', '# H\n\nPara.\n')
     const blocks = blocksOf(root)
-    expect(blocks.length).toBeGreaterThanOrEqual(2)
-    for (const block of blocks) {
-      expect(block.dataset.mdBlock).toBe('0')
-      expect(block.classList.contains('mdAdd')).toBe(true)
-    }
-    expect(root.querySelectorAll('[data-md-block="1"]')).toHaveLength(0)
+    // ONE carrier for the merged block: a tinted union div around the whole document's rendered elements.
+    expect(blocks).toHaveLength(1)
+    const wrapper = blocks[0]!
+    expect(wrapper.tagName).toBe('DIV')
+    expect(wrapper.classList.contains('mdAdd')).toBe(true)
+    expect(wrapper.classList.contains('mdBlockUnion')).toBe(true)
+    expect(wrapper.dataset.mdBlock).toBe('0')
+    expect(wrapper.querySelector('h1')).not.toBeNull()
+    expect(wrapper.querySelector('p')).not.toBeNull()
+    // The children carry no block of their own (they cannot nest inside the merged block).
+    expect(wrapper.querySelectorAll('[data-md-block]')).toHaveLength(0)
+    expect(root.querySelectorAll('[data-md-block]')).toHaveLength(1)
+  })
+
+  it('wraps adjacent wholly-added siblings in ONE union, keeping their order', () => {
+    const root = bodyOf('Keep.\n', 'Keep.\n\nAdded one.\n\nAdded two.\n')
+    const unions = [...root.querySelectorAll<HTMLElement>('.mdBlockUnion')]
+    expect(unions).toHaveLength(1)
+    const union = unions[0]!
+    const added = [...union.children].filter((child): child is HTMLElement => child instanceof HTMLElement)
+    expect(added.map(element => element.tagName)).toEqual(['P', 'P'])
+    expect(added[0]!.textContent).toContain('Added one.')
+    expect(added[1]!.textContent).toContain('Added two.')
+    for (const element of added) expect(element.dataset.mdBlock).toBeUndefined()
   })
 
   it('clones a deleted paragraph as a struck ghost above the paragraph that follows it', () => {
@@ -297,7 +315,9 @@ describe('tree-first renderer: opt-in wiring', () => {
       const holder = document.createElement('div')
       holder.innerHTML = renderMarkdownPreview('', '# H\n\nPara.\n', 'single')
       const drawn = [...holder.querySelectorAll<HTMLElement>('[data-md-block]')]
-      expect(drawn.length).toBeGreaterThanOrEqual(2)
+      // ONE tinted union div wraps the merged block's elements.
+      expect(drawn).toHaveLength(1)
+      expect(drawn[0]!.classList.contains('mdBlockUnion')).toBe(true)
       expect(new Set(drawn.map(element => element.dataset.mdBlock))).toEqual(new Set(['0']))
       // A changed paragraph is a tree block with its character unit.
       const edited = previewBlocks('Old text here.\n', 'New text here.\n')

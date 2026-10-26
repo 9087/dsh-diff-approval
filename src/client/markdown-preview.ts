@@ -2047,6 +2047,37 @@ function markChangedUnit(el: HTMLElement, unit: number, kind: 'add' | 'del'): vo
 }
 
 /** Stamp an element as a changed BLOCK: its whole surface is tinted (a merged added paragraph/list/table). */
+/**
+ * Wrap a MERGED block's several rendered elements in ONE tinted container, so the colour is continuous across
+ * the whole run instead of one background per element with the elements' margins showing white gaps between.
+ *
+ * The wrapper, not the children, carries the block number and the tint: one hover/target for the merged block.
+ *
+ * @param block - the merged block.
+ * @param elements - the elements it renders (already in the DOM, in order).
+ * @param kind - added (green) or deleted (red).
+ * @returns the wrapper, or undefined when the elements do not share a parent.
+ */
+function wrapBlockUnion(block: TreePreviewBlock, elements: readonly HTMLElement[], kind: 'add' | 'del'): HTMLElement | undefined {
+  const attached = elements.filter(element => element.parentNode !== null)
+  if (attached.length < 2) return undefined
+  const parent = attached[0]!.parentNode
+  if (parent === null || !attached.every(element => element.parentNode === parent)) return undefined
+  const wrapper = document.createElement('div')
+  wrapper.className = kind === 'add' ? 'mdAdd mdBlockUnion' : 'mdDel mdBlockUnion'
+  wrapper.dataset.mdBlock = String(block.index)
+  wrapper.dataset.mdKind = kind
+  parent.insertBefore(wrapper, attached[0]!)
+  for (const element of attached) {
+    element.classList.remove('mdAdd', 'mdDel')
+    element.removeAttribute('data-md-block')
+    element.removeAttribute('data-md-kind')
+    element.removeAttribute('data-md-whole-row')
+    wrapper.append(element)
+  }
+  return wrapper
+}
+
 function markChangedBlock(el: HTMLElement, block: number, kind: 'add' | 'del'): void {
   el.classList.add(kind === 'add' ? 'mdAdd' : 'mdDel')
   stampBlock(el, block, kind)
@@ -5632,6 +5663,52 @@ function renderInlineChildBlock(block: TreePreviewBlock, fresh: RenderedDoc, bas
 }
 
 /**
+ * Draw code changes BY LINE, TOP TO BOTTOM: the old line struck above the new line, then the untouched lines.
+ *
+ * A code fence is read line by line, so a changed line is a red line followed by its green replacement — not
+ * two half-lines squeezed onto one row.
+ *
+ * @param blocks - the fence's changed-line blocks (one per contiguous run), in model order.
+ * @param codeNode - the fence's tree node.
+ * @param codeElement - the rendered CODE element.
+ */
+function renderCodeLines(blocks: readonly TreePreviewBlock[], codeNode: MarkdownTreeNode, codeElement: HTMLElement): void {
+  const content = codeElement.textContent ?? ''
+  const lines = content.split('\n')
+  const changed = new Map<number, { block: TreePreviewBlock; unit: TreePreviewUnit }>()
+  for (const block of blocks) {
+    for (const unit of block.units as unknown as TreePreviewUnit[]) {
+      const line = unit.newLines.start - codeNode.lines.start - 1
+      changed.set(line, { block, unit })
+    }
+  }
+  const parts: Node[] = []
+  const appendLine = (text: string, cls: string | undefined, entry: { block: TreePreviewBlock; unit: TreePreviewUnit } | undefined): void => {
+    if (cls === undefined) {
+      parts.push(document.createTextNode(text))
+      return
+    }
+    const span = document.createElement('span')
+    span.className = `${cls} mdCodeLine`
+    span.textContent = text
+    if (entry !== undefined) stampDrawnRun(span, entry.block, entry.unit, cls === 'mdWordDel' ? 'del' : 'add')
+    parts.push(span)
+  }
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!
+    const entry = changed.get(index)
+    if (entry === undefined) {
+      appendLine(line, undefined, undefined)
+      if (index < lines.length - 1) parts.push(document.createTextNode('\n'))
+      continue
+    }
+    if (entry.unit.oldText !== '') appendLine(entry.unit.oldText, 'mdWordDel', entry)
+    if (entry.unit.newText !== '') appendLine(entry.unit.newText, 'mdWordAdd', entry)
+  }
+  codeElement.replaceChildren(...parts)
+}
+
+/**
  * Render every inline block of ONE container together, so blocks that have only ONE side are placed where the
  * model puts them (before the next block's rendered element) instead of as marker chips around the container.
  *
@@ -5643,6 +5720,10 @@ function renderInlineContainerGroup(blocks: readonly TreePreviewBlock[], fresh: 
   const first = blocks[0]!
   const newContainer = first.inlineContainer?.new === undefined ? undefined : treeNodeElements(fresh, first.inlineContainer.new)[0]
   const oldContainer = first.inlineContainer?.old === undefined ? undefined : treeNodeElements(baseline, first.inlineContainer.old)[0]
+  if (blocks.every(block => block.kind === 'code') && first.inlineContainer?.new?.type === 'code' && newContainer !== undefined) {
+    renderCodeLines(blocks, first.inlineContainer.new, newContainer)
+    return
+  }
   const deletions = blocks.filter(block => block.oldNodes.length > 0 && block.newNodes.length === 0)
   const additions = blocks.filter(block => block.newNodes.length > 0 && block.oldNodes.length === 0)
   const both = blocks.filter(block => block.oldNodes.length > 0 && block.newNodes.length > 0)
@@ -5956,13 +6037,24 @@ export function renderTreeMerged(oldText: string, newText: string, labels?: { re
     if (block.merged) {
       // A pure addition is tinted where it renders; a pure deletion is cloned as a struck ghost. A merged pair
       // that exists on both sides (an unrelated replacement) is drawn as the old version above the new one.
+      const ghosts: HTMLElement[] = []
       for (const element of oldElements) {
         const ghost = treeGhostOf(element, block, 'old')
         const next = freshElements[0]
         if (next !== undefined && next.parentNode !== null) next.parentNode.insertBefore(ghost, next)
         else treeInsertGhost(block, element, fresh.root)
+        ghosts.push(ghost)
       }
-      for (const element of freshElements) markChangedBlock(element, block.index, 'add')
+      if (oldElements.length === 0 && freshElements.length > 0) {
+        // A run of adjacent wholly-added blocks: ONE continuous green area (no white gaps between them).
+        if (freshElements.length > 1) wrapBlockUnion(block, freshElements, 'add')
+        else markChangedBlock(freshElements[0]!, block.index, 'add')
+      } else if (oldElements.length > 0 && freshElements.length === 0) {
+        // A run of adjacent wholly-deleted blocks: ONE continuous red area.
+        if (ghosts.length > 1) wrapBlockUnion(block, ghosts, 'del')
+      } else {
+        for (const element of freshElements) markChangedBlock(element, block.index, 'add')
+      }
       index++
       continue
     }

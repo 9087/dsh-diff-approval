@@ -787,6 +787,16 @@
 .mdPreviewBody :global(.mdDel) {
   background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
 }
+/* A run of wholly added/deleted siblings is ONE merged block: one tinted box around all of them, so the colour
+   is continuous instead of showing the children's white margins between separate blocks. */
+.mdPreviewBody :global(.mdBlockUnion) {
+  display: flow-root;
+  border-radius: 3px;
+}
+/* Code differences are read line by line: the struck old line sits ABOVE its green replacement. */
+.mdPreviewBody :global(.mdCodeLine) {
+  display: block;
+}
 /* Word-level highlight inside a changed block: the specific changed words. */
 .mdPreviewBody :global(.mdWordDel) {
   background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
