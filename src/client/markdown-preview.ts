@@ -4244,6 +4244,11 @@ function renderMerged(oldText: string, newText: string, invisibleLabel?: string)
  * @returns the key.
  */
 function blockKey(block: Element): string {
+  // A MATCHED pair (from the tree match plan) shares one anchor id on both sides: the double column pairs
+  // those rows first, instead of guessing from the rendered text/images.
+  const anchors = [...block.querySelectorAll<HTMLElement>('[data-md-match]')].map(element => element.dataset.mdMatch ?? '')
+  if (block instanceof HTMLElement && block.dataset.mdMatch !== undefined) anchors.unshift(block.dataset.mdMatch)
+  if (anchors.length > 0) return `match\u0000${anchors[0]}\u0000${anchors[anchors.length - 1]}\u0000${anchors.length}`
   const images = [...block.querySelectorAll('img')].map(img => img.getAttribute('src') ?? '').join(',')
   const text = (block.textContent ?? '').replace(/\s+/g, ' ').trim()
   return `${block.tagName}\u0000${text}\u0000${images}`
@@ -6238,9 +6243,31 @@ function treePlanSideNodes(piece: MergePlanPiece, side: 'old' | 'new'): Markdown
 }
 
 /**
- * Wrap each adjacent run of FULLY-MATCHED top-level siblings into one layout element, so the double column
- * lays that whole unchanged run in ONE grid row instead of giving each block a row of its own.
+ * Tag every MATCHED pair's rendered elements with one shared anchor id.
  *
+ * The double column's row layout then pairs rows by the tree's own matches (paragraph↔paragraph,
+ * heading↔heading, image↔image, list items by their list), not by comparing rendered text — which broke down as
+ * soon as one side merged blocks or showed ghost markers, pushing later matched content out of line.
+ *
+ * @param plan - the sibling merge plan (positional ops in document order).
+ * @param baseline - the before document's rendered tree.
+ * @param fresh - the after document's rendered tree.
+ */
+function tagMatchedAnchors(plan: readonly MergePlanPiece[], baseline: RenderedDoc, fresh: RenderedDoc): void {
+  let sequence = 0
+  for (const piece of plan) {
+    const oldNodes = treePlanSideNodes(piece, 'old')
+    const newNodes = treePlanSideNodes(piece, 'new')
+    const pairs = Math.min(oldNodes.length, newNodes.length)
+    for (let step = 0; step < pairs; step++) {
+      const anchor = `m${sequence++}`
+      for (const element of treeNodeElements(baseline, oldNodes[step]!)) element.dataset.mdMatch = anchor
+      for (const element of treeNodeElements(fresh, newNodes[step]!)) element.dataset.mdMatch = anchor
+    }
+  }
+}
+
+/**
  * The rows themselves stay visually the same (an unchanged run has the same height in both columns); the
  * wrapper is `display: contents`, so its blocks still read as the document's own blocks.
  */
@@ -6476,6 +6503,7 @@ export function renderTreeDocuments(oldText: string, newText: string, labels?: {
   // double column's row layout); the blocks themselves are unchanged and still read as the document's blocks.
   ensureTreeBlocksReachable(fresh.root, model.blocks, baseline.root)
   const plan = planMergedSiblings(matchMarkdownTrees(oldText, newText).ops)
+  tagMatchedAnchors(plan, baseline, fresh)
   wrapTreeContextRuns({ old: baseline.root, new: fresh.root }, plan)
   captionHiddenPairs(fresh.root, labels?.invisible)
   captionHiddenPairs(baseline.root, labels?.invisible)
