@@ -2079,9 +2079,9 @@ function wrapBlockUnion(block: TreePreviewBlock, elements: readonly HTMLElement[
 }
 
 /**
- * Draw a code fence pair whose LANGUAGES differ as two whole code blocks side by side — old red on the left,
- * new green on the right — like every other paired change. Line-by-line comparison would be meaningless across
- * languages; the language itself is invisible, so the toolbar gets both complete fences.
+ * Draw a code fence pair whose LANGUAGES differ as two whole code blocks STACKED: old red on top, new green
+ * below with the same tight gap as a heading pair — never a line-by-line comparison across languages. The
+ * language itself is invisible, so the toolbar gets both complete fences.
  *
  * @param block - the replacement code block.
  * @param oldElements - the old fence's rendered CODE element(s).
@@ -2099,7 +2099,7 @@ function renderCodePairBlock(
   const oldSource = block.oldNodes.map(node => node.raw).join('\n')
   const newSource = block.newNodes.map(node => node.raw).join('\n')
   const wrapper = document.createElement('div')
-  wrapper.className = 'mdTwin mdTwinCodePair'
+  wrapper.className = 'mdTwin mdTwinStackPair'
   wrapper.dataset.mdBlock = String(block.index)
   wrapper.dataset.mdKind = 'add'
   setSourceDiff(wrapper, { old: oldSource, new: newSource })
@@ -6402,13 +6402,24 @@ export function renderTreeDocuments(oldText: string, newText: string, labels?: {
     const freshElements = treeBlockElements(block, fresh, 'new')
     const oldElements = treeBlockElements(block, baseline, 'old')
     if (block.merged) {
-      for (const element of oldElements) markChangedBlock(element, block.index, 'del')
-      for (const element of freshElements) markChangedBlock(element, block.index, 'add')
       if (block.kind === 'code' && oldElements.length > 0 && freshElements.length > 0) {
-        // Languages differ: each column keeps its own code block; the language difference is invisible and the
-        // toolbar shows each fence's source.
-        for (const element of oldElements) setSourceDiff(element, { old: block.oldNodes.map(node => node.raw).join('\n') }, 'old')
-        for (const element of freshElements) setSourceDiff(element, { new: block.newNodes.map(node => node.raw).join('\n') }, 'new')
+        // Languages differ: each column keeps its own code block, tinted WHOLE (the gray PRE turns red on the
+        // left and green on the right), and the language difference rides on that block for the toolbar.
+        const oldSource = block.oldNodes.map(node => node.raw).join('\n')
+        const newSource = block.newNodes.map(node => node.raw).join('\n')
+        for (const element of oldElements) {
+          const holder = element.closest('pre') ?? element
+          markChangedBlock(holder, block.index, 'del')
+          setSourceDiff(holder, { old: oldSource }, 'old')
+        }
+        for (const element of freshElements) {
+          const holder = element.closest('pre') ?? element
+          markChangedBlock(holder, block.index, 'add')
+          setSourceDiff(holder, { new: newSource }, 'new')
+        }
+      } else {
+        for (const element of oldElements) markChangedBlock(element, block.index, 'del')
+        for (const element of freshElements) markChangedBlock(element, block.index, 'add')
       }
       index++
       continue

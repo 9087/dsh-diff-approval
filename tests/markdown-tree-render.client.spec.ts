@@ -246,27 +246,30 @@ describe('tree-first renderer: character edits', () => {
     expect(code.querySelectorAll('.mdWordDel, .mdWordAdd').length).toBeGreaterThan(0)
   })
 
-  it('shows a fence-language change as two whole code blocks, old red left / new green right', () => {
+  it('stacks a fence-language change as two whole code blocks, old above new', () => {
     const root = bodyOf('```ts\nconst a = 1\n```\n', '```tsx\nconst a = 1\n```\n')
-    // ONE block: two complete code fences side by side, not a line-by-line comparison.
+    // ONE block: two complete code fences, old red above new green, with the tight heading-pair gap.
     expect(blocksOf(root)).toHaveLength(1)
-    const pair = root.querySelector<HTMLElement>('.mdTwin.mdTwinCodePair')
+    const pair = root.querySelector<HTMLElement>('.mdTwin.mdTwinStackPair')
     expect(pair).not.toBeNull()
-    expect(pair!.querySelectorAll('pre')).toHaveLength(2)
-    expect(pair!.querySelector('.mdTwinOld pre')?.textContent).toBe('const a = 1\n')
-    expect(pair!.querySelector('.mdTwinNew pre')?.textContent).toBe('const a = 1\n')
+    const children = [...pair!.children] as HTMLElement[]
+    expect(children[0]!.className).toContain('mdTwinOld')
+    expect(children[1]!.className).toContain('mdTwinNew')
+    expect(children[0]!.querySelector('pre')?.textContent).toBe('const a = 1\n')
+    expect(children[1]!.querySelector('pre')?.textContent).toBe('const a = 1\n')
     // The language itself is invisible: the toolbar's source row has both complete fences.
     expect(pair!.dataset.mdDiffOld).toContain('```ts')
     expect(pair!.dataset.mdDiffNew).toContain('```tsx')
-    // Double column: left keeps the old fence, right keeps the new one.
+    // Double column: each column keeps its whole fence, tinted as a BLOCK, not line by line.
     const holder = document.createElement('div')
     holder.innerHTML = renderTreeDocuments('```ts\nconst a = 1\n```\n', '```tsx\nconst a = 1\n```\n')
-    const oldSide = holder.querySelector<HTMLElement>('[data-diff-doc-side="old"] pre code')!
-    const newSide = holder.querySelector<HTMLElement>('[data-diff-doc-side="new"] pre code')!
-    expect(oldSide.className).toContain('mdDel')
-    expect(newSide.className).toContain('mdAdd')
-    expect(oldSide.textContent).toBe('const a = 1\n')
-    expect(newSide.textContent).toBe('const a = 1\n')
+    const oldPre = holder.querySelector<HTMLElement>('[data-diff-doc-side="old"] pre')!
+    const newPre = holder.querySelector<HTMLElement>('[data-diff-doc-side="new"] pre')!
+    expect(oldPre.className).toContain('mdDel')
+    expect(newPre.className).toContain('mdAdd')
+    expect(oldPre.textContent).toBe('const a = 1\n')
+    expect(newPre.textContent).toBe('const a = 1\n')
+    expect(oldPre.querySelector('[data-md-block]')).toBeNull()
   })
 
   it('groups changed code lines: all old lines on top, all new lines below', () => {

@@ -797,6 +797,13 @@
 .mdPreviewBody :global(.mdCodeLine) {
   display: block;
 }
+/* A whole code fence whose language changed: the entire pre is one red/green block, not just its lines. */
+.mdPreviewBody :global(pre.mdAdd) {
+  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
+}
+.mdPreviewBody :global(pre.mdDel) {
+  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
+}
 /* Word-level highlight inside a changed block: the specific changed words. */
 .mdPreviewBody :global(.mdWordDel) {
   background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
@@ -868,22 +875,13 @@
 .mdPreviewBody :global(.mdTwinOld .mdWordDel) {
   background-color: transparent;
 }
-/* An image's pair takes the whole line, like the image itself did: two frames sharing the width. */
+/* An image pair stacks: the old image above the new one, with the same tight gap as a heading pair. */
 .mdPreviewBody :global(.mdTwin.mdTwinImages) {
-  display: flex;
+  display: block;
   width: 100%;
-  gap: 1px;
-  align-items: stretch;
-  margin: 2px 0 8px;
+  margin: 2px 0 6px;
 }
-/* A code fence pair whose languages differ: two whole code blocks, old left / new right. */
-.mdPreviewBody :global(.mdTwin.mdTwinCodePair) {
-  display: flex;
-  width: 100%;
-  gap: 6px;
-  align-items: stretch;
-  margin: 2px 0 8px;
-}
+/* A code fence pair whose languages differ: two whole code blocks, old above new, tight gap. */
 .mdPreviewBody :global(.mdTwinCodePair > .mdTwinOld),
 .mdPreviewBody :global(.mdTwinCodePair > .mdTwinNew) {
   display: flex;
@@ -920,10 +918,12 @@
 }
 .mdPreviewBody :global(.mdTwinImages > .mdTwinOld),
 .mdPreviewBody :global(.mdTwinImages > .mdTwinNew) {
-  display: flex;
-  flex: 1 1 0;
-  min-width: 0;
+  display: block;
+  width: 100%;
   padding: 0;
+}
+.mdPreviewBody :global(.mdTwinImages > .mdTwinOld) {
+  margin-bottom: 2px;
 }
 /* A change with no rendered content at all: one square block per side — what went, what came. The block IS
    the side, so it carries the same 34% tint as every other change; the square is about one line tall. */
