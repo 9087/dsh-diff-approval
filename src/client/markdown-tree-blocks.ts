@@ -29,6 +29,7 @@ import {
   textSimilarity,
   type MarkdownTreeNode,
   type MergePlanPiece,
+  type TreeMatchOp,
   type TreeMatchPair,
 } from './markdown-tree-match.ts'
 
@@ -467,6 +468,12 @@ class BlockBuilder {
         continue
       }
       if (oldNode.type === newNode.type && INLINE_ELEMENT_TYPES.has(oldNode.type)) {
+        // A LINK is compared as ONE whole: any difference in its text (or target) draws the complete old link
+        // and the complete new link in red/green — never word runs inside the link's text.
+        if (oldNode.type === 'link') {
+          pushBlock('link', [oldNode], [newNode], [])
+          continue
+        }
         // ONE block for the element, however many word runs its text has: the element is the drawer, and two
         // blocks on the same element would fight over it (the second one ended up nested in the first twin).
         const units = collectUnits(piece.inner ?? [], op.pair)
@@ -853,6 +860,155 @@ function insertionAnchor(rows: readonly WholeFileDiffRow[], side: 'old' | 'new',
   return lastOther + 1
 }
 
+/** One top-level match op's node pair: the scope a source-fallback block covers. */
+interface SourceOwner {
+  old?: MarkdownTreeNode | undefined
+  new?: MarkdownTreeNode | undefined
+}
+
+/**
+ * Whether a node contains content the rendered preview cannot faithfully show:
+ *  - raw HTML (a block, or an inline `<strong class=…>` whose attribute is not drawn), including comments;
+ *  - front matter / link reference definitions, which render nothing at all.
+ *
+ * Such a scope degrades to a source twin (old Markdown above new Markdown) instead of structured tinting.
+ */
+function nodeNeedsSourceFallback(node: MarkdownTreeNode): boolean {
+  if (node.type === 'html' || node.type === 'front_matter' || node.type === 'def') return true
+  return node.children.some(child => nodeNeedsSourceFallback(child))
+}
+
+/** A block whose whole reading is its Markdown source: old source above new source, one block. */
+function sourceFallbackBlock(oldNodes: MarkdownTreeNode[], newNodes: MarkdownTreeNode[]): PendingBlock {
+  return { kind: 'source', oldNodes, newNodes, units: [], invisible: [], merged: false }
+}
+
+/** The top-level owners of the match, in document order. */
+function sourceOwners(ops: readonly TreeMatchOp[]): SourceOwner[] {
+  return ops.map(op => {
+    if (op.kind === 'pair') return { old: op.pair.old, new: op.pair.new }
+    if (op.kind === 'oldOnly') return { old: op.node }
+    return { new: op.node }
+  })
+}
+
+/** The owner index of one node (char ranges nest inside their top-level owner). */
+function ownerOfNode(owners: readonly SourceOwner[], node: MarkdownTreeNode, side: 'old' | 'new'): number {
+  for (let index = 0; index < owners.length; index++) {
+    const owner = side === 'old' ? owners[index]!.old : owners[index]!.new
+    if (owner !== undefined && owner.start <= node.start && node.end <= owner.end) return index
+  }
+  return -1
+}
+
+/** The owner index of one block, judged by its first old-side (else new-side) node. */
+function ownerOfBlock(owners: readonly SourceOwner[], block: PendingBlock): number {
+  const oldNode = block.oldNodes[0]
+  if (oldNode !== undefined) {
+    const index = ownerOfNode(owners, oldNode, 'old')
+    if (index >= 0) return index
+  }
+  const newNode = block.newNodes[0]
+  return newNode === undefined ? -1 : ownerOfNode(owners, newNode, 'new')
+}
+
+/**
+ * Split a MERGED pure run so its HTML/invisible nodes become source twins of their own and the rest stays the
+ * continuous tint it was: a wholly new document whose comments are mixed in keeps its green body, with each
+ * comment shown as source at its place.
+ *
+ * @param block - the merged block.
+ * @returns one block per consecutive run of same-fallback nodes.
+ */
+function splitMergedSourceFallback(block: PendingBlock): PendingBlock[] {
+  const side: 'old' | 'new' | undefined = block.oldNodes.length > 0 && block.newNodes.length === 0
+    ? 'old'
+    : block.newNodes.length > 0 && block.oldNodes.length === 0 ? 'new' : undefined
+  if (side === undefined) {
+    const nodes = [...block.oldNodes, ...block.newNodes]
+    if (!nodes.some(node => nodeNeedsSourceFallback(node))) return [block]
+    return [sourceFallbackBlock(block.oldNodes, block.newNodes)]
+  }
+  const nodes = side === 'old' ? block.oldNodes : block.newNodes
+  const parts: PendingBlock[] = []
+  let run: MarkdownTreeNode[] = []
+  let runFallback: boolean | undefined
+  const flush = (): void => {
+    if (run.length === 0) return
+    if (runFallback === true) parts.push(sourceFallbackBlock(side === 'old' ? run : [], side === 'new' ? run : []))
+    else parts.push({ ...block, ...(side === 'old' ? { oldNodes: run, newNodes: [] } : { oldNodes: [], newNodes: run }) })
+    run = []
+  }
+  for (const node of nodes) {
+    const fallback = nodeNeedsSourceFallback(node)
+    if (runFallback === undefined) runFallback = fallback
+    if (fallback !== runFallback) {
+      flush()
+      runFallback = fallback
+    }
+    run.push(node)
+  }
+  flush()
+  return parts
+}
+
+/**
+ * Degrade HTML-bearing and invisible-only scopes to whole-source twins.
+ *
+ * A block scope that contains raw HTML (inline or block), or that renders nothing at all (front matter, comment,
+ * link definition), is shown as its Markdown source: old version above the new one. This replaces the old
+ * eye-icon chips, which readers found too cryptic.
+ *
+ * @param blocks - the builder's blocks, in document order.
+ * @param ops - the top-level match ops (the source scopes).
+ * @returns the final blocks, source twins where needed.
+ */
+function applySourceFallbacks(blocks: readonly PendingBlock[], ops: readonly TreeMatchOp[]): PendingBlock[] {
+  const owners = sourceOwners(ops)
+  const needsFallback = (node: MarkdownTreeNode | undefined): boolean => node !== undefined && nodeNeedsSourceFallback(node)
+  const active = owners.some(owner => needsFallback(owner.old) || needsFallback(owner.new))
+    || blocks.some(block => block.invisible.length > 0
+      || [...block.oldNodes, ...block.newNodes].some(node => nodeNeedsSourceFallback(node)))
+  if (!active) return [...blocks]
+  // A merged run may mix plain blocks and HTML/invisible nodes: split it before scoping.
+  const flat = blocks.flatMap(block => (
+    block.oldNodes.length > 1 || block.newNodes.length > 1 ? splitMergedSourceFallback(block) : [block]
+  ))
+  const result: PendingBlock[] = []
+  for (let index = 0; index < flat.length;) {
+    const block = flat[index]!
+    if (block.kind === 'source' || block.invisible.length > 0) {
+      result.push(block.kind === 'source' ? block : sourceFallbackBlock(block.oldNodes, block.newNodes))
+      index++
+      continue
+    }
+    // Merged runs that were not split keep their tint unless they contain HTML; those were split above.
+    if (block.oldNodes.length > 1 || block.newNodes.length > 1) {
+      result.push(...splitMergedSourceFallback(block))
+      index++
+      continue
+    }
+    const ownerIndex = ownerOfBlock(owners, block)
+    if (ownerIndex < 0) {
+      result.push(block)
+      index++
+      continue
+    }
+    const owner = owners[ownerIndex]!
+    if (!needsFallback(owner.old) && !needsFallback(owner.new)) {
+      result.push(block)
+      index++
+      continue
+    }
+    // All blocks of this top-level scope are ONE source twin.
+    let end = index + 1
+    while (end < flat.length && ownerOfBlock(owners, flat[end]!) === ownerIndex) end++
+    result.push(sourceFallbackBlock(owner.old === undefined ? [] : [owner.old], owner.new === undefined ? [] : [owner.new]))
+    index = end
+  }
+  return result
+}
+
 /**
  * Compute the tree path's preview model for one document pair.
  *
@@ -864,7 +1020,8 @@ export function treePreviewModel(oldText: string, newText: string): TreePreviewM
   const result = matchMarkdownTrees(oldText, newText)
   const builder = new BlockBuilder(oldText, newText)
   builder.walk(planMergedSiblings(result.ops))
-  const pending = builder.blocks
+  // Raw HTML / invisible-only scopes are shown as whole Markdown source twins (see applySourceFallbacks).
+  const pending = applySourceFallbacks(builder.blocks, result.ops)
   // Number the blocks and lay out their units. Ranges: a block with both sides uses the nodes' own lines; a
   // one-sided block keeps its own side and gets an EMPTY range on the other side whose start is the insertion
   // point (the host inserts before that line).

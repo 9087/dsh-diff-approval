@@ -14,6 +14,7 @@ import {
   renderTreeMerged,
   treeDiffEnabled,
 } from '../src/client/markdown-preview.ts'
+import { treePreviewModel } from '../src/client/markdown-tree-blocks.ts'
 
 const bodyOf = (oldText: string, newText: string): HTMLElement => {
   const holder = document.createElement('div')
@@ -76,21 +77,44 @@ describe('tree-first renderer: pure changes', () => {
     expect(root.querySelectorAll('.mdWordAdd, .mdWordDel')).toHaveLength(0)
   })
 
-  it('places an invisible change as source markers at its document position, with the eye icon', () => {
+  it('degrades an invisible change to a source twin at its document position', () => {
     const root = bodyOf('A.\n\n<!-- old -->\n\nB.\n', 'A.\n\n<!-- new -->\n\nB.\n')
     const blocks = blocksOf(root)
-    expect(blocks.length).toBe(2)
-    for (const chip of blocks) {
-      expect(chip.classList.contains('mdTwinPhantom')).toBe(true)
-      expect(chip.querySelector('.mdTwinCaption svg')).not.toBeNull()
-    }
-    const kinds = new Set(blocks.map(chip => chip.dataset.mdKind))
-    expect(kinds).toEqual(new Set(['del', 'add']))
-    // Position: the markers sit between A and B, not after the whole document.
+    // ONE block: old comment source above new comment source, no eye chips.
+    expect(blocks.length).toBe(1)
+    const pair = blocks[0]!
+    expect(pair.classList.contains('mdSourcePair')).toBe(true)
+    expect(pair.classList.contains('mdTwinStackPair')).toBe(true)
+    expect(pair.textContent).toContain('<!-- old -->')
+    expect(pair.textContent).toContain('<!-- new -->')
+    const holders = [...pair.children].map(child => child.className)
+    expect(holders[0]).toContain('mdTwinOld')
+    expect(holders[1]).toContain('mdTwinNew')
+    // Position: the source twin sits between A and B, not after the whole document.
     const children = [...root.children].map(child => child.tagName)
-    const markerIndex = children.findIndex(tag => tag === 'SPAN')
+    const markerIndex = children.findIndex(tag => tag === 'DIV')
     expect(markerIndex).toBeGreaterThan(0)
     expect(markerIndex).toBeLessThan(children.length - 1)
+  })
+
+  it('degrades an inline-HTML paragraph to its whole Markdown source twin', () => {
+    const root = bodyOf(
+      '<strong class="old-inline">内联 HTML</strong> 与 🎉 表情符号。\n',
+      '<strong class="new-inline">内联 HTML</strong> 与 🎉 表情符号。\n',
+    )
+    const pairs = [...root.querySelectorAll<HTMLElement>('.mdSourcePair')]
+    expect(pairs).toHaveLength(1)
+    const pair = pairs[0]!
+    // The WHOLE paragraph source, both versions — not just the changed tag.
+    expect(pair.textContent).toContain('<strong class="old-inline">内联 HTML</strong> 与 🎉 表情符号。')
+    expect(pair.textContent).toContain('<strong class="new-inline">内联 HTML</strong> 与 🎉 表情符号。')
+    // The rendered paragraph is replaced, not left behind: the emoji text is not rendered separately.
+    expect(root.querySelectorAll('p')).toHaveLength(0)
+    expect(blocksOf(root)).toHaveLength(1)
+    // Source is already on screen: no toolbar source row is attached to it.
+    expect(pair.dataset.mdDiffOld).toBeUndefined()
+    expect(pair.dataset.mdDiffNew).toBeUndefined()
+    expect(root.querySelectorAll('.mdTwinPhantom')).toHaveLength(0)
   })
 })
 
@@ -128,6 +152,20 @@ describe('tree-first renderer: character edits', () => {
     expect(twin.dataset.mdBlock).toBeTruthy()
   })
 
+  it('compares a LINK as a whole: changed link text draws the complete old and new links, no word runs', () => {
+    const root = bodyOf('一个[旧链接文字](https://example.com/x)。\n', '一个[新链接文字](https://example.com/x)。\n')
+    const twin = root.querySelector<HTMLElement>('.mdTwin')!
+    expect(twin).not.toBeNull()
+    // Both complete link versions, in order: old first, new second.
+    expect([...twin.querySelectorAll('a')].map(link => link.textContent)).toEqual(['旧链接文字', '新链接文字'])
+    expect(twin.querySelectorAll('.mdWordAdd, .mdWordDel')).toHaveLength(0)
+    // ONE block, with no character units inside it.
+    const model = treePreviewModel('一个[旧链接文字](https://example.com/x)。\n', '一个[新链接文字](https://example.com/x)。\n').blocks
+    expect(model).toHaveLength(1)
+    expect(model[0]!.kind).toBe('link')
+    expect(model[0]!.units).toHaveLength(0)
+  })
+
   it('draws an image path change as two frames, old red on the left and new green on the right', () => {
     const root = bodyOf('![截图](./old.png "标题")\n', '![截图](./new.png "标题")\n')
     const twin = root.querySelector<HTMLElement>('.mdTwin.mdTwinImages')
@@ -144,6 +182,28 @@ describe('tree-first renderer: character edits', () => {
     expect(twin!.dataset.mdBlock).toBeTruthy()
     // The paragraph itself is not tinted whole: the frames are the change.
     expect(root.querySelector('p.mdAdd, p.mdDel')).toBeNull()
+  })
+
+  it('draws a removed image as the compact frame, not the full-size placeholder paragraph', () => {
+    const root = bodyOf('![截图](./removed-shot.png)\n', '')
+    // The image-only block becomes the same compact tinted frame a changed image pair uses.
+    expect(root.querySelector('p')).toBeNull()
+    const twin = root.querySelector<HTMLElement>('.mdTwin.mdTwinImages')
+    expect(twin).not.toBeNull()
+    expect(twin!.classList.contains('mdImageOnlyPair')).toBe(true)
+    const frame = twin!.querySelector<HTMLElement>('.mdImageFrame')!
+    expect(frame.querySelector('.mdImagePath')?.textContent).toBe('./removed-shot.png')
+    expect(frame.querySelector('.mdImageAlt')?.textContent).toBe('截图')
+    // The real image and its path/title line live in the card (the host resolves the image; unreadable ones
+    // degrade to the generic picture fallback).
+    expect(frame.querySelector('img')?.getAttribute('src')).toBe('./removed-shot.png')
+    expect(frame.querySelector('.mdImageFrame > .mdCodeTitlebar')).not.toBeNull()
+    expect(blocksOf(root)).toHaveLength(1)
+    // A wholly ADDED image is the same compact frame on the green side.
+    const added = bodyOf('', '![新图](./added-shot.png)\n')
+    expect(added.querySelector('p')).toBeNull()
+    const addedFrame = added.querySelector<HTMLElement>('.mdImageOnlyPair .mdImageFrame')!
+    expect(addedFrame.querySelector('.mdImagePath')?.textContent).toBe('./added-shot.png')
   })
 
   it('draws image alt and title changes in the frames too', () => {
@@ -252,11 +312,22 @@ describe('tree-first renderer: character edits', () => {
     expect(blocksOf(root)).toHaveLength(1)
     const pair = root.querySelector<HTMLElement>('.mdTwin.mdTwinStackPair')
     expect(pair).not.toBeNull()
+    // Two rounded version cards, each with its language label as the first line inside the card.
     const children = [...pair!.children] as HTMLElement[]
+    expect(children).toHaveLength(2)
     expect(children[0]!.className).toContain('mdTwinOld')
     expect(children[1]!.className).toContain('mdTwinNew')
-    expect(children[0]!.querySelector('pre')?.textContent).toBe('const a = 1\n')
-    expect(children[1]!.querySelector('pre')?.textContent).toBe('const a = 1\n')
+    const oldHolder = children[0]!
+    const newHolder = children[1]!
+    expect(oldHolder.querySelector('pre')?.textContent).toBe('const a = 1\n')
+    expect(newHolder.querySelector('pre')?.textContent).toBe('const a = 1\n')
+    // Each version shows the fence language inside its card (as declared, case kept).
+    expect(oldHolder.querySelector('pre')?.dataset.codeLang).toBe('ts')
+    expect(newHolder.querySelector('pre')?.dataset.codeLang).toBe('tsx')
+    expect(oldHolder.querySelector(':scope > .mdCodeTitlebar')?.textContent).toBe('ts')
+    expect(newHolder.querySelector(':scope > .mdCodeTitlebar')?.textContent).toBe('tsx')
+    expect(oldHolder.querySelector(':scope > .mdCodeTitlebar')?.className).toContain('mdCodeTitlebarOld')
+    expect(newHolder.querySelector(':scope > .mdCodeTitlebar')?.className).toContain('mdCodeTitlebarNew')
     // The language itself is invisible: the toolbar's source row has both complete fences.
     expect(pair!.dataset.mdDiffOld).toContain('```ts')
     expect(pair!.dataset.mdDiffNew).toContain('```tsx')
@@ -267,6 +338,13 @@ describe('tree-first renderer: character edits', () => {
     const newPre = holder.querySelector<HTMLElement>('[data-diff-doc-side="new"] pre')!
     expect(oldPre.className).toContain('mdDel')
     expect(newPre.className).toContain('mdAdd')
+    expect(oldPre.dataset.codeLang).toBe('ts')
+    expect(newPre.dataset.codeLang).toBe('tsx')
+    // The title bar is a SIBLING above the code (not inside PRE, so copying the code stays clean).
+    expect(oldPre.textContent).toBe('const a = 1\n')
+    expect(newPre.textContent).toBe('const a = 1\n')
+    expect(oldPre.closest('.mdCodePane')?.querySelector('.mdCodeTitlebar')?.textContent).toBe('ts')
+    expect(newPre.closest('.mdCodePane')?.querySelector('.mdCodeTitlebar')?.textContent).toBe('tsx')
     expect(oldPre.textContent).toBe('const a = 1\n')
     expect(newPre.textContent).toBe('const a = 1\n')
     expect(oldPre.querySelector('[data-md-block]')).toBeNull()
@@ -279,6 +357,20 @@ describe('tree-first renderer: character edits', () => {
       .toEqual(['del:const a = 1', 'del:const b = 2', 'add:const a = 10', 'add:const b = 20'])
     // The untouched line stays below the pair, unchanged (not part of the changed run).
     expect(root.querySelector('code')!.textContent).toContain('const c = 3')
+  })
+
+  it('double column: each side tinted its changed lines as full-width code-line blocks', () => {
+    const holder = document.createElement('div')
+    holder.innerHTML = renderTreeDocuments('```ts\nconst a = 1\nconst b = 2\nconst c = 3\n```\n', '```ts\nconst a = 10\nconst b = 20\nconst c = 3\n```\n')
+    const oldLines = [...holder.querySelectorAll<HTMLElement>('[data-diff-doc-side="old"] .mdCodeLine')]
+    const newLines = [...holder.querySelectorAll<HTMLElement>('[data-diff-doc-side="new"] .mdCodeLine')]
+    expect(oldLines.map(line => line.textContent?.trim())).toEqual(['const a = 1', 'const b = 2'])
+    expect(newLines.map(line => line.textContent?.trim())).toEqual(['const a = 10', 'const b = 20'])
+    for (const line of oldLines) expect(line.className).toContain('mdWordDel')
+    for (const line of newLines) expect(line.className).toContain('mdWordAdd')
+    // The code's textContent keeps its newlines (the trailing line separator rides inside the block).
+    expect(holder.querySelector<HTMLElement>('[data-diff-doc-side="old"] code')!.textContent)
+      .toBe('const a = 1\nconst b = 2\nconst c = 3\n')
   })
 
   it('shows a heading LEVEL change as old heading ABOVE new heading with a tight gap', () => {
@@ -452,14 +544,18 @@ describe('tree-first renderer: double column', () => {
     return column
   }
 
-  it('tints a wholly new document in the new column only', () => {
+  it('tints a wholly new document in the new column only, as ONE continuous union', () => {
     const root = renderWithTree('', '# H\n\nPara.\n')
     const oldColumn = columnOf(root, 'old')
     const newColumn = columnOf(root, 'new')
     expect(oldColumn.querySelectorAll('[data-md-block]')).toHaveLength(0)
-    const fresh = [...newColumn.querySelectorAll<HTMLElement>('[data-md-block]')]
-    expect(fresh.length).toBeGreaterThanOrEqual(1)
-    for (const element of fresh) expect(element.dataset.mdBlock).toBe('0')
+    // ONE union in the new column: the tint is continuous across the merged run, exactly like single column.
+    const union = newColumn.querySelector<HTMLElement>('.mdBlockUnion')!
+    expect(union).not.toBeNull()
+    expect(union.dataset.mdBlock).toBe('0')
+    expect(union.querySelectorAll('h1, p').length).toBeGreaterThanOrEqual(2)
+    // The children carry no block of their own; the union is the block/hover target.
+    expect(union.querySelectorAll('[data-md-block]')).toHaveLength(0)
   })
 
   it('shows a paired edit with its own changed characters in each column, on the same row', () => {
@@ -491,15 +587,21 @@ describe('tree-first renderer: double column', () => {
     expect(row.classList.contains('mdAdd')).toBe(true)
   })
 
-  it('puts an invisible change into each column at its own position, with the icon', () => {
+  it('puts a source twin into each column at its own position', () => {
     const root = renderWithTree('A.\n\n<!-- old -->\n\nB.\n', 'A.\n\n<!-- new -->\n\nB.\n')
-    for (const side of ['old', 'new'] as const) {
-      const column = columnOf(root, side)
-      const chips = column.querySelectorAll<HTMLElement>('.mdTwinPhantom')
-      expect(chips.length).toBe(1)
-      expect(chips[0]!.dataset.mdBlock).toBe('0')
-      expect(chips[0]!.querySelector('.mdTwinCaption svg')).not.toBeNull()
-    }
+    const oldSources = [...columnOf(root, 'old').querySelectorAll<HTMLElement>('.mdSourcePair')]
+    const newSources = [...columnOf(root, 'new').querySelectorAll<HTMLElement>('.mdSourcePair')]
+    expect(oldSources).toHaveLength(1)
+    expect(newSources).toHaveLength(1)
+    expect(oldSources[0]!.textContent).toContain('<!-- old -->')
+    expect(oldSources[0]!.textContent).not.toContain('<!-- new -->')
+    expect(newSources[0]!.textContent).toContain('<!-- new -->')
+    expect(newSources[0]!.textContent).not.toContain('<!-- old -->')
+    // Both sides of the change share ONE alignment anchor, so the source rows sit on the same grid row.
+    expect(oldSources[0]!.dataset.mdMatch).toBeDefined()
+    expect(oldSources[0]!.dataset.mdMatch).toBe(newSources[0]!.dataset.mdMatch)
+    expect(oldSources[0]!.dataset.mdBlock).toBe('0')
+    expect(newSources[0]!.dataset.mdBlock).toBe('0')
   })
 
   it('merges the adjacent fully-matched siblings into ONE layout row in both columns', () => {

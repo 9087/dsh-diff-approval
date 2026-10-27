@@ -2078,10 +2078,66 @@ function wrapBlockUnion(block: TreePreviewBlock, elements: readonly HTMLElement[
   return wrapper
 }
 
+/** The language a fence declares, for the title bar the renderer puts on a changed-language code block. */
+function codeLanguageLabel(language: string): string {
+  return language === '' ? '无语言' : language
+}
+
+/** A plain language label line, no background or frame: just the fence language above the code. */
+function codeTitlebar(label: string): HTMLElement {
+  const bar = document.createElement('div')
+  bar.className = 'mdCodeTitlebar'
+  bar.textContent = label
+  return bar
+}
+
+/**
+ * Put the fence's language ABOVE the code block as a plain small line (never inside the PRE, so copying the
+ * code stays clean, and no tint is added to the code area or its rounded corners).
+ *
+ * A single-column version's holder card gets the label line just above it, inside the pair wrapper; a
+ * double-column PRE gets wrapped in a `.mdCodePane` that holds the label and the code.
+ */
+function attachCodeLanguageTitlebar(pre: HTMLElement, language: string): void {
+  const label = codeLanguageLabel(language)
+  pre.dataset.codeLang = label
+  const parent = pre.parentElement
+  if (parent !== null && (parent.classList.contains('mdTwinOld') || parent.classList.contains('mdTwinNew'))) {
+    // Inside the version's rounded card: the label is the card's first line.
+    const side = parent.classList.contains('mdTwinOld') ? 'old' : 'new'
+    parent.querySelector(':scope > .mdCodeTitlebar')?.remove()
+    const bar = codeTitlebar(label)
+    bar.dataset.codeLangSide = side
+    bar.classList.add(side === 'old' ? 'mdCodeTitlebarOld' : 'mdCodeTitlebarNew')
+    parent.insertBefore(bar, pre)
+    return
+  }
+  let pane = pre.closest<HTMLElement>('.mdCodePane')
+  if (pane === null) {
+    if (pre.parentNode === null) return
+    pane = document.createElement('div')
+    pane.className = 'mdCodePane'
+    pre.parentNode.insertBefore(pane, pre)
+    pane.append(pre)
+  }
+  pane.classList.toggle('mdCodePaneDel', pre.classList.contains('mdDel'))
+  pane.classList.toggle('mdCodePaneAdd', pre.classList.contains('mdAdd'))
+  // The hover frame must enclose the language label too: the pane, not just the PRE, is part of the block.
+  if (pre.dataset.mdBlock !== undefined) {
+    pane.dataset.mdBlock = pre.dataset.mdBlock
+    pane.dataset.mdKind = pre.dataset.mdKind ?? (pre.classList.contains('mdAdd') ? 'add' : 'del')
+    pane.classList.toggle('mdAdd', pre.classList.contains('mdAdd'))
+    pane.classList.toggle('mdDel', pre.classList.contains('mdDel'))
+  }
+  pane.querySelector(':scope > .mdCodeTitlebar')?.remove()
+  pane.insertBefore(codeTitlebar(label), pre)
+}
+
 /**
  * Draw a code fence pair whose LANGUAGES differ as two whole code blocks STACKED: old red on top, new green
- * below with the same tight gap as a heading pair — never a line-by-line comparison across languages. The
- * language itself is invisible, so the toolbar gets both complete fences.
+ * below with the same tight gap as a heading pair — never a line-by-line comparison across languages. Each
+ * block carries its fence language as a corner badge (the language is the invisible difference). The toolbar
+ * gets both complete fences as source.
  *
  * @param block - the replacement code block.
  * @param oldElements - the old fence's rendered CODE element(s).
@@ -2098,19 +2154,24 @@ function renderCodePairBlock(
   if (oldPre === undefined || newPre === undefined || parent === null || parent === undefined) return
   const oldSource = block.oldNodes.map(node => node.raw).join('\n')
   const newSource = block.newNodes.map(node => node.raw).join('\n')
+  const oldLanguage = String(block.oldNodes[0]?.attrs.lang ?? '')
+  const newLanguage = String(block.newNodes[0]?.attrs.lang ?? '')
   const wrapper = document.createElement('div')
-  wrapper.className = 'mdTwin mdTwinStackPair'
+  wrapper.className = 'mdTwin mdTwinStackPair mdCodeLangPair'
   wrapper.dataset.mdBlock = String(block.index)
   wrapper.dataset.mdKind = 'add'
   setSourceDiff(wrapper, { old: oldSource, new: newSource })
   const oldHolder = document.createElement('div')
   oldHolder.className = 'mdTwinOld'
-  oldHolder.append(oldPre.cloneNode(true))
+  const oldClone = oldPre.cloneNode(true) as HTMLElement
+  oldHolder.append(oldClone)
   const newHolder = document.createElement('div')
   newHolder.className = 'mdTwinNew'
   parent.insertBefore(wrapper, newPre)
   newHolder.append(newPre)
   wrapper.append(oldHolder, newHolder)
+  attachCodeLanguageTitlebar(oldClone, oldLanguage)
+  attachCodeLanguageTitlebar(newPre, newLanguage)
 }
 
 /**
@@ -2150,6 +2211,145 @@ function isBlockPairElement(oldElement: HTMLElement, freshElement: HTMLElement):
     return oldElement.tagName !== freshElement.tagName
   }
   return oldElement.tagName === 'HR' && freshElement.tagName === 'HR'
+}
+
+/** One side of a source twin: a labelled card with the version's Markdown, verbatim, in monospace. */
+function sourceSide(side: 'old' | 'new', raw: string, label: string): HTMLElement {
+  const holder = document.createElement('div')
+  holder.className = side === 'old' ? 'mdTwinOld' : 'mdTwinNew'
+  const header = document.createElement('div')
+  header.className = 'mdSourceLabel'
+  header.textContent = label
+  const pre = document.createElement('pre')
+  pre.className = 'mdSourceText'
+  pre.textContent = raw
+  holder.append(header, pre)
+  return holder
+}
+
+/** What kind of source fallback this scope is, named precisely: YAML front matter, HTML comment, link
+ * definition or inline HTML. Mixed scopes list their kinds. */
+function sourceScopeLabel(block: TreePreviewBlock): string {
+  const names: string[] = []
+  let hasHtml = false
+  const collect = (node: MarkdownTreeNode): void => {
+    if (node.type === 'front_matter') {
+      if (!names.includes('YAML 元数据')) names.push('YAML 元数据')
+      return
+    }
+    if (node.type === 'def') {
+      if (!names.includes('链接引用定义')) names.push('链接引用定义')
+      return
+    }
+    if (node.type === 'html') {
+      if (node.raw.trimStart().startsWith('<!--')) {
+        if (!names.includes('HTML 注释')) names.push('HTML 注释')
+      } else {
+        hasHtml = true
+      }
+      return
+    }
+    for (const child of node.children) collect(child)
+  }
+  for (const node of [...block.oldNodes, ...block.newNodes]) collect(node)
+  if (hasHtml) names.push('内嵌 HTML')
+  return names.length === 0 ? '源码' : names.join('、')
+}
+
+/** A node list's Markdown source, one node per line, no trailing newline. */
+function sourceRawOf(nodes: readonly MarkdownTreeNode[]): string {
+  return nodes.map(node => node.raw.replace(/\n+$/u, '')).join('\n')
+}
+
+/**
+ * Build the source twin for one scope: old Markdown above new Markdown (the heading-pair stack), each side
+ * tinted red/green. The whole thing is ONE block with the source rows on it for the toolbar.
+ *
+ * @param block - the source-fallback block.
+ * @param oldRaw - old side source (absent for a pure addition).
+ * @param newRaw - new side source (absent for a pure deletion).
+ * @returns the twin wrapper.
+ */
+function sourcePairElement(block: TreePreviewBlock, oldRaw: string | undefined, newRaw: string | undefined): HTMLElement {
+  const wrapper = document.createElement('div')
+  wrapper.className = 'mdTwin mdTwinStackPair mdSourcePair'
+  wrapper.dataset.mdBlock = String(block.index)
+  wrapper.dataset.mdKind = oldRaw === undefined ? 'add' : newRaw === undefined ? 'del' : 'add'
+  // The source is ALREADY on screen in this block, so no `data-md-diff` here: the toolbar would only repeat it.
+  if (oldRaw !== undefined) wrapper.append(sourceSide('old', oldRaw, sourceScopeLabel(block)))
+  if (newRaw !== undefined) wrapper.append(sourceSide('new', newRaw, sourceScopeLabel(block)))
+  return wrapper
+}
+
+/** Draw a source-fallback block in the single column, replacing the scope's rendered elements. */
+function renderSourceBlock(block: TreePreviewBlock, fresh: RenderedDoc): void {
+  const oldRaw = block.oldNodes.length === 0 ? undefined : sourceRawOf(block.oldNodes)
+  const newRaw = block.newNodes.length === 0 ? undefined : sourceRawOf(block.newNodes)
+  const wrapper = sourcePairElement(block, oldRaw, newRaw)
+  const freshElements = treeBlockElements(block, fresh, 'new')
+  if (freshElements.length > 0 && freshElements[0]!.parentNode !== null) {
+    const parent = freshElements[0]!.parentNode
+    parent.insertBefore(wrapper, freshElements[0]!)
+    for (const element of freshElements) element.parentNode?.removeChild(element)
+    return
+  }
+  const line = Math.max(0, (block.newStart || block.oldStart || 1) - 1)
+  const anchor = insertionPointFor(fresh.root, line)
+  anchor.parent.insertBefore(wrapper, anchor.before)
+}
+
+/** Draw a source-fallback block into the double column: each column shows ITS side's Markdown source. */
+function renderSourceBlockDouble(block: TreePreviewBlock, fresh: RenderedDoc, baseline: RenderedDoc): void {
+  const anchorId = `source:${block.index}`
+  const place = (side: 'old' | 'new', doc: RenderedDoc): void => {
+    const nodes = side === 'old' ? block.oldNodes : block.newNodes
+    if (nodes.length === 0) return
+    const raw = sourceRawOf(nodes)
+    const wrapper = document.createElement('div')
+    wrapper.className = 'mdTwin mdTwinStackPair mdSourcePair'
+    wrapper.dataset.mdBlock = String(block.index)
+    wrapper.dataset.mdKind = side === 'old' ? 'del' : 'add'
+    wrapper.dataset.mdMatch = anchorId
+    // Source already visible: no toolbar source row (see sourcePairElement).
+    wrapper.append(sourceSide(side, raw, sourceScopeLabel(block)))
+    const elements = treeBlockElements(block, doc, side)
+    if (elements.length > 0 && elements[0]!.parentNode !== null) {
+      const parent = elements[0]!.parentNode
+      parent.insertBefore(wrapper, elements[0]!)
+      for (const element of elements) element.parentNode?.removeChild(element)
+      return
+    }
+    const line = Math.max(0, (side === 'old' ? block.oldStart : block.newStart) - 1)
+    const point = insertionPointFor(doc.root, line)
+    point.parent.insertBefore(wrapper, point.before)
+  }
+  place('old', baseline)
+  place('new', fresh)
+}
+
+/**
+ * A block that is ONLY an image (its paragraph holds no other text): render it as the compact image frame a
+ * changed image pair uses — path + alt in a tinted dashed card — instead of the full-size broken-image
+ * placeholder paragraph. Returns undefined for mixed content (text plus image), which keeps the block rendering.
+ *
+ * @param element - the rendered paragraph/block carrying the image.
+ * @param block - the block being drawn.
+ * @param kind - added (green) or deleted (red).
+ * @returns the compact frame wrapper, or undefined when the block is not image-only.
+ */
+function compactImageOnly(element: HTMLElement, block: TreePreviewBlock, kind: 'add' | 'del'): HTMLElement | undefined {
+  const images = [...element.querySelectorAll<HTMLElement>('img')]
+  if (images.length === 0) return undefined
+  if ((element.textContent ?? '').trim() !== '') return undefined
+  const wrapper = document.createElement('div')
+  wrapper.className = 'mdTwin mdTwinImages mdImageOnlyPair'
+  wrapper.dataset.mdBlock = String(block.index)
+  wrapper.dataset.mdKind = kind
+  const holder = document.createElement('div')
+  holder.className = kind === 'del' ? 'mdTwinOld' : 'mdTwinNew'
+  for (const image of images) holder.append(imageFrame(image, kind === 'del' ? 'old' : 'new'))
+  wrapper.append(holder)
+  return wrapper
 }
 
 function markChangedBlock(el: HTMLElement, block: number, kind: 'add' | 'del'): void {
@@ -3326,28 +3526,54 @@ function blockSide(side: 'old' | 'new'): HTMLElement {
  * @param img - the rendered image.
  * @returns its frame.
  */
-function imageFrame(img: Element): HTMLElement {
+/**
+ * One version of an image change: a tinted, dashed card with a title line naming the path (and alt/title when
+ * they exist) and the IMAGE ITSELF below it. The real `<img>` is kept so the host image resolver can inline a
+ * readable file; an unreadable one degrades to the plugin's image fallback (a generic picture mark + path).
+ *
+ * @param img - the rendered image element to show.
+ * @param side - which version this card is (colors the title line).
+ * @returns the image frame card.
+ */
+function imageFrame(img: Element, side?: 'old' | 'new'): HTMLElement {
+  // The frame sits INSIDE an inline twin holder, so every part stays a span (a div here would be re-parsed out
+  // of the holder when the HTML is serialized and loaded again). CSS gives them block/flex layout.
   const frame = document.createElement('span')
   frame.className = 'mdImageFrame'
+  const header = document.createElement('span')
+  header.className = 'mdCodeTitlebar'
+  if (side === 'old') header.classList.add('mdCodeTitlebarOld')
+  if (side === 'new') header.classList.add('mdCodeTitlebarNew')
   const path = document.createElement('span')
   path.className = 'mdImagePath'
   path.textContent = img.getAttribute('src') ?? ''
-  frame.appendChild(path)
+  header.appendChild(path)
   const alt = img.getAttribute('alt') ?? ''
   if (alt !== '') {
     const caption = document.createElement('span')
     caption.className = 'mdImageAlt'
     caption.textContent = alt
-    frame.appendChild(caption)
+    header.appendChild(caption)
   }
-  // The title is an IMAGE attribute too: a change to it must read on the frame that owns it, like the path.
+  // The title is an IMAGE attribute too: a change to it must read on the card that owns it, like the path.
   const title = img.getAttribute('title') ?? ''
   if (title !== '') {
     const caption = document.createElement('span')
     caption.className = 'mdImageTitle'
     caption.textContent = title
-    frame.appendChild(caption)
+    header.appendChild(caption)
   }
+  const body = document.createElement('span')
+  body.className = 'mdImageBody'
+  const picture = img.cloneNode(true) as HTMLElement
+  for (const marked of [picture, ...picture.querySelectorAll<HTMLElement>('[data-md-unit], [data-md-block]')]) {
+    marked.removeAttribute('data-md-unit')
+    marked.removeAttribute('data-md-block')
+    marked.removeAttribute('data-md-kind')
+    marked.classList.remove('mdAdd', 'mdDel', 'mdWordAdd', 'mdWordDel', 'mdTwinOld', 'mdTwinNew')
+  }
+  body.appendChild(picture)
+  frame.append(header, body)
   return frame
 }
 
@@ -3402,7 +3628,7 @@ function applyTwin(previous: HTMLElement, next: HTMLElement, index: number, hidd
   if (next instanceof HTMLImageElement) {
     // An image took the whole line before, so its pair does too: two frames sharing the width.
     wrapper.classList.add('mdTwinImages')
-    wrapper.append(sideOf('old', imageFrame(previous)), sideOf('new', imageFrame(next)))
+    wrapper.append(sideOf('old', imageFrame(previous, 'old')), sideOf('new', imageFrame(next, 'new')))
   } else if (INLINE_TAGS.has(next.tagName)) {
     wrapper.append(
       sideOf('old', previous.cloneNode(true) as HTMLElement),
@@ -3567,7 +3793,7 @@ function unitSourceLines(text: string, span: LineSpan | undefined, chars: { star
 function sideTwin(element: HTMLElement, side: 'old' | 'new', index: number, hidden: boolean): HTMLElement {
   const row = hidden ? { [side === 'old' ? 'old' : 'new']: sourceOfElement(element) } : undefined
   if (element instanceof HTMLImageElement) {
-    const holder = sideOf(side, imageFrame(element))
+    const holder = sideOf(side, imageFrame(element, side))
     holder.classList.add('mdTwinColumn')
     markUnit(holder, index, side === 'old' ? 'del' : 'add')
     setSourceDiff(holder, row, side)
@@ -6018,10 +6244,63 @@ function renderInlineChildBlockDouble(block: TreePreviewBlock, fresh: RenderedDo
  * @param fresh - the new document's rendered tree.
  * @param baseline - the old document's rendered tree.
  */
+/**
+ * Draw a same-language code fence's changed lines in the DOUBLE column, one side per column: every changed
+ * line is a full-width block (no rounded text-chip), old lines red in the left column and new lines green in
+ * the right — the single column's line rhythm, per side.
+ *
+ * @param blocks - the fence's changed-line blocks.
+ * @param container - the fence's node pair.
+ * @param oldCode - the old column's rendered CODE element.
+ * @param newCode - the new column's rendered CODE element.
+ */
+function renderCodeLinesDouble(
+  blocks: readonly TreePreviewBlock[],
+  container: { old?: MarkdownTreeNode | undefined; new?: MarkdownTreeNode | undefined },
+  oldCode: HTMLElement,
+  newCode: HTMLElement,
+): void {
+  const rebuild = (side: 'old' | 'new', codeElement: HTMLElement, node: MarkdownTreeNode): void => {
+    const lines = (codeElement.textContent ?? '').split('\n')
+    const changed = new Map<number, { block: TreePreviewBlock; unit: TreePreviewUnit }>()
+    for (const block of blocks) {
+      for (const unit of block.units as unknown as TreePreviewUnit[]) {
+        const line = side === 'new' ? unit.newLines.start : unit.oldLines.start
+        changed.set(line - node.lines.start - 1, { block, unit })
+      }
+    }
+    const parts: Node[] = []
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index]!
+      const entry = changed.get(index)
+      const trailing = index < lines.length - 1 ? '\n' : ''
+      if (entry === undefined) {
+        if (line !== '' || index < lines.length - 1) parts.push(document.createTextNode(line + trailing))
+        continue
+      }
+      const span = document.createElement('span')
+      span.className = `${side === 'new' ? 'mdWordAdd' : 'mdWordDel'} mdCodeLine`
+      const text = side === 'new' ? entry.unit.newText : entry.unit.oldText
+      // The line's own newline rides inside the block, so the code's textContent keeps every line separator.
+      span.textContent = text.endsWith('\n') ? text : text + trailing
+      stampDrawnRun(span, entry.block, entry.unit, side === 'new' ? 'add' : 'del')
+      parts.push(span)
+    }
+    codeElement.replaceChildren(...parts)
+  }
+  if (container.old !== undefined) rebuild('old', oldCode, container.old)
+  if (container.new !== undefined) rebuild('new', newCode, container.new)
+}
+
 function renderInlineContainerGroupDouble(blocks: readonly TreePreviewBlock[], fresh: RenderedDoc, baseline: RenderedDoc): void {
   const first = blocks[0]!
   const newContainer = first.inlineContainer?.new === undefined ? undefined : treeNodeElements(fresh, first.inlineContainer.new)[0]
   const oldContainer = first.inlineContainer?.old === undefined ? undefined : treeNodeElements(baseline, first.inlineContainer.old)[0]
+  if (blocks.every(block => block.kind === 'code') && first.inlineContainer?.old !== undefined
+    && first.inlineContainer.new !== undefined && oldContainer !== undefined && newContainer !== undefined) {
+    renderCodeLinesDouble(blocks, first.inlineContainer, oldContainer, newContainer)
+    return
+  }
   for (const block of blocks) {
     if (block.oldNodes.length > 0 && block.newNodes.length > 0) {
       renderInlineChildBlockDouble(block, fresh, baseline)
@@ -6084,6 +6363,12 @@ export function renderTreeMerged(oldText: string, newText: string, labels?: { re
   const baseline = renderAnnotated(oldText)
   for (let index = 0; index < model.blocks.length;) {
     const block = model.blocks[index]!
+    if (block.kind === 'source') {
+      // Raw HTML / invisible-only content: show the scope's Markdown source (old above new), not its rendering.
+      renderSourceBlock(block, fresh)
+      index++
+      continue
+    }
     if (block.inlineContainer !== undefined) {
       // A change INSIDE one inline container: draw ALL of that container's blocks together, so blocks with one
       // side only are placed where the model puts them and text runs are drawn back to front (source offsets).
@@ -6141,10 +6426,15 @@ export function renderTreeMerged(oldText: string, newText: string, labels?: { re
       // that exists on both sides (an unrelated replacement) is drawn as the old version above the new one.
       const ghosts: HTMLElement[] = []
       for (const element of oldElements) {
-        const ghost = treeGhostOf(element, block, 'old')
+        const compact = compactImageOnly(element, block, 'del')
+        const ghost = compact ?? treeGhostOf(element, block, 'old')
         const next = freshElements[0]
         if (next !== undefined && next.parentNode !== null) next.parentNode.insertBefore(ghost, next)
-        else treeInsertGhost(block, element, fresh.root)
+        else if (compact !== undefined) {
+          const line = Math.max(0, (block.newStart || block.oldStart || 1) - 1)
+          const anchor = insertionPointFor(fresh.root, line)
+          anchor.parent.insertBefore(ghost, anchor.before)
+        } else treeInsertGhost(block, element, fresh.root)
         ghosts.push(ghost)
       }
       if (block.kind === 'code' && oldElements.length > 0 && freshElements.length > 0) {
@@ -6155,9 +6445,16 @@ export function renderTreeMerged(oldText: string, newText: string, labels?: { re
         for (const element of [...ghosts, ...freshElements]) setSourceDiff(element, { old: oldSource, new: newSource })
       }
       if (oldElements.length === 0 && freshElements.length > 0) {
-        // A run of adjacent wholly-added blocks: ONE continuous green area (no white gaps between them).
-        if (freshElements.length > 1) wrapBlockUnion(block, freshElements, 'add')
-        else markChangedBlock(freshElements[0]!, block.index, 'add')
+        // A wholly added image reads as the compact green image frame, like a changed image pair.
+        const compacts = freshElements.map(element => compactImageOnly(element, block, 'add'))
+        if (compacts.length > 0 && compacts.every(compact => compact !== undefined)) {
+          freshElements.forEach((element, at) => { element.replaceWith(compacts[at] as HTMLElement) })
+        } else if (freshElements.length > 1) {
+          // A run of adjacent wholly-added blocks: ONE continuous green area (no white gaps between them).
+          wrapBlockUnion(block, freshElements, 'add')
+        } else {
+          markChangedBlock(freshElements[0]!, block.index, 'add')
+        }
       } else if (oldElements.length > 0 && freshElements.length === 0) {
         // A run of adjacent wholly-deleted blocks: ONE continuous red area.
         if (ghosts.length > 1) wrapBlockUnion(block, ghosts, 'del')
@@ -6363,6 +6660,12 @@ export function renderTreeDocuments(oldText: string, newText: string, labels?: {
   }
   for (let index = 0; index < model.blocks.length;) {
     const block = model.blocks[index]!
+    if (block.kind === 'source') {
+      // Each column gets ITS side's Markdown source, in place of the scope's rendering.
+      renderSourceBlockDouble(block, fresh, baseline)
+      index++
+      continue
+    }
     if (block.inlineContainer !== undefined) {
       // A change INSIDE one inline container: draw ALL of that container's blocks together, each column
       // showing its own side of the child.
@@ -6407,19 +6710,42 @@ export function renderTreeDocuments(oldText: string, newText: string, labels?: {
         // left and green on the right), and the language difference rides on that block for the toolbar.
         const oldSource = block.oldNodes.map(node => node.raw).join('\n')
         const newSource = block.newNodes.map(node => node.raw).join('\n')
+        const oldLanguage = codeLanguageLabel(String(block.oldNodes[0]?.attrs.lang ?? ''))
+        const newLanguage = codeLanguageLabel(String(block.newNodes[0]?.attrs.lang ?? ''))
         for (const element of oldElements) {
           const holder = element.closest('pre') ?? element
           markChangedBlock(holder, block.index, 'del')
+          attachCodeLanguageTitlebar(holder, oldLanguage)
           setSourceDiff(holder, { old: oldSource }, 'old')
         }
         for (const element of freshElements) {
           const holder = element.closest('pre') ?? element
           markChangedBlock(holder, block.index, 'add')
+          attachCodeLanguageTitlebar(holder, newLanguage)
           setSourceDiff(holder, { new: newSource }, 'new')
         }
       } else {
-        for (const element of oldElements) markChangedBlock(element, block.index, 'del')
-        for (const element of freshElements) markChangedBlock(element, block.index, 'add')
+        // A merged run (whole new document, adjacent additions/deletions): ONE continuous tinted area per
+        // column, exactly like the single column's union — no white gap between the tinted blocks.
+        const markMergedSide = (elements: HTMLElement[], kind: 'add' | 'del'): void => {
+          if (elements.length === 0) return
+          const parent = elements[0]!.parentNode
+          const simpleParent = parent instanceof HTMLElement
+            && !['UL', 'OL', 'TABLE', 'TBODY', 'TR'].includes(parent.tagName)
+          const hasImageOnly = elements.some(element => compactImageOnly(element, block, kind) !== undefined)
+          if (elements.length > 1 && simpleParent && !hasImageOnly) {
+            wrapBlockUnion(block, elements, kind)
+            return
+          }
+          for (const element of elements) {
+            // A wholly removed image becomes the compact red image card, not a full placeholder paragraph.
+            const compact = compactImageOnly(element, block, kind)
+            if (compact !== undefined) element.replaceWith(compact)
+            else markChangedBlock(element, block.index, kind)
+          }
+        }
+        markMergedSide([...oldElements], 'del')
+        markMergedSide([...freshElements], 'add')
       }
       index++
       continue

@@ -133,7 +133,7 @@ test.describe('the preview keeps its scroll across a Keep', () => {
       delete document.documentElement.dataset.previewScrollAnchor
       const bodyRect = body.getBoundingClientRect()
       const chip = [...body.querySelectorAll<HTMLElement>('[data-md-block="0"]')].find(element =>
-        element.classList.contains('mdTwinPhantom'))
+        element.classList.contains('mdSourcePair'))
       if (chip === undefined) return null
       chip.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
       return {
@@ -204,10 +204,10 @@ test.describe('the preview keeps its scroll across a Keep', () => {
     expect(Math.abs(measured.after - measured.before)).toBeLessThanOrEqual(2)
     // The scroll offset itself moved to make that true: the document got shorter above the viewport.
     expect(measured.scrollAfter).not.toBe(measured.scrollBefore)
-    // Put the chip back for the double-column case: the two layouts are measured on the same diff.
+    // Put the source twin back for the double-column case: the two layouts are measured on the same diff.
     await pressUndo(page)
     await page.waitForTimeout(800)
-    await page.locator('.mdTwinPhantom').first().waitFor({ timeout: 20_000 })
+    await page.locator('.mdSourcePair').first().waitFor({ timeout: 20_000 })
   })
 
   test('double column: the anchor stays put', async () => {

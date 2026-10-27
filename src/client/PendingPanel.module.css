@@ -794,15 +794,60 @@
   border-radius: 3px;
 }
 /* Code differences are read line by line: the struck old line sits ABOVE its green replacement. */
-.mdPreviewBody :global(.mdCodeLine) {
+.mdPreviewBody :global(.mdWordAdd.mdCodeLine),
+.mdPreviewBody :global(.mdWordDel.mdCodeLine) {
   display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
 }
-/* A whole code fence whose language changed: the entire pre is one red/green block, not just its lines. */
+/* A fence whose language changed: an OUTER rounded card (light red/green) with the language label at its
+   top-left, and the CODE PLATE itself tinted the version's red/green like every other change. */
+.mdPreviewBody :global(.mdTwin.mdTwinStackPair.mdCodeLangPair) {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinOld),
+.mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinNew) {
+  padding: 0;
+  border: 1px dashed var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  margin: 0;
+}
+.mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinOld) {
+  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
+}
+.mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinNew) {
+  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent);
+  margin-top: 0;
+}
+.mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinOld > pre) {
+  background: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
+  border-radius: 4px;
+  margin: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+.mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinNew > pre) {
+  background: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
+  border-radius: 4px;
+  margin: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
 .mdPreviewBody :global(pre.mdAdd) {
-  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
+  background: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
 }
 .mdPreviewBody :global(pre.mdDel) {
-  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
+  background: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
+}
+.mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinOld > .mdCodeTitlebar),
+.mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinNew > .mdCodeTitlebar) {
+  margin: 0;
+  padding: 1px 6px 2px;
 }
 /* Word-level highlight inside a changed block: the specific changed words. */
 .mdPreviewBody :global(.mdWordDel) {
@@ -816,6 +861,12 @@
   background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
   border-radius: 2px;
   padding: 0 1px;
+}
+/* A word run that ENDS where a tinted element (a link, a strong, an image…) begins must not keep the 1px air
+   meant for a red/green word pair: that air reads as a seam between two parts of the same change. */
+.mdPreviewBody :global(.mdWordDel:has(+ a)),
+.mdPreviewBody :global(.mdWordAdd:has(+ a)) {
+  margin-right: 0;
 }
 
 /* A preview frame that hangs under the change it belongs to: it is placed by its LEFT edge (the element's
@@ -847,10 +898,9 @@
    right in the added one. The pair IS the change; what neither version can show (a target, a caption) is a
    source row in the toolbar, shown only while the change is hovered. */
 .mdPreviewBody :global(.mdTwin) {
-  display: inline-flex;
-  align-items: baseline;
-  /* One pixel between a pair's two versions, the same gap a changed word pair leaves. */
-  gap: 1px;
+  /* An INLINE pair (links/strong/em): inline boxes share the word-run's line box, so both versions are the
+     same height as a changed-word tint. Block pairs override this display. */
+  display: inline;
   max-width: 100%;
 }
 .mdPreviewBody :global(.mdTwinOld),
@@ -865,6 +915,10 @@
 }
 .mdPreviewBody :global(.mdTwinNew) {
   background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
+}
+/* Inline twins only: 1px between the two inline versions, like a changed-word pair. */
+.mdPreviewBody :global(.mdTwin:not(.mdTwinImages):not(.mdTwinStackPair) > .mdTwinOld) {
+  margin-right: 1px;
 }
 /* A word run INSIDE a twin side must not paint the same colour a second time: 34% over 34% reads as ~57%, a
    darker patch that looks like a different (stronger) change even though it is part of the version the side
@@ -894,6 +948,54 @@
   width: 100%;
   box-sizing: border-box;
 }
+/* A fence whose LANGUAGE changed: an OUTER rounded card (light red/green) with the language label at its
+   top-left, and the CODE PLATE itself tinted (via pre.mdDel/mdAdd) the version's red/green. */
+.mdPreviewBody :global(.mdCodePane) {
+  margin: 8px 0;
+  padding: 0;
+  border: 1px dashed var(--dsw-alias-border-l2);
+  border-radius: 6px;
+}
+.mdPreviewBody :global(.mdCodePane.mdAdd),
+.mdPreviewBody :global(.mdCodePane.mdDel) {
+  /* Keep the outer card LIGHT: the code plate is the strong red/green, not the label band. */
+  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
+}
+.mdPreviewBody :global(.mdCodePane.mdAdd) {
+  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent);
+}
+.mdPreviewBody :global(.mdCodePaneDel) {
+  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
+}
+.mdPreviewBody :global(.mdCodePaneAdd) {
+  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent);
+}
+.mdPreviewBody :global(.mdCodePane > pre) {
+  margin: 0;
+  border-radius: 4px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.mdPreviewBody :global(.mdCodeTitlebar) {
+  display: block;
+  margin: 0;
+  padding: 1px 6px 2px;
+  font-family: var(--dsw-alias-font-ui, ui-sans-serif, system-ui, sans-serif);
+  font-size: 9px;
+  font-weight: 500;
+  line-height: 1.25;
+  letter-spacing: 0.02em;
+  white-space: normal;
+  color: var(--dsw-alias-label-secondary);
+}
+.mdPreviewBody :global(.mdCodeTitlebarOld),
+.mdPreviewBody :global(.mdCodePaneDel > .mdCodeTitlebar) {
+  color: var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary));
+}
+.mdPreviewBody :global(.mdCodeTitlebarNew),
+.mdPreviewBody :global(.mdCodePaneAdd > .mdCodeTitlebar) {
+  color: var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary));
+}
 /* A matched heading/rule pair: old version ABOVE the new one, with a tight gap between them. */
 .mdPreviewBody :global(.mdTwin.mdTwinStackPair) {
   display: block;
@@ -916,14 +1018,85 @@
   width: 100%;
   box-sizing: border-box;
 }
+/* A source twin (raw HTML / front matter / comment / link definition): a labelled, card-like source
+   comparison — old card above new card, gently tinted, with the Markdown itself in monospace. */
+.mdPreviewBody :global(.mdTwin.mdTwinStackPair.mdSourcePair) {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mdPreviewBody :global(.mdSourcePair > .mdTwinOld),
+.mdPreviewBody :global(.mdSourcePair > .mdTwinNew) {
+  display: block;
+  width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+.mdPreviewBody :global(.mdSourcePair > .mdTwinOld) {
+  margin-bottom: 0;
+  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 15%, transparent);
+  border-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 22%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 65%, transparent);
+}
+.mdPreviewBody :global(.mdSourcePair > .mdTwinNew) {
+  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 15%, transparent);
+  border-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 22%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 65%, transparent);
+}
+.mdPreviewBody :global(.mdSourceLabel) {
+  display: flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 0 8px;
+  font-family: var(--dsw-alias-font-ui, ui-sans-serif, system-ui, sans-serif);
+  font-size: 9px;
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: 0.02em;
+  color: var(--dsw-alias-label-secondary);
+  background: color-mix(in srgb, var(--dsw-alias-label-secondary) 4%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--dsw-alias-label-secondary) 10%, transparent);
+}
+.mdPreviewBody :global(.mdSourcePair pre) {
+  margin: 0;
+  padding: 4px 8px 5px;
+  background: transparent;
+  font-family: var(--dsw-alias-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+  box-sizing: border-box;
+  color: var(--dsw-alias-label-primary);
+}
 .mdPreviewBody :global(.mdTwinImages > .mdTwinOld),
 .mdPreviewBody :global(.mdTwinImages > .mdTwinNew) {
   display: block;
   width: 100%;
   padding: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+  border: 1px dashed var(--dsw-alias-border-l2);
+  border-radius: 6px;
 }
 .mdPreviewBody :global(.mdTwinImages > .mdTwinOld) {
   margin-bottom: 2px;
+  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
+}
+.mdPreviewBody :global(.mdTwinImages > .mdTwinNew) {
+  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent);
+}
+/* A removed/added image on its own: the same compact tinted frame a changed image pair uses (one side). */
+.mdPreviewBody :global(.mdImageOnlyPair) {
+  margin: 4px 0 6px;
+}
+.mdPreviewBody :global(.mdImageOnlyPair > .mdTwinOld),
+.mdPreviewBody :global(.mdImageOnlyPair > .mdTwinNew) {
+  display: block;
+  width: 100%;
 }
 /* A change with no rendered content at all: one square block per side — what went, what came. The block IS
    the side, so it carries the same 34% tint as every other change; the square is about one line tall. */
@@ -993,18 +1166,17 @@
   width: 14px;
   height: 14px;
 }
-/* An image's twin: the frame names the path, because for an image the path IS the change. */
+/* An image version card: the same layering as a code block — light outer card, a tinted plate holding the
+   picture, and a title line with the path (and alt/title when they exist). */
 .mdPreviewBody :global(.mdImageFrame) {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  flex: 1 1 auto;
-  min-width: 0;
-  padding: 6px 8px;
-  border: 1px dashed var(--dsw-alias-border-l2);
-  border-radius: 4px;
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: none;
+  border-radius: 0;
   font: 10px/1.45 ui-monospace, Consolas, monospace;
   overflow-wrap: anywhere;
+  box-sizing: border-box;
 }
 .mdPreviewBody :global(.mdImagePath) {
   color: var(--dsw-alias-label-secondary, var(--dsw-alias-label-primary));
@@ -1016,11 +1188,96 @@
   color: var(--dsw-alias-label-tertiary);
   font-style: italic;
 }
-/* The double column: each column shows its own side of a change. An image frame fills the column the way the
-   image did. */
+/* The version's title line: path LEFT, image alt/title RIGHT, all in the version's red/green. */
+.mdPreviewBody :global(.mdImageFrame > .mdCodeTitlebar) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: flex-start;
+  gap: 0 5px;
+  margin: 0;
+  padding: 1px 6px 2px;
+  text-align: left;
+}
+.mdPreviewBody :global(.mdImageFrame > .mdCodeTitlebar .mdImagePath) {
+  margin-right: auto;
+}
+.mdPreviewBody :global(.mdImageFrame > .mdCodeTitlebar .mdImagePath),
+.mdPreviewBody :global(.mdImageFrame > .mdCodeTitlebar .mdImageAlt),
+.mdPreviewBody :global(.mdImageFrame > .mdCodeTitlebar .mdImageTitle) {
+  color: inherit;
+  font-weight: inherit;
+}
+.mdPreviewBody :global(.mdImageFrame .mdImageAlt::before),
+.mdPreviewBody :global(.mdImageFrame .mdImageTitle::before) {
+  content: '· ';
+  opacity: 0.55;
+}
+.mdPreviewBody :global(.mdImageBody) {
+  display: block;
+  margin: 0;
+  overflow: hidden;
+  border-radius: 0 0 5px 5px;
+}
+.mdPreviewBody :global(.mdTwinOld .mdImageBody) {
+  background: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
+}
+.mdPreviewBody :global(.mdTwinNew .mdImageBody) {
+  background: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
+}
+.mdPreviewBody :global(.mdImageFrame img) {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 340px;
+  object-fit: cover;
+  border-radius: 0 0 5px 5px;
+  /* The red/green plate behind shows through, so an added/deleted image reads as a colored overlay. */
+  opacity: 0.85;
+}
+.mdPreviewBody :global(.mdImageFrame .mdImageFallback) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  min-height: 120px;
+  padding: 16px;
+  font-size: 0;
+  line-height: 0;
+  color: transparent;
+  text-align: center;
+}
+/* The generic picture mark for an image the host could not read (the path is already in the title line). */
+.mdPreviewBody :global(.mdImageFrame .mdImageFallback)::before {
+  content: '';
+  width: 36px;
+  height: 36px;
+  opacity: 0.5;
+  background-color: var(--dsw-alias-label-secondary);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='4' width='18' height='16' rx='2.5'/%3E%3Ccircle cx='9' cy='10' r='1.6'/%3E%3Cpath d='M21 15.5l-5-5-9 9'/%3E%3C/svg%3E") center / 36px 36px no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='4' width='18' height='16' rx='2.5'/%3E%3Ccircle cx='9' cy='10' r='1.6'/%3E%3Cpath d='M21 15.5l-5-5-9 9'/%3E%3C/svg%3E") center / 36px 36px no-repeat;
+}
+/* The double column: each column shows its own side of a change. An image card fills the column the way the
+   image did, with the same light-card + tinted-plate layering as the single column. */
 .mdPreviewBody :global(.mdTwinColumn) {
   display: block;
   width: 100%;
+  padding: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+  border: 1px dashed var(--dsw-alias-border-l2);
+  border-radius: 6px;
+}
+.mdPreviewBody :global(.mdTwinColumn.mdTwinOld) {
+  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
+}
+.mdPreviewBody :global(.mdTwinColumn.mdTwinNew) {
+  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent);
 }
 .mdPreviewBody :global(.mdTwinColumn .mdImageFrame) {
   width: 100%;
@@ -1170,6 +1427,7 @@
 .mdPreviewBody pre code {
   padding: 0;
   background: none;
+  display: block;
 }
 .mdPreviewBody blockquote {
   margin: 8px 0;

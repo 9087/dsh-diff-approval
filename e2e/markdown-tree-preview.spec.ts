@@ -202,10 +202,10 @@ test.describe('tree-first preview is the shipped default', () => {
   test('the double column merges the unchanged siblings into ONE layout row', async () => {
     test.setTimeout(300_000)
     await openPreview()
-    // The front-matter change is drawn at its document position with the eye icon (tree path behavior).
-    const chips = await page.evaluate(() =>
-      document.querySelectorAll('[data-diff-md-preview-body] .mdTwinPhantom .mdTwinCaption svg').length)
-    expect(chips).toBeGreaterThanOrEqual(2)
+    // Front matter / comments degrade to SOURCE twins at their document position (no eye icons anymore).
+    const sources = await page.evaluate(() =>
+      document.querySelectorAll('[data-diff-md-preview-body] .mdSourcePair').length)
+    expect(sources).toBeGreaterThanOrEqual(1)
     await page.locator('[data-diff-toggle-view]').first().click({ timeout: 20_000 })
     await page.waitForTimeout(900)
     const rows = await page.evaluate(() => {
@@ -541,7 +541,7 @@ test.describe('tree-first preview is the shipped default', () => {
     expect(measured.position).toMatch(/\d+\s*\/\s*\d+/u)
   })
 
-  test('an invisible change has ONE frame around its two chips, spaced tightly', async () => {
+  test('an invisible change is ONE source twin, framed as a whole', async () => {
     test.setTimeout(300_000)
     await row(page, invisibleFileId).click({ timeout: 20_000 })
     await page.locator('[data-diff-body], [data-diff-md-preview-body]').first().waitFor({ timeout: 20_000 })
@@ -550,40 +550,32 @@ test.describe('tree-first preview is the shipped default', () => {
       await page.waitForTimeout(500)
     }
     await sleep(500)
-    const chips = page.locator('[data-diff-md-preview-body] .mdTwinPhantom')
-    await expect(chips).toHaveCount(2)
-    const chipBoxes = await chips.evaluateAll(elements => elements.map(element => {
-      const rect = element.getBoundingClientRect()
-      return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
-    }))
-    const gap = chipBoxes[1]!.left - chipBoxes[0]!.right
-    expect(gap).toBeLessThan(8)
-    const firstChip = await chips.first().boundingBox()
-    expect(firstChip).not.toBeNull()
-    await page.mouse.move(firstChip!.x + firstChip!.width / 2, firstChip!.y + firstChip!.height / 2)
+    const pair = page.locator('[data-diff-md-preview-body] .mdSourcePair')
+    await expect(pair).toHaveCount(1)
+    await expect(pair).toContainText('<!-- 旧注释 -->')
+    await expect(pair).toContainText('<!-- 新注释 -->')
+    const pairBox = await pair.first().boundingBox()
+    expect(pairBox).not.toBeNull()
+    await page.mouse.move(pairBox!.x + 20, pairBox!.y + 8)
     await sleep(700)
     const measured = await page.evaluate(() => ({
       outlines: [...document.querySelectorAll<HTMLElement>('[data-diff-unit-outline]')].map(element => {
         const rect = element.getBoundingClientRect()
         return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
       }),
-      chips: [...document.querySelectorAll<HTMLElement>('[data-diff-md-preview-body] .mdTwinPhantom')].map(element => {
+      pair: (() => {
+        const element = document.querySelector<HTMLElement>('[data-diff-md-preview-body] .mdSourcePair')!
         const rect = element.getBoundingClientRect()
         return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
-      }),
+      })(),
     }))
-    console.log('[invisible outline]', JSON.stringify({ gap, ...measured }))
-    // ONE frame around BOTH chips of the change.
+    console.log('[invisible source outline]', JSON.stringify(measured))
     expect(measured.outlines).toHaveLength(1)
     const outline = measured.outlines[0]!
-    const left = Math.min(...measured.chips.map(chip => chip.left))
-    const right = Math.max(...measured.chips.map(chip => chip.right))
-    const top = Math.min(...measured.chips.map(chip => chip.top))
-    const bottom = Math.max(...measured.chips.map(chip => chip.bottom))
-    expect(Math.abs(outline.left - left)).toBeLessThanOrEqual(2)
-    expect(Math.abs(outline.right - right)).toBeLessThanOrEqual(2)
-    expect(Math.abs(outline.top - top)).toBeLessThanOrEqual(2)
-    expect(Math.abs(outline.bottom - bottom)).toBeLessThanOrEqual(2)
+    expect(Math.abs(outline.left - measured.pair.left)).toBeLessThanOrEqual(2)
+    expect(Math.abs(outline.right - measured.pair.right)).toBeLessThanOrEqual(2)
+    expect(Math.abs(outline.top - measured.pair.top)).toBeLessThanOrEqual(2)
+    expect(Math.abs(outline.bottom - measured.pair.bottom)).toBeLessThanOrEqual(2)
   })
 
   test('a code line pair has ONE frame around the red line and its green replacement', async () => {

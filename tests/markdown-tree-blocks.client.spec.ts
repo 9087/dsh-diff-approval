@@ -31,8 +31,9 @@ describe('tree preview model: blocks and units', () => {
 
     const withFront = modelOf('', '---\ntitle: T\n---\n\n# H\n')
     expect(withFront.blocks).toHaveLength(2)
-    expect(withFront.blocks[0]!.kind).toBe('invisible')
-    expect(withFront.blocks[0]!.invisible[0]!.grammar).toBe('yaml')
+    // Front matter renders nothing: it degrades to a SOURCE twin (old above new, here new-only).
+    expect(withFront.blocks[0]!.kind).toBe('source')
+    expect(withFront.blocks[0]!.newNodes[0]!.type).toBe('front_matter')
     expect(withFront.blocks[0]!.newStart).toBe(1)
     expect(withFront.blocks[0]!.newEnd).toBe(3)
     expect(withFront.blocks[1]!.merged).toBe(true)
@@ -247,17 +248,20 @@ describe('tree preview model: blocks and units', () => {
     expect(block.newEnd).toBe(2)
   })
 
-  it('makes invisible changes blocks of their own at their document position (eye icons)', () => {
+  it('degrades invisible changes to source twins at their document position', () => {
     const comment = modelOf('A.\n\n<!-- old -->\n\nB.\n', 'A.\n\n<!-- new -->\n\nB.\n')
     expect(comment.blocks).toHaveLength(1)
-    expect(comment.blocks[0]!.kind).toBe('invisible')
-    expect(comment.blocks[0]!.invisible).toHaveLength(1)
-    expect(comment.blocks[0]!.invisible[0]!.grammar).toBe('markdown')
+    // A comment renders nothing: its whole Markdown source is the block (old and new versions).
+    expect(comment.blocks[0]!.kind).toBe('source')
+    expect(comment.blocks[0]!.invisible).toEqual([])
+    expect(comment.blocks[0]!.oldNodes[0]!.raw).toContain('old')
+    expect(comment.blocks[0]!.newNodes[0]!.raw).toContain('new')
     expect([comment.blocks[0]!.oldStart, comment.blocks[0]!.oldEnd]).toEqual([3, 3])
     const front = modelOf('---\ntitle: A\n---\n\nBody\n', '---\ntitle: B\n---\n\nBody\n')
     expect(front.blocks).toHaveLength(1)
-    expect(front.blocks[0]!.kind).toBe('invisible')
-    expect(front.blocks[0]!.invisible[0]!.grammar).toBe('yaml')
+    expect(front.blocks[0]!.kind).toBe('source')
+    expect(front.blocks[0]!.oldNodes[0]!.raw).toContain('title: A')
+    expect(front.blocks[0]!.newNodes[0]!.raw).toContain('title: B')
   })
 
   it('numbers blocks and units in reading order, each unit mapped to its block', () => {
@@ -280,7 +284,7 @@ describe('tree preview model: blocks and units', () => {
     expect(kinds).toContain('text')
     expect(kinds).toContain('link')
     expect(kinds).toContain('code')
-    expect(kinds).toContain('invisible')
+    expect(kinds).toContain('source')
     expect(model.blocks.filter(block => block.inlineContainer !== undefined).length).toBeGreaterThan(10)
   })
 })

@@ -154,7 +154,7 @@ describe('requirement contract: the real rich/demo documents', () => {
     const demo = CASES[1]!
     const holder = document.createElement('div')
     holder.innerHTML = renderTreeMerged(demo.oldText, demo.newText)
-    const pre = holder.querySelector('pre')
+    const pre = holder.querySelector('pre code')?.closest('pre') ?? null
     expect(pre).not.toBeNull()
     const code = pre!.querySelector('code')!
     const text = code.textContent ?? ''

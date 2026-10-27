@@ -17101,13 +17101,14 @@ describe('Markdown preview · structure renderer edge cases', () => {
   })
 
   it('keeps an image and shows its changed source as two frames with their paths', () => {
-    // For an image the PATH is the change, so each side is drawn as a frame that names its own path — no
+    // For an image the PATH is the change: each side is a frame with the path line AND the picture itself
+    // (the host inlines a readable file, otherwise the frame degrades to a generic picture fallback). No
     // source row is needed, since both paths are on screen.
     const root = draw('![alt](a.png)\n', '![alt](b.png)\n')
-    expect(root.querySelectorAll('img').length).toBe(0)
     const frames = [...root.querySelectorAll<HTMLElement>('.mdImageFrame')]
     expect(frames.length).toBe(2)
     expect(frames.map(frame => frame.querySelector('.mdImagePath')!.textContent)).toEqual(['a.png', 'b.png'])
+    expect(frames.map(frame => frame.querySelector('img')?.getAttribute('src'))).toEqual(['a.png', 'b.png'])
     // The pair is one change: no hidden row for the paths, which the frames already show.
     expect(root.querySelector('.mdTwin')!.hasAttribute('data-md-diff-old')).toBe(false)
   })

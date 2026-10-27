@@ -4604,6 +4604,9 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    */
   const previewBlockSourceRow = useCallback((index: number, element: HTMLElement | undefined): PreviewSourceRow | undefined => {
     const block = previewBlocksList[index]
+    // A SOURCE-FALLBACK block already shows its old/new Markdown in the preview: the toolbar repeating it as a
+    // "source diff" row is noise, so it stays hidden for that kind.
+    if ((block as unknown as { kind?: string } | undefined)?.kind === 'source') return undefined
     const tabs = previewTabsOf(block)
     // A merged block with SEVERAL invisible parts reads as tabs, even when the pointed-at element carries a
     // source row of its own (the marker of a block that renders nothing): one row would hide the rest.
@@ -5454,7 +5457,8 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       // MERGED blocks, CODE pairs and INVISIBLE pairs are ONE change PER SIDE: the dashed frame is the outer
       // boundary of that side's painted pieces. Other blocks keep following their own red/green pieces.
       const blockKind = (block as unknown as { kind?: string } | undefined)?.kind
-      const oneFrame = block?.merged === true || blockKind === 'code' || (block?.invisible.length ?? 0) > 0
+      const oneFrame = block?.merged === true || blockKind === 'code' || blockKind === 'source'
+        || (block?.invisible.length ?? 0) > 0
       if (oneFrame && sideBoxes.length > 1) {
         const top = Math.min(...sideBoxes.map(box => box.contentTop))
         const bottom = Math.max(...sideBoxes.map(box => box.contentTop + box.height))
