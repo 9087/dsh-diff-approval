@@ -10429,8 +10429,12 @@ describe('PendingPanel', () => {
     expect(strength(rule('quoteDel'))).toBeGreaterThan(0)
     expect(strength(rule('quoteAdd'))).toBeLessThan(strength(rule('add')))
     expect(strength(rule('quoteDel'))).toBeLessThan(strength(rule('del')))
-    expect(rule('quoteAdd')).toContain('--dsh-diff-add-color')
-    expect(rule('quoteDel')).toContain('--dsh-diff-del-color')
+    // The quote takes the diff's own colours through the panel-level aliases, which resolve to the configured
+    // `--dsh-diff-*` values (and can be dimmed by the preview's hover focus without touching the code view).
+    expect(rule('quoteAdd')).toContain('--md-diff-add-color')
+    expect(rule('quoteDel')).toContain('--md-diff-del-color')
+    expect(css).toContain('--md-diff-add-color: var(--dsh-diff-add-color')
+    expect(css).toContain('--md-diff-del-color: var(--dsh-diff-del-color')
   })
 
   it('stacks two comments that end up on the same row instead of overlapping them', async () => {
@@ -15346,39 +15350,39 @@ describe('PendingPanel', () => {
     expect(position()).toBe('panel.blockPosition {"current":2,"total":2}')
   })
 
-  it('keeps the outline on its own change, and hides it once the pointer leaves', async () => {
-    // ONE dashed box holds everything the hovered unit drew — the reworded phrase is an old run beside the
-    // added new run, and the frame hangs under both. The frame belongs to that change: leaving it for context
-    // or blank space hides it again (after a beat, so the buttons stay reachable on the way there).
+  it('dims every OTHER change\'s red/green tint while one is hovered, and restores it when the pointer leaves', async () => {
+    // Style experiment: no dashed outline. The hovered change keeps its tint at full strength and every other
+    // difference block keeps only 20% of its red/green (the text itself never fades).
     const body = previewBodyOf(entry({
       path: '/repo/README.md',
-      oldText: 'one\n\nold two\n\nthree\n',
-      newText: 'one\n\nnew two\n\nthree\n',
+      oldText: 'old one\n\nold two\n',
+      newText: 'new one\n\nnew two\n',
     }))
-    const outline = (): HTMLElement | null => document.querySelector('[data-diff-unit-outline]')
+    const faded = (): HTMLElement[] => [...document.querySelectorAll<HTMLElement>('.mdHoverFaded')]
     const frame = (): HTMLElement | null => document.querySelector('[data-diff-block-actions]')
-    expect(outline()).toBeNull()
+    expect(faded()).toHaveLength(0)
     fireEvent.mouseOver(body.querySelector('.mdWordAdd') as HTMLElement)
-    expect(outline()).not.toBeNull()
     expect(frame()).not.toBeNull()
-    // Leaving the change for the surrounding context hides it (after the crossing beat).
-    fireEvent.mouseOver(body.querySelector('p') as HTMLElement)
+    // No dashed boxes at all; the hovered block is not faded, at least one other is.
+    expect(document.querySelectorAll('[data-diff-unit-outline]')).toHaveLength(0)
+    expect(faded().length).toBeGreaterThanOrEqual(1)
+    expect(document.querySelector('.mdWordAdd')!.closest('.mdHoverFaded')).toBeNull()
+    // Leaving the change for the surrounding context hides the frame and restores the dimmed blocks.
+    fireEvent.mouseOver(body)
     await waitFor(() => {
-      expect(outline()).toBeNull()
       expect(frame()).toBeNull()
+      expect(faded()).toHaveLength(0)
     })
   })
 
-  it('outlines BOTH matched versions of a change in the double column', () => {
-    // The double column shows the same change twice: the pointer on either version must frame both, so the
-    // reader sees which two blocks are the before and after of the one hovered change.
+  it('keeps BOTH matched versions of the hovered change out of the fade, in the double column', () => {
     const props = panelProps({
       read: true,
       files: [entry({
-        id: 'entry-md-double-outline',
+        id: 'entry-md-double-fade',
         path: '/repo/README.md',
-        oldText: 'A link to [the docs](https://example.com/old).\n',
-        newText: 'A link to [the docs](https://example.com/new).\n',
+        oldText: 'A link to [the docs](https://example.com/old).\n\nSecond old line.\n',
+        newText: 'A link to [the docs](https://example.com/new).\n\nSecond new line.\n',
       })],
       busy: new Set(),
     })
@@ -15386,20 +15390,20 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('README.md'))
     fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
-    const outlines = (): HTMLElement[] => [...document.querySelectorAll('[data-diff-unit-outline]')] as HTMLElement[]
-    // Single column: one union box around the change.
-    fireEvent.mouseOver(document.querySelector('[data-md-block]') as HTMLElement)
-    expect(outlines().length).toBe(1)
-    // Double column: one box on each side, whichever side the pointer is on.
     fireEvent.click(document.querySelector('[data-diff-toggle-view]') as HTMLElement)
+    expect(document.querySelectorAll('[data-diff-unit-outline]')).toHaveLength(0)
     const left = document.querySelector('.mdDoubleCellOld [data-md-block]') as HTMLElement
     const right = document.querySelector('.mdDoubleCellNew [data-md-block]') as HTMLElement
     expect(left).not.toBeNull()
     expect(right).not.toBeNull()
+    const block = left.dataset.mdBlock
+    expect(right.dataset.mdBlock).toBe(block)
     fireEvent.mouseOver(left)
-    expect(outlines().length).toBe(2)
-    fireEvent.mouseOver(right)
-    expect(outlines().length).toBe(2)
+    // Both columns' versions of the hovered block stay opaque; another block is faded.
+    const hoveredCarriers = [...document.querySelectorAll<HTMLElement>(`[data-md-block="${block}"]`)]
+    expect(hoveredCarriers.length).toBeGreaterThanOrEqual(2)
+    for (const carrier of hoveredCarriers) expect(carrier.classList.contains('mdHoverFaded')).toBe(false)
+    expect(document.querySelectorAll('.mdHoverFaded').length).toBeGreaterThanOrEqual(1)
   })
 
   it('shows BOTH sides of a change in the double column source row', () => {

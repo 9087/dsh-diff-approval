@@ -270,17 +270,14 @@ test.describe('tree-first preview is the shipped default', () => {
       return {
         rowWidth: Math.round(rowElement.getBoundingClientRect().width),
         rowCarriesBlock: rowElement.dataset.mdBlock !== undefined,
-        // The dashed outlines are siblings of the scrolling body, not descendants of it.
-        outlines: [...document.querySelectorAll<HTMLElement>('[data-diff-unit-outline]')]
-          .map(element => Math.round(element.getBoundingClientRect().width)),
+        // Style experiment: no dashed outlines; the non-hovered difference blocks fade instead.
+        outlines: document.querySelectorAll('[data-diff-unit-outline]').length,
         position: document.querySelector('[data-diff-block-position]')?.textContent ?? '',
       }
     })
     console.log('[tree table row outline]', JSON.stringify(measured))
     expect(measured).not.toBeNull()
-    expect(measured!.outlines.length).toBeGreaterThanOrEqual(1)
-    // The outline hugs the tinted cell: it is narrower than the row it sits in.
-    for (const width of measured!.outlines) expect(width).toBeLessThan(measured!.rowWidth * 0.75)
+    expect(measured!.outlines).toBe(0)
     // A changed cell is its OWN block: the row is not a block carrier around it.
     expect(measured!.rowCarriesBlock).toBe(false)
     expect(measured!.position).toMatch(/\d+\s*\/\s*\d+/u)
@@ -327,10 +324,14 @@ test.describe('tree-first preview is the shipped default', () => {
     const secondPosition = (await page.locator('[data-diff-block-position]').first().textContent({ timeout: 20_000 })) ?? ''
     console.log('[tree cells hover]', JSON.stringify({ firstPosition, secondPosition }))
     expect(firstPosition).not.toBe(secondPosition)
-    const outlineWidths = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('[data-diff-unit-outline]')]
-      .map(element => Math.round(element.getBoundingClientRect().width)))
-    console.log('[tree cells outlines]', JSON.stringify(outlineWidths))
-    expect(outlineWidths.length).toBeGreaterThanOrEqual(1)
+    const fadeState = await page.evaluate(() => ({
+      outlines: document.querySelectorAll('[data-diff-unit-outline]').length,
+      faded: document.querySelectorAll('[data-diff-md-preview-body] .mdHoverFaded').length,
+    }))
+    console.log('[tree cells fade]', JSON.stringify(fadeState))
+    expect(fadeState.outlines).toBe(0)
+    // The cell that is not hovered is faded; the hovered one is not.
+    expect(fadeState.faded).toBeGreaterThanOrEqual(1)
   })
 
   test('one line splits into three blocks and the retargeted link is a red/green twin with its source', async () => {
@@ -477,25 +478,15 @@ test.describe('tree-first preview is the shipped default', () => {
     // ONE block: the current number is the last one (the duplicate block is gone).
     const numbers = position.match(/\d+/g) ?? []
     expect(numbers[0]).toBe(numbers[1])
-    // And the outline belongs to THIS paragraph only: the invisible change's marker chips above it (a
-    // different block whose UNIT number happens to equal one of this block's run units) must not be framed.
-    const outlines = await page.evaluate(() => {
-      const body = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
-      const paragraph = body.querySelector('p')
-      if (paragraph === null) return null
-      const paragraphRect = paragraph.getBoundingClientRect()
-      return [...document.querySelectorAll<HTMLElement>('[data-diff-unit-outline]')].map(element => {
-        const rect = element.getBoundingClientRect()
-        return { top: rect.top, bottom: rect.bottom, paragraphTop: paragraphRect.top, paragraphBottom: paragraphRect.bottom }
-      })
-    })
-    console.log('[tree replace outlines]', JSON.stringify(outlines))
-    expect(outlines).not.toBeNull()
-    expect(outlines!.length).toBeGreaterThanOrEqual(1)
-    for (const outline of outlines!) {
-      expect(outline.top).toBeGreaterThanOrEqual(outline.paragraphTop - 4)
-      expect(outline.bottom).toBeLessThanOrEqual(outline.paragraphBottom + 4)
-    }
+    // And the focus is THIS paragraph's only: the invisible change's marker chips above it (a different
+    // block) fade out while the paragraph stays opaque. No dashed outline is drawn at all.
+    const fadeState = await page.evaluate(() => ({
+      outlines: document.querySelectorAll('[data-diff-unit-outline]').length,
+      faded: document.querySelectorAll('[data-diff-md-preview-body] .mdHoverFaded').length,
+    }))
+    console.log('[tree replace fade]', JSON.stringify(fadeState))
+    expect(fadeState.outlines).toBe(0)
+    expect(fadeState.faded).toBeGreaterThanOrEqual(1)
   })
 
   test('a MERGED block (whole new document) gets ONE frame on the tint union', async () => {
@@ -514,30 +505,19 @@ test.describe('tree-first preview is the shipped default', () => {
     await sleep(700)
     const measured = await page.evaluate(() => {
       const body = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
-      const tinted = [...body.querySelectorAll<HTMLElement>('[class*="mdAdd"], [class*="mdDel"]')]
-        .filter(element => element.dataset.mdBlock !== undefined)
-      const outlines = [...document.querySelectorAll<HTMLElement>('[data-diff-unit-outline]')]
-        .map(element => {
-          const rect = element.getBoundingClientRect()
-          return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
-        })
+      const carriers = [...body.querySelectorAll<HTMLElement>('[data-md-block]')]
       return {
-        tintTop: Math.min(...tinted.map(element => element.getBoundingClientRect().top)),
-        tintBottom: Math.max(...tinted.map(element => element.getBoundingClientRect().bottom)),
-        tintLeft: Math.min(...tinted.map(element => element.getBoundingClientRect().left)),
-        tintRight: Math.max(...tinted.map(element => element.getBoundingClientRect().right)),
-        outlines,
+        outlines: document.querySelectorAll('[data-diff-unit-outline]').length,
+        carriers: carriers.length,
+        faded: carriers.filter(element => element.classList.contains('mdHoverFaded')).length,
         position: document.querySelector('[data-diff-block-position]')?.textContent ?? '',
       }
     })
     console.log('[merged outline]', JSON.stringify(measured))
-    // ONE frame for the merged block, covering the union of everything it tints.
-    expect(measured.outlines).toHaveLength(1)
-    const outline = measured.outlines[0]!
-    expect(Math.abs(outline.top - measured.tintTop)).toBeLessThanOrEqual(2)
-    expect(Math.abs(outline.bottom - measured.tintBottom)).toBeLessThanOrEqual(2)
-    expect(Math.abs(outline.left - measured.tintLeft)).toBeLessThanOrEqual(2)
-    expect(Math.abs(outline.right - measured.tintRight)).toBeLessThanOrEqual(2)
+    // Style experiment: NO dashed frame; the merged block is the only difference block and stays opaque.
+    expect(measured.outlines).toBe(0)
+    expect(measured.carriers).toBeGreaterThanOrEqual(1)
+    expect(measured.faded).toBe(0)
     expect(measured.position).toMatch(/\d+\s*\/\s*\d+/u)
   })
 
@@ -558,27 +538,21 @@ test.describe('tree-first preview is the shipped default', () => {
     expect(pairBox).not.toBeNull()
     await page.mouse.move(pairBox!.x + 20, pairBox!.y + 8)
     await sleep(700)
-    const measured = await page.evaluate(() => ({
-      outlines: [...document.querySelectorAll<HTMLElement>('[data-diff-unit-outline]')].map(element => {
-        const rect = element.getBoundingClientRect()
-        return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
-      }),
-      pair: (() => {
-        const element = document.querySelector<HTMLElement>('[data-diff-md-preview-body] .mdSourcePair')!
-        const rect = element.getBoundingClientRect()
-        return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
-      })(),
-    }))
+    const measured = await page.evaluate(() => {
+      const pair = document.querySelector<HTMLElement>('[data-diff-md-preview-body] .mdSourcePair')!
+      return {
+        outlines: document.querySelectorAll('[data-diff-unit-outline]').length,
+        faded: document.querySelectorAll('[data-diff-md-preview-body] .mdHoverFaded').length,
+        pairFaded: pair.classList.contains('mdHoverFaded'),
+      }
+    })
     console.log('[invisible source outline]', JSON.stringify(measured))
-    expect(measured.outlines).toHaveLength(1)
-    const outline = measured.outlines[0]!
-    expect(Math.abs(outline.left - measured.pair.left)).toBeLessThanOrEqual(2)
-    expect(Math.abs(outline.right - measured.pair.right)).toBeLessThanOrEqual(2)
-    expect(Math.abs(outline.top - measured.pair.top)).toBeLessThanOrEqual(2)
-    expect(Math.abs(outline.bottom - measured.pair.bottom)).toBeLessThanOrEqual(2)
+    // Style experiment: the pair is the hovered change, so it stays opaque and no dashed box is drawn.
+    expect(measured.outlines).toBe(0)
+    expect(measured.pairFaded).toBe(false)
   })
 
-  test('a code line pair has ONE frame around the red line and its green replacement', async () => {
+  test('a code line pair stays at full strength on hover (no dashed frame)', async () => {
     test.setTimeout(300_000)
     await row(page, codeFileId).click({ timeout: 20_000 })
     await page.locator('[data-diff-body], [data-diff-md-preview-body]').first().waitFor({ timeout: 20_000 })
@@ -593,22 +567,15 @@ test.describe('tree-first preview is the shipped default', () => {
     expect(lineBox).not.toBeNull()
     await page.mouse.move(lineBox!.x + lineBox!.width / 2, lineBox!.y + lineBox!.height / 2)
     await sleep(700)
-    const measured = await page.evaluate(() => ({
-      outlines: [...document.querySelectorAll<HTMLElement>('[data-diff-unit-outline]')].map(element => {
-        const rect = element.getBoundingClientRect()
-        return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
-      }),
-      lines: [...document.querySelectorAll<HTMLElement>('[data-diff-md-preview-body] .mdCodeLine')].map(element => {
-        const rect = element.getBoundingClientRect()
-        return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
-      }),
-    }))
-    console.log('[code outline]', JSON.stringify(measured))
-    expect(measured.outlines).toHaveLength(1)
-    const outline = measured.outlines[0]!
-    expect(Math.abs(outline.top - Math.min(...measured.lines.map(line => line.top)))).toBeLessThanOrEqual(2)
-    expect(Math.abs(outline.bottom - Math.max(...measured.lines.map(line => line.bottom)))).toBeLessThanOrEqual(2)
-    expect(Math.abs(outline.left - Math.min(...measured.lines.map(line => line.left)))).toBeLessThanOrEqual(2)
-    expect(Math.abs(outline.right - Math.max(...measured.lines.map(line => line.right)))).toBeLessThanOrEqual(2)
+    const measured = await page.evaluate(() => {
+      const lines = [...document.querySelectorAll<HTMLElement>('[data-diff-md-preview-body] .mdCodeLine')]
+      return {
+        outlines: document.querySelectorAll('[data-diff-unit-outline]').length,
+        linesFaded: lines.filter(line => line.closest('.mdHoverFaded') !== null).length,
+      }
+    })
+    console.log('[code hover]', JSON.stringify(measured))
+    expect(measured.outlines).toBe(0)
+    expect(measured.linesFaded).toBe(0)
   })
 })

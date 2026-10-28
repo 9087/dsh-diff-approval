@@ -3843,6 +3843,13 @@ function previewBlockAt(node: Node | null): number | undefined {
 /** How many untouched source lines the invisible-content row shows on each side of the change. */
 const PREVIEW_SOURCE_CONTEXT_LINES = 3
 
+/**
+ * Style experiment: draw the hovered change by KEEPING it opaque and fading every OTHER change back, instead
+ * of a dashed outline around the hovered change. Flip to true to bring the dashed boxes back (they are still
+ * computed; only this gate stops their overlay from rendering).
+ */
+const PREVIEW_HOVER_OUTLINES = false
+
 /** One side of the preview's source row, with the grammar it is written in. */
 interface PreviewSourceRow {
   old?: string
@@ -5785,6 +5792,19 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     setPreviewUnitBoxes(boxes)
     previewUnitBoxesStateRef.current = boxes
   }, [mdPreview, lang, previewUnit, hoveredBlock, previewUnitMode, splitView, file.oldText, file.newText, mdImageTick, previewFrameForUnit, previewUnitGeometry, previewUnitBoxesFor])
+
+  // Style experiment: instead of a dashed box, while a change is hovered every OTHER difference block fades
+  // back (the CSS owns the 20% value), so the hovered change is the one that reads at full strength.
+  useLayoutEffect(() => {
+    const body = mdPreviewBodyRef.current
+    if (body === null) return
+    for (const faded of body.querySelectorAll<HTMLElement>('.mdHoverFaded')) faded.classList.remove('mdHoverFaded')
+    if (!previewActive || hoveredBlock === undefined) return
+    const hovered = String(hoveredBlock)
+    for (const element of body.querySelectorAll<HTMLElement>('[data-md-block]')) {
+      if (element.dataset.mdBlock !== hovered) element.classList.add('mdHoverFaded')
+    }
+  }, [previewActive, hoveredBlock, mdPreview, splitView, previewUnitMode, file.oldText, file.newText])
 
   // Likewise for the selection frame: the last covered block's bottom edge.
   useLayoutEffect(() => {
@@ -9170,7 +9190,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
                 }}
               />
             )}
-            {previewUnitBoxes.length > 0 && (
+            {PREVIEW_HOVER_OUTLINES && previewUnitBoxes.length > 0 && (
               <div ref={previewUnitOutlineLayerRef} className={css.mdUnitOutlineLayer} aria-hidden="true">
                 {previewUnitBoxes.map((box, index) => (
                   <div

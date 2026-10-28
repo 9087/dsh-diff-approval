@@ -782,10 +782,10 @@
    words and the version pairs — one colour, one opacity for every deletion mark and the same for every
    addition mark. A deleted paragraph does not read as a lighter kind of change than a deleted word. */
 .mdPreviewBody :global(.mdAdd) {
-  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
 }
 .mdPreviewBody :global(.mdDel) {
-  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
 }
 /* A run of wholly added/deleted siblings is ONE merged block: one tinted box around all of them, so the colour
    is continuous instead of showing the children's white margins between separate blocks. */
@@ -818,31 +818,31 @@
   margin: 0;
 }
 .mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinOld) {
-  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
 }
 .mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinNew) {
-  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent);
   margin-top: 0;
 }
 .mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinOld > pre) {
-  background: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
+  background: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
   border-radius: 4px;
   margin: 0;
   width: 100%;
   box-sizing: border-box;
 }
 .mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinNew > pre) {
-  background: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
+  background: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
   border-radius: 4px;
   margin: 0;
   width: 100%;
   box-sizing: border-box;
 }
 .mdPreviewBody :global(pre.mdAdd) {
-  background: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
+  background: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
 }
 .mdPreviewBody :global(pre.mdDel) {
-  background: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
+  background: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
 }
 .mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinOld > .mdCodeTitlebar),
 .mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinNew > .mdCodeTitlebar) {
@@ -854,14 +854,14 @@
 }
 /* Word-level highlight inside a changed block: the specific changed words. */
 .mdPreviewBody :global(.mdWordDel) {
-  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
   border-radius: 2px;
   padding: 0 1px;
   /* A hair of air before the replacement, so "4" and "FOUR" read as two words rather than one. */
   margin-right: 1px;
 }
 .mdPreviewBody :global(.mdWordAdd) {
-  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
   border-radius: 2px;
   padding: 0 1px;
 }
@@ -914,10 +914,10 @@
 .mdPreviewBody :global(.mdTwinOld) {
   /* The same tint as a changed WORD run: a pair of versions is a change drawn at full strength, not a
      contextual wash. */
-  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
 }
 .mdPreviewBody :global(.mdTwinNew) {
-  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
 }
 /* Inline twins only: 1px between the two inline versions, like a changed-word pair. */
 .mdPreviewBody :global(.mdTwin:not(.mdTwinImages):not(.mdTwinStackPair) > .mdTwinOld) {
@@ -962,16 +962,16 @@
 .mdPreviewBody :global(.mdCodePane.mdAdd),
 .mdPreviewBody :global(.mdCodePane.mdDel) {
   /* Keep the outer card LIGHT: the code plate is the strong red/green, not the label band. */
-  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
 }
 .mdPreviewBody :global(.mdCodePane.mdAdd) {
-  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent);
 }
 .mdPreviewBody :global(.mdCodePaneDel) {
-  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
 }
 .mdPreviewBody :global(.mdCodePaneAdd) {
-  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent);
 }
 .mdPreviewBody :global(.mdCodePane > pre) {
   margin: 0;
@@ -997,11 +997,11 @@
 .mdPreviewBody :global(.mdCodePaneDel > .mdCodeTitlebar) {
   /* Deeper than the diff wash: this is TEXT (a fence language, an image path), so mix it toward the normal
      label colour instead of using the pale state colour raw. */
-  color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 70%, var(--dsw-alias-label-primary));
+  color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 70%, var(--dsw-alias-label-primary));
 }
 .mdPreviewBody :global(.mdCodeTitlebarNew),
 .mdPreviewBody :global(.mdCodePaneAdd > .mdCodeTitlebar) {
-  color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 70%, var(--dsw-alias-label-primary));
+  color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 70%, var(--dsw-alias-label-primary));
 }
 /* A matched heading/rule pair: old version ABOVE the new one, with a tight gap between them. */
 .mdPreviewBody :global(.mdTwin.mdTwinStackPair) {
@@ -1043,14 +1043,14 @@
 }
 .mdPreviewBody :global(.mdSourcePair > .mdTwinOld) {
   margin-bottom: 0;
-  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 15%, transparent);
-  border-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 22%, transparent);
-  border-left: 2px solid color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 65%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 15%, transparent);
+  border-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 22%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 65%, transparent);
 }
 .mdPreviewBody :global(.mdSourcePair > .mdTwinNew) {
-  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 15%, transparent);
-  border-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 22%, transparent);
-  border-left: 2px solid color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 65%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 15%, transparent);
+  border-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 22%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 65%, transparent);
 }
 .mdPreviewBody :global(.mdSourceLabel) {
   display: flex;
@@ -1091,10 +1091,10 @@
 }
 .mdPreviewBody :global(.mdTwinImages > .mdTwinOld) {
   margin-bottom: 2px;
-  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
 }
 .mdPreviewBody :global(.mdTwinImages > .mdTwinNew) {
-  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent);
 }
 /* A removed/added image on its own: the same compact tinted frame a changed image pair uses (one side). */
 .mdPreviewBody :global(.mdImageOnlyPair) {
@@ -1144,12 +1144,12 @@
 }
 /* A no-rendering fallback shows its SOURCE text (no eye icon): the chip is tinted by its side. */
 .mdPreviewBody :global(.mdTwin.mdTwinPhantom.mdPhantomOld) {
-  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 15%, transparent);
-  border-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 25%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 15%, transparent);
+  border-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 25%, transparent);
 }
 .mdPreviewBody :global(.mdTwin.mdTwinPhantom.mdPhantomNew) {
-  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 15%, transparent);
-  border-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 25%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 15%, transparent);
+  border-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 25%, transparent);
 }
 .mdPreviewBody :global(.mdPhantomSource) {
   padding: 0;
@@ -1170,10 +1170,10 @@
 /* The side this chip does NOT stand for is hidden (see `phantomBlock`): the visible side's colour is the chip's,
    in the single column and the double one alike. */
 .mdPreviewBody :global(.mdTwinPhantom:has(.mdTwinNew[hidden])) {
-  background: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
+  background: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
 }
 .mdPreviewBody :global(.mdTwinPhantom:has(.mdTwinOld[hidden])) {
-  background: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
+  background: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, transparent);
 }
 .mdPreviewBody :global(.mdTwinPhantom > .mdTwinBlock) {
   display: none;
@@ -1254,10 +1254,10 @@
   border-radius: 0 0 5px 5px;
 }
 .mdPreviewBody :global(.mdTwinOld .mdImageBody) {
-  background: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
+  background: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
 }
 .mdPreviewBody :global(.mdTwinNew .mdImageBody) {
-  background: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
+  background: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 34%, var(--dsw-alias-bg-base, #ffffff));
 }
 .mdPreviewBody :global(.mdImageFrame img) {
   display: block;
@@ -1308,10 +1308,10 @@
   border-radius: 6px;
 }
 .mdPreviewBody :global(.mdTwinColumn.mdTwinOld) {
-  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 12%, transparent);
 }
 .mdPreviewBody :global(.mdTwinColumn.mdTwinNew) {
-  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent);
 }
 .mdPreviewBody :global(.mdTwinColumn .mdImageFrame) {
   width: 100%;
@@ -2758,11 +2758,11 @@
 /* Per-row change counts share the hue of the diff kind backgrounds, blended
    toward the primary label color to soften the saturation. */
 .addCount {
-  color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 60%, var(--dsw-alias-label-primary));
+  color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 60%, var(--dsw-alias-label-primary));
 }
 
 .delCount {
-  color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 60%, var(--dsw-alias-label-primary));
+  color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 60%, var(--dsw-alias-label-primary));
 }
 
 .diff {
@@ -2773,6 +2773,10 @@
   flex-direction: column;
   background: var(--dsw-alias-markdown-code-block);
   overflow: hidden;
+  /* Diff tint colours, resolved once here so the preview can dim a COPY of them on hover (see the hover-focus
+     rules): the code view and every other diff surface keep reading the real value. */
+  --md-diff-del-color: var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary));
+  --md-diff-add-color: var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary));
 }
 
 .diffHeader {
@@ -3233,11 +3237,11 @@
 .blockSourceDiffDel {
   /* The same surface a removed code row uses: a red band, not struck-through text — at the same opacity as
      the added band, so a pair of source lines reads as one change, not as two strengths. */
-  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 20%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 20%, transparent);
   border-radius: 2px;
 }
 .blockSourceDiffAdd {
-  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 20%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 20%, transparent);
   border-radius: 2px;
 }
 .blockSourceDiffContext {
@@ -3897,8 +3901,8 @@
 /* A quoted row wears the same green/red the file gave it (`.add` / `.del`), so the quote reads as
    the code the reader selected rather than as plain prose — but a step fainter than the file's own
    rows: these are old lines, shown for what they were, rather than the change under review. */
-.quoteAdd { background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent); }
-.quoteDel { background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 13%, transparent); }
+.quoteAdd { background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 12%, transparent); }
+.quoteDel { background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 13%, transparent); }
 
 /* One quoted line: one code row, at the code's line height. A line long enough to wrap grows its
    row, the same way the file's own wrapped rows do (and the block reserved that height, in code
@@ -4440,12 +4444,12 @@
 /* The tint is named as well as painted: the row's pinned gutter cells repaint it over the
    surface behind them (see `.line > .gutter`), and they can only read it as a value. */
 .del {
-  --diff-row-tint: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 20%, transparent);
+  --diff-row-tint: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 20%, transparent);
   background-color: var(--diff-row-tint);
 }
 
 .add {
-  --diff-row-tint: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 18%, transparent);
+  --diff-row-tint: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 18%, transparent);
   background-color: var(--diff-row-tint);
 }
 
@@ -4949,16 +4953,58 @@
 
 /* One side of a split pair: tinted by its own semantics (left deletion red,
    right addition green), independent of the other column. */
-.splitLdel { background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 20%, transparent); }
-.splitRadd { background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 18%, transparent); }
+.splitLdel { background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 20%, transparent); }
+.splitRadd { background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 18%, transparent); }
 
 /* Intra-line (inline) diff chips: the removed characters of a del line and the
    added characters of its paired add line. A stronger tint than the row's own
    line-level background, so the changed span reads as a distinct chip. */
 .intraDel {
-  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 34%, transparent);
   text-decoration: line-through;
 }
 .intraAdd {
-  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 32%, transparent);
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 32%, transparent);
+}
+
+/* Hover focus (style experiment): no dashed outline around the hovered change. Only the RED/GREEN tint of
+   every other difference block is dimmed (to 20% of its own strength); the text, spacing, borders and every
+   other piece of content stay exactly as they are, so the reading line never fades. */
+.mdPreviewBody {
+  --md-diff-del-base: var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary));
+  --md-diff-add-base: var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary));
+  --md-diff-del-color: var(--md-diff-del-base);
+  --md-diff-add-color: var(--md-diff-add-base);
+}
+.mdPreviewBody :global(.mdHoverFaded) {
+  --md-diff-del-color: color-mix(in srgb, var(--md-diff-del-base) 20%, transparent);
+  --md-diff-add-color: color-mix(in srgb, var(--md-diff-add-base) 20%, transparent);
+}
+
+/* Square difference blocks in the rendered preview, matching the CODE view (whose diff rows have no rounded
+   corners). Only the renderer's own change surfaces are squared: ordinary Markdown keeps its own shape (inline
+   code chips, tables, quotes…). These repeat the original selectors so they win on order. */
+.mdPreviewBody :global(.mdBlock),
+.mdPreviewBody :global(.mdBlockUnion),
+.mdPreviewBody :global(.mdWordDel),
+.mdPreviewBody :global(.mdWordAdd),
+.mdPreviewBody :global(.mdTwinOld),
+.mdPreviewBody :global(.mdTwinNew),
+.mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinOld),
+.mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinNew),
+.mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinOld > pre),
+.mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinNew > pre),
+.mdPreviewBody :global(.mdSourcePair > .mdTwinOld),
+.mdPreviewBody :global(.mdSourcePair > .mdTwinNew),
+.mdPreviewBody :global(.mdTwinImages > .mdTwinOld),
+.mdPreviewBody :global(.mdTwinImages > .mdTwinNew),
+.mdPreviewBody :global(.mdTwinBlock),
+.mdPreviewBody :global(.mdTwin.mdTwinPhantom),
+.mdPreviewBody :global(.mdCodePane),
+.mdPreviewBody :global(.mdCodePane > pre),
+.mdPreviewBody :global(.mdImageFrame),
+.mdPreviewBody :global(.mdImageBody),
+.mdPreviewBody :global(.mdImageFrame img),
+.mdPreviewBody :global(.mdTwinColumn) {
+  border-radius: 0;
 }
