@@ -223,13 +223,11 @@ describe('Markdown preview · one large mixed document', () => {
     for (const chip of chips) {
       const oldText = chip.getAttribute('data-md-diff-old')
       const newText = chip.getAttribute('data-md-diff-new')
-      // Exactly one side per block: the block is red (removal) or green (addition), not both. The mark is an
-      // eye-with-a-slash icon whose accessible name is the caller's words.
+      // Exactly one side per block: the block is red (removal) or green (addition), not both. No eye icon:
+      // the fallback shows that side's SOURCE text inline.
       expect(oldText === null || newText === null, `chip ${chip.getAttribute('data-md-unit')}`).toBe(true)
-      const icon = chip.querySelector('[data-md-twin-caption]') as HTMLElement
-      expect(icon, `chip ${chip.getAttribute('data-md-unit')} icon`).not.toBeNull()
-      expect(icon.querySelector('svg')).not.toBeNull()
-      expect(icon.getAttribute('aria-label')).toBe('不可见内容')
+      expect(chip.querySelector('[data-md-twin-caption]'), 'no eye-icon caption').toBeNull()
+      expect(chip.querySelector('.mdPhantomSource')?.textContent ?? '').not.toBe('')
     }
     // The front matter is a change the document cannot show. Its changed runs are TWO invisible changes (the
     // header lines, then the tag list with the added owner/note): each has a removal block and an addition block,

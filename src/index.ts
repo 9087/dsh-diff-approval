@@ -3026,7 +3026,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // always took.
         const chars = charSpansOf(blockTarget.block)
         let updatedOld: string
-        if (chars === undefined) {
+        if (chars === undefined || !charSpansStayOnOneLine(entry.oldText, entry.newText, chars)) {
           const accepted = contentRangeOf(entry.newText, blockTarget.block.newStart, blockTarget.block.newEnd)
           updatedOld = replaceContentLines(entry.oldText, blockTarget.block.oldStart, blockTarget.block.oldEnd, accepted)
         } else {
@@ -3071,7 +3071,7 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         // (newText === oldText): the file stays listed with no pending diff.
         const revertChars = charSpansOf(blockTarget.block)
         let revertedText: string
-        if (revertChars === undefined) {
+        if (revertChars === undefined || !charSpansStayOnOneLine(entry.oldText, entry.newText, revertChars)) {
           const restored = contentRangeOf(entry.oldText, blockTarget.block.oldStart, blockTarget.block.oldEnd)
           revertedText = replaceContentLines(entry.newText, blockTarget.block.newStart, blockTarget.block.newEnd, restored)
         } else {
@@ -3782,6 +3782,29 @@ function charSpanOf(value: unknown): { start: number; end: number } | undefined 
 function charSpansOf(block: DiffApprovalBlockRange): { old: { start: number; end: number }; new: { start: number; end: number } } | undefined {
   if (block.oldChars === undefined || block.newChars === undefined) return undefined
   return { old: block.oldChars, new: block.newChars }
+}
+
+/**
+ * Whether character spans really stay inside ONE line on both sides.
+ *
+ * A character-level keep/revert is only safe within a line. A caller can (and an older renderer did) send a
+ * span that crosses a newline — splicing that accepted text into the middle of a line corrupts the baseline,
+ * duplicating or swallowing lines and making the block impossible to keep afterwards. Such a span falls back
+ * to its line range, which the block always carries.
+ *
+ * @param oldText - the entry's baseline.
+ * @param newText - the entry's current content.
+ * @param spans - the character spans to check.
+ * @returns true when both spanned slices are single-line (or empty).
+ */
+function charSpansStayOnOneLine(
+  oldText: string,
+  newText: string,
+  spans: { old: { start: number; end: number }; new: { start: number; end: number } },
+): boolean {
+  const oldSlice = oldText.slice(spans.old.start, spans.old.end)
+  const newSlice = newText.slice(spans.new.start, spans.new.end)
+  return !oldSlice.includes('\n') && !newSlice.includes('\n')
 }
 
 /**

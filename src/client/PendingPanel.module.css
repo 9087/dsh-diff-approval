@@ -846,8 +846,11 @@
 }
 .mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinOld > .mdCodeTitlebar),
 .mdPreviewBody :global(.mdTwin.mdCodeLangPair > .mdTwinNew > .mdCodeTitlebar) {
+  display: flex;
+  align-items: center;
+  min-height: 20px;
   margin: 0;
-  padding: 1px 6px 2px;
+  padding: 0 6px;
 }
 /* Word-level highlight inside a changed block: the specific changed words. */
 .mdPreviewBody :global(.mdWordDel) {
@@ -977,9 +980,11 @@
   box-sizing: border-box;
 }
 .mdPreviewBody :global(.mdCodeTitlebar) {
-  display: block;
+  display: flex;
+  align-items: center;
+  min-height: 20px;
   margin: 0;
-  padding: 1px 6px 2px;
+  padding: 0 6px;
   font-family: var(--dsw-alias-font-ui, ui-sans-serif, system-ui, sans-serif);
   font-size: 9px;
   font-weight: 500;
@@ -990,11 +995,13 @@
 }
 .mdPreviewBody :global(.mdCodeTitlebarOld),
 .mdPreviewBody :global(.mdCodePaneDel > .mdCodeTitlebar) {
-  color: var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary));
+  /* Deeper than the diff wash: this is TEXT (a fence language, an image path), so mix it toward the normal
+     label colour instead of using the pale state colour raw. */
+  color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 70%, var(--dsw-alias-label-primary));
 }
 .mdPreviewBody :global(.mdCodeTitlebarNew),
 .mdPreviewBody :global(.mdCodePaneAdd > .mdCodeTitlebar) {
-  color: var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary));
+  color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 70%, var(--dsw-alias-label-primary));
 }
 /* A matched heading/rule pair: old version ABOVE the new one, with a tight gap between them. */
 .mdPreviewBody :global(.mdTwin.mdTwinStackPair) {
@@ -1125,14 +1132,40 @@
 .mdPreviewBody :global(.mdTwin.mdTwinPhantom) {
   display: inline-flex;
   width: fit-content;
+  max-width: 100%;
   align-items: center;
   justify-content: center;
-  margin: 3px 0 8px;
-  padding: 2px 4px;
+  margin: 2px 0 4px;
+  padding: 1px 5px;
   border: 1px dashed var(--dsw-alias-border-l2);
   border-radius: 4px;
   color: var(--dsw-alias-label-secondary);
   vertical-align: middle;
+}
+/* A no-rendering fallback shows its SOURCE text (no eye icon): the chip is tinted by its side. */
+.mdPreviewBody :global(.mdTwin.mdTwinPhantom.mdPhantomOld) {
+  background-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 15%, transparent);
+  border-color: color-mix(in srgb, var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary)) 25%, transparent);
+}
+.mdPreviewBody :global(.mdTwin.mdTwinPhantom.mdPhantomNew) {
+  background-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 15%, transparent);
+  border-color: color-mix(in srgb, var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary)) 25%, transparent);
+}
+.mdPreviewBody :global(.mdPhantomSource) {
+  padding: 0;
+  background: none;
+  font-family: var(--dsw-alias-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--dsw-alias-label-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.mdPreviewBody :global(.mdPhantomSide) {
+  display: inline;
+}
+.mdPreviewBody :global(.mdPhantomSide + .mdPhantomSide) {
+  margin-left: 4px;
 }
 /* The side this chip does NOT stand for is hidden (see `phantomBlock`): the visible side's colour is the chip's,
    in the single column and the double one alike. */
@@ -1192,11 +1225,12 @@
 .mdPreviewBody :global(.mdImageFrame > .mdCodeTitlebar) {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   justify-content: flex-start;
   gap: 0 5px;
+  min-height: 20px;
   margin: 0;
-  padding: 1px 6px 2px;
+  padding: 0 6px;
   text-align: left;
 }
 .mdPreviewBody :global(.mdImageFrame > .mdCodeTitlebar .mdImagePath) {

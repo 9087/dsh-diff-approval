@@ -1,5 +1,5 @@
-// REQUIREMENT CONTRACTS for the two REAL documents the user reviews (Saved/demo-rich.md and
-// Saved/markdown-rich-test.md, old/new extracted from the pending store):
+// REQUIREMENT CONTRACTS for the ONE comprehensive sample pair the user reviews
+// (`tests/fixtures/md-block-spec/demo-old.md` → `demo-new.md`, the merged demo/rich document):
 //   1. blocks never nest and never overlap: a hover can only frame its own block;
 //   2. the DOM order of block numbers is the syntax tree's preorder (left to right, top to bottom);
 //   3. a changed code line / table cell / inline child is a block of its own;
@@ -23,8 +23,7 @@ interface Case {
 }
 
 const CASES: Case[] = [
-  { name: 'markdown-rich-test.md', oldText: fixture('rich-old.md'), newText: fixture('rich-new.md') },
-  { name: 'demo-rich.md', oldText: fixture('demo-old.md'), newText: fixture('demo-new.md') },
+  { name: 'demo.md (comprehensive)', oldText: fixture('demo-old.md'), newText: fixture('demo-new.md') },
 ]
 
 /** Every element carrying a block number, and whether it sits inside a DIFFERENT block's element. */
@@ -151,22 +150,27 @@ describe('requirement contract: the real rich/demo documents', () => {
   })
 
   it('code: changed lines are compared top to bottom (old line above new line)', () => {
-    const demo = CASES[1]!
+    const demo = CASES[0]!
     const holder = document.createElement('div')
     holder.innerHTML = renderTreeMerged(demo.oldText, demo.newText)
     const pre = holder.querySelector('pre code')?.closest('pre') ?? null
     expect(pre).not.toBeNull()
     const code = pre!.querySelector('code')!
     const text = code.textContent ?? ''
-    // The change is shown as two LINE blocks: struck old line, then its green replacement.
+    // The change is shown as LINE blocks: the two struck old lines, then the two green replacements.
     const lineRuns = [...code.querySelectorAll<HTMLElement>('.mdCodeLine')]
-    expect(lineRuns).toHaveLength(2)
+    expect(lineRuns).toHaveLength(4)
     expect(lineRuns[0]!.className).toContain('mdWordDel')
     expect(lineRuns[0]!.textContent).toBe('const version = 1')
-    expect(lineRuns[1]!.className).toContain('mdWordAdd')
-    expect(lineRuns[1]!.textContent).toBe('const version = 2')
+    expect(lineRuns[1]!.className).toContain('mdWordDel')
+    expect(lineRuns[1]!.textContent).toBe("console.log('old')")
+    expect(lineRuns[2]!.className).toContain('mdWordAdd')
+    expect(lineRuns[2]!.textContent).toBe('const version = 2')
+    expect(lineRuns[3]!.className).toContain('mdWordAdd')
+    expect(lineRuns[3]!.textContent).toBe("console.log('new')")
     // No inline half-line comparison and no fence leakage; the untouched line is intact.
-    expect(text).toContain('console.log(version)')
+    expect(text).toContain("console.log('old')")
+    expect(text).toContain("console.log('new')")
     expect(text).not.toContain('```')
     expect(text).not.toContain('const const')
     // Double column: each column keeps its own complete code.
@@ -174,15 +178,16 @@ describe('requirement contract: the real rich/demo documents', () => {
     doubleHolder.innerHTML = renderTreeDocuments(demo.oldText, demo.newText)
     const oldCode = doubleHolder.querySelector<HTMLElement>('[data-diff-doc-side="old"] pre code')!.textContent
     const newCode = doubleHolder.querySelector<HTMLElement>('[data-diff-doc-side="new"] pre code')!.textContent
-    expect(oldCode).toBe('const version = 1\nconsole.log(version)\n')
-    expect(newCode).toBe('const version = 2\nconsole.log(version)\n')
+    expect(oldCode).toBe("const version = 1\nconsole.log('old')\n")
+    expect(newCode).toBe("const version = 2\nconsole.log('new')\n")
   })
 
   it('demo table: two changed cells are two blocks, each inside its own cell; the row is not a block', () => {
-    const demo = CASES[1]!
+    const demo = CASES[0]!
     const holder = document.createElement('div')
     holder.innerHTML = renderTreeMerged(demo.oldText, demo.newText)
-    const row = holder.querySelector<HTMLElement>('tbody tr')!
+    // The `All` row changes TWO cells (true→false, 弹窗→弹窗确认).
+    const row = [...holder.querySelectorAll<HTMLElement>('tbody tr')].find(candidate => (candidate.textContent ?? '').includes('All'))!
     const cells = [...row.children].filter((cell): cell is HTMLElement => cell instanceof HTMLElement)
     const idsByCell = cells.map(cell => [...new Set([...cell.querySelectorAll<HTMLElement>('[data-md-block]')].map(element => element.dataset.mdBlock))])
     expect(row.dataset.mdBlock).toBeUndefined()
@@ -192,14 +197,29 @@ describe('requirement contract: the real rich/demo documents', () => {
   })
 
   it('demo image: path/title change is a pair of frames with the old/new source', () => {
-    const demo = CASES[1]!
+    const demo = CASES[0]!
     const holder = document.createElement('div')
     holder.innerHTML = renderTreeMerged(demo.oldText, demo.newText)
     const twin = holder.querySelector<HTMLElement>('.mdTwin.mdTwinImages')!
     expect(twin).not.toBeNull()
     const paths = [...twin.querySelectorAll('.mdImagePath')].map(path => path.textContent)
-    expect(paths).toEqual(['./screenshot-v1.png', './screenshot-v2.png'])
-    expect(twin.dataset.mdDiffOld).toContain('screenshot-v1.png')
-    expect(twin.dataset.mdDiffNew).toContain('screenshot-v2.png')
+    expect(paths).toEqual(['./old-shot.png', './new-shot.png'])
+    expect(twin.dataset.mdDiffOld).toContain('old-shot.png')
+    expect(twin.dataset.mdDiffNew).toContain('new-shot.png')
+  })
+
+  it('shows NO eye icons: fallback content is its source text', () => {
+    const demo = CASES[0]!
+    const single = document.createElement('div')
+    single.innerHTML = renderTreeMerged(demo.oldText, demo.newText)
+    const double = document.createElement('div')
+    double.innerHTML = renderTreeDocuments(demo.oldText, demo.newText)
+    for (const root of [single, double]) {
+      expect(root.querySelectorAll('[data-md-twin-caption]')).toHaveLength(0)
+      expect(root.querySelectorAll('.mdTwinCaption svg')).toHaveLength(0)
+    }
+    // The deleted inline link is still readable as content; the tree path needs no eye fallback here.
+    expect(single.textContent).toContain('会消失的链接')
+    expect(single.querySelectorAll('.mdTwinPhantom')).toHaveLength(0)
   })
 })

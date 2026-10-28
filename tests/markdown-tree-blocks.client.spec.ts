@@ -58,6 +58,16 @@ describe('tree preview model: blocks and units', () => {
     expect(model.units.map(unit => unit.index)).toEqual([0])
   })
 
+  it('does NOT expose character ranges for a multi-line merged addition (keep must use whole lines)', () => {
+    const model = modelOf('Keep.\n', 'Keep.\n\n- added one\n- added two\n')
+    const added = model.blocks.find(block => block.oldNodes.length === 0 && block.newNodes.length > 0)!
+    expect(added.merged).toBe(true)
+    // Two added lines: a character-level keep would splice text into the middle of a line and corrupt the
+    // baseline. The block must fall back to its whole line range.
+    expect(added.oldChars).toBeUndefined()
+    expect(added.newChars).toBeUndefined()
+  })
+
   it('splits the changes of ONE line into one block each, keeping the text between them as context', () => {
     const oldText = '一段**普通**说明，其中有 **加粗重点**、`行内代码`，以及一个 [文档链接](https://example.com/v1/guide)。\n'
     const newText = '一段**新的**说明，其中有 **重点加粗**、`行内代码`，以及一个 [文档链接](https://example.com/v2/guide)。\n'

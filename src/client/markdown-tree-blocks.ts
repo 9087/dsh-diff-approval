@@ -1071,7 +1071,15 @@ export function treePreviewModel(oldText: string, newText: string): TreePreviewM
       return entry
     })
     const single = blockUnits.length === 1 ? blockUnits[0] : undefined
-    const chars = single !== undefined && block.invisible.length === 0
+    // Character keep/revert is only safe when BOTH sides are one line: a unit can cover a multi-line node
+    // (a merged addition, a whole paragraph), and splicing those characters would insert/remove text in the
+    // middle of a line — corrupting the baseline and making the block impossible to keep.
+    const singleLine = single !== undefined
+      && !single.oldText.includes('\n')
+      && !single.newText.includes('\n')
+      && (oldStart > oldEnd || oldStart === oldEnd)
+      && (newStart > newEnd || newStart === newEnd)
+    const chars = single !== undefined && singleLine && block.invisible.length === 0
       ? { oldChars: single.oldChars, newChars: single.newChars }
       : {}
     return {
@@ -1093,5 +1101,18 @@ export function treePreviewModel(oldText: string, newText: string): TreePreviewM
       newNodes: block.newNodes,
     }
   })
+  // A pure DELETION's insertion line comes from the whole-file line diff. With many structural edits around it
+  // that anchor can fall BEFORE the block that precedes it in reading order, or AFTER the block that follows it
+  // (the ghost then jumps and breaks the preorder). Clamp ONLY an out-of-range anchor; a correct one stays put
+  // (context blocks are not in the model, so recomputing from block neighbours would move it too early).
+  for (let index = 0; index < blocks.length; index++) {
+    const block = blocks[index]!
+    if (block.oldNodes.length === 0 || block.newNodes.length > 0) continue
+    const lower = index === 0 ? 1 : blocks[index - 1]!.newEnd + 1
+    const upper = index + 1 < blocks.length ? blocks[index + 1]!.newStart : Number.POSITIVE_INFINITY
+    if (block.newStart >= lower && block.newStart <= upper) continue
+    block.newStart = Math.max(1, Math.min(Math.max(block.newStart, lower), upper))
+    block.newEnd = block.newStart - 1
+  }
   return { blocks, units }
 }

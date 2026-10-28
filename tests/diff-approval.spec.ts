@@ -834,6 +834,37 @@ describe('block keep/revert', () => {
     expect(kept!.oldText).toBe('x one y two\n')
   })
 
+  it('falls back to whole lines when a character span crosses a newline (keep)', async () => {
+    // A corrupt/malformed span must never splice text into the middle of a line: the block's line range wins.
+    const { ctx, fs, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'one\ntwo\nthree\n', 'ONE\nTWO\nthree\n'))
+    const [entry] = await listEntries(handle, 'session-1')
+    await expect(handle('block-keep', {
+      sessionId: 'session-1',
+      id: entry!.id,
+      block: { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1, oldChars: { start: 0, end: 5 }, newChars: { start: 0, end: 5 } },
+    }, signal())).resolves.toEqual({ ok: true, value: { outcome: 'kept' } })
+    const [kept] = await listEntries(handle, 'session-1')
+    // Whole line 1 folded; line 2 is still pending.
+    expect(kept!.oldText).toBe('ONE\ntwo\nthree\n')
+    expect(kept!.newText).toBe('ONE\nTWO\nthree\n')
+  })
+
+  it('falls back to whole lines when a character span crosses a newline (revert)', async () => {
+    const { ctx, fs, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'one\ntwo\nthree\n', 'ONE\nTWO\nthree\n'))
+    const [entry] = await listEntries(handle, 'session-1')
+    await expect(handle('block-revert', {
+      sessionId: 'session-1',
+      id: entry!.id,
+      block: { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 1, oldChars: { start: 0, end: 5 }, newChars: { start: 0, end: 5 } },
+    }, signal())).resolves.toEqual({ ok: true, value: { outcome: 'reverted' } })
+    // Line 1 restored whole; line 2 keeps its accepted text.
+    expect(fs.writeText).toHaveBeenCalledWith(
+      { displayPath: '/repo/a.txt', targetKey: 'key:/repo/a.txt' }, 'one\nTWO\nthree\n', undefined, expect.anything() as AbortSignal,
+    )
+  })
+
   it('keeps the entry with no pending diff when the last block is kept', async () => {
     const { ctx, fs, handle } = await harness()
     const entry = await twoBlocks({ ctx, fs, handle })

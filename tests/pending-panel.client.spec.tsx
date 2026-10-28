@@ -15094,18 +15094,14 @@ describe('PendingPanel', () => {
     expect(blocks[0]!.getAttribute('data-md-diff-new')).toBeNull()
     expect(blocks[1]!.getAttribute('data-md-diff-new')).toBe('title: B')
     expect(blocks[1]!.getAttribute('data-md-diff-old')).toBeNull()
-    // One block either red or green: each chip hides the side it does not stand for (see the stylesheet).
-    expect(blocks[0]!.querySelector('.mdTwinNew')!.hasAttribute('hidden')).toBe(true)
-    expect(blocks[0]!.querySelector('.mdTwinOld')!.hasAttribute('hidden')).toBe(false)
-    expect(blocks[1]!.querySelector('.mdTwinOld')!.hasAttribute('hidden')).toBe(true)
+    // One block either red or green: the chip is tinted by its side and shows that side's SOURCE text.
+    expect(blocks[0]!.classList.contains('mdPhantomOld')).toBe(true)
+    expect(blocks[1]!.classList.contains('mdPhantomNew')).toBe(true)
+    expect(blocks[0]!.querySelector('.mdPhantomSource')?.textContent).toBe('title: A')
+    expect(blocks[1]!.querySelector('.mdPhantomSource')?.textContent).toBe('title: B')
     for (const block of blocks) {
-      // The visible mark is an eye-with-a-slash icon (no words in the reading line); the caller's words are its
-      // accessible name and the pointer's title.
-      const icon = block.querySelector('[data-md-twin-caption]') as HTMLElement
-      expect(icon).not.toBeNull()
-      expect(icon.querySelector('svg')).not.toBeNull()
-      expect(icon.getAttribute('aria-label')).toBe('panel.invisibleContent')
-      expect(block.getAttribute('title')).toBe('panel.invisibleContent')
+      // No eye icon anymore: the fallback text IS the marker.
+      expect(block.querySelector('[data-md-twin-caption]')).toBeNull()
     }
     fireEvent.mouseOver(blocks[0]!)
     const label = document.querySelector('[data-diff-block-sourcediff-label]') as HTMLElement
@@ -17461,43 +17457,37 @@ describe('Markdown preview · structure renderer edge cases', () => {
     const blocks = phantoms(root)
     expect(blocks.length).toBe(2)
     expect(blocks.map(block => block.getAttribute('data-md-block'))).toEqual(['0', '0'])
-    // One side per block: the hidden side is what the stylesheet reads for the tint.
-    expect(blocks[0]!.querySelector('.mdTwinNew')!.hasAttribute('hidden')).toBe(true)
-    expect(blocks[1]!.querySelector('.mdTwinOld')!.hasAttribute('hidden')).toBe(true)
-    expect(blocks[0]!.querySelectorAll('.mdTwinBlock').length).toBe(2)
-    expect(blocks[0]!.querySelectorAll('.mdTwinMarker').length).toBe(0)
+    // One side per block: the side class drives the tint, and the block shows that side's source text.
+    expect(blocks[0]!.classList.contains('mdPhantomOld')).toBe(true)
+    expect(blocks[1]!.classList.contains('mdPhantomNew')).toBe(true)
+    expect(blocks[0]!.querySelector('.mdPhantomSource')?.textContent).toBe('title: A\nstatus: draft')
+    expect(blocks[1]!.querySelector('.mdPhantomSource')?.textContent).toBe('title: B\nstatus: stable')
+    expect(blocks[0]!.querySelector('[data-md-twin-caption]')).toBeNull()
+    expect(blocks[0]!.querySelectorAll('.mdTwinBlock').length).toBe(0)
     expect(blocks[0]!.getAttribute('data-md-diff-old')).toBe('title: A\nstatus: draft')
     expect(blocks[1]!.getAttribute('data-md-diff-new')).toBe('title: B\nstatus: stable')
     // The document's own content is untouched by the pair.
     expect(root.querySelectorAll('p').length).toBe(1)
   })
 
-  it('names a no-rendering pair with the caller\'s words, and stays unnamed without them', () => {
-    // The marker's visible mark is an eye-with-a-slash icon, which says what it means on its own; the panel
-    // passes the localized words for its accessible name (and the pointer's title). The words are the caller's —
-    // the renderer has no translator, and the bare rendering (which most cases read) has none.
+  it('shows a no-rendering pair as SOURCE text, never an eye icon', () => {
+    // The fallback marker used to be an eye-with-a-slash icon captioned with the caller's words. It is now the
+    // changed SOURCE line itself: readable without hovering, in both layouts.
     const oldText = '---\ntitle: A\n---\n\nBody\n'
     const newText = '---\ntitle: B\n---\n\nBody\n'
-    const bare = document.createElement('div')
-    bare.innerHTML = renderMarkdownPreview(oldText, newText, 'single', 'structure')
-    const bareIcon = bare.querySelector('[data-md-twin-caption]') as HTMLElement
-    expect(bareIcon).not.toBeNull()
-    expect(bareIcon.getAttribute('aria-label')).toBeNull()
-    expect(bareIcon.getAttribute('aria-hidden')).toBe('true')
-    expect(bare.querySelector('.mdTwinPhantom')!.getAttribute('title')).toBeNull()
-
     const single = document.createElement('div')
     single.innerHTML = renderMarkdownPreview(oldText, newText, 'single', 'structure', { invisible: '不可见内容' })
-    const singleIcon = single.querySelector('[data-md-twin-caption]') as HTMLElement
-    expect(singleIcon.getAttribute('aria-label')).toBe('不可见内容')
-    expect(singleIcon.getAttribute('title')).toBe('不可见内容')
+    expect(single.querySelectorAll('[data-md-twin-caption]')).toHaveLength(0)
+    const sources = [...single.querySelectorAll<HTMLElement>('.mdPhantomSource')].map(source => source.textContent)
+    expect(sources).toContain('title: A')
+    expect(sources).toContain('title: B')
 
-    // The double column decorates each column's own marker, because each column shows only its side.
     const double = document.createElement('div')
     double.innerHTML = renderMarkdownPreview(oldText, newText, 'double', 'structure', { invisible: '不可见内容' })
     for (const side of ['old', 'new'] as const) {
       const column = double.querySelector(`[data-diff-doc-side="${side}"]`) as HTMLElement
-      expect(column.querySelector('[data-md-twin-caption]')?.getAttribute('aria-label'), side).toBe('不可见内容')
+      expect(column.querySelectorAll('[data-md-twin-caption]'), side).toHaveLength(0)
+      expect(column.querySelector('.mdPhantomSource'), side).not.toBeNull()
     }
   })
 
@@ -17854,13 +17844,14 @@ describe('Markdown preview · structure renderer edge cases', () => {
     expect(columns[0]!.querySelector('.mdTwinPhantom')!.getAttribute('data-md-diff-new')).toBeNull()
     expect(columns[1]!.querySelector('.mdTwinPhantom')!.getAttribute('data-md-diff-new')).toBe('title: B')
     expect(columns[1]!.querySelector('.mdTwinPhantom')!.getAttribute('data-md-diff-old')).toBeNull()
-    for (const [column, own, other] of [
-      [columns[0]!, 'mdTwinOld', 'mdTwinNew'],
-      [columns[1]!, 'mdTwinNew', 'mdTwinOld'],
+    for (const [column, ownClass, ownText] of [
+      [columns[0]!, 'mdPhantomOld', 'title: A'],
+      [columns[1]!, 'mdPhantomNew', 'title: B'],
     ] as const) {
       const phantom = column.querySelector('.mdTwinPhantom')!
-      expect(phantom.querySelector(`.${own}`)!.hasAttribute('hidden')).toBe(false)
-      expect(phantom.querySelector(`.${other}`)!.hasAttribute('hidden')).toBe(true)
+      expect(phantom.classList.contains(ownClass)).toBe(true)
+      expect(phantom.querySelector('.mdPhantomSource')?.textContent).toBe(ownText)
+      expect(phantom.querySelector('[data-md-twin-caption]')).toBeNull()
     }
     // The link target: each column shows its own link, tinted, carrying its own side of the href.
     const linksBefore = [...columns[0]!.querySelectorAll<HTMLAnchorElement>('a')]

@@ -42,6 +42,38 @@ describe('tree-first renderer: pure changes', () => {
     expect(root.querySelectorAll('[data-md-block]')).toHaveLength(1)
   })
 
+  it('a wholly new COMPLEX document is still ONE union, never a source fallback', () => {
+    // Regression: a merged run whose nodes resolved to nested elements (list items, table rows) lost its
+    // carrier and degraded to one whole-document source chip. It must paint the outermost siblings instead.
+    const root = bodyOf('', [
+      '# 标题',
+      '',
+      '一段正文。',
+      '',
+      '- 列表一',
+      '- 列表二',
+      '',
+      '| 列 | 值 |',
+      '| --- | --- |',
+      '| a | 1 |',
+      '',
+      '> 引用。',
+      '',
+      '```ts',
+      'const a = 1',
+      '```',
+      '',
+    ].join('\n'))
+    expect(root.querySelectorAll('.mdTwinPhantom')).toHaveLength(0)
+    expect(root.querySelectorAll('.mdSourcePair')).toHaveLength(0)
+    const unions = [...root.querySelectorAll<HTMLElement>('.mdBlockUnion')]
+    expect(unions).toHaveLength(1)
+    for (const tag of ['H1', 'P', 'UL', 'TABLE', 'BLOCKQUOTE', 'PRE']) {
+      expect(unions[0]!.querySelector(tag), tag).not.toBeNull()
+    }
+    expect(blocksOf(root)).toHaveLength(1)
+  })
+
   it('wraps adjacent wholly-added siblings in ONE union, keeping their order', () => {
     const root = bodyOf('Keep.\n', 'Keep.\n\nAdded one.\n\nAdded two.\n')
     const unions = [...root.querySelectorAll<HTMLElement>('.mdBlockUnion')]
@@ -95,6 +127,24 @@ describe('tree-first renderer: pure changes', () => {
     const markerIndex = children.findIndex(tag => tag === 'DIV')
     expect(markerIndex).toBeGreaterThan(0)
     expect(markerIndex).toBeLessThan(children.length - 1)
+  })
+
+  it('syntax-highlights a source twin, keeping its text byte-identical', () => {
+    const root = bodyOf(
+      '---\ntitle: A\nversion: 1\n---\n\nBody\n',
+      '---\ntitle: B\nversion: 2\n---\n\nBody\n',
+    )
+    const pair = blocksOf(root)[0]!
+    expect(pair.classList.contains('mdSourcePair')).toBe(true)
+    const sides = [...pair.querySelectorAll<HTMLElement>('.mdSourceText')]
+    expect(sides).toHaveLength(2)
+    // Exact source text is preserved while the tokens are coloured spans.
+    expect(sides[0]!.textContent).toBe('---\ntitle: A\nversion: 1\n---')
+    expect(sides[1]!.textContent).toBe('---\ntitle: B\nversion: 2\n---')
+    for (const side of sides) {
+      expect(side.querySelectorAll('span').length).toBeGreaterThan(0)
+      expect([...side.querySelectorAll<HTMLElement>('span')].some(span => span.style.color !== '')).toBe(true)
+    }
   })
 
   it('degrades an inline-HTML paragraph to its whole Markdown source twin', () => {
@@ -473,6 +523,27 @@ describe('tree-first renderer: opt-in wiring', () => {
     expect(blocks[0]!.units.length).toBeGreaterThan(0)
   })
 
+  it('legacy renderer: invisible content is its SOURCE text, never an eye icon', () => {
+    localStorage.setItem(TREE_DIFF_SETTING, '0')
+    try {
+      const holder = document.createElement('div')
+      holder.innerHTML = renderMarkdownPreview(
+        '---\ntitle: A\n---\n\n<!-- old -->\n\nBody\n',
+        '---\ntitle: B\n---\n\n<!-- new -->\n\nBody\n',
+        'single',
+        'structure',
+      )
+      expect(holder.querySelectorAll('[data-md-twin-caption]')).toHaveLength(0)
+      expect(holder.querySelectorAll('.mdTwinCaption svg')).toHaveLength(0)
+      const sources = [...holder.querySelectorAll<HTMLElement>('.mdPhantomSource')].map(source => source.textContent ?? '')
+      expect(sources.join('\n')).toContain('title: A')
+      expect(sources.join('\n')).toContain('<!-- old -->')
+      expect(sources.join('\n')).toContain('<!-- new -->')
+    } finally {
+      localStorage.removeItem(TREE_DIFF_SETTING)
+    }
+  })
+
   it('resolves the pipeline: forced values win, the shipped default is the tree path, tests default to legacy', () => {
     // What the browser ships with.
     expect(TREE_DIFF_DEFAULT).toBe(true)
@@ -572,6 +643,67 @@ describe('tree-first renderer: double column', () => {
     const newCell = newMark.closest<HTMLElement>('.mdDoubleCellNew')!
     expect(oldCell.style.gridRow).toBe(newCell.style.gridRow)
     expect(oldCell.style.gridRow).not.toBe('')
+  })
+
+  it('a deleted NESTED list stays in the old column, never a phantom source chip in the new one', () => {
+    // Regression: a removed nested list resolved to no old element (it is covered by no single source span), so
+    // the reachability net put its source chip in the NEW column, under the YAML card. It must tint the nested
+    // UL in the old column — the side that actually loses it.
+    const root = renderWithTree(
+      '- 第一项：保持\n- 第二项：描述\n  - 子项 A\n  - 子项 B（更新）\n- [x] 待办\n\n结尾段落。\n',
+      '- 第一项：保持\n- 第二项：描述\n- [x] 待办\n\n结尾段落。\n',
+    )
+    const oldColumn = columnOf(root, 'old')
+    const newColumn = columnOf(root, 'new')
+    expect(newColumn.querySelectorAll('.mdTwinPhantom')).toHaveLength(0)
+    expect((newColumn.textContent ?? '')).not.toContain('子项 A')
+    // The nested list itself is the red carrier in the old column.
+    const deletedList = [...oldColumn.querySelectorAll<HTMLElement>('ul.mdDel, ol.mdDel')]
+      .find(list => (list.textContent ?? '').includes('子项 A'))
+    expect(deletedList).toBeDefined()
+    expect(deletedList!.closest<HTMLElement>('[data-diff-doc-side]')?.dataset.diffDocSide).toBe('old')
+    expect(deletedList!.dataset.mdBlock).toBeDefined()
+    expect(oldColumn.querySelectorAll(`[data-md-block="${deletedList!.dataset.mdBlock}"]`).length).toBeGreaterThan(0)
+  })
+
+  it('draws an inline TYPE change in place (old element red, new element green), not as source chips', () => {
+    const root = renderWithTree(
+      '一段说明，其中有 **加粗**、以及收尾。\n',
+      '一段说明，其中有 [项目文档](https://example.com/old)、以及收尾。\n',
+    )
+    const oldColumn = columnOf(root, 'old')
+    const newColumn = columnOf(root, 'new')
+    expect(root.querySelectorAll('.mdTwinPhantom')).toHaveLength(0)
+    const oldStrong = oldColumn.querySelector<HTMLElement>('strong.mdDel')
+    expect(oldStrong).not.toBeNull()
+    expect(oldStrong!.textContent).toBe('加粗')
+    expect(oldStrong!.dataset.mdBlock).toBeDefined()
+    const newLink = newColumn.querySelector<HTMLElement>('a.mdAdd')
+    expect(newLink).not.toBeNull()
+    expect(newLink!.textContent).toBe('项目文档')
+    expect(newLink!.dataset.mdBlock).toBe(oldStrong!.dataset.mdBlock)
+  })
+
+  it('aligns matched list items row by row even when the other list gains an item', () => {
+    const root = renderWithTree(
+      '- 第一项：旧\n- 第二项：保持不变\n- 第三项：旧\n',
+      '- 第一项：新\n- 第二项：保持不变\n- 新增的一条\n- 第三项：新\n',
+    )
+    const rowsByBlock = new Map<string, { old?: string; new?: string }>()
+    for (const side of ['old', 'new'] as const) {
+      for (const element of columnOf(root, side).querySelectorAll<HTMLElement>('[data-md-block]')) {
+        const block = element.dataset.mdBlock ?? '?'
+        const row = element.closest<HTMLElement>('.mdDoubleCellOld, .mdDoubleCellNew')?.style.gridRow
+        const current = rowsByBlock.get(block) ?? {}
+        current[side] = row
+        rowsByBlock.set(block, current)
+      }
+    }
+    const matched = [...rowsByBlock].filter(([, rows]) => rows.old !== undefined && rows.new !== undefined)
+    expect(matched.length).toBeGreaterThanOrEqual(2)
+    for (const [block, rows] of matched) {
+      expect(rows.old, `block ${block}`).toBe(rows.new)
+    }
   })
 
   it('marks a new table row as a row in the new column only', () => {

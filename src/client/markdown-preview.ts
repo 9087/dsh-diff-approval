@@ -20,12 +20,13 @@
 
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { diffArrays, diffChars } from 'diff'
+import { diffChars } from 'diff'
 import type { WholeFileDiff } from './whole-file-diff.ts'
 import { blockRangesOf, changeBlocksOf, computeWholeFileDiff, intraRunsOf } from './whole-file-diff.ts'
 import type { IntraRun } from './whole-file-diff.ts'
 import type { WholeFileDiffRow } from './whole-file-diff.ts'
 import { treePreviewModel } from './markdown-tree-blocks.ts'
+import { highlightWindow } from './highlight.ts'
 import type { MarkdownTreeNode } from './markdown-tree-match.ts'
 import { matchMarkdownTrees, nodeVisibleText, planMergedSiblings, type MergePlanPiece } from './markdown-tree-match.ts'
 import type { TreePreviewBlock, TreePreviewUnit } from './markdown-tree-blocks.ts'
@@ -2048,6 +2049,44 @@ function markChangedUnit(el: HTMLElement, unit: number, kind: 'add' | 'del'): vo
 
 /** Stamp an element as a changed BLOCK: its whole surface is tinted (a merged added paragraph/list/table). */
 /**
+ * Keep only the OUTERMOST siblings of an element list.
+ *
+ * A merged block's nodes can resolve to both a container element and elements nested inside it (a list and
+ * its items, a table and its rows). Wrapping "all elements" then fails or nests blocks; the merged run must be
+ * drawn at the level its nodes actually share — the container's children.
+ *
+ * @param elements - the resolved elements, in document order.
+ * @returns the elements that share the first attached element's parent.
+ */
+function outermostSiblings(elements: readonly HTMLElement[]): HTMLElement[] {
+  const attached = elements.filter(element => element.parentElement !== null)
+  if (attached.length <= 1) return attached.length === 1 ? attached : [...elements]
+  // The deepest common ancestor of every resolved element: the run is painted at its children level.
+  const ancestorsOf = (element: HTMLElement): HTMLElement[] => {
+    const chain: HTMLElement[] = []
+    let node: HTMLElement | null = element
+    while (node !== null) {
+      chain.push(node)
+      node = node.parentElement
+    }
+    return chain
+  }
+  const firstChain = ancestorsOf(attached[0]!)
+  const common = firstChain.find(candidate => attached.every(element => candidate === element || candidate.contains(element)))
+  if (common === undefined) return attached
+  // A node that CONTAINS the others (a list resolving to UL and its items, a table to TABLE and cells): the
+  // container alone is the layer that paints the run, not its descendants.
+  if (attached.includes(common)) return [common]
+  const result: HTMLElement[] = []
+  for (const element of attached) {
+    let node: HTMLElement = element
+    while (node.parentElement !== null && node.parentElement !== common) node = node.parentElement
+    if (node.parentElement === common && !result.includes(node)) result.push(node)
+  }
+  return result.length > 0 ? result : attached
+}
+
+/**
  * Wrap a MERGED block's several rendered elements in ONE tinted container, so the colour is continuous across
  * the whole run instead of one background per element with the elements' margins showing white gaps between.
  *
@@ -2214,7 +2253,7 @@ function isBlockPairElement(oldElement: HTMLElement, freshElement: HTMLElement):
 }
 
 /** One side of a source twin: a labelled card with the version's Markdown, verbatim, in monospace. */
-function sourceSide(side: 'old' | 'new', raw: string, label: string): HTMLElement {
+function sourceSide(side: 'old' | 'new', raw: string, label: string, language: string | undefined): HTMLElement {
   const holder = document.createElement('div')
   holder.className = side === 'old' ? 'mdTwinOld' : 'mdTwinNew'
   const header = document.createElement('div')
@@ -2222,9 +2261,52 @@ function sourceSide(side: 'old' | 'new', raw: string, label: string): HTMLElemen
   header.textContent = label
   const pre = document.createElement('pre')
   pre.className = 'mdSourceText'
-  pre.textContent = raw
+  fillHighlightedSource(pre, raw, language)
   holder.append(header, pre)
   return holder
+}
+
+/**
+ * Write SOURCE text into an element, tokenized by Shiki when possible.
+ *
+ * The fallback cards show Markdown/YAML source where the document has no rendering. Syntax colour makes that
+ * source readable instead of a grey block. Highlighting is best effort: an unknown grammar, a too-large scope
+ * or a tokenizer miss keeps the exact text plain. Newlines live in TEXT nodes between token spans, so
+ * `element.textContent` stays byte-identical to the source.
+ *
+ * @param element - the `<pre>`/`<code>` to fill.
+ * @param raw - the exact source text.
+ * @param language - the Shiki grammar id, or undefined for plain text.
+ */
+function fillHighlightedSource(element: HTMLElement, raw: string, language: string | undefined): void {
+  const lines = raw.split('\n')
+  const highlighted = language === undefined ? undefined : highlightWindow(lines, language, 0, lines.length)
+  if (highlighted === undefined) {
+    element.textContent = raw
+    return
+  }
+  highlighted.runs.forEach((runs, lineIndex) => {
+    if (lineIndex > 0) element.append('\n')
+    for (const run of runs) {
+      const span = document.createElement('span')
+      span.textContent = run.text
+      const color = run.style.color
+      if (typeof color === 'string' && color !== '') span.style.color = color
+      element.append(span)
+    }
+  })
+}
+
+/** The grammar a source fallback should be highlighted with: YAML only for a pure front-matter scope. */
+function sourceHighlightLanguage(nodes: readonly MarkdownTreeNode[]): string | undefined {
+  if (nodes.length > 0 && nodes.every(node => node.type === 'front_matter')) return 'yaml'
+  return 'markdown'
+}
+
+/** A no-rendering fallback's source line, highlighted for the grammar its source diff was recorded with. */
+function phantomHighlightLanguage(grammar: string | undefined): string | undefined {
+  if (grammar === undefined || grammar === '') return undefined
+  return grammar
 }
 
 /** What kind of source fallback this scope is, named precisely: YAML front matter, HTML comment, link
@@ -2276,8 +2358,8 @@ function sourcePairElement(block: TreePreviewBlock, oldRaw: string | undefined, 
   wrapper.dataset.mdBlock = String(block.index)
   wrapper.dataset.mdKind = oldRaw === undefined ? 'add' : newRaw === undefined ? 'del' : 'add'
   // The source is ALREADY on screen in this block, so no `data-md-diff` here: the toolbar would only repeat it.
-  if (oldRaw !== undefined) wrapper.append(sourceSide('old', oldRaw, sourceScopeLabel(block)))
-  if (newRaw !== undefined) wrapper.append(sourceSide('new', newRaw, sourceScopeLabel(block)))
+  if (oldRaw !== undefined) wrapper.append(sourceSide('old', oldRaw, sourceScopeLabel(block), sourceHighlightLanguage(block.oldNodes)))
+  if (newRaw !== undefined) wrapper.append(sourceSide('new', newRaw, sourceScopeLabel(block), sourceHighlightLanguage(block.newNodes)))
   return wrapper
 }
 
@@ -2311,7 +2393,7 @@ function renderSourceBlockDouble(block: TreePreviewBlock, fresh: RenderedDoc, ba
     wrapper.dataset.mdKind = side === 'old' ? 'del' : 'add'
     wrapper.dataset.mdMatch = anchorId
     // Source already visible: no toolbar source row (see sourcePairElement).
-    wrapper.append(sourceSide(side, raw, sourceScopeLabel(block)))
+    wrapper.append(sourceSide(side, raw, sourceScopeLabel(block), sourceHighlightLanguage(nodes)))
     const elements = treeBlockElements(block, doc, side)
     if (elements.length > 0 && elements[0]!.parentNode !== null) {
       const parent = elements[0]!.parentNode
@@ -3694,9 +3776,17 @@ function placeholderTwins(
   return blocks
 }
 
+/** The source text of a no-rendering fallback, shown inline instead of an eye icon (syntax-coloured). */
+function phantomSource(line: string, grammar?: string): HTMLElement {
+  const code = document.createElement('code')
+  code.className = 'mdPhantomSource'
+  fillHighlightedSource(code, line, phantomHighlightLanguage(grammar))
+  return code
+}
+
 /**
  * ONE side's modest block for a change with no rendered content: the wrapper is tinted red (removal) or green
- * (addition) by the stylesheet, from the side that is NOT hidden.
+ * (addition) by the stylesheet, and shows that side's SOURCE text — the eye icon is gone.
  *
  * @param index - the change unit's number.
  * @param line - that side's changed source line(s).
@@ -3706,15 +3796,12 @@ function placeholderTwins(
  */
 function phantomBlock(index: number, line: string, side: 'old' | 'new', grammar: SourceGrammar): HTMLElement {
   const wrapper = document.createElement('span')
-  wrapper.className = 'mdTwin mdTwinPhantom'
+  wrapper.className = side === 'old'
+    ? 'mdTwin mdTwinPhantom mdPhantomOld'
+    : 'mdTwin mdTwinPhantom mdPhantomNew'
   markUnit(wrapper, index, side === 'old' ? 'del' : 'add')
   setSourceDiff(wrapper, side === 'old' ? { old: line } : { new: line }, undefined, grammar)
-  const oldSide = blockSide('old')
-  const newSide = blockSide('new')
-  // The other side does not exist on THIS block: the stylesheet reads the hidden side for the tint.
-  if (side === 'old') newSide.hidden = true
-  else oldSide.hidden = true
-  wrapper.append(oldSide, newSide)
+  wrapper.append(phantomSource(line, grammar))
   return wrapper
 }
 
@@ -3738,16 +3825,25 @@ function placeholderTwin(
 ): HTMLElement {
   const wrapper = document.createElement('span')
   wrapper.className = 'mdTwin mdTwinPhantom'
+  if (oldLine !== undefined && newLine === undefined) wrapper.classList.add('mdPhantomOld')
+  if (newLine !== undefined && oldLine === undefined) wrapper.classList.add('mdPhantomNew')
   markUnit(wrapper, index, 'add')
   setSourceDiff(wrapper, {
     ...(oldLine !== undefined ? { old: oldLine } : {}),
     ...(newLine !== undefined ? { new: newLine } : {}),
   }, undefined, grammar)
-  const oldSide = blockSide('old')
-  const newSide = blockSide('new')
-  if (oldLine === undefined) oldSide.hidden = true
-  if (newLine === undefined) newSide.hidden = true
-  wrapper.append(oldSide, newSide)
+  if (oldLine !== undefined) {
+    const side = document.createElement('span')
+    side.className = 'mdTwinOld mdPhantomSide'
+    side.append(phantomSource(oldLine, grammar))
+    wrapper.append(side)
+  }
+  if (newLine !== undefined) {
+    const side = document.createElement('span')
+    side.className = 'mdTwinNew mdPhantomSide'
+    side.append(phantomSource(newLine, grammar))
+    wrapper.append(side)
+  }
   if (oldLine !== undefined) setMarkerLines(wrapper, unit, 'old')
   if (newLine !== undefined) setMarkerLines(wrapper, unit, 'new')
   return wrapper
@@ -4469,15 +4565,35 @@ function renderMerged(oldText: string, newText: string, invisibleLabel?: string)
  * @param block - one top-level rendered block.
  * @returns the key.
  */
-function blockKey(block: Element): string {
-  // A MATCHED pair (from the tree match plan) shares one anchor id on both sides: the double column pairs
-  // those rows first, instead of guessing from the rendered text/images.
-  const anchors = [...block.querySelectorAll<HTMLElement>('[data-md-match]')].map(element => element.dataset.mdMatch ?? '')
-  if (block instanceof HTMLElement && block.dataset.mdMatch !== undefined) anchors.unshift(block.dataset.mdMatch)
-  if (anchors.length > 0) return `match\u0000${anchors[0]}\u0000${anchors[anchors.length - 1]}\u0000${anchors.length}`
-  const images = [...block.querySelectorAll('img')].map(img => img.getAttribute('src') ?? '').join(',')
-  const text = (block.textContent ?? '').replace(/\s+/g, ' ').trim()
-  return `${block.tagName}\u0000${text}\u0000${images}`
+function blockKeys(block: Element): string[] {
+  const tokens = new Set<string>()
+  const splitList = (block.tagName === 'UL' || block.tagName === 'OL')
+    && block instanceof HTMLElement
+    && block.dataset.mdMatch !== undefined
+    && block.querySelector('[data-md-block]') !== null
+  // A split list unit inherits the whole list's match anchor on every clone; it must align on its ITEM's
+  // block numbers, or every item would look identical to the aligner.
+  if (!splitList && block instanceof HTMLElement && block.dataset.mdMatch !== undefined) {
+    tokens.add(`match\u0000${block.dataset.mdMatch}`)
+  }
+  for (const element of block.querySelectorAll<HTMLElement>('[data-md-match]')) {
+    tokens.add(`match\u0000${element.dataset.mdMatch ?? ''}`)
+  }
+  // Change block numbers are the strongest identity: a MATCHED block carries the SAME number on both sides,
+  // while a one-sided block's number exists on one side only. They survive the renderer's transformations
+  // (a split list unit, a compacted image card, an image or table row) that lose the match anchor.
+  for (const element of block.querySelectorAll<HTMLElement>('[data-md-block]')) {
+    tokens.add(`block\u0000${element.dataset.mdBlock ?? ''}`)
+  }
+  if (block instanceof HTMLElement && block.dataset.mdBlock !== undefined) {
+    tokens.add(`block\u0000${block.dataset.mdBlock}`)
+  }
+  if (tokens.size === 0) {
+    const images = [...block.querySelectorAll('img')].map(img => img.getAttribute('src') ?? '').join(',')
+    const text = (block.textContent ?? '').replace(/\s+/g, ' ').trim()
+    tokens.add(`text\u0000${block.tagName}\u0000${text}\u0000${images}`)
+  }
+  return [...tokens]
 }
 
 /** One row of the aligned double column: the before side's block, the after side's, or both. */
@@ -4489,11 +4605,14 @@ interface DocumentRow {
 /**
  * Put the two documents' top-level blocks on shared rows.
  *
- * The same block (same key) is found in both documents by a longest-common-subsequence walk; the runs between
- * those anchors are paired in order — the k-th changed block of the before side with the k-th of the after
- * side — and whatever is left over stands on its own row. A block that exists on one side ONLY therefore
- * takes a row of its own instead of pushing everything under it out of line with the other column, which is
- * what row alignment means in a rendered document whose row heights come from the content itself.
+ * Two blocks belong on one row when ANY identity token agrees: they carry the same change block number, or
+ * the same tree-match anchor, or (unchanged content) the same text. A longest-common-subsequence walk finds
+ * those anchors; the runs between them are paired in order — the k-th changed block of the before side with
+ * the k-th of the after side — and whatever is left over stands on its own row.
+ *
+ * Token intersection rather than one key string matters because a rendered block can lose part of its
+ * identity: an image pair's old carrier keeps its match anchor while the compacted image card on the new side
+ * keeps only the block number.
  *
  * @param left - the before document's top-level blocks.
  * @param right - the after document's top-level blocks.
@@ -4501,6 +4620,21 @@ interface DocumentRow {
  */
 function alignDocumentBlocks(left: readonly Element[], right: readonly Element[]): DocumentRow[] {
   const rows: DocumentRow[] = []
+  const leftKeys = left.map(blockKeys)
+  const rightKeys = right.map(blockKeys)
+  const shares = (leftAt: number, rightAt: number): boolean =>
+    leftKeys[leftAt]!.some(token => rightKeys[rightAt]!.includes(token))
+  const leftCount = left.length
+  const rightCount = right.length
+  // Suffix LCS lengths, so the walking loop knows whether skipping a block loses a later match.
+  const lengths: number[][] = Array.from({ length: leftCount + 1 }, () => new Array<number>(rightCount + 1).fill(0))
+  for (let leftAt = leftCount - 1; leftAt >= 0; leftAt--) {
+    for (let rightAt = rightCount - 1; rightAt >= 0; rightAt--) {
+      lengths[leftAt]![rightAt] = shares(leftAt, rightAt)
+        ? lengths[leftAt + 1]![rightAt + 1]! + 1
+        : Math.max(lengths[leftAt + 1]![rightAt]!, lengths[leftAt]![rightAt + 1]!)
+    }
+  }
   let leftIndex = 0
   let rightIndex = 0
   let pendingLeft: number[] = []
@@ -4515,25 +4649,24 @@ function alignDocumentBlocks(left: readonly Element[], right: readonly Element[]
     pendingLeft = []
     pendingRight = []
   }
-  for (const part of diffArrays(left.map(blockKey), right.map(blockKey))) {
-    const length = part.value.length
-    if (part.removed) {
-      for (let step = 0; step < length; step++) pendingLeft.push(leftIndex + step)
-      leftIndex += length
+  while (leftIndex < leftCount && rightIndex < rightCount) {
+    if (shares(leftIndex, rightIndex)) {
+      flush()
+      rows.push({ left: left[leftIndex], right: right[rightIndex] })
+      leftIndex++
+      rightIndex++
       continue
     }
-    if (part.added) {
-      for (let step = 0; step < length; step++) pendingRight.push(rightIndex + step)
-      rightIndex += length
-      continue
+    if (lengths[leftIndex + 1]![rightIndex]! >= lengths[leftIndex]![rightIndex + 1]!) {
+      pendingLeft.push(leftIndex)
+      leftIndex++
+    } else {
+      pendingRight.push(rightIndex)
+      rightIndex++
     }
-    flush()
-    for (let step = 0; step < length; step++) {
-      rows.push({ left: left[leftIndex + step], right: right[rightIndex + step] })
-    }
-    leftIndex += length
-    rightIndex += length
   }
+  while (leftIndex < leftCount) pendingLeft.push(leftIndex++)
+  while (rightIndex < rightCount) pendingRight.push(rightIndex++)
   flush()
   return rows
 }
@@ -4850,55 +4983,10 @@ function renderDocuments(oldText: string, newText: string, invisibleLabel?: stri
  * @param root - the rendered document whose pairs get the caption.
  * @param label - the caption, or undefined to leave the pairs bare.
  */
-/**
- * The eye-with-a-slash that says "this change has no rendering of its own".
- *
- * The marker used to carry the words "invisible content"; the icon says the same in a square that sits in the
- * reading line like the image twin's frame does (same dashed edge, same radius — see the stylesheet), and the
- * caller's words move to the marker's accessible name (`aria-label`, and `title` for the pointer).
- *
- * @param label - the caller's words for the marker, when there are any.
- * @returns the icon element.
- */
-function invisibleContentIcon(label: string | undefined): HTMLElement {
-  const holder = document.createElement('span')
-  holder.className = 'mdTwinCaption'
-  holder.setAttribute('data-md-twin-caption', '')
-  if (label === undefined || label === '') {
-    holder.setAttribute('aria-hidden', 'true')
-  } else {
-    holder.setAttribute('role', 'img')
-    holder.setAttribute('aria-label', label)
-    holder.setAttribute('title', label)
-  }
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
-  svg.setAttribute('viewBox', '0 0 24 24')
-  svg.setAttribute('width', '14')
-  svg.setAttribute('height', '14')
-  svg.setAttribute('fill', 'none')
-  svg.setAttribute('stroke', 'currentColor')
-  svg.setAttribute('stroke-width', '1.6')
-  svg.setAttribute('stroke-linecap', 'round')
-  svg.setAttribute('stroke-linejoin', 'round')
-  const eye = document.createElementNS('http://www.w3.org/2000/svg', 'path')
-  eye.setAttribute('d', 'M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z')
-  const pupil = document.createElementNS('http://www.w3.org/2000/svg', 'circle')
-  pupil.setAttribute('cx', '12')
-  pupil.setAttribute('cy', '12')
-  pupil.setAttribute('r', '3')
-  const slash = document.createElementNS('http://www.w3.org/2000/svg', 'path')
-  slash.setAttribute('d', 'm3 3 18 18')
-  svg.append(eye, pupil, slash)
-  holder.append(svg)
-  return holder
-}
-
-/** Put the invisible-change icon in every no-rendering marker, naming it with the caller's words when given. */
+/** No-rendering fallbacks show their SOURCE text inline now: no eye icon or caption is appended anymore. */
 function captionHiddenPairs(root: HTMLElement, label: string | undefined): void {
-  for (const pair of root.querySelectorAll<HTMLElement>('.mdTwinPhantom')) {
-    pair.append(invisibleContentIcon(label))
-    if (label !== undefined && label !== '') pair.setAttribute('title', label)
-  }
+  void root
+  void label
 }
 
 /**
@@ -5016,7 +5104,10 @@ function treeNodeElements(doc: RenderedDoc, node: MarkdownTreeNode): HTMLElement
     })
   if (stamped.length > 0) return stamped
   // Containers (table/list/quote) have no element of their own in `elements`: resolve through a descendant.
-  const descendant = doc.elements.find(entry => entry.start <= start && entry.end >= end)?.el
+  // A NESTED list/quote is covered by no single entry, so a descendant that lies INSIDE its range is the
+  // honest resolver (its closest container is the nested one, not the outer list).
+  const descendant = (doc.elements.find(entry => entry.start <= start && entry.end >= end)
+    ?? doc.elements.find(entry => entry.start >= start && entry.end <= end))?.el
   if (descendant !== undefined) {
     if (node.type === 'table') {
       const table = descendant.closest('table')
@@ -5549,27 +5640,45 @@ function renderInlineUnitGroupDouble(
  * attributed to the separate changes, or an inline attribute change whose counterpart element never rendered.
  * Such a block gets ONE modest source marker at its position (the old renderer's reachability net), so the
  * toolbar can still number, hover and keep it.
+ *
+ * In the double column each call is scoped to ITS column: a pure deletion must never get a marker in the new
+ * column (that is how an old nested list once appeared under the YAML card on the wrong side).
+ *
+ * @param root - the column's rendered document.
+ * @param blocks - every numbered block.
+ * @param otherRoot - the opposite column, so a paired block carried there is not marked twice.
+ * @param side - which column this call serves ('both' for the single column).
  */
-function ensureTreeBlocksReachable(root: HTMLElement, blocks: readonly TreePreviewBlock[], otherRoot?: HTMLElement): void {
+function ensureTreeBlocksReachable(
+  root: HTMLElement,
+  blocks: readonly TreePreviewBlock[],
+  otherRoot?: HTMLElement,
+  side: 'old' | 'new' | 'both' = 'both',
+): void {
   for (const block of blocks) {
     if (block.invisible.length > 0) continue
+    const pureDeletion = block.newNodes.length === 0
+    const pureAddition = block.oldNodes.length === 0
+    if ((side === 'new' && pureDeletion) || (side === 'old' && pureAddition)) continue
     if (root.querySelector(`[data-md-block="${block.index}"]`) !== null) continue
-    // In the double column a block only needs ONE column to carry it: a deletion lives in the old column and an
-    // addition in the new one. Marking it in both would put phantom chips in the column that does not show it,
-    // out of preorder.
+    // In the double column a paired block only needs ONE column to carry it.
     if (otherRoot !== undefined && otherRoot.querySelector(`[data-md-block="${block.index}"]`) !== null) continue
     const oldSource = block.oldNodes.map(node => node.raw).join('\n').replace(/\n+$/, '')
     const newSource = block.newNodes.map(node => node.raw).join('\n').replace(/\n+$/, '')
     if (oldSource === '' && newSource === '') continue
+    const showOld = side !== 'new' && oldSource !== ''
+    const showNew = side !== 'old' && newSource !== ''
     const markers = placeholderTwins(
       block.index,
-      oldSource === '' ? undefined : oldSource,
-      newSource === '' ? undefined : newSource,
+      showOld ? oldSource : undefined,
+      showNew ? newSource : undefined,
       'markdown',
       block.units[0] as unknown as PreviewUnit | undefined,
     )
     for (const marker of markers) stampBlock(marker, block.index, marker.dataset.mdKind === 'del' ? 'del' : 'add')
-    const line = block.newStart <= block.newEnd ? block.newStart : block.oldStart
+    const line = side === 'old'
+      ? block.oldStart
+      : block.newStart <= block.newEnd ? block.newStart : block.oldStart
     const anchor = insertionPointFor(root, Math.max(0, line - 1))
     for (const marker of markers) anchor.parent.insertBefore(marker, anchor.before)
   }
@@ -6222,6 +6331,18 @@ function renderInlineChildBlockDouble(block: TreePreviewBlock, fresh: RenderedDo
       return
     }
   }
+  // An inline TYPE change (a strong becoming a link) has no same-type twin, but each column still renders
+  // ITS own element: paint that element in place instead of degrading the change to a source chip.
+  if (oldNode !== undefined && newNode !== undefined && oldNode.type !== newNode.type
+    && INLINE_NODE_TAGS[oldNode.type] !== undefined && INLINE_NODE_TAGS[newNode.type] !== undefined) {
+    const oldElement = containerOld === undefined ? undefined : inlineElementForNode(containerOld, oldNode)
+    const newElement = containerNew === undefined ? undefined : inlineElementForNode(containerNew, newNode)
+    if (oldElement !== undefined && newElement !== undefined) {
+      markChangedBlock(oldElement, block.index, 'del')
+      markChangedBlock(newElement, block.index, 'add')
+      return
+    }
+  }
   const oldSource = block.oldNodes.map(node => node.raw).join('').replace(/\n+$/, '')
   const newSource = block.newNodes.map(node => node.raw).join('').replace(/\n+$/, '')
   if (containerOld !== undefined && containerOld.parentNode !== null && oldSource !== '') {
@@ -6422,13 +6543,17 @@ export function renderTreeMerged(oldText: string, newText: string, labels?: { re
         index++
         continue
       }
+      // A merged run is painted at the level its nodes share: outermost siblings only (a list's items are
+      // already inside the list element and must not be wrapped/marked separately).
+      const oldMerged = outermostSiblings(oldElements)
+      const freshMerged = outermostSiblings(freshElements)
       // A pure addition is tinted where it renders; a pure deletion is cloned as a struck ghost. A merged pair
       // that exists on both sides (an unrelated replacement) is drawn as the old version above the new one.
       const ghosts: HTMLElement[] = []
-      for (const element of oldElements) {
+      for (const element of oldMerged) {
         const compact = compactImageOnly(element, block, 'del')
         const ghost = compact ?? treeGhostOf(element, block, 'old')
-        const next = freshElements[0]
+        const next = freshMerged[0]
         if (next !== undefined && next.parentNode !== null) next.parentNode.insertBefore(ghost, next)
         else if (compact !== undefined) {
           const line = Math.max(0, (block.newStart || block.oldStart || 1) - 1)
@@ -6437,29 +6562,29 @@ export function renderTreeMerged(oldText: string, newText: string, labels?: { re
         } else treeInsertGhost(block, element, fresh.root)
         ghosts.push(ghost)
       }
-      if (block.kind === 'code' && oldElements.length > 0 && freshElements.length > 0) {
+      if (block.kind === 'code' && oldMerged.length > 0 && freshMerged.length > 0) {
         // Different fence language: the language is invisible, so the whole fence source rides on both versions
         // for the toolbar (` ```ts ` vs ` ```tsx `).
         const oldSource = block.oldNodes.map(node => node.raw).join('\n')
         const newSource = block.newNodes.map(node => node.raw).join('\n')
-        for (const element of [...ghosts, ...freshElements]) setSourceDiff(element, { old: oldSource, new: newSource })
+        for (const element of [...ghosts, ...freshMerged]) setSourceDiff(element, { old: oldSource, new: newSource })
       }
-      if (oldElements.length === 0 && freshElements.length > 0) {
+      if (oldMerged.length === 0 && freshMerged.length > 0) {
         // A wholly added image reads as the compact green image frame, like a changed image pair.
-        const compacts = freshElements.map(element => compactImageOnly(element, block, 'add'))
+        const compacts = freshMerged.map(element => compactImageOnly(element, block, 'add'))
         if (compacts.length > 0 && compacts.every(compact => compact !== undefined)) {
-          freshElements.forEach((element, at) => { element.replaceWith(compacts[at] as HTMLElement) })
-        } else if (freshElements.length > 1) {
+          freshMerged.forEach((element, at) => { element.replaceWith(compacts[at] as HTMLElement) })
+        } else if (freshMerged.length > 1) {
           // A run of adjacent wholly-added blocks: ONE continuous green area (no white gaps between them).
-          wrapBlockUnion(block, freshElements, 'add')
+          wrapBlockUnion(block, freshMerged, 'add')
         } else {
-          markChangedBlock(freshElements[0]!, block.index, 'add')
+          markChangedBlock(freshMerged[0]!, block.index, 'add')
         }
-      } else if (oldElements.length > 0 && freshElements.length === 0) {
+      } else if (oldMerged.length > 0 && freshMerged.length === 0) {
         // A run of adjacent wholly-deleted blocks: ONE continuous red area.
         if (ghosts.length > 1) wrapBlockUnion(block, ghosts, 'del')
       } else {
-        for (const element of freshElements) markChangedBlock(element, block.index, 'add')
+        for (const element of freshMerged) markChangedBlock(element, block.index, 'add')
       }
       index++
       continue
@@ -6727,7 +6852,9 @@ export function renderTreeDocuments(oldText: string, newText: string, labels?: {
       } else {
         // A merged run (whole new document, adjacent additions/deletions): ONE continuous tinted area per
         // column, exactly like the single column's union — no white gap between the tinted blocks.
-        const markMergedSide = (elements: HTMLElement[], kind: 'add' | 'del'): void => {
+        const markMergedSide = (resolved: HTMLElement[], kind: 'add' | 'del'): void => {
+          // Paint at the level the nodes share: outermost siblings only, never a list's items inside its list.
+          const elements = outermostSiblings(resolved)
           if (elements.length === 0) return
           const parent = elements[0]!.parentNode
           const simpleParent = parent instanceof HTMLElement
@@ -6838,7 +6965,9 @@ export function renderTreeDocuments(oldText: string, newText: string, labels?: {
   }
   // Adjacent fully-matched top-level siblings become ONE layout row (the user's merge rule applied to the
   // double column's row layout); the blocks themselves are unchanged and still read as the document's blocks.
-  ensureTreeBlocksReachable(fresh.root, model.blocks, baseline.root)
+  // Each column is reachable for ITS OWN side only: a deletion never gets a marker in the new column.
+  ensureTreeBlocksReachable(baseline.root, model.blocks, fresh.root, 'old')
+  ensureTreeBlocksReachable(fresh.root, model.blocks, baseline.root, 'new')
   const plan = planMergedSiblings(matchMarkdownTrees(oldText, newText).ops)
   tagMatchedAnchors(plan, baseline, fresh)
   wrapTreeContextRuns({ old: baseline.root, new: fresh.root }, plan)
