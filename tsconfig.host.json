@@ -35,6 +35,7 @@
     "src/comments.ts",
     "src/font-slices.ts",
     "src/index.ts",
+    "src/kept-edits.ts",
     "src/open.ts",
     "src/pending.ts",
     "src/persist.ts",

@@ -3110,6 +3110,64 @@
   isolation: isolate;
 }
 
+/* The reader's editable version of the open file (see the panel's edit mode).
+   It takes the diff body's place rather than sitting beside it, so it fills the
+   same box: the header and the decision row stay put and only the middle changes
+   kind. A column, because the hint below the field is part of this surface. */
+.editWrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* The draft itself. It is the file's code, so it wears the code view's own face,
+   size and row height: typing then reads at exactly the size the diff will show
+   the result at, and the panel's font setting moves both together. */
+.editBody {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  margin: 0;
+  padding: 8px 10px;
+  border: 0;
+  /* No focus ring of its own: the field IS the whole surface while it is open,
+     and the panel's frame is already the focus cue. The browser's default inset
+     outline would draw a box inside a box. */
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-markdown-code-block);
+  font-size: calc(1em * var(--dsh-diff-font-scale, 1));
+  line-height: var(--dsh-diff-line-height, 22px);
+  /* Mobile browsers auto-inflate small text in wide blocks; pinned for the same
+     reason the diff body pins it, so the draft and the diff agree on the size. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  /* No soft wrap (the element also carries wrap="off"): a long line scrolls
+     sideways here exactly as it does in the code view, instead of re-flowing into
+     rows that have no line numbers to match. Tab stops follow the panel's width
+     setting, set on the element from the same value the diff uses. */
+  white-space: pre;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/* Why the field exists and what keeping does with it. It is a note, not a control:
+   the decisions above the code are the controls. */
+.editHint {
+  flex: none;
+  margin: 0;
+  padding: 6px 10px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
 .diffBody {
   /* The code's own scroll: no rubber-band at its edges. The panel is a fixed overlay, so a
      bounce there reads as the panel (and the rows under it) sliding, not as the code being

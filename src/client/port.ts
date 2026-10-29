@@ -9,6 +9,7 @@ import type { ClientConnectionRpc, SessionId } from '@deepseek-ai/dsh-client-con
 import type {
   CommentAnchor, CommentAsk, CommentQuoteLine, CommentRecord,
   DiffApprovalActionValue, DiffApprovalAddValue, DiffApprovalBlockRange, DiffApprovalBrowseValue, DiffApprovalBulkValue,
+  DiffApprovalKeepEditedValue,
   DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue,
   DiffApprovalListCountValue,
   DiffApprovalListValue,
@@ -58,6 +59,16 @@ export interface DiffApprovalPort {
   listCount(sessionId: SessionId): Promise<DiffApprovalListCountValue>
   /** Keep one operation. `keepListed` leaves the resolved entry in the list. */
   keep(sessionId: SessionId, id: string, keepListed?: boolean): Promise<DiffApprovalActionValue>
+  /**
+   * Keep the READER's own version of one pending change: `content` is the file's whole text.
+   *
+   * Distinct from `keep` on purpose. `keep` accepts the content the file already holds; this one WRITES
+   * the reader's version first and makes it the pending change's after-content, and the host answers
+   * whether it did that (`kept`), found nothing to change (`unchanged`), or found no such row
+   * (`missing`). The host never submits a prompt for it: the diff of what the reader changed is picked
+   * up by the agent's next model call, so a keep can never start a turn.
+   */
+  keepEdited(sessionId: SessionId, id: string, content: string): Promise<DiffApprovalKeepEditedValue>
   /** Revert one operation. `keepListed` leaves the resolved entry in the list. */
   revert(sessionId: SessionId, id: string, keepListed?: boolean): Promise<DiffApprovalActionValue>
   /** Keep one diff block (accept its change into the tracked baseline). */
@@ -162,6 +173,12 @@ export function createDiffApprovalPort(rpc: ClientConnectionRpc): DiffApprovalPo
       // Omit the field entirely when unset, so the wire payload keeps its shape.
       return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'keep',
         keepListed === undefined ? { sessionId, id } : { sessionId, id, keepListed }))
+    },
+    async keepEdited(sessionId, id, content) {
+      // The whole file goes over the wire, empty string included: an emptied file is a real version,
+      // and a payload builder that dropped the field would make "the reader deleted every line" a
+      // malformed request rather than a keep.
+      return keepEditedValueOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'keep-edited', { sessionId, id, content }))
     },
     async revert(sessionId, id, keepListed) {
       return actionOf(await rpc.call(DIFF_APPROVAL_CHANNEL, 'revert',
@@ -523,6 +540,22 @@ function actionOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): Dif
   const entryId = typeof id === 'string' && id.length > 0 ? id : undefined
   const resolved = (value as Record<string, unknown>).resolved
   return resolved === true ? { outcome, id: entryId, resolved: true } : { outcome, id: entryId }
+}
+
+/** Narrow the keep-edited endpoint's value; a malformed wire value is a keep failure. */
+function keepEditedValueOf(result: Awaited<ReturnType<ClientConnectionRpc['call']>>): DiffApprovalKeepEditedValue {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+  const value: unknown = result.value
+  if (typeof value !== 'object' || value === null) throw new Error('the keep of an edited change returned a malformed value')
+  const outcome = (value as Record<string, unknown>).outcome
+  if (outcome !== 'kept' && outcome !== 'unchanged' && outcome !== 'missing') {
+    throw new Error('the keep of an edited change returned a malformed outcome')
+  }
+  // `appended` is the host's statement that the agent will be told on its next call; absent or not a
+  // boolean is read as "not told", never as "told", so a host that cannot say it cannot make the panel
+  // promise it.
+  const appended = (value as Record<string, unknown>).appended
+  return { outcome, appended: appended === true }
 }
 
 /** Narrow the vcs-import endpoint's value; a malformed wire value is a failure. */

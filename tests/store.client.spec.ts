@@ -2,7 +2,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
-import type { DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue, DiffApprovalListCountValue, DiffApprovalListValue, DiffApprovalRefreshValue, PendingFileDiff } from '../src/types.ts'
+import type { DiffApprovalActionValue, DiffApprovalBlockRange, DiffApprovalCommentAddValue, DiffApprovalCommentAskValue, DiffApprovalCommentRemoveManyValue, DiffApprovalCommentRemoveValue, DiffApprovalKeepEditedValue, DiffApprovalListCountValue, DiffApprovalListValue, DiffApprovalRefreshValue, PendingFileDiff } from '../src/types.ts'
 import type { CommentDraft, DiffApprovalPort } from '../src/client/port.ts'
 import type { PendingDiffSnapshot } from '../src/client/slots.ts'
 import { createPendingDiffStore } from '../src/client/store.ts'
@@ -34,6 +34,7 @@ interface PortSeam {
   list: ListMock
   listCount: ReturnType<typeof vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListCountValue>>>
   keep: ActionMock
+  keepEdited: ReturnType<typeof vi.fn<(sessionId: SessionId, id: string, content: string) => Promise<DiffApprovalKeepEditedValue>>>
   revert: ActionMock
   blockKeep: BlockActionMock
   blockRevert: BlockActionMock
@@ -49,12 +50,13 @@ interface PortSeam {
 }
 
 /** Build one seam whose answers the test controls through typed mocks. */
-function port(overrides: Partial<Pick<PortSeam, 'list' | 'listCount' | 'keep' | 'revert' | 'blockKeep' | 'blockRevert' | 'undo' | 'redo' | 'refreshVcs'>> = {}): PortSeam {
+function port(overrides: Partial<Pick<PortSeam, 'list' | 'listCount' | 'keep' | 'keepEdited' | 'revert' | 'blockKeep' | 'blockRevert' | 'undo' | 'redo' | 'refreshVcs'>> = {}): PortSeam {
   const list = vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListValue>>(async () => listValue({ files: [FILE] }))
   // An empty count by default: this suite is about entries, and a canned non-zero number would make a
   // test that forgot to stage one pass for the wrong reason.
   const listCount = vi.fn<(sessionId: SessionId) => Promise<DiffApprovalListCountValue>>(async () => ({ count: 0 }))
   const keep = vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'kept' }))
+  const keepEdited = vi.fn<(sessionId: SessionId, id: string, content: string) => Promise<DiffApprovalKeepEditedValue>>(async () => ({ outcome: 'kept', appended: true }))
   const revert = vi.fn<(sessionId: SessionId, id: string) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'reverted' }))
   const blockKeep = vi.fn<(sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'kept' }))
   const blockRevert = vi.fn<(sessionId: SessionId, id: string, block: DiffApprovalBlockRange) => Promise<DiffApprovalActionValue>>(async () => ({ outcome: 'reverted' }))
@@ -72,8 +74,8 @@ function port(overrides: Partial<Pick<PortSeam, 'list' | 'listCount' | 'keep' | 
     // silently replaced the caller's `list` (and every other mock) with the canned one here, so a test
     // that staged a bespoke answer was handed the default and could not tell — and the store under test
     // received the canned one too.
-    port: { list, listCount, keep, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentRemoveMany, commentAsk, markSeen, commentSeen, ...overrides },
-    list, listCount, keep, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentRemoveMany, commentAsk, markSeen, commentSeen, ...overrides,
+    port: { list, listCount, keep, keepEdited, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentRemoveMany, commentAsk, markSeen, commentSeen, ...overrides },
+    list, listCount, keep, keepEdited, revert, blockKeep, blockRevert, undo, redo, refreshVcs, commentAdd, commentRemove, commentRemoveMany, commentAsk, markSeen, commentSeen, ...overrides,
   }
 }
 
@@ -518,6 +520,34 @@ describe('actions', () => {
     release?.({ outcome: 'kept' })
     await settled
     expect(store.getSnapshot()).toEqual({ read: true, files: [], ...NO_COMMENTS, busy: new Set(), failed: new Map() })
+  })
+
+  it('keeps the reader\'s version through the port and keeps the row, then reads it back', async () => {
+    // The row does NOT leave the list: the host makes the reader's text the entry's after-content, so
+    // the store's bookkeeping is the keep-listed one — busy on the row, then the read that shows it.
+    const seam = port()
+    seam.list.mockResolvedValue(listValue({ files: [{ ...FILE, newText: 'mine' }] }))
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+
+    await store.keepEdited(S1, FILE.id, 'mine')
+    expect(seam.keepEdited).toHaveBeenCalledWith(S1, FILE.id, 'mine')
+    expect(store.getSnapshot().files[0]!.newText).toBe('mine')
+    expect(store.getSnapshot().busy).toEqual(new Set())
+    expect(store.getSnapshot().failed).toEqual(new Map())
+  })
+
+  it('reports a refused keep of an edited change inline, and leaves the row as it was', async () => {
+    const seam = port()
+    seam.keepEdited.mockRejectedValue(new Error('keep edited failed: disk full'))
+    const store = createPendingDiffStore(seam.port)
+    await store.refresh(S1)
+
+    await store.keepEdited(S1, FILE.id, 'mine')
+    // The row keeps its old content (no read was made of a write that never landed) and says why.
+    expect(store.getSnapshot().files[0]!.newText).toBe('b')
+    expect(store.getSnapshot().failed).toEqual(new Map([[FILE.id, 'keep edited failed: disk full']]))
+    expect(store.getSnapshot().busy).toEqual(new Set())
   })
 
   it('reverts through the port and removes the entry', async () => {

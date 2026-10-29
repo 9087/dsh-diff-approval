@@ -319,6 +319,40 @@ describe('keep and revert', () => {
   })
 })
 
+describe('keep-edited', () => {
+  it('sends the reader\'s whole version, empty string included, and narrows what the host did', async () => {
+    const seam = fakeRpc({
+      'keep-edited': { ok: true, value: { outcome: 'kept', appended: true } },
+    })
+    const port = createDiffApprovalPort(seam.rpc)
+    await expect(port.keepEdited(S1, '/repo/a.txt', 'mine\n')).resolves.toEqual({ outcome: 'kept', appended: true })
+    expect(seam.call).toHaveBeenCalledWith('/diff-approval', 'keep-edited', {
+      sessionId: 'session-1', id: '/repo/a.txt', content: 'mine\n',
+    })
+
+    // A file the reader emptied is a real version, so the field travels as '' rather than being dropped.
+    await port.keepEdited(S1, '/repo/a.txt', '')
+    expect(seam.call).toHaveBeenLastCalledWith('/diff-approval', 'keep-edited', {
+      sessionId: 'session-1', id: '/repo/a.txt', content: '',
+    })
+  })
+
+  it('reads an absent appended flag as "not told", never as "told"', async () => {
+    const seam = fakeRpc({ 'keep-edited': { ok: true, value: { outcome: 'unchanged' } } })
+    await expect(createDiffApprovalPort(seam.rpc).keepEdited(S1, '/repo/a.txt', 'same'))
+      .resolves.toEqual({ outcome: 'unchanged', appended: false })
+  })
+
+  it('rejects a malformed outcome, a missing outcome and a transport error', async () => {
+    const malformed = fakeRpc({ 'keep-edited': { ok: true, value: { outcome: 'saved' } } })
+    await expect(createDiffApprovalPort(malformed.rpc).keepEdited(S1, 'e1', 'x')).rejects.toThrow('malformed outcome')
+    const empty = fakeRpc({ 'keep-edited': { ok: true, value: {} } })
+    await expect(createDiffApprovalPort(empty.rpc).keepEdited(S1, 'e1', 'x')).rejects.toThrow('malformed outcome')
+    const failed = fakeRpc({ 'keep-edited': { ok: false, error: { code: 'internal', message: 'disk full', details: {} } } })
+    await expect(createDiffApprovalPort(failed.rpc).keepEdited(S1, 'e1', 'x')).rejects.toThrow('internal: disk full')
+  })
+})
+
 describe('open', () => {
   it('narrows the open outcome and passes the action through', async () => {
     const seam = fakeRpc({

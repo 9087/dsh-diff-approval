@@ -248,6 +248,10 @@ export function apply(ctx: ClientContext): void {
       onRefreshCount: (sessionId) => { void store.refreshCount(sessionId) },
       onMarkSeen: (sessionId, id) => { if (sessionId !== undefined) void store.markSeen(sessionId, id) },
       onKeep: (sessionId, path, keepListed) => store.keep(sessionId, path, keepListed),
+      // The reader's own version of a pending change. The store keeps the row busy, then reads it back:
+      // the host has made the reader's text the entry's after-content and queued its diff for the agent,
+      // so nothing here has to prompt anything — and nothing here may.
+      onKeepEdited: (sessionId, path, content) => store.keepEdited(sessionId, path, content),
       onRevert: (sessionId, path, keepListed) => {
         // The entry comes from THIS session's own view: the whole-page snapshot may be pointed at another
         // session's read (another seat's poll), and the reference remap below is about the reader's file.

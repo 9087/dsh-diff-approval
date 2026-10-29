@@ -8,7 +8,7 @@
 [![兼容性（比 latest 更新的已发布版本）](https://img.shields.io/github/actions/workflow/status/9087/dsh-diff-approval/compat-newer.yml?label=compat%20(newer))](https://github.com/9087/dsh-diff-approval/actions/workflows/compat-newer.yml)
 [![发布](https://img.shields.io/github/actions/workflow/status/9087/dsh-diff-approval/release.yml?label=release)](https://github.com/9087/dsh-diff-approval/actions/workflows/release.yml)
 
-一个 DeepSeek Harness（DSH）待处理改动审核插件：自动跟踪每次成功的 `edit` / `write` / 编辑器（`str_replace_editor`）改动，在侧边栏整合为一个待处理列表，可逐个文件查看完整差异并保留 / 回退，也可以把工作区里版本控制仓库的本地改动一键导入（Git / SVN / Perforce）。
+一个 DeepSeek Harness（DSH）待处理改动审核插件：自动跟踪每次成功的 `edit` / `write` / 编辑器（`str_replace_editor`）改动，在侧边栏整合为一个待处理列表，可逐个文件查看完整差异并保留 / 回退，也可以把工作区里版本控制仓库的本地改动一键导入（Git / SVN / Perforce）。待处理改动还可以**就地改写**：在面板里直接编辑文件并保留，你的版本就成为这条改动——同时，你相对 Agent 原稿的改动会以 diff 形式追加到 Agent 的上下文，在它下一次调用时生效（不提交提示词，也不发起回合）。
 
 ![待处理改动面板](docs/images/pending-panel.zh.png)
 
@@ -45,7 +45,8 @@
 - **外部改动**：已纳入列表的文件若之后被外部修改（其它工具 / 编辑器），面板会跟进最新内容并标记分歧。
 - **打开 / 定位**：查看某个文件的差异时，可一键在默认应用中打开它，或在系统文件管理器中定位它。
 - **导入版本控制的改动**：列表为空时，点击按钮即可导入工作区里 **Git / SVN / Perforce** 的本地改动——**凡是没有提交的都算，add 过与否一样**（Git 以最后一次提交为基准，即 `git diff HEAD` 的口径），以及已删除文件，和（可选开启的）VCS 从未见过的文件（未跟踪 / 未版本化）。通过从工作区目录逐级向上查找 VCS 根目录，工作区在子目录里也能识别。
-- **持久化**：待处理状态按 workspace 落盘至 `<dshHome>/diff-approval/workspaces/<workspaceId>.json`，跨重启保留——回来时未处理的改动仍在，即便换了新会话。
+- **就地编辑**：在打开文件的工具栏点 **编辑**，代码视图变为可编辑的源码框，内容是这条待处理改动的 after 版本。改完点 **保留我的修改**：文件被写入，条目留在列表里显示你的版本，并且像其它操作一样可以用 `Ctrl+Z` 撤销。面板还会把你相对 Agent 原稿的改动按文件生成 unified diff，追加到 Agent 的动态运行时上下文（每次模型调用都会重新组装），因此 Agent 在下一次调用时就能看到你改了什么。保留不会提交任何提示词，也不会发起回合。
+- **持久化**：待处理状态按 workspace 落盘至 `<dshHome>/diff-approval/workspaces/<workspaceId>.json`，跨重启保留——回来时未处理的改动仍在，即便换了新会话。尚未交付的就地编辑 diff 按会话存放在 `kept-edits/` 目录，因此保留之后、Agent 下一次调用之前即使重启，也不会丢失。
 
 ## 📦 安装
 
@@ -84,6 +85,7 @@ npx @deepseek-ai/dsh plugin --profile web add dsh-diff-approval
 ## 📝 注意事项
 
 - 只自动记录被跟踪的改动（`edit`、`write` 与编辑器 `str_replace_editor` 调用）。通过以上工具以外的删除（如 shell `rm`）只能对已跟踪的文件感知：条目显示"文件已不存在"，回退即恢复。
+- 保留的就地编辑通过 harness 自己的动态运行时上下文交给 Agent，而不是提示词。上下文在每次模型调用前组装，因此这份 diff 会出现在 Agent 的下一次请求里——无论那是你发的消息、排队中的回合，还是重启后的调用——保留本身不提交任何东西、也不发起任何东西。diff 按文件对照 Agent 产出的内容计算，只显示你改了什么、不包含 Agent 已经写过的部分；在下一次调用之前再次编辑，会合并成一份累计 diff，并在这次模型请求中消费掉。工作区之外的文件在 diff 头里保留绝对路径；超过插件预算（40000 字符）的 diff 会被截断，并在末尾注明。
 - VCS 导入通过部署环境的 shell 执行器运行只读的 Git / SVN / Perforce 命令，需要对应 CLI 在 `PATH` 中。包含版本控制未跟踪文件（默认关闭）会扫描整个工作区，目录很大时可能较慢。
 - 新建文件的整文件回退操作显示为**删除**并移除该文件。
 - 回退文件时会保留其当前换行符（LF / CRLF）。

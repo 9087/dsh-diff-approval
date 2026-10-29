@@ -105,6 +105,15 @@ export interface PendingDiffStore extends HostObservable<PendingDiffSnapshot> {
   /** Inline one workspace image as a base64 data URI (empty when unreadable). */
   previewImage: (sessionId: SessionId, path: string) => Promise<string | undefined>
   /**
+   * Keep the READER's own version of one pending change, then refresh once.
+   *
+   * The keep stays on the row: the host writes the reader's version and makes it the entry's after-content,
+   * so the refreshed entry shows what the reader wrote with its diff still pending. The host queues a
+   * unified diff of the change for the agent's next model call; no prompt is sent, so this never starts a
+   * turn. It is the same busy/failure bookkeeping as `keep` so the row reports a refused write inline.
+   */
+  keepEdited: (sessionId: SessionId, id: string, content: string) => Promise<void>
+  /**
    * Write one annotation down, then refresh so the thread appears from the host's own
    * copy (the panel keeps no thread state of its own).
    */
@@ -613,6 +622,12 @@ export function createPendingDiffStore(port: DiffApprovalPort): PendingDiffStore
         return withKeptEntry(sessionId, id, () => this.refresh(sessionId), async () => { await port.revert(sessionId, id, true) })
       }
       return withBusy(sessionId, id, async () => { await port.revert(sessionId, id) })
+    },
+    // The reader's own version: the row stays listed (that is the host's answer), so the bookkeeping is
+    // the one a keep-listed row uses — busy on the row, the failure inline, then the read that shows the
+    // reader's content as the pending change's after side.
+    keepEdited(sessionId, id, content) {
+      return withKeptEntry(sessionId, id, () => this.refresh(sessionId), async () => { await port.keepEdited(sessionId, id, content) })
     },
     // A block op keeps the entry: mark the file busy, run the port call, then
     // refresh so the entry's diff updates (the poll alone would lag a second).

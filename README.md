@@ -8,7 +8,7 @@ English | [中文](README.zh.md)
 [![Compat (newer published releases)](https://img.shields.io/github/actions/workflow/status/9087/dsh-diff-approval/compat-newer.yml?label=compat%20(newer))](https://github.com/9087/dsh-diff-approval/actions/workflows/compat-newer.yml)
 [![Release](https://img.shields.io/github/actions/workflow/status/9087/dsh-diff-approval/release.yml?label=release)](https://github.com/9087/dsh-diff-approval/actions/workflows/release.yml)
 
-A DeepSeek Harness (DSH) plugin for pending-change review: it automatically tracks every successful `edit`, `write`, and editor (`str_replace_editor`) mutation, folds them into a single pending list in the sidebar where each file's diff can be reviewed and kept/reverted — and it can also import the workspace's version-control repository's local changes (Git / SVN / Perforce) in one click.
+A DeepSeek Harness (DSH) plugin for pending-change review: it automatically tracks every successful `edit`, `write`, and editor (`str_replace_editor`) mutation, folds them into a single pending list in the sidebar where each file's diff can be reviewed and kept/reverted — and it can also import the workspace's version-control repository's local changes (Git / SVN / Perforce) in one click. A pending change can also be rewritten **in place**: edit the file in the panel, press Keep, and your version becomes the change — with a unified diff of what you changed, against what the agent wrote, appended to the agent's context for its next call (no prompt, no turn).
 
 ![Pending changes panel](docs/images/pending-panel.png)
 
@@ -45,7 +45,8 @@ For Markdown files, the source-line diff can also be shown as a rendered before/
 - **External changes**: files already in the pending list are monitored — if one is later modified outside the reviewed edits (another tool, an editor), the panel adopts the new content and flags the divergence.
 - **Open / Reveal**: while reviewing a file's diff, open it in its default app or reveal it in the system file manager with one click.
 - **Import version-control changes**: when the list is empty, click the button to import the workspace's local changes from **Git / SVN / Perforce** — everything that is **not committed yet, staged or not** (Git is read against the last commit, the `git diff HEAD` view), plus deleted files and, opt-in, files the VCS has never seen (untracked / unversioned). The VCS root is found by walking up from the workspace, so a workspace inside a subdirectory works too.
-- **Persistence**: pending state is stored per workspace at `<dshHome>/diff-approval/workspaces/<workspaceId>.json` and survives restarts — unhandled changes are still there when you come back, even in a fresh session.
+- **Edit in place**: the **Edit** button in the open file's toolbar turns the code view into an editable source field holding the pending change's after-content. Type into it and press **Keep my version**: the file is written, the row stays in the list showing your version, and the change is undoable with `Ctrl+Z` as usual. The panel also appends a unified diff per file — your version against what the agent itself produced — to the agent's dynamic runtime context, which every model call assembles fresh, so the agent understands your edit on its next call. The keep submits no prompt and starts no turn.
+- **Persistence**: pending state is stored per workspace at `<dshHome>/diff-approval/workspaces/<workspaceId>.json` and survives restarts — unhandled changes are still there when you come back, even in a fresh session. Undelivered kept-edit diffs are stored per session in `kept-edits/`, so a restart between your keep and the agent's next call loses nothing.
 
 ## 📦 Install
 
@@ -84,6 +85,7 @@ Then restart `dsh web`.
 ## 📝 Notes
 
 - Only tracked mutations (`edit`, `write`, and `str_replace_editor` editor calls) are recorded automatically. Deletions made outside these tools (e.g. shell `rm`) are sensed only for tracked files: the entry turns "File is gone" and its Revert restores the file.
+- A kept edit reaches the agent through the harness's own dynamic runtime context, not a prompt. The context is assembled before every model call, so the diff is part of the agent's next request whatever that request is — a message you send, a queued turn, or a call after a restart — and the keep itself submits nothing and starts nothing. The diff is computed per file against the content the agent produced, so it shows exactly what you changed and nothing the agent already wrote; a second edit before that call arrives as one cumulative diff, and is consumed at the model request it was admitted to. Files outside the workspace keep their absolute path in the diff's headers; a diff over the plugin's size budget (40 000 characters) is cut with a line saying so.
 - The VCS import runs read-only Git/SVN/Perforce commands through the deployment's shell executor, so the respective CLI must be on `PATH`. Including files version control has not seen (default off) scans the whole workspace, which can be slow on large trees.
 - For a newly-created file, the whole-file revert action reads **Delete** and removes the file.
 - Reverting a file writes it back with its current line endings (LF / CRLF) preserved.

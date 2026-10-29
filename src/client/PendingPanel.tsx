@@ -2,7 +2,7 @@
 
 import { Component, Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactElement, ReactNode } from 'react'
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactElement, ReactNode } from 'react'
 import { IconBrowseOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16, IconEllipsisOutline16, IconFolderOpenOutline16, IconListPenOutline16, IconPanelLeftOutline16, IconPlusOutline16, IconRefreshOutline16, IconSearchOutline16, IconSettingsOutline16, Menu, Toast, Tooltip, writeClipboard } from './dsh-icons.ts'
 import type { MenuEntry } from './dsh-icons.ts'
 import { usePublishedSessionId, selectedSessionOf, unreviewableSession } from './session-seat.ts'
@@ -1404,6 +1404,13 @@ interface PendingDiffProps {  file: PendingFileDiff
   t: Translator
   /** `keepListed` answers the whole-file prompt up front: false removes the entry outright. */
   onKeep: (sessionId: SessionId, id: string, keepListed?: boolean) => Promise<void>
+  /**
+   * Keep the reader's own version of this pending change: `content` is the file's whole text.
+   *
+   * Absent on a seat built against a face that has no such verb, which is what keeps the editor out of
+   * that page entirely (see the toolbar's own guard) rather than offering a button that cannot work.
+   */
+  onKeepEdited?: ((sessionId: SessionId, id: string, content: string) => Promise<void>) | undefined
   /** The reader is looking at this file now: its row's unseen dot goes out. */
   onMarkSeen?: ((sessionId: SessionId, id: string) => void) | undefined
   onRevert: (sessionId: SessionId, id: string, keepListed?: boolean) => Promise<void>
@@ -2355,6 +2362,20 @@ interface RowRange {
  */
 function fileHasNoDiff(file: PendingFileDiff): boolean {
   return changeBlocksOf(computeWholeFileDiff(file.oldText, file.newText)).length === 0
+}
+
+/**
+ * Whether two texts are the same FILE CONTENT, line endings aside.
+ *
+ * The line terminators belong to the file, not to its content: an HTML textarea always delivers `\n`,
+ * so a draft of a CRLF file comes back with LF terminators and would otherwise read as changed on every
+ * character — the same tolerance the whole-file diff uses between an entry's content and the file's.
+ * @param left - one text.
+ * @param right - the other.
+ * @returns whether the two say the same thing.
+ */
+function sameEditText(left: string, right: string): boolean {
+  return left.replace(/\r\n?/g, '\n') === right.replace(/\r\n?/g, '\n')
 }
 
 /** Whether a block keep/revert range covers the file's entire change region, so
@@ -4305,7 +4326,7 @@ export function inlineItemCount(widths: readonly number[], available: number, ga
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, landingLine, landingOld, landingComment, landingCard, onLanded, failedMessage, commentSkill, comments, commentAnswers, commentsRevision, commentLines, onCommentAdd, onCommentRemove, onCommentAsk, onCommentSeen, onPasteReference, onToast, t, onAddTypedPath, onPreviewLink, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, releaseChip }: PendingDiffProps) {
+function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, landingLine, landingOld, landingComment, landingCard, onLanded, failedMessage, commentSkill, comments, commentAnswers, commentsRevision, commentLines, onCommentAdd, onCommentRemove, onCommentAsk, onCommentSeen, onPasteReference, onToast, t, onAddTypedPath, onPreviewLink, onKeep, onKeepEdited, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, releaseChip }: PendingDiffProps) {
   // The same five search-bar tooltips as the split view, plus the copy-reference button, decided once
   // (see `chords.ts`): this host's keycaps where it can draw them, the pre-0.1.7-rc.2 glued label
   // where it cannot. The toolbar's own items decide per item, in their map below.
@@ -4320,6 +4341,100 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   // list escapes the diff's overflow clip.
   /** The path being typed into the header field; null shows the open file's own path. */
   const [pathDraft, setPathDraft] = useState<string | null>(null)
+  /**
+   * The reader's own draft of this file while the editor is open; `null` means the diff is showing.
+   *
+   * The WHOLE file is the draft, not a patch: the host takes the reader's complete version, and a draft
+   * that a change underneath it has moved past is still a version of the file the reader can keep or
+   * abandon. The row keeps its place while it is edited, so closing the editor returns to the diff.
+   */
+  const [editDraft, setEditDraft] = useState<string | null>(null)
+  /**
+   * The draft a Keep was just asked for, so the editor closes only once the HOST's own read shows it.
+   *
+   * Its other job is to stop a second press while the first is still in flight: `busy` covers the
+   * moment React re-renders, and this covers the same tick.
+   */
+  const [editSaved, setEditSaved] = useState<string | null>(null)
+  const editRef = useRef<HTMLTextAreaElement | null>(null)
+  /** Whether the editor is open. `editDraft` is its content, so the two cannot disagree. */
+  const editing = editDraft !== null
+  /** Whether the draft differs from what the pending change already holds (line endings aside). */
+  const editDirty = editDraft !== null && !sameEditText(editDraft, file.newText)
+  // The editor belongs to ONE file: selecting another row abandons the draft rather than carrying it onto
+  // a file it was never written for (and a keep that lands does the same, below).
+  useEffect(() => {
+    setEditDraft(null)
+    setEditSaved(null)
+  }, [file.id])
+  // Close the editor when a keep has landed, which is the host's own read saying so: a refused write (or
+  // one that found nothing to change) leaves the draft in place to fix or abandon rather than pretending
+  // it was saved.
+  useEffect(() => {
+    if (editSaved === null || !sameEditText(file.newText, editSaved)) return
+    setEditDraft(null)
+    setEditSaved(null)
+  }, [file.newText, editSaved])
+  // The caret goes into the editor as it opens, at the top: the reader pressed Edit to type, and a field
+  // that opens without focus reads as a disabled surface.
+  useEffect(() => {
+    if (!editing) return
+    const element = editRef.current
+    if (element === null) return
+    element.focus()
+    element.setSelectionRange(0, 0)
+  }, [editing])
+
+  /** Open the reader's editor on the file as it stands: the pending change's after-content. */
+  const openEditor = (): void => {
+    if (onKeepEdited === undefined) return
+    // The Markdown preview is not an editable surface, and re-rendering it from the draft would be a
+    // second implementation of the code editor: opening the editor shows the SOURCE, which is what the
+    // reader is editing. A later keep goes back to whichever view was showing.
+    setEditDraft(file.newText)
+    setEditSaved(null)
+  }
+
+  /** Abandon the draft and go back to the diff: Esc, the toolbar toggle, or the editor's own Cancel. */
+  const closeEditor = (): void => {
+    setEditDraft(null)
+    setEditSaved(null)
+  }
+
+  /**
+   * Ask the host to keep the reader's version. The keep is not a prompt and never starts a turn: the
+   * host writes the file, makes the version the pending change's after-content, and queues a unified
+   * diff of it for the agent's next model call. The editor closes when that write is visible here.
+   */
+  const keepEditedDraft = async (): Promise<void> => {
+    if (onKeepEdited === undefined || editDraft === null || editSaved !== null) return
+    const draft = editDraft
+    setEditSaved(draft)
+    await onKeepEdited(sessionId, file.id, draft)
+  }
+
+  /**
+   * The editor's own keys: Esc abandons the draft, and Tab indents instead of leaving the field.
+   *
+   * The Tab is the one thing a code field must not give to the browser: a reader who has just typed a
+   * line cannot be expected to reach for the mouse to indent it. The caret is restored by hand because a
+   * controlled value re-renders from the end otherwise.
+   */
+  const onEditKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>): void => {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      closeEditor()
+      return
+    }
+    if (event.key !== 'Tab' || editDraft === null) return
+    event.preventDefault()
+    const element = event.currentTarget
+    const start = element.selectionStart
+    const end = element.selectionEnd
+    setEditDraft(`${editDraft.slice(0, start)}\t${editDraft.slice(end)}`)
+    requestAnimationFrame(() => { element.setSelectionRange(start + 1, start + 1) })
+  }
+
   const [langOverride, setLangOverride] = useState<string | undefined>(undefined)
   const [langMenuOpen, setLangMenuOpen] = useState(false)
   const langMenuItems = useMemo<MenuEntry[]>(() => [
@@ -8862,6 +8977,18 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       },
     })
   }
+  // The reader's own edit of the pending change. It is left out of a page whose face has no verb for it
+  // (an older seat), and out of a file there is no text to edit (binary, or a format the backend will not
+  // decode): a control that cannot work is worse than no control. The label names the other state, the way
+  // the view toggles beside it do — one button, pressed to enter and pressed again to leave.
+  if (onKeepEdited !== undefined && file.textUnavailable !== true) {
+    toolbarItems.push({
+      kind: 'button', key: 'edit', data: { 'data-diff-edit': '' }, disabled: busy,
+      label: t(editing ? 'action.editClose' : 'action.edit'),
+      icon: <IconListPenOutline16 size={14} />,
+      onSelect: () => { if (editing) closeEditor(); else openEditor() },
+    })
+  }
   toolbarItems.push({
     kind: 'button', key: 'refreshVcs', data: { 'data-diff-refresh-vcs': '' }, disabled: busy,
     label: t('action.refreshVcs'), icon: <IconRefreshOutline16 size={14} />,
@@ -9085,7 +9212,32 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
         {file.textUnavailable === true && (
           <p className={`${css.note} ${css.noteCentered}`} data-diff-text-unavailable>{t('panel.textUnavailable')}</p>
         )}
-        {fileHasNoDiff(file) && file.textUnavailable !== true ? (
+        {/* While the reader is editing, the pair is save-or-abandon: the row's own Keep would accept the
+            content the file already holds, which is not what an open editor is asking, and its Revert would
+            throw the draft away without saying so. Revert stays one press away — closing the editor brings
+            the row's own decisions back. */}
+        {editing ? (
+          <>
+            <button
+              type="button"
+              className={`${css.action} ${css.actionPrimary} ${css.actionQuietDisabled}`}
+              data-diff-keep-edited
+              disabled={busy || editSaved !== null || !editDirty}
+              onClick={() => { void keepEditedDraft() }}
+            >
+              {t('action.keepEdited')}
+            </button>
+            <button
+              type="button"
+              className={`${css.action} ${css.actionQuietDisabled}`}
+              data-diff-edit-cancel
+              disabled={busy}
+              onClick={closeEditor}
+            >
+              {t('action.editClose')}
+            </button>
+          </>
+        ) : fileHasNoDiff(file) && file.textUnavailable !== true ? (
           <button
             type="button"
             className={`${css.action} ${css.actionPrimary} ${css.actionQuietDisabled}`}
@@ -9120,7 +9272,33 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
         </div>
       </div>
       {failedMessage !== undefined && <p className={css.actionError} data-diff-action-error>{failedMessage}</p>}
-      {previewActive ? (
+      {/* The reader's editable version of the file. It REPLACES the diff while it is open rather than
+          sitting beside it: the editor is the file's content, and two surfaces showing two versions of one
+          file at once would make the reader guess which one a Keep would accept. It comes before the
+          preview branch because a Markdown preview has no editable surface of its own (see `openEditor`). */}
+      {editing ? (
+        <div className={css.editWrap} data-diff-edit-wrap>
+          <textarea
+            ref={editRef}
+            className={css.editBody}
+            data-diff-edit-body
+            value={editDraft}
+            spellCheck={false}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            // No soft wrap: a code editor scrolls sideways rather than re-flowing a long line into rows
+            // that have no line numbers to match. The panel's own tab width applies to the draft, so the
+            // reader sees the indent they typed the same way the diff will show it afterwards.
+            wrap="off"
+            aria-label={t('action.editBody')}
+            onChange={(event) => { setEditDraft(event.target.value) }}
+            onKeyDown={onEditKeyDown}
+            style={{ tabSize: tabWidthSpaces }}
+          />
+          <p className={css.editHint} data-diff-edit-hint>{t('panel.editHint')}</p>
+        </div>
+      ) : previewActive ? (
         <MarkdownPreviewBoundary fallback={<div className={css.mdPreviewFallback} data-diff-md-preview-fallback>{t('panel.mdPreviewFailed')}</div>}>
           <div className={css.mdPreviewWrap} onMouseLeave={hidePreviewFrame}>
             <div
@@ -9774,7 +9952,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
 
 /** Render the pending-edit review panel and its unified footer action. */
 export function PendingPanel({
-  wide, useSessions, sessionId, usePending, pendingView, showing = true, onRefresh, onRefreshCount, onMarkSeen, onKeep, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onCommentAdd, onCommentRemove, onCommentRemoveMany, onCommentAsk, onCommentSeen, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onKeepMany, onRevertMany, onAckRedoCleared, onAckUndoNotice, collapseSidebar, t,
+  wide, useSessions, sessionId, usePending, pendingView, showing = true, onRefresh, onRefreshCount, onMarkSeen, onKeep, onKeepEdited, onRevert, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, onPasteReference, onCommentAdd, onCommentRemove, onCommentRemoveMany, onCommentAsk, onCommentSeen, onUndo, onRedo, onImportVcs, onRefreshVcs, onBrowse, onAddPath, onKeepAll, onKeepMany, onRevertMany, onAckRedoCleared, onAckUndoNotice, collapseSidebar, t,
   docked = false, dockHost, onOpenDock, closeDock, useDock, onCheckUpdate,
 }: PendingPanelProps) {
   // Whether a NEWER RELEASE of this plugin is published, and whether the reader has already said "got it".
@@ -12612,6 +12790,10 @@ export function PendingPanel({
       if (pathPickerOpen()) return
       // The detail header's path field keeps its own Escape — it puts the shown path back —       // so this press belongs to the field and never to the panel behind it.
       if (event.target instanceof Element && event.target.closest('[data-diff-path-input]') !== null) return
+      // The reader's EDITOR is the innermost dismissible too: its own Escape abandons the draft and returns
+      // to the diff, and a press while focus sits on its Save/Cancel buttons must not fold the panel and
+      // take an unsaved version of the file with it (see `onEditKeyDown`).
+      if (document.querySelector('[data-diff-edit-body]') !== null) return
       // The coverage popover is the innermost dismissible while it is up, and it
       // closes on this same press.
       if (document.querySelector('[data-diff-approval-cover-popover]') !== null) return
@@ -13040,6 +13222,10 @@ export function PendingPanel({
                     // host already lists and opens it, which is the same outcome with one honest request.
                     onPreviewLink={(path, x, y) => { setChipMenu({ path, x, y, held: false, fromLink: true }) }}
                     onKeep={keepWithPrompt}
+                    // The editor's save is the face's own verb, unfiltered: it asks no question (the row
+                    // stays listed) and it cannot remove a row, so the removal prompts above must not see
+                    // it at all.
+                    onKeepEdited={onKeepEdited}
                     onRevert={revertWithPrompt}
                     onRefreshVcs={(entry) => { void runRefreshVcs(entry) }}
                     onBlockKeep={blockKeepWithPrompt}
