@@ -31,7 +31,7 @@ import {
 } from './discussion.ts'
 import type { Discussion, DiscussionMessage, DiscussionQuoteLine } from './discussion.ts'
 import { frameFollowIsAnimated, frameFollowKeyframes } from './scroll-follow.ts'
-import { previewBlocks, renderMarkdownPreview } from './markdown-preview.ts'
+import { flowPreviewBlocks, previewBlocks, renderMarkdownPreview, treeDiffEnabled } from './markdown-preview.ts'
 import type { PreviewBlock, PreviewInvisibleDiff } from './markdown-preview.ts'
 import { resolvePreviewImages } from './markdown-images.ts'
 import type { ChangeBlock, DiffPairRows, IntraRun, WholeFileDiffRow } from './whole-file-diff.ts'
@@ -752,10 +752,6 @@ const OVERSCAN_ROWS = 8
  * 5px frame padding on each side + 1px border on each side, plus a little
  * breathing room so the bottom padding never sits flush against it. */
 const BLOCK_ACTIONS_FRAME_PX = 40
-/** How far a floating block-action frame stays inside the surface it is anchored
- *  to (the content's right edge in the Markdown preview, the pane's in the code
- *  view). */
-const FRAME_INSET_PX = 8
 
 /** One dashed outline box in the preview's content coordinates, moved on scroll by `top`. */
 interface PreviewUnitBox {
@@ -765,28 +761,22 @@ interface PreviewUnitBox {
   right: number
 }
 
-/** One Markdown-preview frame's measured placement. `contentBottom` is the block
- *  group's bottom edge in content coordinates (scroll independent), `right` its
- *  inset from the pane's right edge. */
+/**
+ * One Markdown-preview frame's measured placement. `contentBottom` is the block
+ * group's bottom edge in content coordinates (scroll independent), `right` its
+ * inset from the pane's right edge.
+ */
 interface PreviewFramePlacement {
   contentBottom: number
   /**
    * The hovered change's TOP edge in content coordinates, for the hover frame.
    *
    * The frame prefers the space under the change, but a frame with a source row is tall: when it would run
-   * past the pane's bottom edge it hangs ABOVE the change instead, off this edge. Undefined for the selection
+   * past the pane's bottom edge it sticks to the pane's bottom edge instead. Undefined for the selection
    * frame, which spans blocks and is only clamped into the pane.
    */
   contentTop?: number
   right: number
-  /**
-   * The hovered element's own left edge, in the pane's content coordinates.
-   *
-   * Set for the HOVER frame, which belongs under the change it is about: a rendered document has no rows,
-   * so the reader has to see the toolbar attached to the element the pointer is on. Undefined for the
-   * selection frame, which spans blocks and keeps the code view's right-edge anchor.
-   */
-  contentLeft?: number
 }
 
 /** One Markdown-preview flash box's measured placement: the jumped-to block's
@@ -4420,7 +4410,11 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    */
   const previewUnitMode = previewActive && mdStyle === 'structure'
   const previewBlocksList = useMemo(
-    () => (previewUnitMode ? previewBlocks(file.oldText, file.newText) : []),
+    () => (previewUnitMode
+      ? (treeDiffEnabled()
+          ? flowPreviewBlocks(file.oldText, file.newText)
+          : previewBlocks(file.oldText, file.newText))
+      : []),
     [previewUnitMode, file.oldText, file.newText],
   )
   /**
@@ -4969,8 +4963,6 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   // offset is mirrored in a ref so the scroll path can move a frame without a
   // render (and a render for any other reason still places it correctly).
   const [previewFrame, setPreviewFrame] = useState<PreviewFramePlacement | undefined>(undefined)
-  const [previewCovered, setPreviewCovered] = useState<number[]>([])
-  const [previewSelectionFrame, setPreviewSelectionFrame] = useState<PreviewFramePlacement | undefined>(undefined)
   /**
    * The hovered unit's dashed outline, in content coordinates so the scroll path can move it without a render.
    *
@@ -4983,7 +4975,6 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   const previewUnitBoxesStateRef = useRef<PreviewUnitBox[]>([])
   const previewScrollTopRef = useRef(0)
   const previewHoverFrameRef = useRef<HTMLDivElement>(null)
-  const previewSelectionFrameRef = useRef<HTMLDivElement>(null)
   // The query's occurrences inside the rendered preview, in document order. The
   // preview has no rows to map matches onto, so these marks ARE its match list
   // (see the highlight pass). `previewHitCount` mirrors their length in state so
@@ -5258,11 +5249,9 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     return model.blocks.map(block => blockRangesOf(model.diff.rows, block))
   }, [model])
 
-  // Blocks fully covered by the current text selection, in order. A selection
-  // covering one or more complete blocks shows its own keep/revert frame (the
-  // combined range below) in place of the single-block hover frame.
+  // Blocks fully covered by the current text selection in the CODE view. The Markdown preview no longer offers
+  // a multi-block keep/revert (see the removal note on `selectionTargetRanges`).
   const coveredBlockIndices = useMemo(() => {
-    if (previewActive) return previewCovered
     if (selection === undefined || splitView) return []
     const covered: number[] = []
     for (let index = 0; index < model.blocks.length; index++) {
@@ -5270,37 +5259,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       if (selection.start <= block.start && block.end <= selection.end) covered.push(index)
     }
     return covered
-  }, [selection, splitView, model, mdPreview, lang, previewCovered])
-
-  // The combined old/new range spanning the covered blocks (first to last). The PREVIEW's
-  // range: its selection names rendered elements, so it is read as the change blocks it
-  // fully covers and keep/revert apply to every covered block in one host call. The code
-  // view's frame derives its own range from the selected ROWS instead (see
-  // `selectionTargetRanges`), which is what lets a partial selection act on part of a block.
-  const selectionRange = useMemo(() => {
-    if (coveredBlockIndices.length === 0) return undefined
-    // The preview's covered indices are its BLOCKS: their line ranges give the host a line range to fold in,
-    // which is the same rule the preview has always used for a selection.
-    if (previewActive && previewUnitMode) {
-      const covered = coveredBlockIndices
-        .map(index => previewBlocksList[index])
-        .filter((block): block is NonNullable<typeof block> => block !== undefined)
-      if (covered.length === 0) return undefined
-      return {
-        oldStart: Math.min(...covered.map(block => block.oldStart)),
-        oldEnd: Math.max(...covered.map(block => block.oldEnd)),
-        newStart: Math.min(...covered.map(block => block.newStart)),
-        newEnd: Math.max(...covered.map(block => block.newEnd)),
-      }
-    }
-    const firstIndex = coveredBlockIndices[0]
-    const lastIndex = coveredBlockIndices[coveredBlockIndices.length - 1]
-    if (firstIndex === undefined || lastIndex === undefined) return undefined
-    const first = model.blocks[firstIndex]
-    const last = model.blocks[lastIndex]
-    if (first === undefined || last === undefined) return undefined
-    return blockRangesOf(model.diff.rows, { start: first.start, end: last.end })
-  }, [coveredBlockIndices, model, previewActive, previewUnitMode, previewBlocksList])
+  }, [selection, splitView, model, mdPreview, lang])
 
   // In-file search: matching lines over the whole diff (not just the rendered
   // window), so the count and jumps stay correct while the virtual list
@@ -5329,8 +5288,6 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    * @param indices - the block indices the frame acts on.
    * @returns the placement, or undefined when nothing is rendered.
    */
-  /** An estimate of the frame's width, for clamping it inside the pane when it hangs under an element. */
-  const PREVIEW_FRAME_WIDTH_PX = 270
   /**
    * Air the hover outline keeps around the change's own extent.
    *
@@ -5343,7 +5300,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   const PREVIEW_OUTLINE_AIR_X = 0
   const PREVIEW_OUTLINE_AIR_Y = 0
   /** What a change is painted with: the outline hugs these pieces, not the block carrier around them. */
-  const PREVIEW_PAINTED_SELECTOR = '.mdWordAdd, .mdWordDel, .mdTwin, .mdTwinOld, .mdTwinNew, .mdAdd, .mdDel, .mdTwinPhantom'
+  const PREVIEW_PAINTED_SELECTOR = '.mdWordAdd, .mdWordDel, .mdTwin, .mdTwinOld, .mdTwinNew, .mdAdd, .mdDel, .mdTwinPhantom, .mdFlowBlock, .mdFlowGroup, .mdFlowTr, .mdFlowCodeBanner, .mdFlowDoubleRow-diff, .mdFlowCodeRow-old, .mdFlowCodeRow-new, .mdFlowCodeBlock-old, .mdFlowCodeBlock-new'
 
   /**
    * The hovered unit's outline boxes.
@@ -5521,7 +5478,6 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       frame: {
         contentTop,
         contentBottom: contentTop + height,
-        contentLeft: Math.max(0, Math.min(leftInset, Math.max(0, body.clientWidth - PREVIEW_FRAME_WIDTH_PX))),
         right: 0,
       },
     }
@@ -5540,32 +5496,10 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const bodyRect = body.getBoundingClientRect()
     const rect = element.getBoundingClientRect()
     previewScrollTopRef.current = body.scrollTop
-    const left = rect.left - bodyRect.left + body.scrollLeft
     return {
       contentTop: rect.top - bodyRect.top + body.scrollTop,
       contentBottom: rect.bottom - bodyRect.top + body.scrollTop,
-      contentLeft: Math.max(0, Math.min(left, Math.max(0, body.clientWidth - PREVIEW_FRAME_WIDTH_PX))),
       right: 0,
-    }
-  }, [])
-
-  const previewFrameFor = useCallback((indices: readonly number[]): PreviewFramePlacement | undefined => {
-    const body = mdPreviewBodyRef.current
-    if (body === null || indices.length === 0) return undefined
-    const bodyRect = body.getBoundingClientRect()
-    let bottom = -Infinity
-    for (const index of indices) {
-      for (const element of body.querySelectorAll(`[data-md-block="${index}"]`)) {
-        bottom = Math.max(bottom, element.getBoundingClientRect().bottom)
-      }
-    }
-    if (!Number.isFinite(bottom)) return undefined
-    const content = body.querySelector('[data-diff-md-preview-content]')
-    const contentRight = content === null ? bodyRect.right : content.getBoundingClientRect().right
-    previewScrollTopRef.current = body.scrollTop
-    return {
-      contentBottom: bottom - bodyRect.top + body.scrollTop,
-      right: Math.max(0, bodyRect.right - contentRight) + FRAME_INSET_PX,
     }
   }, [])
 
@@ -5591,14 +5525,12 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    */
   const previewFrameTop = (frame: PreviewFramePlacement | undefined, scrollTop: number, height = BLOCK_ACTIONS_FRAME_PX): number | undefined => {
     if (frame === undefined) return undefined
+    // Same anchoring as the code view's block actions: bottom-RIGHT of the change. The top is the block's
+    // bottom edge, and when that would run past the pane's bottom edge the whole toolbar sticks to the bottom
+    // edge instead of flipping above the block.
     const paneHeight = mdPreviewBodyRef.current?.clientHeight ?? 0
     const highestTop = Math.max(0, paneHeight - height)
     const below = frame.contentBottom - scrollTop + PREVIEW_FRAME_GAP_PX
-    const fitsBelow = below >= 0 && below + height <= paneHeight
-    if (fitsBelow || frame.contentTop === undefined) return Math.max(0, Math.min(below, highestTop))
-    const above = frame.contentTop - scrollTop - height - PREVIEW_FRAME_GAP_PX
-    if (above >= 0 && above + height <= paneHeight) return above
-    // Neither side fits (a change taller than the pane, or one scrolled to an edge): stay inside the pane.
     return Math.max(0, Math.min(below, highestTop))
   }
 
@@ -5609,16 +5541,9 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     const top = previewFrameTop(frame, previewScrollTopRef.current, element.offsetHeight)
     if (top === undefined) return
     element.style.top = `${top}px`
-    // A frame that hangs under an element is placed by its LEFT edge, so it travels with the words it belongs
-    // to; the others stay pinned to the pane's right edge as the code view's does. The unused side is dropped
-    // rather than written, so the stylesheet's own rule for it stays in charge.
-    if (frame.contentLeft === undefined) {
-      element.style.removeProperty('left')
-      element.style.right = `${frame.right}px`
-    } else {
-      element.style.removeProperty('right')
-      element.style.left = `${frame.contentLeft}px`
-    }
+    // Every preview frame is pinned to the pane's right edge, like the code view's own block actions.
+    element.style.removeProperty('left')
+    element.style.right = `${frame.right}px`
   }
 
   /**
@@ -5651,12 +5576,15 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       right = Math.max(right, span.right)
     }
     if (!Number.isFinite(top) || !Number.isFinite(bottom)) return undefined
+    // The paragraph-level flow renderer paints a block's tint EDGE TO EDGE; the block-navigation flash has to
+    // match that horizontal extent, so its border does not cut through the red/green band at the text column.
+    const flowDoc = body.querySelector('.mdFlowDoc') !== null
     return {
       contentTop: top - bodyRect.top + body.scrollTop,
       contentBottom: bottom - bodyRect.top + body.scrollTop,
       // Those edges are the inset: a 2px border drawn border-box lands on them.
-      left: Math.max(0, left - bodyRect.left),
-      right: Math.max(0, bodyRect.right - right),
+      left: flowDoc ? 0 : Math.max(0, left - bodyRect.left),
+      right: flowDoc ? 0 : Math.max(0, bodyRect.right - right),
     }
   }
 
@@ -5683,10 +5611,9 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     element.style.right = `${flash.right}px`
   }
 
-  /** Re-place the two action frames at the mirrored scroll offset. */
+  /** Re-place the hover action frame at the mirrored scroll offset. */
   const applyPreviewFrames = (): void => {
     applyPreviewFrame(previewHoverFrameRef.current, previewFrame)
-    applyPreviewFrame(previewSelectionFrameRef.current, previewSelectionFrame)
   }
 
   /** Re-place the unit outlines at the mirrored scroll offset (one box per rendered side). */
@@ -5775,7 +5702,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   // since both move the change; scrolling is handled imperatively (see `onScroll`).
   useLayoutEffect(() => {
     if (!previewActive) return
-    const geometry = previewUnitMode && !splitView && hoveredBlock !== undefined
+    const geometry = previewUnitMode && hoveredBlock !== undefined
       ? previewUnitGeometry(hoveredBlock)
       : undefined
     if (geometry !== undefined) {
@@ -5793,24 +5720,198 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     previewUnitBoxesStateRef.current = boxes
   }, [mdPreview, lang, previewUnit, hoveredBlock, previewUnitMode, splitView, file.oldText, file.newText, mdImageTick, previewFrameForUnit, previewUnitGeometry, previewUnitBoxesFor])
 
-  // Style experiment: instead of a dashed box, while a change is hovered every OTHER difference block fades
-  // back (the CSS owns the 20% value), so the hovered change is the one that reads at full strength.
+  // Hover must NOT change any difference colour: the tint is read-only while the toolbar follows the pointer.
   useLayoutEffect(() => {
     const body = mdPreviewBodyRef.current
     if (body === null) return
     for (const faded of body.querySelectorAll<HTMLElement>('.mdHoverFaded')) faded.classList.remove('mdHoverFaded')
-    if (!previewActive || hoveredBlock === undefined) return
-    const hovered = String(hoveredBlock)
-    for (const element of body.querySelectorAll<HTMLElement>('[data-md-block]')) {
-      if (element.dataset.mdBlock !== hovered) element.classList.add('mdHoverFaded')
-    }
   }, [previewActive, hoveredBlock, mdPreview, splitView, previewUnitMode, file.oldText, file.newText])
 
-  // Likewise for the selection frame: the last covered block's bottom edge.
+  /**
+   * The code block's tint layer: measure each changed code line (or a whole added/deleted fence) and place its
+   * full-width band in the block's `.mdFlowCodeTintLayer`. That layer sits UNDER the code card, so the card's
+   * surface covers only its own box and the tint keeps running edge to edge behind it.
+   */
   useLayoutEffect(() => {
-    if (!previewActive) return
-    setPreviewSelectionFrame(previewFrameFor(previewCovered))
-  }, [mdPreview, lang, previewCovered, file.oldText, file.newText, splitView, mdImageTick, previewFrameFor])
+    const body = mdPreviewBodyRef.current
+    if (body === null) return
+    let frame = 0
+    const measure = (): void => {
+      frame = 0
+      // A whole-file change paints ONE document-wide layer (CSS), so no per-segment bands are needed.
+      if (body.querySelector('.mdFlowDocWhole') !== null) return
+      const bodyRect = body.getBoundingClientRect()
+      for (const shell of body.querySelectorAll<HTMLElement>('.mdFlowCodeShell')) {
+        const layer = shell.querySelector<HTMLElement>('.mdFlowCodeTintLayer')
+        const card = shell.querySelector<HTMLElement>('.mdFlowCodeBlock')
+        if (layer === null || card === null) continue
+        layer.replaceChildren()
+        const shellRect = shell.getBoundingClientRect()
+        const addBand = (element: HTMLElement, side: 'old' | 'new'): void => {
+          const rect = element.getBoundingClientRect()
+          if (rect.height <= 0) return
+          const band = document.createElement('div')
+          band.className = `mdFlowCodeTintBand mdFlowCodeTintBand-${side}`
+          band.style.top = `${rect.top - shellRect.top}px`
+          band.style.height = `${rect.height}px`
+          layer.append(band)
+        }
+        const wholeSide: 'old' | 'new' | undefined = card.classList.contains('mdFlowCodeBlock-old')
+          ? 'old'
+          : card.classList.contains('mdFlowCodeBlock-new') ? 'new' : undefined
+        if (wholeSide !== undefined) {
+          // A whole-fence card inside a merged hunk already has the hunk's tint behind it (its surface is
+          // transparent there): adding its own band would double the colour as a darker inner strip.
+          const holder = card.parentElement?.closest('.mdFlowBlock-old, .mdFlowBlock-new, .mdFlowGroup-old, .mdFlowGroup-new')
+          if (holder === null || holder === undefined) addBand(card, wholeSide)
+          continue
+        }
+        for (const line of card.querySelectorAll<HTMLElement>('.mdFlowCodeRow-old')) addBand(line, 'old')
+        for (const line of card.querySelectorAll<HTMLElement>('.mdFlowCodeRow-new')) addBand(line, 'new')
+      }
+      // A WIDE table scrolls horizontally, so its full-width change bands are painted by an outer, unscrolled
+      // layer: measure each changed row there and let the table's transparent rows show the colour through.
+      for (const outer of body.querySelectorAll<HTMLElement>('.mdFlowTableOuter')) {
+        const layer = outer.querySelector<HTMLElement>('.mdFlowTableTintLayer')
+        if (layer === null) continue
+        layer.replaceChildren()
+        const holder = outer.closest('.mdFlowBlock-old, .mdFlowBlock-new, .mdFlowGroup-old, .mdFlowGroup-new')
+        if (holder !== null) continue
+        const outerRect = outer.getBoundingClientRect()
+        const addRowBand = (element: HTMLElement, side: 'old' | 'new'): void => {
+          const rect = element.getBoundingClientRect()
+          if (rect.height <= 0) return
+          const band = document.createElement('div')
+          band.className = `mdFlowTableTintBand mdFlowTableTintBand-${side}`
+          band.style.top = `${rect.top - outerRect.top}px`
+          band.style.height = `${rect.height}px`
+          layer.append(band)
+        }
+        for (const row of outer.querySelectorAll<HTMLElement>('.mdFlowTr-old')) addRowBand(row, 'old')
+        for (const row of outer.querySelectorAll<HTMLElement>('.mdFlowTr-new')) addRowBand(row, 'new')
+      }
+      // Side-by-side: a changed table row's colour fills its OWN column width (never the other side), measured
+      // per row under the table so a narrow table inside a wide column still gets a full-column band.
+      for (const unit of body.querySelectorAll<HTMLElement>('.mdFlowDoubleRow-table')) {
+        for (const stale of [...unit.children]) {
+          if (stale.classList.contains('mdFlowDoubleTintLayer')) stale.remove()
+        }
+        const layer = document.createElement('div')
+        layer.className = 'mdFlowDoubleTintLayer'
+        unit.prepend(layer)
+        const unitRect = unit.getBoundingClientRect()
+        const leftOverhang = unitRect.left - bodyRect.left
+        const rightOverhang = bodyRect.right - unitRect.right
+        const addCellBands = (side: 'old' | 'new'): void => {
+          const cell = [...unit.children].find(child =>
+            child.classList.contains(`mdFlowDoubleCell-${side}`)) as HTMLElement | undefined
+          if (cell === undefined) return
+          // Full OWN half, running to the PANE edge on its own side: it reaches the gutter's centre line but
+          // never past it into the other side.
+          const center = unitRect.width / 2
+          const left = side === 'old' ? -leftOverhang : center
+          const width = side === 'old' ? center + leftOverhang : unitRect.width - center + rightOverhang
+          for (const row of cell.querySelectorAll<HTMLElement>(`.mdFlowTr-${side}`)) {
+            const rect = row.getBoundingClientRect()
+            if (rect.height <= 0) continue
+            const band = document.createElement('div')
+            band.className = `mdFlowDoubleTintBand mdFlowDoubleTintBand-${side}`
+            band.style.top = `${rect.top - unitRect.top}px`
+            band.style.height = `${rect.height}px`
+            band.style.left = `${left}px`
+            band.style.width = `${width}px`
+            layer.append(band)
+          }
+        }
+        addCellBands('old')
+        addCellBands('new')
+      }
+      // Side-by-side rows inside one difference block: a list item / paragraph that WRAPS on one side is taller
+      // there; level each paired slot to the taller side so the next matched item stays on the same visual row.
+      for (const unit of body.querySelectorAll<HTMLElement>('.mdFlowDoubleRow-diff')) {
+        const cells = [...unit.children].filter(child => child.classList.contains('mdFlowDoubleCell')) as HTMLElement[]
+        const oldRows = [...(cells[0]?.querySelectorAll<HTMLElement>('[data-double-pair]') ?? [])]
+        const newRows = [...(cells[1]?.querySelectorAll<HTMLElement>('[data-double-pair]') ?? [])]
+        for (const row of [...oldRows, ...newRows]) row.style.minHeight = ''
+        for (let at = 0; at < Math.min(oldRows.length, newRows.length); at++) {
+          const oldRow = oldRows[at]!
+          const newRow = newRows[at]!
+          const height = Math.max(oldRow.getBoundingClientRect().height, newRow.getBoundingClientRect().height)
+          if (height <= 0) continue
+          oldRow.style.minHeight = `${height}px`
+          newRow.style.minHeight = `${height}px`
+        }
+      }
+      // Side-by-side CODE: a changed line's colour runs edge to edge over its OWN half (like the single-column
+      // code line), under the transparent code card and above the page.
+      for (const unit of body.querySelectorAll<HTMLElement>('.mdFlowDoubleRow-code')) {
+        for (const stale of [...unit.children]) {
+          if (stale.classList.contains('mdFlowDoubleTintLayer')) stale.remove()
+        }
+        const layer = document.createElement('div')
+        layer.className = 'mdFlowDoubleTintLayer'
+        unit.prepend(layer)
+        // A long code line WRAPS at the column width. The wrapped line is taller on its own side, so without
+        // levelling each aligned pair to the taller half the next matched line would drift out of alignment.
+        // Clear the previous measurement first, or the old min-height would keep its own height on re-measure.
+        const cells = [...unit.children].filter(child => child.classList.contains('mdFlowDoubleCell')) as HTMLElement[]
+        const leftLines = [...(cells[0]?.querySelectorAll<HTMLElement>('.mdFlowCodeRow') ?? [])]
+        const rightLines = [...(cells[1]?.querySelectorAll<HTMLElement>('.mdFlowCodeRow') ?? [])]
+        for (const line of [...leftLines, ...rightLines]) line.style.minHeight = ''
+        for (let at = 0; at < Math.min(leftLines.length, rightLines.length); at++) {
+          const leftLine = leftLines[at]!
+          const rightLine = rightLines[at]!
+          const height = Math.max(leftLine.getBoundingClientRect().height, rightLine.getBoundingClientRect().height)
+          if (height <= 0) continue
+          leftLine.style.minHeight = `${height}px`
+          rightLine.style.minHeight = `${height}px`
+        }
+        const unitRect = unit.getBoundingClientRect()
+        const leftOverhang = unitRect.left - bodyRect.left
+        const rightOverhang = bodyRect.right - unitRect.right
+        const center = unitRect.width / 2
+        const addLineBands = (side: 'old' | 'new'): void => {
+          const cell = [...unit.children].find(child =>
+            child.classList.contains(`mdFlowDoubleCell-${side}`)) as HTMLElement | undefined
+          if (cell === undefined) return
+          const left = side === 'old' ? -leftOverhang : center
+          const width = side === 'old' ? center + leftOverhang : unitRect.width - center + rightOverhang
+          for (const line of cell.querySelectorAll<HTMLElement>(`.mdFlowCodeRow-${side}`)) {
+            const rect = line.getBoundingClientRect()
+            if (rect.height <= 0) continue
+            const band = document.createElement('div')
+            band.className = `mdFlowDoubleTintBand mdFlowDoubleTintBand-${side}`
+            band.style.top = `${rect.top - unitRect.top}px`
+            band.style.height = `${rect.height}px`
+            band.style.left = `${left}px`
+            band.style.width = `${width}px`
+            layer.append(band)
+          }
+        }
+        // A whole-fence (language) change is painted by the row's own full-half band (CSS), not per line.
+        if (!unit.classList.contains('mdFlowDoubleCodeWhole')) {
+          addLineBands('old')
+          addLineBands('new')
+        }
+      }
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const flowDoc = body.querySelector<HTMLElement>('.mdFlowDoc') ?? body
+    const observer = new ResizeObserver(() => {
+      if (frame !== 0) return
+      frame = window.requestAnimationFrame(measure)
+    })
+    observer.observe(flowDoc)
+    for (const shell of body.querySelectorAll<HTMLElement>('.mdFlowCodeShell')) observer.observe(shell)
+    for (const outer of body.querySelectorAll<HTMLElement>('.mdFlowTableOuter')) observer.observe(outer)
+    for (const unit of body.querySelectorAll<HTMLElement>('.mdFlowDoubleRow-table')) observer.observe(unit)
+    for (const unit of body.querySelectorAll<HTMLElement>('.mdFlowDoubleRow-code')) observer.observe(unit)
+    return () => {
+      observer.disconnect()
+      if (frame !== 0) window.cancelAnimationFrame(frame)
+    }
+  }, [previewActive, mdPreview, splitView, file.oldText, file.newText])
 
   // The hover frame's own height decides which side of its change it hangs on: a short frame fits underneath,
   // a tall one (the one carrying a source row) flips ABOVE the change near the pane's bottom instead of being
@@ -5819,7 +5920,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   useLayoutEffect(() => {
     if (!previewActive) return
     applyPreviewFrames()
-  }, [previewActive, previewFrame, previewSourceRow, previewSelectionFrame])
+  }, [previewActive, previewFrame, previewSourceRow])
 
   // A mode switch starts both preview interactions clean: a hover or a selection
   // from the other view must not carry over onto freshly rendered elements.
@@ -5827,7 +5928,6 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     setHoveredBlock(undefined)
     setPreviewUnit(undefined)
     setPreviewSourceRow(undefined)
-    setPreviewCovered([])
   }, [mdPreview, lang])
 
   // A new hovered block starts on its first invisible difference's tab.
@@ -5881,37 +5981,6 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       setPreviewUnit(undefined)
       setPreviewSourceRow(undefined)
     }, PREVIEW_HIDE_DELAY_MS)
-  }
-
-  /** The change blocks a live native selection inside the preview fully covers, in order — the preview's
-   *  counterpart of the code view's row-range rule. */
-  const coveredPreviewBlocks = (): number[] => {
-    const body = mdPreviewBodyRef.current
-    const live = window.getSelection()
-    if (body === null || live === null || live.isCollapsed || live.rangeCount === 0) return []
-    const range = live.getRangeAt(0)
-    if (!body.contains(range.commonAncestorContainer)) return []
-    const covered: number[] = []
-    // The preview's indices are its BLOCKS (see `previewUnitMode`) — the same numbers its toolbar shows.
-    const count = previewUnitMode ? previewBlocksList.length : model.blocks.length
-    for (let index = 0; index < count; index++) {
-      // Only the OUTERMOST tagged elements matter: a merged paragraph carries the block and so do the word
-      // runs inside it, and a selection that covers the paragraph must not be asked to cover each run too.
-      const elements = [...body.querySelectorAll(`[data-md-block="${index}"]`)].filter(element =>
-        element.parentElement?.closest(`[data-md-block="${index}"]`) === null)
-      if (elements.length === 0) continue
-      // ANY of the unit's elements inside the selection covers it: in the double column the same change is
-      // rendered in both columns, and a selection is made in one of them.
-      const inside = elements.some(element => {
-        const blockRange = document.createRange()
-        blockRange.selectNode(element)
-        // The selection must start at or before the element and end at or after it.
-        return range.compareBoundaryPoints(Range.START_TO_START, blockRange) <= 0
-          && range.compareBoundaryPoints(Range.END_TO_END, blockRange) >= 0
-      })
-      if (inside) covered.push(index)
-    }
-    return covered
   }
 
   /**
@@ -8052,7 +8121,6 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
         : onBlockRevert(sessionId, file.id, range))
     }
     setSelection(undefined)
-    setPreviewCovered([])
     window.getSelection()?.removeAllRanges?.()
   }
 
@@ -8166,20 +8234,14 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     setFocus(ref === -1 ? 0 : ref)
   }
 
-  // Track the native text selection inside the diff: the copy-reference
+  // Track the native text selection inside the CODE view: the copy-reference
   // toolbar appears once lines are selected and hides when the selection
   // collapses. The toolbar's own mousedown prevents the default so the
-  // selection survives the click that triggers the copy.
+  // selection survives the click that triggers the copy. The Markdown preview no
+  // longer reacts to text selection (its multi-block keep/revert was removed).
   useEffect(() => {
     const update = () => {
-      // The preview renders Markdown, not diff rows: its selection resolves to
-      // the change blocks it fully covers (the same rule as below) rather than a
-      // row range, and only the preview owns the selection then.
-      if (previewActive) {
-        setPreviewCovered(coveredPreviewBlocks())
-        selectionTextRef.current = ''
-        return
-      }
+      if (previewActive) return
       const live = window.getSelection()
       const range = splitView ? splitRowRangeOf(live) : rowRangeOf(live)
       // Only serialize the selected text when there is a real in-diff selection;
@@ -8390,16 +8452,13 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    * change is the point: keep folds only those lines into the baseline and only those leave it, and the
    * context lines a selection spans ride along unchanged. The code view sends the one range the SELECTED
    * ROWS name; the side-by-side view sends the range(s) of the PAIRS it names (`pairsRangeOf`), which
-   * covers both sides of every pair the reader touched. The Markdown preview keeps its own block-derived
-   * range (`selectionRange`): its selection names rendered elements, not rows.
+   * covers both sides of every pair the reader touched. The Markdown preview has no multi-block action.
    */
-  const selectionTargetRanges: DiffApprovalBlockRange[] = previewActive
-    ? selectionRange === undefined ? [] : [selectionRange]
-    : splitView
-      ? pairsRangeOf(model.diff.rows, splitSelectionPairs)
-      : selectionRowRange === undefined
-        ? []
-        : [blockRangesOf(model.diff.rows, selectionRowRange)]
+  const selectionTargetRanges: DiffApprovalBlockRange[] = splitView
+    ? pairsRangeOf(model.diff.rows, splitSelectionPairs)
+    : selectionRowRange === undefined
+      ? []
+      : [blockRangesOf(model.diff.rows, selectionRowRange)]
 
   // What the frame offers for the current selection (see `selectionFrame`), with comment
   // mode applied: an OFF mode withholds the comment action but not the frame, so a range
@@ -9207,47 +9266,17 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
                 ))}
               </div>
             )}
-            {previewCovered.length > 0 && selectionRange !== undefined && previewSelectionFrame !== undefined ? (
-              <div
-                ref={previewSelectionFrameRef}
-                className={css.blockActions}
-                data-diff-selection-actions
-                data-diff-frame-drag={pressInCode ? '' : undefined}
-                style={{ top: previewFrameTop(previewSelectionFrame, previewScrollTopRef.current) ?? 0, right: previewSelectionFrame.right }}
-              >
-                <button
-                  type="button"
-                  className={`${css.action} ${css.actionPrimary}`}
-                  data-diff-selection-keep
-                  disabled={busy}
-                  onClick={() => { void handleSelectionAction('keep') }}
-                >
-                  {t('action.keep')}
-                </button>
-                <button
-                  type="button"
-                  className={css.action}
-                  data-diff-selection-revert
-                  disabled={busy}
-                  onClick={() => { void handleSelectionAction('revert') }}
-                >
-                  {t('action.revert')}
-                </button>
-              </div>
-            ) : hoveredBlock !== undefined
+            {hoveredBlock !== undefined
               && (previewUnitMode ? previewBlocksList[hoveredBlock] !== undefined : model.blocks[hoveredBlock] !== undefined)
               && previewFrame !== undefined ? (
               <div
                 ref={previewHoverFrameRef}
                 className={previewToolbarRow === undefined && !showPreviewSourceTabs ? css.blockActions : `${css.blockActions} ${css.blockActionsWithSource}`}
                 data-diff-block-actions
-                data-diff-anchored={previewFrame.contentLeft === undefined ? undefined : ''}
                 data-diff-block-with-source={previewToolbarRow === undefined && !showPreviewSourceTabs ? undefined : ''}
                 style={{
                   top: previewFrameTop(previewFrame, previewScrollTopRef.current) ?? 0,
-                  ...(previewFrame.contentLeft === undefined
-                    ? { right: previewFrame.right }
-                    : { left: previewFrame.contentLeft }),
+                  right: previewFrame.right,
                 }}
                 onMouseEnter={cancelPreviewFrameHide}
                 onMouseLeave={schedulePreviewFrameHide}

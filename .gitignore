@@ -5,6 +5,10 @@ lib/
 # Local pnpm package-store cache: never committed (tool artifact).
 .pnpm-store/
 
+# Local scratch/sample area used to exercise the preview by hand (temporary Markdown cases, their old/new JSON
+# and raw screenshots). Kept on disk, never committed.
+scratch/
+
 # `pnpm run compat` installs each published DSH release here to boot the plugin
 # against the real package. Cached between runs; never committed.
 .compat/

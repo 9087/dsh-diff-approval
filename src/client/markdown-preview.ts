@@ -28,8 +28,9 @@ import type { WholeFileDiffRow } from './whole-file-diff.ts'
 import { treePreviewModel } from './markdown-tree-blocks.ts'
 import { highlightWindow } from './highlight.ts'
 import type { MarkdownTreeNode } from './markdown-tree-match.ts'
-import { matchMarkdownTrees, nodeVisibleText, planMergedSiblings, type MergePlanPiece } from './markdown-tree-match.ts'
-import type { TreePreviewBlock, TreePreviewUnit } from './markdown-tree-blocks.ts'
+import { isInvisibleNode, matchMarkdownTrees, nodeVisibleText, pairFullyMatched, textSimilarity } from './markdown-tree-match.ts'
+import type { TreeMatchOp } from './markdown-tree-match.ts'
+import { writeClipboard } from './dsh-icons.ts'
 
 /** How the preview expresses the diff. See the module comment. */
 export type MarkdownPreviewStyle = 'structure' | 'blocks'
@@ -2047,225 +2048,6 @@ function markChangedUnit(el: HTMLElement, unit: number, kind: 'add' | 'del'): vo
   markUnit(el, unit, kind)
 }
 
-/** Stamp an element as a changed BLOCK: its whole surface is tinted (a merged added paragraph/list/table). */
-/**
- * Keep only the OUTERMOST siblings of an element list.
- *
- * A merged block's nodes can resolve to both a container element and elements nested inside it (a list and
- * its items, a table and its rows). Wrapping "all elements" then fails or nests blocks; the merged run must be
- * drawn at the level its nodes actually share — the container's children.
- *
- * @param elements - the resolved elements, in document order.
- * @returns the elements that share the first attached element's parent.
- */
-function outermostSiblings(elements: readonly HTMLElement[]): HTMLElement[] {
-  const attached = elements.filter(element => element.parentElement !== null)
-  if (attached.length <= 1) return attached.length === 1 ? attached : [...elements]
-  // The deepest common ancestor of every resolved element: the run is painted at its children level.
-  const ancestorsOf = (element: HTMLElement): HTMLElement[] => {
-    const chain: HTMLElement[] = []
-    let node: HTMLElement | null = element
-    while (node !== null) {
-      chain.push(node)
-      node = node.parentElement
-    }
-    return chain
-  }
-  const firstChain = ancestorsOf(attached[0]!)
-  const common = firstChain.find(candidate => attached.every(element => candidate === element || candidate.contains(element)))
-  if (common === undefined) return attached
-  // A node that CONTAINS the others (a list resolving to UL and its items, a table to TABLE and cells): the
-  // container alone is the layer that paints the run, not its descendants.
-  if (attached.includes(common)) return [common]
-  const result: HTMLElement[] = []
-  for (const element of attached) {
-    let node: HTMLElement = element
-    while (node.parentElement !== null && node.parentElement !== common) node = node.parentElement
-    if (node.parentElement === common && !result.includes(node)) result.push(node)
-  }
-  return result.length > 0 ? result : attached
-}
-
-/**
- * Wrap a MERGED block's several rendered elements in ONE tinted container, so the colour is continuous across
- * the whole run instead of one background per element with the elements' margins showing white gaps between.
- *
- * The wrapper, not the children, carries the block number and the tint: one hover/target for the merged block.
- *
- * @param block - the merged block.
- * @param elements - the elements it renders (already in the DOM, in order).
- * @param kind - added (green) or deleted (red).
- * @returns the wrapper, or undefined when the elements do not share a parent.
- */
-function wrapBlockUnion(block: TreePreviewBlock, elements: readonly HTMLElement[], kind: 'add' | 'del'): HTMLElement | undefined {
-  const attached = elements.filter(element => element.parentNode !== null)
-  if (attached.length < 2) return undefined
-  const parent = attached[0]!.parentNode
-  if (parent === null || !attached.every(element => element.parentNode === parent)) return undefined
-  const wrapper = document.createElement('div')
-  wrapper.className = kind === 'add' ? 'mdAdd mdBlockUnion' : 'mdDel mdBlockUnion'
-  wrapper.dataset.mdBlock = String(block.index)
-  wrapper.dataset.mdKind = kind
-  parent.insertBefore(wrapper, attached[0]!)
-  for (const element of attached) {
-    element.classList.remove('mdAdd', 'mdDel')
-    element.removeAttribute('data-md-block')
-    element.removeAttribute('data-md-kind')
-    element.removeAttribute('data-md-whole-row')
-    wrapper.append(element)
-  }
-  return wrapper
-}
-
-/** The language a fence declares, for the title bar the renderer puts on a changed-language code block. */
-function codeLanguageLabel(language: string): string {
-  return language === '' ? '无语言' : language
-}
-
-/** A plain language label line, no background or frame: just the fence language above the code. */
-function codeTitlebar(label: string): HTMLElement {
-  const bar = document.createElement('div')
-  bar.className = 'mdCodeTitlebar'
-  bar.textContent = label
-  return bar
-}
-
-/**
- * Put the fence's language ABOVE the code block as a plain small line (never inside the PRE, so copying the
- * code stays clean, and no tint is added to the code area or its rounded corners).
- *
- * A single-column version's holder card gets the label line just above it, inside the pair wrapper; a
- * double-column PRE gets wrapped in a `.mdCodePane` that holds the label and the code.
- */
-function attachCodeLanguageTitlebar(pre: HTMLElement, language: string): void {
-  const label = codeLanguageLabel(language)
-  pre.dataset.codeLang = label
-  const parent = pre.parentElement
-  if (parent !== null && (parent.classList.contains('mdTwinOld') || parent.classList.contains('mdTwinNew'))) {
-    // Inside the version's rounded card: the label is the card's first line.
-    const side = parent.classList.contains('mdTwinOld') ? 'old' : 'new'
-    parent.querySelector(':scope > .mdCodeTitlebar')?.remove()
-    const bar = codeTitlebar(label)
-    bar.dataset.codeLangSide = side
-    bar.classList.add(side === 'old' ? 'mdCodeTitlebarOld' : 'mdCodeTitlebarNew')
-    parent.insertBefore(bar, pre)
-    return
-  }
-  let pane = pre.closest<HTMLElement>('.mdCodePane')
-  if (pane === null) {
-    if (pre.parentNode === null) return
-    pane = document.createElement('div')
-    pane.className = 'mdCodePane'
-    pre.parentNode.insertBefore(pane, pre)
-    pane.append(pre)
-  }
-  pane.classList.toggle('mdCodePaneDel', pre.classList.contains('mdDel'))
-  pane.classList.toggle('mdCodePaneAdd', pre.classList.contains('mdAdd'))
-  // The hover frame must enclose the language label too: the pane, not just the PRE, is part of the block.
-  if (pre.dataset.mdBlock !== undefined) {
-    pane.dataset.mdBlock = pre.dataset.mdBlock
-    pane.dataset.mdKind = pre.dataset.mdKind ?? (pre.classList.contains('mdAdd') ? 'add' : 'del')
-    pane.classList.toggle('mdAdd', pre.classList.contains('mdAdd'))
-    pane.classList.toggle('mdDel', pre.classList.contains('mdDel'))
-  }
-  pane.querySelector(':scope > .mdCodeTitlebar')?.remove()
-  pane.insertBefore(codeTitlebar(label), pre)
-}
-
-/**
- * Draw a code fence pair whose LANGUAGES differ as two whole code blocks STACKED: old red on top, new green
- * below with the same tight gap as a heading pair — never a line-by-line comparison across languages. Each
- * block carries its fence language as a corner badge (the language is the invisible difference). The toolbar
- * gets both complete fences as source.
- *
- * @param block - the replacement code block.
- * @param oldElements - the old fence's rendered CODE element(s).
- * @param freshElements - the new fence's rendered CODE element(s).
- */
-function renderCodePairBlock(
-  block: TreePreviewBlock,
-  oldElements: readonly HTMLElement[],
-  freshElements: readonly HTMLElement[],
-): void {
-  const oldPre = oldElements[0]?.closest('pre') ?? oldElements[0]
-  const newPre = freshElements[0]?.closest('pre') ?? freshElements[0]
-  const parent = newPre?.parentNode
-  if (oldPre === undefined || newPre === undefined || parent === null || parent === undefined) return
-  const oldSource = block.oldNodes.map(node => node.raw).join('\n')
-  const newSource = block.newNodes.map(node => node.raw).join('\n')
-  const oldLanguage = String(block.oldNodes[0]?.attrs.lang ?? '')
-  const newLanguage = String(block.newNodes[0]?.attrs.lang ?? '')
-  const wrapper = document.createElement('div')
-  wrapper.className = 'mdTwin mdTwinStackPair mdCodeLangPair'
-  wrapper.dataset.mdBlock = String(block.index)
-  wrapper.dataset.mdKind = 'add'
-  setSourceDiff(wrapper, { old: oldSource, new: newSource })
-  const oldHolder = document.createElement('div')
-  oldHolder.className = 'mdTwinOld'
-  const oldClone = oldPre.cloneNode(true) as HTMLElement
-  oldHolder.append(oldClone)
-  const newHolder = document.createElement('div')
-  newHolder.className = 'mdTwinNew'
-  parent.insertBefore(wrapper, newPre)
-  newHolder.append(newPre)
-  wrapper.append(oldHolder, newHolder)
-  attachCodeLanguageTitlebar(oldClone, oldLanguage)
-  attachCodeLanguageTitlebar(newPre, newLanguage)
-}
-
-/**
- * A block-level matched pair whose only change is its shell (a heading level, a horizontal rule style) is
- * drawn as the old version ABOVE the new one — like the document reads — but with a tight gap instead of the
- * normal paragraph spacing. The pair is ONE block and one hover target.
- *
- * @param block - the replacement block.
- * @param oldElement - the old block element (e.g. the H4).
- * @param freshElement - the new block element (e.g. the H3).
- */
-function renderBlockPairBlock(block: TreePreviewBlock, oldElement: HTMLElement, freshElement: HTMLElement): void {
-  const parent = freshElement.parentNode
-  if (parent === null) return
-  const wrapper = document.createElement('div')
-  wrapper.className = 'mdTwin mdTwinStackPair'
-  wrapper.dataset.mdBlock = String(block.index)
-  wrapper.dataset.mdKind = 'add'
-  setSourceDiff(wrapper, {
-    old: block.oldNodes.map(node => node.raw).join('\n'),
-    new: block.newNodes.map(node => node.raw).join('\n'),
-  })
-  const oldHolder = document.createElement('div')
-  oldHolder.className = 'mdTwinOld'
-  oldHolder.append(oldElement.cloneNode(true))
-  const newHolder = document.createElement('div')
-  newHolder.className = 'mdTwinNew'
-  parent.insertBefore(wrapper, freshElement)
-  newHolder.append(freshElement)
-  wrapper.append(oldHolder, newHolder)
-}
-
-/** The matched pairs that read as two block versions side by side: a heading LEVEL change, or a rule pair. */
-function isBlockPairElement(oldElement: HTMLElement, freshElement: HTMLElement): boolean {
-  const heading = /^H[1-6]$/u
-  if (heading.test(oldElement.tagName) && heading.test(freshElement.tagName)) {
-    return oldElement.tagName !== freshElement.tagName
-  }
-  return oldElement.tagName === 'HR' && freshElement.tagName === 'HR'
-}
-
-/** One side of a source twin: a labelled card with the version's Markdown, verbatim, in monospace. */
-function sourceSide(side: 'old' | 'new', raw: string, label: string, language: string | undefined): HTMLElement {
-  const holder = document.createElement('div')
-  holder.className = side === 'old' ? 'mdTwinOld' : 'mdTwinNew'
-  const header = document.createElement('div')
-  header.className = 'mdSourceLabel'
-  header.textContent = label
-  const pre = document.createElement('pre')
-  pre.className = 'mdSourceText'
-  fillHighlightedSource(pre, raw, language)
-  holder.append(header, pre)
-  return holder
-}
-
 /**
  * Write SOURCE text into an element, tokenized by Shiki when possible.
  *
@@ -2297,143 +2079,13 @@ function fillHighlightedSource(element: HTMLElement, raw: string, language: stri
   })
 }
 
-/** The grammar a source fallback should be highlighted with: YAML only for a pure front-matter scope. */
-function sourceHighlightLanguage(nodes: readonly MarkdownTreeNode[]): string | undefined {
-  if (nodes.length > 0 && nodes.every(node => node.type === 'front_matter')) return 'yaml'
-  return 'markdown'
-}
-
 /** A no-rendering fallback's source line, highlighted for the grammar its source diff was recorded with. */
 function phantomHighlightLanguage(grammar: string | undefined): string | undefined {
   if (grammar === undefined || grammar === '') return undefined
   return grammar
 }
 
-/** What kind of source fallback this scope is, named precisely: YAML front matter, HTML comment, link
- * definition or inline HTML. Mixed scopes list their kinds. */
-function sourceScopeLabel(block: TreePreviewBlock): string {
-  const names: string[] = []
-  let hasHtml = false
-  const collect = (node: MarkdownTreeNode): void => {
-    if (node.type === 'front_matter') {
-      if (!names.includes('YAML 元数据')) names.push('YAML 元数据')
-      return
-    }
-    if (node.type === 'def') {
-      if (!names.includes('链接引用定义')) names.push('链接引用定义')
-      return
-    }
-    if (node.type === 'html') {
-      if (node.raw.trimStart().startsWith('<!--')) {
-        if (!names.includes('HTML 注释')) names.push('HTML 注释')
-      } else {
-        hasHtml = true
-      }
-      return
-    }
-    for (const child of node.children) collect(child)
-  }
-  for (const node of [...block.oldNodes, ...block.newNodes]) collect(node)
-  if (hasHtml) names.push('内嵌 HTML')
-  return names.length === 0 ? '源码' : names.join('、')
-}
-
-/** A node list's Markdown source, one node per line, no trailing newline. */
-function sourceRawOf(nodes: readonly MarkdownTreeNode[]): string {
-  return nodes.map(node => node.raw.replace(/\n+$/u, '')).join('\n')
-}
-
-/**
- * Build the source twin for one scope: old Markdown above new Markdown (the heading-pair stack), each side
- * tinted red/green. The whole thing is ONE block with the source rows on it for the toolbar.
- *
- * @param block - the source-fallback block.
- * @param oldRaw - old side source (absent for a pure addition).
- * @param newRaw - new side source (absent for a pure deletion).
- * @returns the twin wrapper.
- */
-function sourcePairElement(block: TreePreviewBlock, oldRaw: string | undefined, newRaw: string | undefined): HTMLElement {
-  const wrapper = document.createElement('div')
-  wrapper.className = 'mdTwin mdTwinStackPair mdSourcePair'
-  wrapper.dataset.mdBlock = String(block.index)
-  wrapper.dataset.mdKind = oldRaw === undefined ? 'add' : newRaw === undefined ? 'del' : 'add'
-  // The source is ALREADY on screen in this block, so no `data-md-diff` here: the toolbar would only repeat it.
-  if (oldRaw !== undefined) wrapper.append(sourceSide('old', oldRaw, sourceScopeLabel(block), sourceHighlightLanguage(block.oldNodes)))
-  if (newRaw !== undefined) wrapper.append(sourceSide('new', newRaw, sourceScopeLabel(block), sourceHighlightLanguage(block.newNodes)))
-  return wrapper
-}
-
-/** Draw a source-fallback block in the single column, replacing the scope's rendered elements. */
-function renderSourceBlock(block: TreePreviewBlock, fresh: RenderedDoc): void {
-  const oldRaw = block.oldNodes.length === 0 ? undefined : sourceRawOf(block.oldNodes)
-  const newRaw = block.newNodes.length === 0 ? undefined : sourceRawOf(block.newNodes)
-  const wrapper = sourcePairElement(block, oldRaw, newRaw)
-  const freshElements = treeBlockElements(block, fresh, 'new')
-  if (freshElements.length > 0 && freshElements[0]!.parentNode !== null) {
-    const parent = freshElements[0]!.parentNode
-    parent.insertBefore(wrapper, freshElements[0]!)
-    for (const element of freshElements) element.parentNode?.removeChild(element)
-    return
-  }
-  const line = Math.max(0, (block.newStart || block.oldStart || 1) - 1)
-  const anchor = insertionPointFor(fresh.root, line)
-  anchor.parent.insertBefore(wrapper, anchor.before)
-}
-
-/** Draw a source-fallback block into the double column: each column shows ITS side's Markdown source. */
-function renderSourceBlockDouble(block: TreePreviewBlock, fresh: RenderedDoc, baseline: RenderedDoc): void {
-  const anchorId = `source:${block.index}`
-  const place = (side: 'old' | 'new', doc: RenderedDoc): void => {
-    const nodes = side === 'old' ? block.oldNodes : block.newNodes
-    if (nodes.length === 0) return
-    const raw = sourceRawOf(nodes)
-    const wrapper = document.createElement('div')
-    wrapper.className = 'mdTwin mdTwinStackPair mdSourcePair'
-    wrapper.dataset.mdBlock = String(block.index)
-    wrapper.dataset.mdKind = side === 'old' ? 'del' : 'add'
-    wrapper.dataset.mdMatch = anchorId
-    // Source already visible: no toolbar source row (see sourcePairElement).
-    wrapper.append(sourceSide(side, raw, sourceScopeLabel(block), sourceHighlightLanguage(nodes)))
-    const elements = treeBlockElements(block, doc, side)
-    if (elements.length > 0 && elements[0]!.parentNode !== null) {
-      const parent = elements[0]!.parentNode
-      parent.insertBefore(wrapper, elements[0]!)
-      for (const element of elements) element.parentNode?.removeChild(element)
-      return
-    }
-    const line = Math.max(0, (side === 'old' ? block.oldStart : block.newStart) - 1)
-    const point = insertionPointFor(doc.root, line)
-    point.parent.insertBefore(wrapper, point.before)
-  }
-  place('old', baseline)
-  place('new', fresh)
-}
-
-/**
- * A block that is ONLY an image (its paragraph holds no other text): render it as the compact image frame a
- * changed image pair uses — path + alt in a tinted dashed card — instead of the full-size broken-image
- * placeholder paragraph. Returns undefined for mixed content (text plus image), which keeps the block rendering.
- *
- * @param element - the rendered paragraph/block carrying the image.
- * @param block - the block being drawn.
- * @param kind - added (green) or deleted (red).
- * @returns the compact frame wrapper, or undefined when the block is not image-only.
- */
-function compactImageOnly(element: HTMLElement, block: TreePreviewBlock, kind: 'add' | 'del'): HTMLElement | undefined {
-  const images = [...element.querySelectorAll<HTMLElement>('img')]
-  if (images.length === 0) return undefined
-  if ((element.textContent ?? '').trim() !== '') return undefined
-  const wrapper = document.createElement('div')
-  wrapper.className = 'mdTwin mdTwinImages mdImageOnlyPair'
-  wrapper.dataset.mdBlock = String(block.index)
-  wrapper.dataset.mdKind = kind
-  const holder = document.createElement('div')
-  holder.className = kind === 'del' ? 'mdTwinOld' : 'mdTwinNew'
-  for (const image of images) holder.append(imageFrame(image, kind === 'del' ? 'old' : 'new'))
-  wrapper.append(holder)
-  return wrapper
-}
-
+/** Stamp an element as a changed BLOCK: its whole surface is tinted (a merged added paragraph/list/table). */
 function markChangedBlock(el: HTMLElement, block: number, kind: 'add' | 'del'): void {
   el.classList.add(kind === 'add' ? 'mdAdd' : 'mdDel')
   stampBlock(el, block, kind)
@@ -2679,6 +2331,84 @@ function wrapOwnChangedRuns(el: HTMLElement, runs: readonly IntraRun[], cls: str
   let cursor = 0
   for (const run of runs) {
     if (run.kind !== 'same' && run.text !== '') wrapOwnRange(el, cursor, cursor + run.text.length, cls)
+    cursor += run.text.length
+  }
+}
+
+/** All readable text under an element, in document order (blockquote paragraphs, cells, list content). */
+function textOfSubtree(el: HTMLElement): string {
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
+  let text = ''
+  let node = walker.nextNode()
+  while (node !== null) {
+    text += node.textContent ?? ''
+    node = walker.nextNode()
+  }
+  return text
+}
+
+/** Text nodes of an element's whole subtree, in document order. */
+function subtreeTextNodes(el: HTMLElement): Text[] {
+  const nodes: Text[] = []
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
+  let node = walker.nextNode()
+  while (node !== null) {
+    nodes.push(node as Text)
+    node = walker.nextNode()
+  }
+  return nodes
+}
+
+/**
+ * Wrap `[start, end)` of an element's WHOLE subtree text (not just its own line). A container's text lives in
+ * block children (a blockquote's paragraphs, a list item's content block), so the per-line walker cannot reach
+ * it; this one can, while still splitting an inline element's text on its own boundaries.
+ */
+function wrapSubtreeRange(el: HTMLElement, start: number, end: number, cls: string): void {
+  const initial = subtreeTextNodes(el)
+  const total = initial.reduce((length, node) => length + node.data.length, 0)
+  let cursor = Math.max(0, start)
+  const limit = Math.min(end, total)
+  while (cursor < limit) {
+    const nodes = subtreeTextNodes(el)
+    const offsets: number[] = []
+    let running = 0
+    for (const node of nodes) {
+      offsets.push(running)
+      running += node.data.length
+    }
+    let index = 0
+    let found = false
+    for (let step = 0; step < nodes.length; step++) {
+      const node = nodes[step]!
+      const from = offsets[step]!
+      if (cursor >= from && cursor < from + node.data.length) {
+        index = step
+        found = true
+        break
+      }
+    }
+    if (!found) return
+    const node = nodes[index]!
+    const localStart = cursor - offsets[index]!
+    const localEnd = Math.min(node.data.length, localStart + (limit - cursor))
+    if (localEnd <= localStart) return
+    const tail = splitAt(node, localEnd)
+    const piece = localStart > 0 ? splitAt(node, localStart) : node
+    void tail
+    const span = document.createElement('span')
+    span.className = cls
+    piece.parentNode?.insertBefore(span, piece)
+    span.append(piece)
+    cursor += localEnd - localStart
+  }
+}
+
+/** Wrap the changed runs of a subtree-text diff (containers, cells, blockquotes). */
+function wrapSubtreeChangedRuns(el: HTMLElement, runs: readonly IntraRun[], cls: string): void {
+  let cursor = 0
+  for (const run of runs) {
+    if (run.kind !== 'same' && run.text !== '') wrapSubtreeRange(el, cursor, cursor + run.text.length, cls)
     cursor += run.text.length
   }
 }
@@ -5012,8 +4742,8 @@ export function renderMarkdownPreview(
     // The tree-first path is being brought up beside the line-hunk one; the setting opts in (default: old path).
     if (treeDiffEnabled()) {
       return mode === 'single'
-        ? renderTreeMerged(oldText, newText, labels)
-        : renderTreeDocuments(oldText, newText, labels)
+        ? renderFlowMerged(oldText, newText)
+        : renderFlowDouble(oldText, newText)
     }
     return mode === 'single' ? renderMerged(oldText, newText, labels?.invisible) : renderDocuments(oldText, newText, labels?.invisible)
   }
@@ -5125,1859 +4855,1758 @@ function treeNodeElements(doc: RenderedDoc, node: MarkdownTreeNode): HTMLElement
   return []
 }
 
-/** The elements of every node in one block, in node order (one side's document). */
-function treeBlockElements(block: TreePreviewBlock, doc: RenderedDoc, side: 'old' | 'new'): HTMLElement[] {
-  const nodes = side === 'new' ? block.newNodes : block.oldNodes
-  return uniqueElements(nodes.flatMap(node => treeNodeElements(doc, node)))
-}
-
-/** A struck/side tinted CLONE of one rendered element, stripped of the other side's unit marks. */
-function treeGhostOf(element: HTMLElement, block: TreePreviewBlock, side: 'old' | 'new'): HTMLElement {
-  const ghost = element.cloneNode(true) as HTMLElement
-  for (const marked of [ghost, ...ghost.querySelectorAll<HTMLElement>('[data-md-unit], [data-md-block]')]) {
-    marked.removeAttribute('data-md-unit')
-    marked.removeAttribute('data-md-kind')
-    marked.removeAttribute('data-md-block')
-    marked.removeAttribute('data-md-whole-row')
-    marked.classList.remove('mdAdd', 'mdDel', 'mdWordAdd', 'mdWordDel')
-  }
-  markChangedBlock(ghost, block.index, side === 'old' ? 'del' : 'add')
-  return ghost
-}
-
-/** Put a deletion's ghost where the block's new-side insertion point says it belongs. */
-function treeInsertGhost(block: TreePreviewBlock, baselineElement: HTMLElement, freshRoot: HTMLElement): void {
-  const ghost = treeGhostOf(baselineElement, block, 'old')
-  const line = Math.max(0, block.newStart - 1)
-  const container = baselineElement.tagName === 'TR'
-    ? 'table'
-    : baselineElement.tagName === 'LI'
-      ? 'ul, ol'
-      : undefined
-  if (container !== undefined) {
-    insertGhostHost(freshRoot, baselineElement, ghost, line)
-    return
-  }
-  const anchor = insertionPointFor(freshRoot, line)
-  anchor.parent.insertBefore(ghost, anchor.before)
-}
-
-/** Draw a replacement fallback: old side as a struck ghost, new side tinted whole. */
-function treeReplacement(block: TreePreviewBlock, freshElements: readonly HTMLElement[], oldElements: readonly HTMLElement[], freshRoot: HTMLElement): void {
-  for (const element of oldElements) {
-    const ghost = treeGhostOf(element, block, 'old')
-    const next = freshElements[0]
-    if (next !== undefined && next.parentNode !== null) {
-      next.parentNode.insertBefore(ghost, next)
-      continue
-    }
-    treeInsertGhost(block, element, freshRoot)
-  }
-  for (const element of freshElements) markChangedBlock(element, block.index, 'add')
-}
-
-/** Draw one invisible change as the source markers of both sides, at its document position. */
-function treeInvisibleBlock(block: TreePreviewBlock, freshRoot: HTMLElement): void {
-  const diff = block.invisible[0]
-  if (diff === undefined) return
-  // The new side's position is the insertion point even for a pure deletion (its range is empty there): using
-  // the OLD line for a deleted definition put its marker rows at the wrong place in the new document.
-  const line = block.newStart >= 1 ? block.newStart : block.oldStart
-  const chips = placeholderTwins(block.index, diff.oldText, diff.newText, diff.grammar)
-  for (const chip of chips) {
-    const side = chip.dataset.mdKind === 'del' ? 'del' : 'add'
-    stampBlock(chip, block.index, side)
-  }
-  const anchor = insertionPointFor(freshRoot, Math.max(0, line - 1))
-  for (const chip of chips) anchor.parent.insertBefore(chip, anchor.before)
-}
-
-/**
- * The TD elements a `table_cell` block covers, one per side.
- *
- * The cell node identifies its own source slice, but several cells share a source LINE; the model stores the
- * cell's COLUMN as well, so the renderer marks exactly that column of the row its cell resolved in.
- *
- * @param block - the cell block.
- * @param freshElements - the new document's element(s) for the node.
- * @param oldElements - the old document's element(s) for the node.
- * @returns the new/old cell elements, when rendered.
- */
-function tableCellElements(
-  block: TreePreviewBlock,
-  freshElements: readonly HTMLElement[],
-  oldElements: readonly HTMLElement[],
-): { next: HTMLElement | undefined; previous: HTMLElement | undefined } {
-  const column = block.cellColumn
-  const pick = (elements: readonly HTMLElement[]): HTMLElement | undefined => {
-    const first = elements[0]
-    if (first === undefined) return undefined
-    const row = first.tagName === 'TR' ? first : first.closest('tr')
-    if (row !== null && column !== undefined) {
-      const cell = row.children[column]
-      if (cell instanceof HTMLElement) return cell
-    }
-    return first
-  }
-  return { next: pick(freshElements), previous: pick(oldElements) }
-}
-
-/** Draw a table row edit: per-cell character marks on the row, the row itself carrying the block number. */
-function treeTableRowBlock(block: TreePreviewBlock, freshElements: readonly HTMLElement[], oldElements: readonly HTMLElement[]): boolean {
-  const newRow = freshElements.find(element => element.tagName === 'TR')
-    ?? freshElements.find(element => element.closest('tr') !== null)?.closest('tr')
-  if (!(newRow instanceof HTMLElement)) return false
-  const oldRow = oldElements.find(element => element.tagName === 'TR')
-    ?? oldElements.find(element => element.closest('tr') !== null)?.closest('tr')
-  const newCells = [...newRow.children].filter((child): child is HTMLElement => child instanceof HTMLElement)
-  const oldCells = oldRow instanceof HTMLElement
-    ? [...oldRow.children].filter((child): child is HTMLElement => child instanceof HTMLElement)
-    : []
-  // The cell element pairs are read before the text merges (the merges split text nodes).
-  const rowPairs = oldRow instanceof HTMLElement ? changedElementPairs(oldRow, newRow, false) : []
-  let unitAt = 0
-  const drawnUnits = new Set<number>()
-  const pairs = Math.min(newCells.length, oldCells.length)
-  for (let index = 0; index < pairs; index++) {
-    const nextCell = newCells[index]!
-    const oldCell = oldCells[index]!
-    if (shownText(nextCell) === shownText(oldCell)) continue
-    if (mergeInlineText(nextCell, oldCell)) {
-      const unit = block.units[unitAt] ?? block.units[0]
-      if (unit !== undefined) {
-        markUnit(nextCell, unit.index, 'add')
-        drawnUnits.add(unit.index)
-      }
-      unitAt++
-      continue
-    }
-    const unit = block.units[unitAt] ?? block.units[0]
-    if (unit !== undefined) {
-      markChangedUnit(nextCell, unit.index, 'add')
-      drawnUnits.add(unit.index)
-    }
-    unitAt++
-  }
-  // A header-row block carries only the changed cells in its nodes (a partial header): mark those cells too.
-  for (const cellNode of block.newNodes.filter(node => node.type === 'table_cell')) {
-    const cell = newCells.find(candidate => {
-      const span = sourceSpanOf(candidate)
-      return span !== undefined && span.start === cellNode.lines.start - 1 && span.end === cellNode.lines.end - 1
-    })
-    if (cell === undefined) continue
-    if (cell.dataset.mdUnit !== undefined) continue
-    const unit = block.units[unitAt] ?? block.units[0]
-    if (unit !== undefined) {
-      markUnit(cell, unit.index, 'add')
-      drawnUnits.add(unit.index)
-    }
-    unitAt++
-  }
-  // The remaining changes of the row are INVISIBLE inline ones (a retargeted link in a cell): red/green twins
-  // inside the cell, with their own source for the toolbar. A row is still ONE block (rule A), so each twin
-  // carries the row's block number.
-  const twinUnits = block.units
-    .filter(unit => !drawnUnits.has(unit.index))
-    .map(unit => ({ blockIndex: block.index, unit }))
-  if (twinUnits.length > 0 && oldRow instanceof HTMLElement) twinHiddenInlineUnits(twinUnits, oldRow, newRow, rowPairs)
-  stampBlock(newRow, block.index, 'add')
-  return true
-}
-
-/** Draw an edit of a paragraph/heading/list item (and similar block nodes): inline character runs when possible. */
-function treeInlineBlock(block: TreePreviewBlock, freshElements: readonly HTMLElement[], oldElements: readonly HTMLElement[], freshRoot: HTMLElement): void {
-  const next = freshElements[0]
-  const previous = oldElements[0]
-  if (next !== undefined && previous !== undefined && next.tagName === previous.tagName && mergeInlineText(next, previous)) {
-    stampBlock(next, block.index, 'add')
-    const unit = block.units[0]
-    if (unit !== undefined) markUnit(next, unit.index, 'add')
-    // The merge drew character runs: this block is visible as a modification (word marks inside the element).
-    if (next.querySelector('.mdWordAdd, .mdWordDel') !== null) return
-  }
-  treeReplacement(block, freshElements, oldElements, freshRoot)
-}
-
-/** Draw a code fence edit: changed code text merged in the CODE element, else a whole-fence replacement. */
-function treeCodeBlock(block: TreePreviewBlock, freshElements: readonly HTMLElement[], oldElements: readonly HTMLElement[], freshRoot: HTMLElement): void {
-  const next = freshElements[0]
-  const previous = oldElements[0]
-  if (next === undefined || previous === undefined) {
-    treeReplacement(block, freshElements, oldElements, freshRoot)
-    return
-  }
-  const nextText = (next.textContent ?? '').replace(/\s+/g, ' ').trim()
-  const previousText = (previous.textContent ?? '').replace(/\s+/g, ' ').trim()
-  if (nextText === previousText) {
-    // The language or fence spelling changed while the code reads the same: show both whole versions.
-    const host = next.parentElement?.tagName === 'PRE' ? next.parentElement : next
-    const oldHost = previous.parentElement?.tagName === 'PRE' ? previous.parentElement : previous
-    const ghost = treeGhostOf(oldHost, block, 'old')
-    if (host.parentNode !== null) host.parentNode.insertBefore(ghost, host)
-    markChangedBlock(host, block.index, 'add')
-    return
-  }
-  if (mergeInlineText(next, previous)) {
-    stampBlock(next, block.index, 'add')
-    const unit = block.units[0]
-    if (unit !== undefined) markUnit(next, unit.index, 'add')
-    return
-  }
-  treeReplacement(block, freshElements, oldElements, freshRoot)
-}
-
-/** Whether a block is ONE inline change of a paragraph/heading/list item (its frame is its characters). */
-function isInlineUnitBlock(block: TreePreviewBlock): boolean {
-  return (block.kind === 'paragraph' || block.kind === 'heading' || block.kind === 'list_item')
-    && block.merged === false
-    && block.units.length >= 1
-    && block.oldNodes.length === 1
-    && block.newNodes.length === 1
-    && block.invisible.length === 0
-}
-
-/** The end (exclusive) of the consecutive inline-unit blocks sharing one rendered node pair. */
-function inlineUnitGroupEnd(blocks: readonly TreePreviewBlock[], start: number): number {
-  const first = blocks[start]!
-  let end = start + 1
-  while (end < blocks.length) {
-    const next = blocks[end]!
-    if (!isInlineUnitBlock(next)) break
-    if (next.oldNodes[0] !== first.oldNodes[0] || next.newNodes[0] !== first.newNodes[0]) break
-    end++
-  }
-  return end
-}
-
-/** Stamp one drawn word-run element with its UNIT and BLOCK, so hover/keep name the change it draws. */
-function stampInlineRun(element: HTMLElement, block: TreePreviewBlock, unitIndex: number, kind: 'add' | 'del'): void {
-  element.dataset.mdUnit = String(unitIndex)
-  element.dataset.mdBlock = String(block.index)
-  element.dataset.mdKind = kind
-}
-
-/**
- * Attribute the word runs `mergeInlineText` drew to their blocks/units, in reading order.
- *
- * One group can hold several changes of the same paragraph; each unit's `oldText`/`newText` is exactly what the
- * drawn del/add spans carry, so the spans are matched in order and stamped.
- *
- * @param element - the merged element (the new side).
- * @param blocks - the group's single-unit blocks, in order.
- * @param wordClass - which span class this side's runs use.
- * @returns the blocks whose runs were found and stamped.
- */
-function tagInlineRuns(element: HTMLElement, blocks: readonly TreePreviewBlock[], wordClass: 'mdWordAdd' | 'mdWordDel'): Set<number> {
-  const runs = [...element.querySelectorAll<HTMLElement>(`.${wordClass}`)]
-  const used = new Set<HTMLElement>()
-  const matched = new Set<number>()
-  const side: 'add' | 'del' = wordClass === 'mdWordAdd' ? 'add' : 'del'
-  for (const block of blocks) {
-    const unit = block.units[0]!
-    const text = side === 'add' ? unit.newText : unit.oldText
-    if (text === '') continue
-    const run = runs.find(candidate => !used.has(candidate) && (candidate.textContent ?? '') === text)
-      ?? runs.find(candidate => !used.has(candidate) && text.trim() !== '' && (candidate.textContent ?? '').includes(text.trim()))
-    if (run === undefined) continue
-    used.add(run)
-    stampInlineRun(run, block, unit.index, side)
-    matched.add(block.index)
-  }
-  return matched
-}
-
-/** Whether an inline element pair's own Markdown source is the text this unit's change is about. */
-function inlinePairMatchesUnit(unit: { oldText: string; newText: string }, oldElement: HTMLElement, newElement: HTMLElement): boolean {
-  const oldSource = sourceOfElement(oldElement)
-  const newSource = sourceOfElement(newElement)
-  const same = (a: string, b: string): boolean => a === b || a.includes(b) || b.includes(a)
-  if (same(unit.oldText, oldSource) || same(unit.newText, newSource)) return true
-  // A link/destination change can leave the ELEMENT's rendered text unchanged while the unit names the same
-  // visible anchor (a reference-style link whose target moved): match the pair by the words both read.
-  const oldVisible = (oldElement.textContent ?? '').trim()
-  const newVisible = (newElement.textContent ?? '').trim()
-  return oldVisible !== '' && oldVisible === newVisible
-    && (unit.oldText.includes(oldVisible) || unit.newText.includes(newVisible))
-}
-
-/** Stamp every element inside `root` that already carries one unit with that unit's block number. */
-function stampUnitElements(root: HTMLElement, unitIndex: number, blockIndex: number, kind: 'add' | 'del'): void {
-  for (const element of root.querySelectorAll<HTMLElement>(`[data-md-unit="${unitIndex}"]`)) {
-    element.dataset.mdBlock = String(blockIndex)
-    element.dataset.mdKind = kind
-  }
-}
-
-/**
- * One block's unit, as the inline-twin helper needs it: which block the twin belongs to, and the change.
- */
-interface InlineTwinUnit {
-  blockIndex: number
-  unit: TreePreviewUnit
-}
-
-/**
- * Whether two paired elements are an IMAGE whose path/alt/title changed.
- *
- * An image's attributes cannot be read off the rendered picture (and a wrong path shows nothing at all), so
- * its pair is ALWAYS drawn as the two frames — old red on the left, new green on the right — exactly like a
- * retargeted link. That covers both the path and the title/alt text: each frame names its own side.
- */
-function isImagePairChange(previous: HTMLElement, next: HTMLElement): boolean {
-  return previous.tagName === 'IMG'
-    && next.tagName === 'IMG'
-    && attributeFingerprint(previous) !== attributeFingerprint(next)
-}
-
-/**
- * Put the red/green twin of every INVISIBLE inline change (a retargeted link, a re-spelled style) inside one
- * rendered line, and stamp each twin with its block/unit and source.
- *
- * @param units - the block/unit pairs of this line that still have no drawn word run.
- * @param previous - the old side's element.
- * @param next - the new side's element.
- * @returns the indices of the units that got a twin.
- */
-function twinHiddenInlineUnits(
-  units: readonly InlineTwinUnit[],
-  previous: HTMLElement,
-  next: HTMLElement,
-  pairs: [HTMLElement, HTMLElement][] = changedElementPairs(previous, next, false),
-): Set<number> {
-  const matched = new Set<number>()
-  for (const { blockIndex, unit } of units) {
-    if (matched.has(unit.index)) continue
-    const pair = pairs.find(([oldElement, newElement]) =>
-      (hasHiddenDiff(oldElement, newElement) || isImagePairChange(oldElement, newElement))
-      && inlinePairMatchesUnit(unit, oldElement, newElement))
-    if (pair === undefined) continue
-    const parent = pair[1].parentNode
-    if (parent === null) continue
-    const position = [...parent.childNodes].indexOf(pair[1])
-    if (position === -1 || !applyTwin(pair[0], pair[1], unit.index, true)) continue
-    const wrapper = parent.childNodes[position]
-    if (!(wrapper instanceof HTMLElement)) continue
-    wrapper.dataset.mdBlock = String(blockIndex)
-    wrapper.dataset.mdKind = 'add'
-    setMarkerLines(wrapper, unit, 'old')
-    setMarkerLines(wrapper, unit, 'new')
-    matched.add(unit.index)
-  }
-  return matched
-}
-
-/**
- * The double column's version of `twinHiddenInlineUnits`: each column gets ITS side tinted with that side's
- * source, so the two link targets read as one red and one green link across the columns.
- */
-function twinHiddenInlineUnitsDouble(
-  units: readonly InlineTwinUnit[],
-  previous: HTMLElement,
-  next: HTMLElement,
-  pairs: [HTMLElement, HTMLElement][] = changedElementPairs(previous, next, false),
-): Set<number> {
-  const matched = new Set<number>()
-  for (const { blockIndex, unit } of units) {
-    if (matched.has(unit.index)) continue
-    const pair = pairs.find(([oldElement, newElement]) =>
-      (hasHiddenDiff(oldElement, newElement) || isImagePairChange(oldElement, newElement))
-      && inlinePairMatchesUnit(unit, oldElement, newElement))
-    if (pair === undefined) continue
-    const oldSide = sideTwin(pair[0], 'old', unit.index, true)
-    const newSide = sideTwin(pair[1], 'new', unit.index, true)
-    oldSide.dataset.mdBlock = String(blockIndex)
-    oldSide.dataset.mdKind = 'del'
-    newSide.dataset.mdBlock = String(blockIndex)
-    newSide.dataset.mdKind = 'add'
-    matched.add(unit.index)
-  }
-  return matched
-}
-
-/**
- * Draw one rendered line's inline changes: the word runs AND the one-red-one-green twins for changes that the
- * text itself cannot show (a retargeted link, a re-spelled style). Every block of the group is stamped onto the
- * elements its own change produced, so the toolbar frames/hovers just that difference, not the whole line.
- *
- * @param blocks - the group's single-unit inline blocks, in order.
- * @param next - the new side's element.
- * @param previous - the old side's element.
- * @param freshRoot - the new document's root (needed by the replacement fallback).
- */
-function renderInlineUnitGroup(
-  blocks: readonly TreePreviewBlock[],
-  next: HTMLElement | undefined,
-  previous: HTMLElement | undefined,
-  freshRoot: HTMLElement,
-): void {
-  if (next === undefined || previous === undefined || next.tagName !== previous.tagName) {
-    for (const block of blocks) treeReplacement(block, next === undefined ? [] : [next], previous === undefined ? [] : [previous], freshRoot)
-    return
-  }
-  // The inline element pairs are read BEFORE the text merge: the merge splits text nodes, so a later walk would
-  // compare a changed child list and could miss the link that moved its target.
-  const inlinePairs = changedElementPairs(previous, next, false)
-  const merged = mergeInlineText(next, previous)
-  const matched = merged
-    ? new Set<number>([...tagInlineRuns(next, blocks, 'mdWordAdd'), ...tagInlineRuns(next, blocks, 'mdWordDel')])
-    : new Set<number>()
-  const remaining = blocks.filter(block => !matched.has(block.index))
-  // A CHECKBOX state change is drawn as the box itself: old box struck beside the new one (one block).
-  const unmatched: TreePreviewBlock[] = []
-  for (const block of remaining) {
-    const unit = block.units[0]!
-    if (drawCheckboxStates(previous, next, unit.index)) {
-      stampUnitElements(next, unit.index, block.index, 'add')
-      matched.add(block.index)
-      continue
-    }
-    unmatched.push(block)
-  }
-  if (unmatched.length > 0) {
-    const twinUnits = unmatched.map(block => ({
-      blockIndex: block.index,
-      unit: block.units[0]!,
-    }))
-    const twins = twinHiddenInlineUnits(twinUnits, previous, next, inlinePairs)
-    for (const unit of twins) {
-      const block = unmatched.find(candidate => candidate.units[0]!.index === unit)
-      if (block !== undefined) matched.add(block.index)
-    }
-  }
-  // A change with no drawable run at all (a changed attribute on a wrapper): mark its element whole. When the
-  // merge DID draw a whole-line run pair (a rewritten sentence), that pair is the block's visible extent — tag
-  // it, so hovering the blank end of the line does not raise a block whose carrier is the whole paragraph.
-  for (const block of blocks) {
-    if (matched.has(block.index)) continue
-    const unit = block.units[0]!
-    const drawnRuns = [...next.querySelectorAll<HTMLElement>('.mdWordAdd, .mdWordDel')]
-      .filter(run => run.dataset.mdBlock === undefined)
-      .filter(run => {
-        const text = run.textContent ?? ''
-        return (unit.oldText !== '' && text.includes(unit.oldText))
-          || (unit.newText !== '' && text.includes(unit.newText))
-      })
-    if (drawnRuns.length > 0) {
-      for (const run of drawnRuns) {
-        const kind = run.classList.contains('mdWordDel') ? 'del' : 'add'
-        markUnit(run, unit.index, kind)
-        stampBlock(run, block.index, kind)
-      }
-      setMarkerLines(drawnRuns[0]!, unit, 'old')
-      setMarkerLines(drawnRuns[0]!, unit, 'new')
-      matched.add(block.index)
-      continue
-    }
-    markChangedUnit(next, unit.index, 'add')
-    stampBlock(next, block.index, 'add')
-  }
-}
-
-/** Draw a group of inline-unit blocks in the double column: each column keeps its own side's text/marks. */
-function renderInlineUnitGroupDouble(
-  blocks: readonly TreePreviewBlock[],
-  oldElement: HTMLElement | undefined,
-  newElement: HTMLElement | undefined,
-): void {
-  if (oldElement === undefined || newElement === undefined || oldElement.tagName !== newElement.tagName) {
-    for (const block of blocks) {
-      const unit = block.units[0]!
-      if (oldElement !== undefined) {
-        markChangedUnit(oldElement, unit.index, 'del')
-        stampBlock(oldElement, block.index, 'del')
-      }
-      if (newElement !== undefined) {
-        markChangedUnit(newElement, unit.index, 'add')
-        stampBlock(newElement, block.index, 'add')
-      }
-    }
-    return
-  }
-  const inlinePairs = changedElementPairs(oldElement, newElement, false)
-  const oldText = ownTextOf(oldElement)
-  const newText = ownTextOf(newElement)
-  if (oldText !== newText) {
-    const runs = intraRunsOf(oldText, newText)
-    if (runs !== undefined) {
-      wrapOwnChangedRuns(oldElement, runs.del, 'mdWordDel')
-      wrapOwnChangedRuns(newElement, runs.add, 'mdWordAdd')
-    }
-  }
-  const matchedOld = tagInlineRuns(oldElement, blocks, 'mdWordDel')
-  const matchedNew = tagInlineRuns(newElement, blocks, 'mdWordAdd')
-  for (const block of blocks) {
-    if (matchedOld.has(block.index) || matchedNew.has(block.index)) continue
-    const unit = block.units[0]!
-    // A checkbox state change: each column tints ITS OWN box (no struck/added pair across columns).
-    if (markCheckboxSide(oldElement, unit.index, 'del') && markCheckboxSide(newElement, unit.index, 'add')) {
-      stampUnitElements(oldElement, unit.index, block.index, 'del')
-      stampUnitElements(newElement, unit.index, block.index, 'add')
-      continue
-    }
-    const pair = inlinePairs.find(([oldPair, newPair]) =>
-      (hasHiddenDiff(oldPair, newPair) || isImagePairChange(oldPair, newPair))
-      && inlinePairMatchesUnit(unit, oldPair, newPair))
-    if (pair !== undefined) {
-      const oldSide = sideTwin(pair[0], 'old', unit.index, true)
-      const newSide = sideTwin(pair[1], 'new', unit.index, true)
-      oldSide.dataset.mdBlock = String(block.index)
-      oldSide.dataset.mdKind = 'del'
-      newSide.dataset.mdBlock = String(block.index)
-      newSide.dataset.mdKind = 'add'
-      continue
-    }
-    markChangedUnit(oldElement, unit.index, 'del')
-    stampBlock(oldElement, block.index, 'del')
-    markChangedUnit(newElement, unit.index, 'add')
-    stampBlock(newElement, block.index, 'add')
-  }
-}
-
-/**
- * Every numbered block must be reachable in the DOM.
- *
- * A merge can leave one block without a drawn element: a rewritten line whose character runs cannot be
- * attributed to the separate changes, or an inline attribute change whose counterpart element never rendered.
- * Such a block gets ONE modest source marker at its position (the old renderer's reachability net), so the
- * toolbar can still number, hover and keep it.
- *
- * In the double column each call is scoped to ITS column: a pure deletion must never get a marker in the new
- * column (that is how an old nested list once appeared under the YAML card on the wrong side).
- *
- * @param root - the column's rendered document.
- * @param blocks - every numbered block.
- * @param otherRoot - the opposite column, so a paired block carried there is not marked twice.
- * @param side - which column this call serves ('both' for the single column).
- */
-function ensureTreeBlocksReachable(
-  root: HTMLElement,
-  blocks: readonly TreePreviewBlock[],
-  otherRoot?: HTMLElement,
-  side: 'old' | 'new' | 'both' = 'both',
-): void {
-  for (const block of blocks) {
-    if (block.invisible.length > 0) continue
-    const pureDeletion = block.newNodes.length === 0
-    const pureAddition = block.oldNodes.length === 0
-    if ((side === 'new' && pureDeletion) || (side === 'old' && pureAddition)) continue
-    if (root.querySelector(`[data-md-block="${block.index}"]`) !== null) continue
-    // In the double column a paired block only needs ONE column to carry it.
-    if (otherRoot !== undefined && otherRoot.querySelector(`[data-md-block="${block.index}"]`) !== null) continue
-    const oldSource = block.oldNodes.map(node => node.raw).join('\n').replace(/\n+$/, '')
-    const newSource = block.newNodes.map(node => node.raw).join('\n').replace(/\n+$/, '')
-    if (oldSource === '' && newSource === '') continue
-    const showOld = side !== 'new' && oldSource !== ''
-    const showNew = side !== 'old' && newSource !== ''
-    const markers = placeholderTwins(
-      block.index,
-      showOld ? oldSource : undefined,
-      showNew ? newSource : undefined,
-      'markdown',
-      block.units[0] as unknown as PreviewUnit | undefined,
-    )
-    for (const marker of markers) stampBlock(marker, block.index, marker.dataset.mdKind === 'del' ? 'del' : 'add')
-    const line = side === 'old'
-      ? block.oldStart
-      : block.newStart <= block.newEnd ? block.newStart : block.oldStart
-    const anchor = insertionPointFor(root, Math.max(0, line - 1))
-    for (const marker of markers) anchor.parent.insertBefore(marker, anchor.before)
-  }
-}
-
-/** Rendered tag for each inline tree-node type whose element can be twinned. */
-const INLINE_NODE_TAGS: Record<string, string> = {
-  link: 'A',
-  strong: 'STRONG',
-  em: 'EM',
-  codespan: 'CODE',
-  image: 'IMG',
-  del: 'DEL',
-  ins: 'INS',
-}
-
-/** The rendered element for one inline tree node INSIDE its container element. */
-function inlineElementForNode(container: HTMLElement, node: MarkdownTreeNode): HTMLElement | undefined {
-  if (node.type === 'checkbox') {
-    const box = container.querySelector('input[type="checkbox"]')
-    return box instanceof HTMLElement ? box : undefined
-  }
-  const tag = INLINE_NODE_TAGS[node.type]
-  if (tag === undefined) return undefined
-  const candidates = [...container.querySelectorAll<HTMLElement>(tag)]
-  if (node.type === 'image') {
-    const path = (node.attrs.src as string | undefined) ?? ''
-    return candidates.find(image => image.getAttribute('src') === path) ?? candidates[0]
-  }
-  const text = nodeVisibleText(node).trim()
-  const exact = candidates.filter(element => (element.textContent ?? '').trim() === text)
-  if (exact.length === 1) return exact[0]
-  if (exact.length > 1) {
-    const raw = node.raw.replace(/\s+/g, '')
-    const bySource = exact.find(element => {
-      const source = sourceOfElement(element).replace(/\s+/g, '')
-      return source === raw || source.includes(raw) || raw.includes(source)
-    })
-    return bySource ?? exact[0]
-  }
-  return candidates.length === 1 ? candidates[0] : undefined
-}
-
-/** Where a needle sits in one element's OWN text (text nodes up to the first structural child). */
-function ownTextIndexOf(element: HTMLElement, needle: string): number {
-  if (needle === '') return -1
-  return ownTextOf(element).indexOf(needle)
-}
-
-/**
- * The text a tree node contributes to its container's OWN rendered text.
- *
- * This is how the renderer maps a node's SOURCE position to a DOM text offset without searching for the words
- * (a search picks the wrong occurrence when the line repeats itself, which is what put blocks out of order and
- * let one block's run wrap inside another's).
- */
-function ownRenderedTextOfNode(node: MarkdownTreeNode): string {
-  switch (node.type) {
-    case 'image':
-    case 'checkbox':
-    case 'hr':
-    case 'html':
-      return ''
-    case 'text':
-      return node.children.length > 0 ? node.children.map(child => ownRenderedTextOfNode(child)).join('') : node.raw
-    case 'codespan':
-    case 'escape':
-      return node.text
-    case 'list':
-    case 'blockquote':
-    case 'table':
-    case 'code':
-      return ''
-    default:
-      return node.children.length > 0 ? node.children.map(child => ownRenderedTextOfNode(child)).join('') : node.text
-  }
-}
-
-/** The rendered-own-text offset of one source position, walking the container's children in tree order. */
-function renderedOffsetInChildren(children: readonly MarkdownTreeNode[], target: MarkdownTreeNode, sourceOffset: number): number {
-  let offset = 0
-  for (const child of children) {
-    if (child.id === target.id) return offset + Math.max(0, sourceOffset - child.start)
-    if (child.children.length > 0) {
-      const nested = renderedOffsetInChildren(child.children, target, sourceOffset)
-      if (nested >= 0) return offset + nested
-    }
-    offset += ownRenderedTextOfNode(child).length
-  }
-  return -1
-}
-
-/** The DOM own-text offset of a text unit (or a whole node, when `sourceOffset` is its start). */
-function renderedOffsetOf(container: MarkdownTreeNode, node: MarkdownTreeNode, sourceOffset: number): number {
-  if (container.id === node.id) return Math.max(0, sourceOffset - container.start)
-  return renderedOffsetInChildren(container.children, node, sourceOffset)
-}
-
-/**
- * The DOM own-text offset of one text unit (or a whole node, when `sourceOffset` is its start).
- *
- * @param container - the inline container's tree node.
- * @param node - the text node the unit belongs to.
- * @param unit - the unit.
- * @param side - which side's character range to use.
- * @returns the offset in the element's own rendered text, or -1 when it cannot be mapped.
- */
-function renderedOffsetOfUnit(container: MarkdownTreeNode, node: MarkdownTreeNode, unit: TreePreviewUnit, side: 'old' | 'new'): number {
-  const chars = side === 'new' ? unit.newChars : unit.oldChars
-  return renderedOffsetOf(container, node, chars.start)
-}
-
-/** The DOM own-text offset where a whole node starts. */
-function renderedOffsetOfNode(container: MarkdownTreeNode, node: MarkdownTreeNode): number {
-  return renderedOffsetOf(container, node, node.start)
-}
-
-/**
- * The DOM own-text offset of one CODE line unit.
- *
- * The CODE element holds only the fence's CONTENT lines; the opening ``` line is part of the code node's raw
- * source but not of the element's text. The tree offset must drop that opening line, or the run lands six
- * characters into the first code line (the reported broken fence).
- */
-function renderedOffsetOfCodeUnit(
-  container: MarkdownTreeNode,
-  node: MarkdownTreeNode,
-  unit: TreePreviewUnit,
-  side: 'old' | 'new',
-): number {
-  if (node.type !== 'code') return renderedOffsetOfUnit(container, node, unit, side)
-  const chars = side === 'new' ? unit.newChars : unit.oldChars
-  const raw = container.raw
-  const opening = raw.indexOf('\n')
-  const prefix = opening === -1 ? 0 : opening + 1
-  return Math.max(0, chars.start - container.start - prefix)
-}
-
-/** The newly created `.cls` run, once a wrap/insert has run on the element. */
-function newestRun(element: HTMLElement, cls: string, before: ReadonlySet<Element>): HTMLElement | undefined {
-  return [...element.querySelectorAll<HTMLElement>(`.${cls}`)]
-    .filter(run => !before.has(run) && run.dataset.mdBlock === undefined)
-    .pop()
-}
-
-/** Stamp one drawn run with the block and its unit, and carry the unit's source lines for the toolbar. */
-function stampDrawnRun(element: HTMLElement, block: TreePreviewBlock, unit: TreePreviewUnit | undefined, kind: 'add' | 'del'): void {
-  element.dataset.mdBlock = String(block.index)
-  element.dataset.mdKind = kind
-  if (unit !== undefined) {
-    element.dataset.mdUnit = String(unit.index)
-    setMarkerLines(element, unit as unknown as PreviewUnit, 'old')
-    setMarkerLines(element, unit as unknown as PreviewUnit, 'new')
-  }
-}
-
-/** Insert a styled run at a DOM own-text offset (used for a deletion's struck words, which have no new run). */
-function insertOwnSpanAt(element: HTMLElement, offset: number, text: string, cls: string): HTMLElement | undefined {
-  if (text === '') return undefined
-  const nodes = ownTextNodes(element)
-  const offsets = nodeOffsets(nodes)
-  const at = Math.max(0, Math.min(offset, ownTextOf(element).length))
-  const span = document.createElement('span')
-  span.className = cls
-  span.textContent = text
-  for (let step = 0; step < nodes.length; step++) {
-    const node = nodes[step]!
-    const from = offsets[step]!
-    if (at >= from && at < from + node.data.length) {
-      const tail = splitAt(node, at - from)
-      tail.parentNode?.insertBefore(span, tail)
-      return span
-    }
-  }
-  const last = nodes[nodes.length - 1]
-  if (last !== undefined) {
-    const parent = last.parentNode
-    if (parent !== null) {
-      parent.insertBefore(span, last.nextSibling)
-      return span
-    }
-  }
-  return undefined
-}
-
-/**
- * Insert the old words immediately BEFORE the new run they replaced.
- *
- * Inserting by text offset would be wrong as soon as another unit's run was already inserted on the same line
- * (the old text shifts every later offset), and it could nest the struck run inside a later wrapper. Anchoring
- * to the new run keeps the two halves of ONE change together and independent of the other blocks.
- */
-function insertDelRunBefore(anchor: HTMLElement, text: string, block: TreePreviewBlock, unit: TreePreviewUnit): HTMLElement | undefined {
-  if (text === '') return undefined
-  const span = document.createElement('span')
-  span.className = 'mdWordDel'
-  span.textContent = text
-  anchor.before(span)
-  stampDrawnRun(span, block, unit, 'del')
-  return span
-}
-
-/**
- * Draw one unit's characters at a KNOWN own-text offset.
- *
- * @param element - the element whose own text carries the change.
- * @param offset - the DOM own-text offset (negative to fall back to searching the words).
- * @param unit - the change.
- * @param block - its block.
- * @param side - which side's words to draw.
- * @returns the created run, when drawn.
- */
-function drawUnitAt(
-  element: HTMLElement,
-  offset: number,
-  unit: TreePreviewUnit,
-  block: TreePreviewBlock,
-  side: 'add' | 'del',
-): HTMLElement | undefined {
-  const needle = side === 'add' ? unit.newText : unit.oldText
-  if (needle === '') return undefined
-  const ownLength = ownTextOf(element).length
-  let at = offset >= 0 ? offset : ownTextIndexOf(element, needle)
-  // A source offset can land past the rendered own text (text inside a nested structure, markup that does not
-  // render): wrapping such a range would run off the end and never advance. Skip instead.
-  if (at < 0 || at >= ownLength || at + needle.length > ownLength) at = ownTextIndexOf(element, needle)
-  if (at < 0) return undefined
-  const cls = side === 'add' ? 'mdWordAdd' : 'mdWordDel'
-  const before = new Set<Element>(element.querySelectorAll(`.${cls}`))
-  wrapOwnRange(element, at, at + needle.length, cls)
-  const run = newestRun(element, cls, before)
-  if (run === undefined) return undefined
-  stampDrawnRun(run, block, unit, side)
-  return run
-}
-
-function drawTextUnitIn(element: HTMLElement, unit: TreePreviewUnit, side: 'add' | 'del'): HTMLElement | undefined {
-  const needle = side === 'add' ? unit.newText : unit.oldText
-  if (needle === '') return undefined
-  const at = ownTextIndexOf(element, needle)
-  if (at < 0) return undefined
-  const cls = side === 'add' ? 'mdWordAdd' : 'mdWordDel'
-  const before = new Set<Element>(element.querySelectorAll(`.${cls}`))
-  wrapOwnRange(element, at, at + needle.length, cls)
-  return newestRun(element, cls, before)
-}
-
-/**
- * The hover/keep markers for an inline block that has no drawable element (a deleted inline link, a node that
- * changed TYPE): its own source chips at the container's position — never a tint on the whole container.
- */
-function insertInlineSourceMarkers(
-  block: TreePreviewBlock,
-  freshContainer: HTMLElement | undefined,
-  baselineContainer: HTMLElement | undefined,
-  side: 'single' | 'old' | 'new',
-): boolean {
-  const oldSource = block.oldNodes.map(node => node.raw).join('').replace(/\n+$/, '')
-  const newSource = block.newNodes.map(node => node.raw).join('').replace(/\n+$/, '')
-  const wantOld = side !== 'new' && oldSource !== ''
-  const wantNew = side !== 'old' && newSource !== ''
-  if (!wantOld && !wantNew) return false
-  const chips = placeholderTwins(
-    block.index,
-    wantOld ? oldSource : undefined,
-    wantNew ? newSource : undefined,
-    'markdown',
-  )
-  for (const chip of chips) stampBlock(chip, block.index, chip.dataset.mdKind === 'del' ? 'del' : 'add')
-  const anchor = freshContainer ?? baselineContainer
-  if (anchor?.parentNode !== undefined && anchor?.parentNode !== null) {
-    for (const chip of chips) anchor.parentNode.insertBefore(chip, anchor)
-    return true
-  }
-  return false
-}
-
-/**
- * Draw ONE inline-child block (a text run, a changed link/strong/image, or an inline node that exists on one
- * side only) in the single column.
- *
- * The block's container is its rendered parent; the change is drawn as word runs inside the changed element or,
- * for an attribute-only change (a retargeted link, an image path, a syntax respelling), as the red/green pair.
- * Nothing here ever tints the container element, so one block cannot contain another.
- *
- * @param block - the inline block.
- * @param fresh - the new document's rendered tree.
- * @param baseline - the old document's rendered tree.
- */
-function renderInlineChildBlock(block: TreePreviewBlock, fresh: RenderedDoc, baseline: RenderedDoc): void {
-  const containerNew = block.inlineContainer?.new === undefined ? undefined : treeNodeElements(fresh, block.inlineContainer.new)[0]
-  const containerOld = block.inlineContainer?.old === undefined ? undefined : treeNodeElements(baseline, block.inlineContainer.old)[0]
-  const unit = block.units[0] as unknown as TreePreviewUnit | undefined
-  if (block.kind === 'checkbox') {
-    const index = unit?.index ?? block.index
-    if (containerOld !== undefined && containerNew !== undefined && drawCheckboxStates(containerOld, containerNew, index)) {
-      stampUnitElements(containerNew, index, block.index, 'add')
-      return
-    }
-    insertInlineSourceMarkers(block, containerNew, containerOld, 'single')
-    return
-  }
-  const oldNode = block.oldNodes[0]
-  const newNode = block.newNodes[0]
-  // A REWRITTEN text pair (several char runs the line merge cannot align) is drawn as the whole line, once.
-  const containerNodeNew = block.inlineContainer?.new
-  if (block.units.length > 1 && block.kind === 'text' && containerOld !== undefined && containerNew !== undefined
-    && oldNode !== undefined && newNode !== undefined) {
-    const oldText = block.oldNodes.map(node => node.raw).join('')
-    const newText = newNode.raw
-    const offset = containerNodeNew === undefined ? -1 : renderedOffsetOfNode(containerNodeNew, newNode)
-    const at = offset >= 0 ? offset : ownTextIndexOf(containerNew, newText)
-    if (at >= 0) {
-      const length = newText.length
-      const addBefore = new Set<Element>(containerNew.querySelectorAll('.mdWordAdd'))
-      wrapOwnRange(containerNew, at, at + length, 'mdWordAdd')
-      const addRun = newestRun(containerNew, 'mdWordAdd', addBefore)
-      if (addRun !== undefined) {
-        stampDrawnRun(addRun, block, block.units[0] as unknown as TreePreviewUnit, 'add')
-        insertDelRunBefore(addRun, oldText, block, block.units[0] as unknown as TreePreviewUnit)
-      }
-      return
-    }
-  }
-  // Code lines / text runs: wrap exactly the unit's source characters, located by the tree offset.
-  if (block.units.length > 0 && containerNew !== undefined && (block.kind === 'code' || block.kind === 'text')
-    && oldNode !== undefined && newNode !== undefined && containerNodeNew !== undefined) {
-    let drew = false
-    // Back to front: inserting one unit's old words must not move the offsets of units still to draw.
-    const orderedUnits = [...block.units as unknown as TreePreviewUnit[]]
-      .map(blockUnit => ({
-        blockUnit,
-        offset: block.kind === 'code'
-          ? renderedOffsetOfCodeUnit(containerNodeNew, newNode, blockUnit, 'new')
-          : renderedOffsetOfUnit(containerNodeNew, newNode, blockUnit, 'new'),
-      }))
-      .sort((left, right) => right.offset - left.offset)
-    for (const { blockUnit, offset } of orderedUnits) {
-      if (blockUnit.newText === '') {
-        // A pure deletion has no new run: its struck words sit where they were removed.
-        const deleted = insertOwnSpanAt(containerNew, Math.max(0, offset), blockUnit.oldText, 'mdWordDel')
-        if (deleted !== undefined) {
-          stampDrawnRun(deleted, block, blockUnit, 'del')
-          drew = true
-        }
-        continue
-      }
-      const addRun = drawUnitAt(containerNew, offset, blockUnit, block, 'add')
-      if (addRun === undefined) continue
-      insertDelRunBefore(addRun, blockUnit.oldText, block, blockUnit)
-      drew = true
-    }
-    if (drew) return
-  }
-  // Text edits INSIDE one inline element (a link/strong whose words changed): word runs on that element.
-  if (block.units.length > 0 && oldNode !== undefined && newNode !== undefined) {
-    const oldTarget = block.kind === 'text' ? containerOld : containerOld === undefined ? undefined : inlineElementForNode(containerOld, oldNode)
-    const newTarget = block.kind === 'text' ? containerNew : containerNew === undefined ? undefined : inlineElementForNode(containerNew, newNode)
-    if (oldTarget !== undefined && newTarget !== undefined) {
-      let drew = false
-      for (const blockUnit of block.units as unknown as TreePreviewUnit[]) {
-        const addRun = drawTextUnitIn(newTarget, blockUnit, 'add')
-        if (addRun === undefined) continue
-        stampDrawnRun(addRun, block, blockUnit, 'add')
-        insertDelRunBefore(addRun, blockUnit.oldText, block, blockUnit)
-        drew = true
-      }
-      if (drew) return
-    }
-  }
-  // An attribute-only change: the element itself is the change — red old copy, green new copy.
-  if (oldNode !== undefined && newNode !== undefined && oldNode.type === newNode.type && INLINE_NODE_TAGS[oldNode.type] !== undefined) {
-    const oldElement = containerOld === undefined ? undefined : inlineElementForNode(containerOld, oldNode)
-    const newElement = containerNew === undefined ? undefined : inlineElementForNode(containerNew, newNode)
-    if (oldElement !== undefined && newElement !== undefined) {
-      const parent = newElement.parentNode
-      if (parent !== null) {
-        const position = [...parent.childNodes].indexOf(newElement)
-        const index = unit?.index ?? block.index
-        if (applyTwin(oldElement, newElement, index, true)) {
-          const wrapper = parent.childNodes[position]
-          if (wrapper instanceof HTMLElement) {
-            wrapper.dataset.mdBlock = String(block.index)
-            wrapper.dataset.mdKind = 'add'
-            if (unit !== undefined) wrapper.dataset.mdUnit = String(unit.index)
-            // The toolbar wants the Markdown that was written (`**x**` / `__x__`), not the rendered words.
-            setSourceDiff(wrapper, { old: oldNode.raw, new: newNode.raw })
-            return
-          }
-        }
-      }
-    }
-  }
-  // No drawable element: its own source chips stand for it.
-  insertInlineSourceMarkers(block, containerNew, containerOld, 'single')
-}
-
-/**
- * Draw code changes BY LINE, TOP TO BOTTOM: the old line struck above the new line, then the untouched lines.
- *
- * A code fence is read line by line, so a changed line is a red line followed by its green replacement — not
- * two half-lines squeezed onto one row.
- *
- * @param blocks - the fence's changed-line blocks (one per contiguous run), in model order.
- * @param codeNode - the fence's tree node.
- * @param codeElement - the rendered CODE element.
- */
-function renderCodeLines(blocks: readonly TreePreviewBlock[], codeNode: MarkdownTreeNode, codeElement: HTMLElement): void {
-  const content = codeElement.textContent ?? ''
-  const lines = content.split('\n')
-  const changed = new Map<number, { block: TreePreviewBlock; unit: TreePreviewUnit }>()
-  for (const block of blocks) {
-    for (const unit of block.units as unknown as TreePreviewUnit[]) {
-      const line = unit.newLines.start - codeNode.lines.start - 1
-      changed.set(line, { block, unit })
-    }
-  }
-  const parts: Node[] = []
-  const appendLine = (text: string, cls: string | undefined, entry: { block: TreePreviewBlock; unit: TreePreviewUnit } | undefined): void => {
-    if (cls === undefined) {
-      parts.push(document.createTextNode(text))
-      return
-    }
-    const span = document.createElement('span')
-    span.className = `${cls} mdCodeLine`
-    span.textContent = text
-    if (entry !== undefined) stampDrawnRun(span, entry.block, entry.unit, cls === 'mdWordDel' ? 'del' : 'add')
-    parts.push(span)
-  }
-  for (let index = 0; index < lines.length;) {
-    const entry = changed.get(index)
-    if (entry === undefined) {
-      appendLine(lines[index]!, undefined, undefined)
-      if (index < lines.length - 1) parts.push(document.createTextNode('\n'))
-      index++
-      continue
-    }
-    // One contiguous changed run: ALL old lines on top (red), then ALL new lines below (green).
-    let end = index
-    while (end + 1 < lines.length && changed.has(end + 1)) end++
-    for (let at = index; at <= end; at++) {
-      const run = changed.get(at)!
-      if (run.unit.oldText !== '') appendLine(run.unit.oldText, 'mdWordDel', run)
-    }
-    for (let at = index; at <= end; at++) {
-      const run = changed.get(at)!
-      if (run.unit.newText !== '') appendLine(run.unit.newText, 'mdWordAdd', run)
-    }
-    index = end + 1
-  }
-  codeElement.replaceChildren(...parts)
-}
-
-/**
- * Render every inline block of ONE container together, so blocks that have only ONE side are placed where the
- * model puts them (before the next block's rendered element) instead of as marker chips around the container.
- *
- * @param blocks - the container's inline blocks, in model order.
- * @param fresh - the new document's rendered tree.
- * @param baseline - the old document's rendered tree.
- */
-function renderInlineContainerGroup(blocks: readonly TreePreviewBlock[], fresh: RenderedDoc, baseline: RenderedDoc): void {
-  const first = blocks[0]!
-  const newContainer = first.inlineContainer?.new === undefined ? undefined : treeNodeElements(fresh, first.inlineContainer.new)[0]
-  const oldContainer = first.inlineContainer?.old === undefined ? undefined : treeNodeElements(baseline, first.inlineContainer.old)[0]
-  if (blocks.every(block => block.kind === 'code') && first.inlineContainer?.new?.type === 'code' && newContainer !== undefined) {
-    renderCodeLines(blocks, first.inlineContainer.new, newContainer)
-    return
-  }
-  const deletions = blocks.filter(block => block.oldNodes.length > 0 && block.newNodes.length === 0)
-  const additions = blocks.filter(block => block.newNodes.length > 0 && block.oldNodes.length === 0)
-  const both = blocks.filter(block => block.oldNodes.length > 0 && block.newNodes.length > 0)
-  // Text runs inside one container are drawn back to front: a struck insertion must not move the source
-  // offsets of the runs still to draw.
-  const textRuns = both
-    .filter(block => (block.kind === 'text' || block.kind === 'code') && block.units.length > 0 && block.inlineContainer?.new !== undefined)
-    .map(block => ({
-      block,
-      offset: block.kind === 'code'
-        ? renderedOffsetOfCodeUnit(
-          block.inlineContainer!.new!,
-          block.newNodes[0]!,
-          block.units[0] as unknown as TreePreviewUnit,
-          'new',
-        )
-        : renderedOffsetOfUnit(
-          block.inlineContainer!.new!,
-          block.newNodes[0]!,
-          block.units[0] as unknown as TreePreviewUnit,
-          'new',
-        ),
-    }))
-    .sort((left, right) => right.offset - left.offset)
-  for (const entry of textRuns) renderInlineChildBlock(entry.block, fresh, baseline)
-  for (const block of both) {
-    if (textRuns.some(entry => entry.block === block)) continue
-    renderInlineChildBlock(block, fresh, baseline)
-  }
-  // One-sided blocks are MARKS on the side that exists: the side's own content is already rendered in place.
-  for (const block of additions) {
-    if (newContainer === undefined) continue
-    for (const node of block.newNodes) {
-      if (node.type === 'text') {
-        const offset = renderedOffsetOfNode(block.inlineContainer!.new!, node)
-        if (offset < 0) continue
-        const before = new Set<Element>(newContainer.querySelectorAll('.mdWordAdd'))
-        wrapOwnRange(newContainer, offset, offset + node.raw.length, 'mdWordAdd')
-        const run = newestRun(newContainer, 'mdWordAdd', before)
-        if (run !== undefined) stampDrawnRun(run, block, undefined, 'add')
-      } else {
-        const element = inlineElementForNode(newContainer, node)
-        if (element !== undefined) {
-          markChangedUnit(element, block.index, 'add')
-          stampBlock(element, block.index, 'add')
-        }
-      }
-    }
-  }
-  for (const block of deletions) {
-    if (newContainer === undefined) continue
-    // Find the next block of this container that has rendered content: the deleted words sit right before it.
-    const later = blocks.slice(blocks.indexOf(block) + 1).find(candidate =>
-      newContainer.querySelector(`[data-md-block="${candidate.index}"]`) !== null)
-    const anchor = later === undefined ? undefined : newContainer.querySelector<HTMLElement>(`[data-md-block="${later.index}"]`) ?? undefined
-    const wrapper = document.createElement('span')
-    wrapper.className = 'mdWordDel'
-    wrapper.dataset.mdBlock = String(block.index)
-    wrapper.dataset.mdKind = 'del'
-    for (const node of block.oldNodes) {
-      if (node.type === 'text') {
-        wrapper.append(document.createTextNode(node.raw))
-        continue
-      }
-      const element = oldContainer === undefined ? undefined : inlineElementForNode(oldContainer, node)
-      if (element !== undefined) {
-        const clone = element.cloneNode(true) as HTMLElement
-        clone.removeAttribute('data-md-block')
-        clone.removeAttribute('data-md-unit')
-        wrapper.append(clone)
-      } else {
-        wrapper.append(document.createTextNode(node.raw))
-      }
-    }
-    if (anchor !== undefined) anchor.before(wrapper)
-    else newContainer.append(wrapper)
-  }
-}
-
-/**
- * Draw ONE inline-child block in the double column: each column shows its own side's text edit or element twin.
- *
- * @param block - the inline block.
- * @param fresh - the new document's rendered tree.
- * @param baseline - the old document's rendered tree.
- */
-function renderInlineChildBlockDouble(block: TreePreviewBlock, fresh: RenderedDoc, baseline: RenderedDoc): void {
-  const containerNew = block.inlineContainer?.new === undefined ? undefined : treeNodeElements(fresh, block.inlineContainer.new)[0]
-  const containerOld = block.inlineContainer?.old === undefined ? undefined : treeNodeElements(baseline, block.inlineContainer.old)[0]
-  const unit = block.units[0] as unknown as TreePreviewUnit | undefined
-  const index = unit?.index ?? block.index
-  if (block.kind === 'checkbox') {
-    if (containerOld !== undefined) markCheckboxSide(containerOld, index, 'del')
-    if (containerNew !== undefined) markCheckboxSide(containerNew, index, 'add')
-    if (containerOld !== undefined) stampUnitElements(containerOld, index, block.index, 'del')
-    if (containerNew !== undefined) stampUnitElements(containerNew, index, block.index, 'add')
-    return
-  }
-  const oldNode = block.oldNodes[0]
-  const newNode = block.newNodes[0]
-  const containerNodeNew = block.inlineContainer?.new
-  const containerNodeOld = block.inlineContainer?.old
-  if (block.units.length > 1 && block.kind === 'text' && containerOld !== undefined && containerNew !== undefined
-    && oldNode !== undefined && newNode !== undefined && containerNodeOld !== undefined && containerNodeNew !== undefined) {
-    const firstUnit = block.units[0] as unknown as TreePreviewUnit
-    const oldOffset = renderedOffsetOfNode(containerNodeOld, oldNode)
-    const newOffset = renderedOffsetOfNode(containerNodeNew, newNode)
-    const oldLength = ownRenderedTextOfNode(oldNode).length
-    const newLength = ownRenderedTextOfNode(newNode).length
-    let drew = false
-    if (oldOffset >= 0) {
-      const before = new Set<Element>(containerOld.querySelectorAll('.mdWordDel'))
-      wrapOwnRange(containerOld, oldOffset, oldOffset + oldLength, 'mdWordDel')
-      const run = newestRun(containerOld, 'mdWordDel', before)
-      if (run !== undefined) {
-        stampDrawnRun(run, block, firstUnit, 'del')
-        drew = true
-      }
-    }
-    if (newOffset >= 0) {
-      const before = new Set<Element>(containerNew.querySelectorAll('.mdWordAdd'))
-      wrapOwnRange(containerNew, newOffset, newOffset + newLength, 'mdWordAdd')
-      const run = newestRun(containerNew, 'mdWordAdd', before)
-      if (run !== undefined) {
-        stampDrawnRun(run, block, firstUnit, 'add')
-        drew = true
-      }
-    }
-    if (drew) return
-  }
-  if (block.units.length > 0 && containerOld !== undefined && containerNew !== undefined && (block.kind === 'code' || block.kind === 'text')
-    && oldNode !== undefined && newNode !== undefined && containerNodeOld !== undefined && containerNodeNew !== undefined) {
-    let drew = false
-    for (const blockUnit of block.units as unknown as TreePreviewUnit[]) {
-      const oldOffset = block.kind === 'code'
-        ? renderedOffsetOfCodeUnit(containerNodeOld, oldNode, blockUnit, 'old')
-        : renderedOffsetOfUnit(containerNodeOld, oldNode, blockUnit, 'old')
-      const newOffset = block.kind === 'code'
-        ? renderedOffsetOfCodeUnit(containerNodeNew, newNode, blockUnit, 'new')
-        : renderedOffsetOfUnit(containerNodeNew, newNode, blockUnit, 'new')
-      const oldRun = drawUnitAt(containerOld, oldOffset, blockUnit, block, 'del')
-      const newRun = drawUnitAt(containerNew, newOffset, blockUnit, block, 'add')
-      if (oldRun !== undefined) drew = true
-      if (newRun !== undefined) drew = true
-    }
-    if (drew) return
-  }
-  if (block.units.length > 0 && oldNode !== undefined && newNode !== undefined) {
-    const oldTarget = block.kind === 'text' ? containerOld : containerOld === undefined ? undefined : inlineElementForNode(containerOld, oldNode)
-    const newTarget = block.kind === 'text' ? containerNew : containerNew === undefined ? undefined : inlineElementForNode(containerNew, newNode)
-    if (oldTarget !== undefined && newTarget !== undefined) {
-      let drew = false
-      for (const blockUnit of block.units as unknown as TreePreviewUnit[]) {
-        const oldRun = drawTextUnitIn(oldTarget, blockUnit, 'del')
-        const newRun = drawTextUnitIn(newTarget, blockUnit, 'add')
-        if (oldRun !== undefined) {
-          stampDrawnRun(oldRun, block, blockUnit, 'del')
-          drew = true
-        }
-        if (newRun !== undefined) {
-          stampDrawnRun(newRun, block, blockUnit, 'add')
-          drew = true
-        }
-      }
-      if (drew) return
-    }
-  }
-  if (oldNode !== undefined && newNode !== undefined && oldNode.type === newNode.type && INLINE_NODE_TAGS[oldNode.type] !== undefined) {
-    const oldElement = containerOld === undefined ? undefined : inlineElementForNode(containerOld, oldNode)
-    const newElement = containerNew === undefined ? undefined : inlineElementForNode(containerNew, newNode)
-    if (oldElement !== undefined && newElement !== undefined) {
-      const oldSide = sideTwin(oldElement, 'old', index, true)
-      const newSide = sideTwin(newElement, 'new', index, true)
-      oldSide.dataset.mdBlock = String(block.index)
-      oldSide.dataset.mdKind = 'del'
-      newSide.dataset.mdBlock = String(block.index)
-      newSide.dataset.mdKind = 'add'
-      // The toolbar wants the Markdown that was written (`**x**` / `__x__`), not the rendered words.
-      setSourceDiff(oldSide, { old: oldNode.raw })
-      setSourceDiff(newSide, { new: newNode.raw })
-      return
-    }
-  }
-  // An inline TYPE change (a strong becoming a link) has no same-type twin, but each column still renders
-  // ITS own element: paint that element in place instead of degrading the change to a source chip.
-  if (oldNode !== undefined && newNode !== undefined && oldNode.type !== newNode.type
-    && INLINE_NODE_TAGS[oldNode.type] !== undefined && INLINE_NODE_TAGS[newNode.type] !== undefined) {
-    const oldElement = containerOld === undefined ? undefined : inlineElementForNode(containerOld, oldNode)
-    const newElement = containerNew === undefined ? undefined : inlineElementForNode(containerNew, newNode)
-    if (oldElement !== undefined && newElement !== undefined) {
-      markChangedBlock(oldElement, block.index, 'del')
-      markChangedBlock(newElement, block.index, 'add')
-      return
-    }
-  }
-  const oldSource = block.oldNodes.map(node => node.raw).join('').replace(/\n+$/, '')
-  const newSource = block.newNodes.map(node => node.raw).join('').replace(/\n+$/, '')
-  if (containerOld !== undefined && containerOld.parentNode !== null && oldSource !== '') {
-    const chip = placeholderTwin(block.index, oldSource, undefined, 'markdown')
-    stampBlock(chip, block.index, 'del')
-    containerOld.parentNode.insertBefore(chip, containerOld)
-  }
-  if (containerNew !== undefined && containerNew.parentNode !== null && newSource !== '') {
-    const chip = placeholderTwin(block.index, undefined, newSource, 'markdown')
-    stampBlock(chip, block.index, 'add')
-    containerNew.parentNode.insertBefore(chip, containerNew)
-  }
-}
-
-/**
- * Render one inline container's blocks in the double column: each column shows its own side, so one-sided
- * blocks are marks on the side that exists (its content is already rendered in place there).
- *
- * @param blocks - the container's inline blocks, in model order.
- * @param fresh - the new document's rendered tree.
- * @param baseline - the old document's rendered tree.
- */
-/**
- * Draw a same-language code fence's changed lines in the DOUBLE column, one side per column: every changed
- * line is a full-width block (no rounded text-chip), old lines red in the left column and new lines green in
- * the right — the single column's line rhythm, per side.
- *
- * @param blocks - the fence's changed-line blocks.
- * @param container - the fence's node pair.
- * @param oldCode - the old column's rendered CODE element.
- * @param newCode - the new column's rendered CODE element.
- */
-function renderCodeLinesDouble(
-  blocks: readonly TreePreviewBlock[],
-  container: { old?: MarkdownTreeNode | undefined; new?: MarkdownTreeNode | undefined },
-  oldCode: HTMLElement,
-  newCode: HTMLElement,
-): void {
-  const rebuild = (side: 'old' | 'new', codeElement: HTMLElement, node: MarkdownTreeNode): void => {
-    const lines = (codeElement.textContent ?? '').split('\n')
-    const changed = new Map<number, { block: TreePreviewBlock; unit: TreePreviewUnit }>()
-    for (const block of blocks) {
-      for (const unit of block.units as unknown as TreePreviewUnit[]) {
-        const line = side === 'new' ? unit.newLines.start : unit.oldLines.start
-        changed.set(line - node.lines.start - 1, { block, unit })
-      }
-    }
-    const parts: Node[] = []
-    for (let index = 0; index < lines.length; index++) {
-      const line = lines[index]!
-      const entry = changed.get(index)
-      const trailing = index < lines.length - 1 ? '\n' : ''
-      if (entry === undefined) {
-        if (line !== '' || index < lines.length - 1) parts.push(document.createTextNode(line + trailing))
-        continue
-      }
-      const span = document.createElement('span')
-      span.className = `${side === 'new' ? 'mdWordAdd' : 'mdWordDel'} mdCodeLine`
-      const text = side === 'new' ? entry.unit.newText : entry.unit.oldText
-      // The line's own newline rides inside the block, so the code's textContent keeps every line separator.
-      span.textContent = text.endsWith('\n') ? text : text + trailing
-      stampDrawnRun(span, entry.block, entry.unit, side === 'new' ? 'add' : 'del')
-      parts.push(span)
-    }
-    codeElement.replaceChildren(...parts)
-  }
-  if (container.old !== undefined) rebuild('old', oldCode, container.old)
-  if (container.new !== undefined) rebuild('new', newCode, container.new)
-}
-
-function renderInlineContainerGroupDouble(blocks: readonly TreePreviewBlock[], fresh: RenderedDoc, baseline: RenderedDoc): void {
-  const first = blocks[0]!
-  const newContainer = first.inlineContainer?.new === undefined ? undefined : treeNodeElements(fresh, first.inlineContainer.new)[0]
-  const oldContainer = first.inlineContainer?.old === undefined ? undefined : treeNodeElements(baseline, first.inlineContainer.old)[0]
-  if (blocks.every(block => block.kind === 'code') && first.inlineContainer?.old !== undefined
-    && first.inlineContainer.new !== undefined && oldContainer !== undefined && newContainer !== undefined) {
-    renderCodeLinesDouble(blocks, first.inlineContainer, oldContainer, newContainer)
-    return
-  }
-  for (const block of blocks) {
-    if (block.oldNodes.length > 0 && block.newNodes.length > 0) {
-      renderInlineChildBlockDouble(block, fresh, baseline)
-      continue
-    }
-    if (block.oldNodes.length > 0 && oldContainer !== undefined) {
-      for (const node of block.oldNodes) {
-        if (node.type === 'text') {
-          const offset = renderedOffsetOfNode(block.inlineContainer!.old!, node)
-          if (offset < 0) continue
-          const before = new Set<Element>(oldContainer.querySelectorAll('.mdWordDel'))
-          wrapOwnRange(oldContainer, offset, offset + node.raw.length, 'mdWordDel')
-          const run = newestRun(oldContainer, 'mdWordDel', before)
-          if (run !== undefined) stampDrawnRun(run, block, undefined, 'del')
-        } else {
-          const element = inlineElementForNode(oldContainer, node)
-          if (element !== undefined) {
-            markChangedUnit(element, block.index, 'del')
-            stampBlock(element, block.index, 'del')
-          }
-        }
-      }
-    }
-    if (block.newNodes.length > 0 && newContainer !== undefined) {
-      for (const node of block.newNodes) {
-        if (node.type === 'text') {
-          const offset = renderedOffsetOfNode(block.inlineContainer!.new!, node)
-          if (offset < 0) continue
-          const before = new Set<Element>(newContainer.querySelectorAll('.mdWordAdd'))
-          wrapOwnRange(newContainer, offset, offset + node.raw.length, 'mdWordAdd')
-          const run = newestRun(newContainer, 'mdWordAdd', before)
-          if (run !== undefined) stampDrawnRun(run, block, undefined, 'add')
-        } else {
-          const element = inlineElementForNode(newContainer, node)
-          if (element !== undefined) {
-            markChangedUnit(element, block.index, 'add')
-            stampBlock(element, block.index, 'add')
-          }
-        }
-      }
-    }
-  }
-}
-
-/**
- * Render the Markdown preview with the TREE-FIRST diff: the two documents are parsed into syntax trees, matched
- * outermost-first (exact, then by type, then each type's internals), and the resulting match plan is drawn onto
- * the elements those nodes rendered as.
- *
- * This is the new pipeline being brought up beside the line-diff one; it currently supports the single column.
- *
- * @param oldText - the file's tracked baseline.
- * @param newText - the file's current content.
- * @param labels - user-facing words the rendered markup must carry (none by default).
- * @returns sanitized HTML for the preview body.
- */
-export function renderTreeMerged(oldText: string, newText: string, labels?: { readonly invisible?: string }): string {
-  const model = treePreviewModel(oldText, newText)
-  const fresh = renderAnnotated(newText)
-  const baseline = renderAnnotated(oldText)
-  for (let index = 0; index < model.blocks.length;) {
-    const block = model.blocks[index]!
-    if (block.kind === 'source') {
-      // Raw HTML / invisible-only content: show the scope's Markdown source (old above new), not its rendering.
-      renderSourceBlock(block, fresh)
-      index++
-      continue
-    }
-    if (block.inlineContainer !== undefined) {
-      // A change INSIDE one inline container: draw ALL of that container's blocks together, so blocks with one
-      // side only are placed where the model puts them and text runs are drawn back to front (source offsets).
-      const containerNew = block.inlineContainer.new
-      const containerOld = block.inlineContainer.old
-      const group = [block]
-      let end = index + 1
-      while (end < model.blocks.length) {
-        const candidate = model.blocks[end]!
-        if (candidate.inlineContainer === undefined) break
-        const sameNew = containerNew === undefined ? candidate.inlineContainer.new === undefined : candidate.inlineContainer.new === containerNew
-        const sameOld = containerOld === undefined ? candidate.inlineContainer.old === undefined : candidate.inlineContainer.old === containerOld
-        if (!sameNew || !sameOld) break
-        group.push(candidate)
-        end++
-      }
-      renderInlineContainerGroup(group, fresh, baseline)
-      index = end
-      continue
-    }
-    if (isInlineUnitBlock(block)) {
-      const pairOld = treeBlockElements(block, baseline, 'old')
-      const pairNew = treeBlockElements(block, fresh, 'new')
-      if (pairOld.length === 1 && pairNew.length === 1 && isBlockPairElement(pairOld[0]!, pairNew[0]!)) {
-        renderBlockPairBlock(block, pairOld[0]!, pairNew[0]!)
-        index++
-        continue
-      }
-      const end = inlineUnitGroupEnd(model.blocks, index)
-      const group = model.blocks.slice(index, end)
-      renderInlineUnitGroup(
-        group,
-        treeBlockElements(group[0]!, fresh, 'new')[0],
-        treeBlockElements(group[0]!, baseline, 'old')[0],
-        fresh.root,
-      )
-      index = end
-      continue
-    }
-    if (block.invisible.length > 0) {
-      treeInvisibleBlock(block, fresh.root)
-      index++
-      continue
-    }
-    const freshElements = treeBlockElements(block, fresh, 'new')
-    const oldElements = treeBlockElements(block, baseline, 'old')
-    if (block.merged) {
-      if (block.kind === 'code' && oldElements.length > 0 && freshElements.length > 0) {
-        // Languages differ: two whole code blocks, old red LEFT and new green RIGHT.
-        renderCodePairBlock(block, oldElements, freshElements)
-        index++
-        continue
-      }
-      // A merged run is painted at the level its nodes share: outermost siblings only (a list's items are
-      // already inside the list element and must not be wrapped/marked separately).
-      const oldMerged = outermostSiblings(oldElements)
-      const freshMerged = outermostSiblings(freshElements)
-      // A pure addition is tinted where it renders; a pure deletion is cloned as a struck ghost. A merged pair
-      // that exists on both sides (an unrelated replacement) is drawn as the old version above the new one.
-      const ghosts: HTMLElement[] = []
-      for (const element of oldMerged) {
-        const compact = compactImageOnly(element, block, 'del')
-        const ghost = compact ?? treeGhostOf(element, block, 'old')
-        const next = freshMerged[0]
-        if (next !== undefined && next.parentNode !== null) next.parentNode.insertBefore(ghost, next)
-        else if (compact !== undefined) {
-          const line = Math.max(0, (block.newStart || block.oldStart || 1) - 1)
-          const anchor = insertionPointFor(fresh.root, line)
-          anchor.parent.insertBefore(ghost, anchor.before)
-        } else treeInsertGhost(block, element, fresh.root)
-        ghosts.push(ghost)
-      }
-      if (block.kind === 'code' && oldMerged.length > 0 && freshMerged.length > 0) {
-        // Different fence language: the language is invisible, so the whole fence source rides on both versions
-        // for the toolbar (` ```ts ` vs ` ```tsx `).
-        const oldSource = block.oldNodes.map(node => node.raw).join('\n')
-        const newSource = block.newNodes.map(node => node.raw).join('\n')
-        for (const element of [...ghosts, ...freshMerged]) setSourceDiff(element, { old: oldSource, new: newSource })
-      }
-      if (oldMerged.length === 0 && freshMerged.length > 0) {
-        // A wholly added image reads as the compact green image frame, like a changed image pair.
-        const compacts = freshMerged.map(element => compactImageOnly(element, block, 'add'))
-        if (compacts.length > 0 && compacts.every(compact => compact !== undefined)) {
-          freshMerged.forEach((element, at) => { element.replaceWith(compacts[at] as HTMLElement) })
-        } else if (freshMerged.length > 1) {
-          // A run of adjacent wholly-added blocks: ONE continuous green area (no white gaps between them).
-          wrapBlockUnion(block, freshMerged, 'add')
-        } else {
-          markChangedBlock(freshMerged[0]!, block.index, 'add')
-        }
-      } else if (oldMerged.length > 0 && freshMerged.length === 0) {
-        // A run of adjacent wholly-deleted blocks: ONE continuous red area.
-        if (ghosts.length > 1) wrapBlockUnion(block, ghosts, 'del')
-      } else {
-        for (const element of freshMerged) markChangedBlock(element, block.index, 'add')
-      }
-      index++
-      continue
-    }
-    if (oldElements.length === 1 && freshElements.length === 1
-      && isBlockPairElement(oldElements[0]!, freshElements[0]!)) {
-      // A matched heading/rule whose shell changed (level, rule style): old left red, new right green, small gap.
-      renderBlockPairBlock(block, oldElements[0]!, freshElements[0]!)
-      index++
-      continue
-    }
-    if (block.units.length === 0) {
-      treeReplacement(block, freshElements, oldElements, fresh.root)
-      index++
-      continue
-    }
-    if (block.kind === 'table_cell') {
-      // A changed table cell is its OWN block: mark only that cell (its word runs/twins), never the row.
-      const { next, previous } = tableCellElements(block, freshElements, oldElements)
-      if (next === undefined || previous === undefined) {
-        treeReplacement(block, freshElements, oldElements, fresh.root)
-      } else {
-        renderInlineUnitGroup([block], next, previous, fresh.root)
-        const unit = block.units[0]
-        if (unit !== undefined && next.querySelector(`[data-md-block="${block.index}"]`) === null) {
-          markChangedUnit(next, unit.index, 'add')
-          stampBlock(next, block.index, 'add')
-          setMarkerLines(next, unit, 'old')
-          setMarkerLines(next, unit, 'new')
-        }
-      }
-      index++
-      continue
-    }
-    if (block.kind === 'table_row' || block.kind === 'table_header') {
-      if (!treeTableRowBlock(block, freshElements, oldElements)) treeReplacement(block, freshElements, oldElements, fresh.root)
-      index++
-      continue
-    }
-    if (block.kind === 'code') {
-      treeCodeBlock(block, freshElements, oldElements, fresh.root)
-      index++
-      continue
-    }
-    treeInlineBlock(block, freshElements, oldElements, fresh.root)
-    index++
-  }
-  ensureTreeBlocksReachable(fresh.root, model.blocks)
-  captionHiddenPairs(fresh.root, labels?.invisible)
-  return fresh.root.innerHTML
-}
-
 /** The tree path's units, adapted to the panel's `PreviewUnit` shape. */
 export function treePreviewUnits(oldText: string, newText: string): PreviewUnit[] {
   return treePreviewModel(oldText, newText).units as unknown as PreviewUnit[]
 }
 
-/**
- * One plan piece's top-level nodes on one side: for a context piece the merged siblings, for a diff piece its
- * own node. Used by the double column's context-run row merging.
- */
-function treePlanSideNodes(piece: MergePlanPiece, side: 'old' | 'new'): MarkdownTreeNode[] {
-  const nodes: MarkdownTreeNode[] = []
-  if (piece.kind === 'context') {
-    for (const op of piece.ops ?? []) {
-      if (op.kind === 'pair') nodes.push(side === 'old' ? op.pair.old : op.pair.new)
-      else if (side === 'old' && op.kind === 'oldOnly') nodes.push(op.node)
-      else if (side === 'new' && op.kind === 'newOnly') nodes.push(op.node)
-    }
-    return nodes
-  }
-  const op = piece.op
-  if (op === undefined) return nodes
-  if (op.kind === 'pair') nodes.push(side === 'old' ? op.pair.old : op.pair.new)
-  else if (side === 'old' && op.kind === 'oldOnly') nodes.push(op.node)
-  else if (side === 'new' && op.kind === 'newOnly') nodes.push(op.node)
-  return nodes
-}
-
-/**
- * Tag every MATCHED pair's rendered elements with one shared anchor id.
- *
- * The double column's row layout then pairs rows by the tree's own matches (paragraph↔paragraph,
- * heading↔heading, image↔image, list items by their list), not by comparing rendered text — which broke down as
- * soon as one side merged blocks or showed ghost markers, pushing later matched content out of line.
- *
- * @param plan - the sibling merge plan (positional ops in document order).
- * @param baseline - the before document's rendered tree.
- * @param fresh - the after document's rendered tree.
- */
-function tagMatchedAnchors(plan: readonly MergePlanPiece[], baseline: RenderedDoc, fresh: RenderedDoc): void {
-  let sequence = 0
-  for (const piece of plan) {
-    const oldNodes = treePlanSideNodes(piece, 'old')
-    const newNodes = treePlanSideNodes(piece, 'new')
-    const pairs = Math.min(oldNodes.length, newNodes.length)
-    for (let step = 0; step < pairs; step++) {
-      const anchor = `m${sequence++}`
-      for (const element of treeNodeElements(baseline, oldNodes[step]!)) element.dataset.mdMatch = anchor
-      for (const element of treeNodeElements(fresh, newNodes[step]!)) element.dataset.mdMatch = anchor
-    }
-  }
-}
-
-/**
- * The rows themselves stay visually the same (an unchanged run has the same height in both columns); the
- * wrapper is `display: contents`, so its blocks still read as the document's own blocks.
- */
-function wrapTreeContextRuns(roots: { old: HTMLElement; new: HTMLElement }, plan: readonly MergePlanPiece[]): void {
-  for (const side of ['old', 'new'] as const) {
-    const root = roots[side]
-    for (const piece of plan) {
-      if (piece.kind !== 'context') continue
-      const nodes = treePlanSideNodes(piece, side)
-      if (nodes.length === 0) continue
-      let start = Number.POSITIVE_INFINITY
-      let end = -1
-      for (const node of nodes) {
-        start = Math.min(start, node.lines.start - 1)
-        end = Math.max(end, node.lines.end - 1)
-      }
-      if (end < start) continue
-      const selected = [...root.children].filter((child): child is HTMLElement => {
-        if (!(child instanceof HTMLElement)) return false
-        const span = sourceSpanOf(child)
-        return span !== undefined && span.start >= start && span.end <= end
-      })
-      // One element only: it already IS the run's row; nothing to merge.
-      if (selected.length < 2) continue
-      const wrapper = document.createElement('div')
-      wrapper.className = 'mdTreeRun'
-      wrapper.style.display = 'contents'
-      selected[0]!.parentNode?.insertBefore(wrapper, selected[0]!)
-      for (const element of selected) wrapper.appendChild(element)
-    }
-  }
-}
-
-/**
- * Render the TREE-FIRST diff as two whole documents (the double column): each column keeps its own
- * rendering and is tinted on ITS side, a paired edit highlights each side's changed characters, adjacent
- * fully-matched siblings are merged into one layout row, and the two documents are then laid out row by row.
- *
- * @param oldText - the file's tracked baseline (the before column).
- * @param newText - the file's current content (the after column).
- * @param labels - user-facing words the rendered markup must carry (none by default).
- * @returns sanitized HTML for the preview body.
- */
-export function renderTreeDocuments(oldText: string, newText: string, labels?: { readonly invisible?: string }): string {
-  const model = treePreviewModel(oldText, newText)
-  const fresh = renderAnnotated(newText)
-  const baseline = renderAnnotated(oldText)
-  /** Draw one invisible change as each column's own source marker at its position. */
-  const drawInvisible = (block: TreePreviewBlock): void => {
-    const diff = block.invisible[0]
-    if (diff === undefined) return
-    if (diff.oldText !== undefined) {
-      const chip = placeholderTwin(block.index, diff.oldText, undefined, diff.grammar)
-      stampBlock(chip, block.index, 'del')
-      const anchor = insertionPointFor(baseline.root, Math.max(0, block.oldStart - 1))
-      anchor.parent.insertBefore(chip, anchor.before)
-    }
-    if (diff.newText !== undefined) {
-      const chip = placeholderTwin(block.index, undefined, diff.newText, diff.grammar)
-      stampBlock(chip, block.index, 'add')
-      const anchor = insertionPointFor(fresh.root, Math.max(0, block.newStart - 1))
-      anchor.parent.insertBefore(chip, anchor.before)
-    }
-  }
-  const drawSideRuns = (
-    oldElement: HTMLElement,
-    newElement: HTMLElement,
-    block: TreePreviewBlock,
-    unitIndex: number,
-  ): void => {
-    const oldTextOfElement = ownTextOf(oldElement)
-    const newTextOfElement = ownTextOf(newElement)
-    let drewRuns = false
-    if (oldElement.tagName === newElement.tagName && oldTextOfElement !== newTextOfElement) {
-      const runs = intraRunsOf(oldTextOfElement, newTextOfElement)
-      if (runs !== undefined) {
-        wrapOwnChangedRuns(oldElement, runs.del, 'mdWordDel')
-        wrapOwnChangedRuns(newElement, runs.add, 'mdWordAdd')
-        drewRuns = true
-      }
-    }
-    if (drewRuns) {
-      // Only the changed CHARACTERS are tinted in a column (the block frame says which block); marking the whole
-      // element would paint an unchanged sentence red just because one word in it changed.
-      markUnit(oldElement, unitIndex, 'del')
-      markUnit(newElement, unitIndex, 'add')
-    } else {
-      markChangedUnit(oldElement, unitIndex, 'del')
-      markChangedUnit(newElement, unitIndex, 'add')
-    }
-    stampBlock(oldElement, block.index, 'del')
-    stampBlock(newElement, block.index, 'add')
-  }
-  for (let index = 0; index < model.blocks.length;) {
-    const block = model.blocks[index]!
-    if (block.kind === 'source') {
-      // Each column gets ITS side's Markdown source, in place of the scope's rendering.
-      renderSourceBlockDouble(block, fresh, baseline)
-      index++
-      continue
-    }
-    if (block.inlineContainer !== undefined) {
-      // A change INSIDE one inline container: draw ALL of that container's blocks together, each column
-      // showing its own side of the child.
-      const containerNew = block.inlineContainer.new
-      const containerOld = block.inlineContainer.old
-      const group = [block]
-      let end = index + 1
-      while (end < model.blocks.length) {
-        const candidate = model.blocks[end]!
-        if (candidate.inlineContainer === undefined) break
-        const sameNew = containerNew === undefined ? candidate.inlineContainer.new === undefined : candidate.inlineContainer.new === containerNew
-        const sameOld = containerOld === undefined ? candidate.inlineContainer.old === undefined : candidate.inlineContainer.old === containerOld
-        if (!sameNew || !sameOld) break
-        group.push(candidate)
-        end++
-      }
-      renderInlineContainerGroupDouble(group, fresh, baseline)
-      index = end
-      continue
-    }
-    if (isInlineUnitBlock(block)) {
-      const end = inlineUnitGroupEnd(model.blocks, index)
-      const group = model.blocks.slice(index, end)
-      renderInlineUnitGroupDouble(
-        group,
-        treeBlockElements(group[0]!, baseline, 'old')[0],
-        treeBlockElements(group[0]!, fresh, 'new')[0],
-      )
-      index = end
-      continue
-    }
-    if (block.invisible.length > 0) {
-      drawInvisible(block)
-      index++
-      continue
-    }
-    const freshElements = treeBlockElements(block, fresh, 'new')
-    const oldElements = treeBlockElements(block, baseline, 'old')
-    if (block.merged) {
-      if (block.kind === 'code' && oldElements.length > 0 && freshElements.length > 0) {
-        // Languages differ: each column keeps its own code block, tinted WHOLE (the gray PRE turns red on the
-        // left and green on the right), and the language difference rides on that block for the toolbar.
-        const oldSource = block.oldNodes.map(node => node.raw).join('\n')
-        const newSource = block.newNodes.map(node => node.raw).join('\n')
-        const oldLanguage = codeLanguageLabel(String(block.oldNodes[0]?.attrs.lang ?? ''))
-        const newLanguage = codeLanguageLabel(String(block.newNodes[0]?.attrs.lang ?? ''))
-        for (const element of oldElements) {
-          const holder = element.closest('pre') ?? element
-          markChangedBlock(holder, block.index, 'del')
-          attachCodeLanguageTitlebar(holder, oldLanguage)
-          setSourceDiff(holder, { old: oldSource }, 'old')
-        }
-        for (const element of freshElements) {
-          const holder = element.closest('pre') ?? element
-          markChangedBlock(holder, block.index, 'add')
-          attachCodeLanguageTitlebar(holder, newLanguage)
-          setSourceDiff(holder, { new: newSource }, 'new')
-        }
-      } else {
-        // A merged run (whole new document, adjacent additions/deletions): ONE continuous tinted area per
-        // column, exactly like the single column's union — no white gap between the tinted blocks.
-        const markMergedSide = (resolved: HTMLElement[], kind: 'add' | 'del'): void => {
-          // Paint at the level the nodes share: outermost siblings only, never a list's items inside its list.
-          const elements = outermostSiblings(resolved)
-          if (elements.length === 0) return
-          const parent = elements[0]!.parentNode
-          const simpleParent = parent instanceof HTMLElement
-            && !['UL', 'OL', 'TABLE', 'TBODY', 'TR'].includes(parent.tagName)
-          const hasImageOnly = elements.some(element => compactImageOnly(element, block, kind) !== undefined)
-          if (elements.length > 1 && simpleParent && !hasImageOnly) {
-            wrapBlockUnion(block, elements, kind)
-            return
-          }
-          for (const element of elements) {
-            // A wholly removed image becomes the compact red image card, not a full placeholder paragraph.
-            const compact = compactImageOnly(element, block, kind)
-            if (compact !== undefined) element.replaceWith(compact)
-            else markChangedBlock(element, block.index, kind)
-          }
-        }
-        markMergedSide([...oldElements], 'del')
-        markMergedSide([...freshElements], 'add')
-      }
-      index++
-      continue
-    }
-    if (block.units.length === 0) {
-      for (const element of oldElements) {
-        markChangedUnit(element, block.index, 'del')
-        stampBlock(element, block.index, 'del')
-      }
-      for (const element of freshElements) {
-        markChangedUnit(element, block.index, 'add')
-        stampBlock(element, block.index, 'add')
-      }
-      index++
-      continue
-    }
-    const unitIndex = block.units[0]!.index
-    if (block.kind === 'table_cell') {
-      // A changed table cell is its own block: each column draws only that cell's runs/twins.
-      const { next, previous } = tableCellElements(block, freshElements, oldElements)
-      if (next === undefined || previous === undefined) {
-        if (next !== undefined) markChangedBlock(next, block.index, 'add')
-        if (previous !== undefined) markChangedBlock(previous, block.index, 'del')
-      } else {
-        renderInlineUnitGroupDouble([block], previous, next)
-        const unit = block.units[0]
-        const drawnNew = next.querySelector(`[data-md-block="${block.index}"]`) !== null
-          || next.getAttribute('data-md-block') === String(block.index)
-        const drawnOld = previous.querySelector(`[data-md-block="${block.index}"]`) !== null
-          || previous.getAttribute('data-md-block') === String(block.index)
-        if (unit !== undefined && !drawnNew) {
-          markChangedUnit(next, unit.index, 'add')
-          stampBlock(next, block.index, 'add')
-          setMarkerLines(next, unit, 'old')
-          setMarkerLines(next, unit, 'new')
-        }
-        if (unit !== undefined && !drawnOld) {
-          markChangedUnit(previous, unit.index, 'del')
-          stampBlock(previous, block.index, 'del')
-        }
-      }
-      index++
-      continue
-    }
-    if (block.kind === 'table_row' || block.kind === 'table_header') {
-      const oldRowElement = oldElements.find(element => element.tagName === 'TR')
-        ?? oldElements.find(element => element.closest('tr') !== null)?.closest('tr')
-      const newRowElement = freshElements.find(element => element.tagName === 'TR')
-        ?? freshElements.find(element => element.closest('tr') !== null)?.closest('tr')
-      if (oldRowElement instanceof HTMLElement) stampBlock(oldRowElement, block.index, 'del')
-      if (newRowElement instanceof HTMLElement) stampBlock(newRowElement, block.index, 'add')
-      const oldCells = oldRowElement instanceof HTMLElement
-        ? [...oldRowElement.children].filter((child): child is HTMLElement => child instanceof HTMLElement)
-        : []
-      const newCells = newRowElement instanceof HTMLElement
-        ? [...newRowElement.children].filter((child): child is HTMLElement => child instanceof HTMLElement)
-        : []
-      let cellUnit = 0
-      const drawnCellUnits = new Set<number>()
-      const rowPairsDouble = oldRowElement instanceof HTMLElement && newRowElement instanceof HTMLElement
-        ? changedElementPairs(oldRowElement, newRowElement, false)
-        : []
-      for (let column = 0; column < Math.min(oldCells.length, newCells.length); column++) {
-        const oldCell = oldCells[column]!
-        const newCell = newCells[column]!
-        if (shownText(oldCell) === shownText(newCell)) continue
-        const unit = block.units[cellUnit] ?? block.units[0]!
-        cellUnit++
-        drawSideRuns(oldCell, newCell, block, unit.index)
-        drawnCellUnits.add(unit.index)
-      }
-      // An invisible inline change of the row (a retargeted link inside a cell) gets its own side's tint per column.
-      if (oldRowElement instanceof HTMLElement && newRowElement instanceof HTMLElement) {
-        const twinUnits = block.units
-          .filter(unit => !drawnCellUnits.has(unit.index))
-          .map(unit => ({ blockIndex: block.index, unit }))
-        if (twinUnits.length > 0) twinHiddenInlineUnitsDouble(twinUnits, oldRowElement, newRowElement, rowPairsDouble)
-      }
-      index++
-      continue
-    }
-    if (oldElements[0] !== undefined && freshElements[0] !== undefined) {
-      drawSideRuns(oldElements[0], freshElements[0], block, unitIndex)
-      index++
-      continue
-    }
-    for (const element of oldElements) markChangedUnit(element, unitIndex, 'del')
-    for (const element of freshElements) markChangedUnit(element, unitIndex, 'add')
-    index++
-  }
-  // Adjacent fully-matched top-level siblings become ONE layout row (the user's merge rule applied to the
-  // double column's row layout); the blocks themselves are unchanged and still read as the document's blocks.
-  // Each column is reachable for ITS OWN side only: a deletion never gets a marker in the new column.
-  ensureTreeBlocksReachable(baseline.root, model.blocks, fresh.root, 'old')
-  ensureTreeBlocksReachable(fresh.root, model.blocks, baseline.root, 'new')
-  const plan = planMergedSiblings(matchMarkdownTrees(oldText, newText).ops)
-  tagMatchedAnchors(plan, baseline, fresh)
-  wrapTreeContextRuns({ old: baseline.root, new: fresh.root }, plan)
-  captionHiddenPairs(fresh.root, labels?.invisible)
-  captionHiddenPairs(baseline.root, labels?.invisible)
-  return renderAlignedDocuments(baseline.root, fresh.root)
-}
-
 /** The tree path's blocks, adapted to the panel's `PreviewBlock` shape. */
 export function treePreviewBlocks(oldText: string, newText: string): PreviewBlock[] {
   return treePreviewModel(oldText, newText).blocks as unknown as PreviewBlock[]
+}
+
+/* ======================= paragraph-level flow renderer ======================= */
+
+/**
+ * One content ROW of the paragraph-level model.
+ *
+ * Rows are the preview's equivalent of the code view's source lines: a heading, a paragraph, a list item, a
+ * table row or a code line. Consecutive CHANGED rows are one diff block (one toolbar); a context row breaks the
+ * block. A row carries the syntax-tree nodes it stands for, so the renderer and the panel's block list agree.
+ */
+interface FlowRow {
+  kind: 'context' | 'pair' | 'old' | 'new'
+  oldNode?: MarkdownTreeNode
+  newNode?: MarkdownTreeNode
+  /** Nesting level: 0 for top-level rows, 1+ inside a list item's nested lists. */
+  depth: number
+  /** The list item this row is, when it is one: how to draw its marker. */
+  list?: { tag: 'ul' | 'ol'; index: number; start: number; task: boolean }
+  /** The table this row belongs to (all rows of one table share the id), and the table node its header renders from. */
+  table?: { id: string; source: MarkdownTreeNode; side: 'old' | 'new' }
+  /** The cells that make up this table BODY row (the parser keeps cells, not row nodes, as table children). */
+  tableCells?: { oldCell?: MarkdownTreeNode | undefined; newCell?: MarkdownTreeNode | undefined }[]
+  /** True when this row is a table HEADER row (rendered into <thead>). */
+  tableHeader?: boolean
+  /** The code block this row is ONE LINE of (same id for every line of that fence). */
+  code?: { id: string; source: MarkdownTreeNode; side: 'old' | 'new'; language: string }
+  /** A whole-list marker change / table / code block renders as ONE container pair. */
+  container?: 'list-style' | 'table' | 'code' | undefined
+}
+
+/** One difference block: consecutive changed rows, old version above new version, ONE toolbar. */
+interface FlowPreviewBlock extends PreviewBlock {
+  /** Which renderer path drew it (the panel only needs the line ranges and the index). */
+  flowKind: 'plain' | 'list' | 'table' | 'code'
+  /** The syntax-tree nodes this block stands for: decides whether it is all-old/all-new or mixed. */
+  oldNodes: MarkdownTreeNode[]
+  newNodes: MarkdownTreeNode[]
+}
+
+/** A list item's marker identity: a marker-type change is a container-level block, not one block per item. */
+function flowListMarkerKey(node: MarkdownTreeNode): string {
+  return `${node.attrs.ordered === true ? 'ol' : 'ul'}:${String(node.attrs.task ?? '')}`
+}
+
+/** The container pair a row stands for, when the change is a whole list/table/code block. */
+function flowContainerOf(oldNode: MarkdownTreeNode | undefined, newNode: MarkdownTreeNode | undefined): FlowRow['container'] | undefined {
+  const node = newNode ?? oldNode
+  if (node === undefined) return undefined
+  if (node.type === 'table') return 'table'
+  if (node.type === 'code') return 'code'
+  return undefined
+}
+
+/** Flatten one node's list items into rows (a whole list that exists on one side only). */
+function flowRowsOfOneSidedList(node: MarkdownTreeNode, side: 'old' | 'new', depth: number): FlowRow[] {
+  const rows: FlowRow[] = []
+  const ordered = node.attrs.ordered === true
+  const start = Number(node.attrs.start ?? 1)
+  node.children.forEach((item, index) => {
+    const row: FlowRow = {
+      kind: side,
+      ...(side === 'old' ? { oldNode: item } : { newNode: item }),
+      depth,
+      list: { tag: ordered ? 'ol' : 'ul', index: start + index, start, task: item.attrs.task === true },
+    }
+    rows.push(row)
+    for (const child of item.children) {
+      if (child.type === 'list') rows.push(...flowRowsOfOneSidedList(child, side, depth + 1))
+    }
+  })
+  return rows
+}
+
+/** The header cells of a table (they are direct table_cell children with `header` set). */
+function flowTableHeaderCells(table: MarkdownTreeNode): MarkdownTreeNode[] {
+  return table.children.filter(child => child.type === 'table_cell' && child.attrs.header === true)
+}
+
+/** The header's visible text, for deciding whether a table header itself changed. */
+function flowTableHeaderText(table: MarkdownTreeNode): string {
+  return flowTableHeaderCells(table).map(cell => nodeVisibleText(cell)).join('\u0001')
+}
+
+/** The table's column count: header cells and the widest body row. A change here falls back to the whole table. */
+function flowTableColumnCount(table: MarkdownTreeNode): number {
+  const header = flowTableHeaderCells(table).length
+  const body = flowTableRowGroups(table).reduce((widest, cells) => Math.max(widest, cells.length), 0)
+  return Math.max(header, body)
+}
+
+/**
+ * Body rows as CELL groups. The syntax tree keeps a table's children as cells, not row nodes, so a row is the
+ * cells that share one source line (the header's cells are handled separately, as <thead>).
+ */
+function flowTableRowGroups(table: MarkdownTreeNode): MarkdownTreeNode[][] {
+  const groups = new Map<number, MarkdownTreeNode[]>()
+  for (const cell of table.children) {
+    if (cell.type !== 'table_cell' || cell.attrs.header === true) continue
+    const line = cell.lines.start
+    const group = groups.get(line)
+    if (group === undefined) groups.set(line, [cell])
+    else group.push(cell)
+  }
+  return [...groups.values()]
+}
+
+/** A row group's visible text, for matching. */
+function flowRowGroupText(cells: readonly MarkdownTreeNode[]): string {
+  return cells.map(cell => nodeVisibleText(cell)).join('\u0001')
+}
+
+/** LCS alignment of old/new table row groups by their visible text. */
+function flowAlignTableRows(
+  oldRows: readonly MarkdownTreeNode[][],
+  newRows: readonly MarkdownTreeNode[][],
+): { oldCells?: MarkdownTreeNode[] | undefined; newCells?: MarkdownTreeNode[] | undefined }[] {
+  const same = (left: readonly MarkdownTreeNode[], right: readonly MarkdownTreeNode[]): boolean =>
+    textSimilarity(flowRowGroupText(left), flowRowGroupText(right)) >= 0.5
+  const table: number[][] = Array.from({ length: oldRows.length + 1 }, () => new Array<number>(newRows.length + 1).fill(0))
+  for (let row = oldRows.length - 1; row >= 0; row--) {
+    for (let column = newRows.length - 1; column >= 0; column--) {
+      table[row]![column] = same(oldRows[row]!, newRows[column]!)
+        ? table[row + 1]![column + 1]! + 1
+        : Math.max(table[row + 1]![column]!, table[row]![column + 1]!)
+    }
+  }
+  const aligned: { oldCells?: MarkdownTreeNode[] | undefined; newCells?: MarkdownTreeNode[] | undefined }[] = []
+  let row = 0
+  let column = 0
+  while (row < oldRows.length && column < newRows.length) {
+    if (same(oldRows[row]!, newRows[column]!)) {
+      aligned.push({ oldCells: oldRows[row]!, newCells: newRows[column]! })
+      row++
+      column++
+    } else if (table[row + 1]![column]! >= table[row]![column + 1]!) {
+      aligned.push({ oldCells: oldRows[row]! })
+      row++
+    } else {
+      aligned.push({ newCells: newRows[column]! })
+      column++
+    }
+  }
+  while (row < oldRows.length) aligned.push({ oldCells: oldRows[row++] })
+  while (column < newRows.length) aligned.push({ newCells: newRows[column++] })
+  return aligned
+}
+
+/** Flatten one side of a table pair into rows: a HEADER row first, then body rows (paired where they match). */
+function flowRowsOfTableSide(
+  oldTable: MarkdownTreeNode | undefined,
+  newTable: MarkdownTreeNode | undefined,
+): FlowRow[] {
+  const sourceTable = newTable ?? oldTable!
+  const table = { id: sourceTable.id, source: sourceTable, side: newTable === undefined ? 'old' as const : 'new' as const }
+  const makeCells = (cells: MarkdownTreeNode[], side: 'old' | 'new'): NonNullable<FlowRow['tableCells']> =>
+    cells.map(cell => (side === 'old' ? { oldCell: cell } : { newCell: cell }))
+  const rows: FlowRow[] = []
+  const oldHeader = oldTable === undefined ? [] : flowTableHeaderCells(oldTable)
+  const newHeader = newTable === undefined ? [] : flowTableHeaderCells(newTable)
+  const headerCells: NonNullable<FlowRow['tableCells']> = oldHeader.length > 0 || newHeader.length > 0
+    ? (oldHeader.length >= newHeader.length ? oldHeader : newHeader).map((_cell, at) => ({
+        oldCell: oldHeader[at],
+        newCell: newHeader[at],
+      }))
+    : []
+  if (headerCells.length > 0) {
+    const sameHeader = oldTable !== undefined && newTable !== undefined
+      ? flowTableHeaderText(oldTable) === flowTableHeaderText(newTable)
+      : true
+    const kind: FlowRow['kind'] = oldTable === undefined ? 'new' : newTable === undefined ? 'old' : sameHeader ? 'context' : 'pair'
+    rows.push({ kind, depth: 0, table, tableCells: headerCells, tableHeader: true })
+  }
+  if (oldTable === undefined) {
+    rows.push(...flowTableRowGroups(newTable!).map(cells => ({ kind: 'new', depth: 0, table, tableCells: makeCells(cells, 'new') }) satisfies FlowRow))
+    return rows
+  }
+  if (newTable === undefined) {
+    rows.push(...flowTableRowGroups(oldTable).map(cells => ({ kind: 'old', depth: 0, table, tableCells: makeCells(cells, 'old') }) satisfies FlowRow))
+    return rows
+  }
+  rows.push(...flowAlignTableRows(flowTableRowGroups(oldTable), flowTableRowGroups(newTable)).map(cells => {
+    if (cells.oldCells !== undefined && cells.newCells !== undefined) {
+      const exact = cells.oldCells.length === cells.newCells.length
+        && cells.oldCells.every((cell, at) => cell.raw === cells.newCells![at]!.raw)
+      return {
+        kind: exact ? 'context' : 'pair',
+        depth: 0,
+        table,
+        tableCells: cells.oldCells.map((cell, at) => ({ oldCell: cell, newCell: cells.newCells?.[at] })),
+      } satisfies FlowRow
+    }
+    return cells.oldCells !== undefined
+      ? { kind: 'old', depth: 0, table, tableCells: makeCells(cells.oldCells, 'old') } satisfies FlowRow
+      : { kind: 'new', depth: 0, table, tableCells: makeCells(cells.newCells!, 'new') } satisfies FlowRow
+  }))
+  return rows
+}
+
+/** The `code_line` children of a code node: one rendered line each. */
+function flowCodeLinesOf(code: MarkdownTreeNode): MarkdownTreeNode[] {
+  return code.children.filter(child => child.type === 'code_line')
+}
+
+/** One code line's source text (without its trailing newline). */
+function flowCodeLineText(node: MarkdownTreeNode): string {
+  return node.text !== '' ? node.text : node.raw
+}
+
+/** LCS alignment of two code blocks' lines by exact text: equal lines are context, the rest add/delete lines. */
+function flowAlignCodeLines(
+  oldLines: readonly MarkdownTreeNode[],
+  newLines: readonly MarkdownTreeNode[],
+): { oldNode?: MarkdownTreeNode | undefined; newNode?: MarkdownTreeNode | undefined }[] {
+  const same = (left: MarkdownTreeNode, right: MarkdownTreeNode): boolean =>
+    flowCodeLineText(left) === flowCodeLineText(right)
+  const table: number[][] = Array.from({ length: oldLines.length + 1 }, () => new Array<number>(newLines.length + 1).fill(0))
+  for (let row = oldLines.length - 1; row >= 0; row--) {
+    for (let column = newLines.length - 1; column >= 0; column--) {
+      table[row]![column] = same(oldLines[row]!, newLines[column]!)
+        ? table[row + 1]![column + 1]! + 1
+        : Math.max(table[row + 1]![column]!, table[row]![column + 1]!)
+    }
+  }
+  const aligned: { oldNode?: MarkdownTreeNode | undefined; newNode?: MarkdownTreeNode | undefined }[] = []
+  let row = 0
+  let column = 0
+  while (row < oldLines.length && column < newLines.length) {
+    if (same(oldLines[row]!, newLines[column]!)) {
+      aligned.push({ oldNode: oldLines[row], newNode: newLines[column] })
+      row++
+      column++
+    } else if (table[row + 1]![column]! >= table[row]![column + 1]!) {
+      aligned.push({ oldNode: oldLines[row] })
+      row++
+    } else {
+      aligned.push({ newNode: newLines[column] })
+      column++
+    }
+  }
+  while (row < oldLines.length) aligned.push({ oldNode: oldLines[row++] })
+  while (column < newLines.length) aligned.push({ newNode: newLines[column++] })
+  return aligned
+}
+
+/** Flatten a matched code pair (same language) into code-LINE rows: equal lines context, changed runs add/delete. */
+function flowRowsOfCodePair(oldCode: MarkdownTreeNode, newCode: MarkdownTreeNode): FlowRow[] {
+  const language = String(newCode.attrs.lang ?? '')
+  const info = { id: newCode.id, source: newCode, side: 'new' as const, language }
+  return flowAlignCodeLines(flowCodeLinesOf(oldCode), flowCodeLinesOf(newCode)).map(line => {
+    if (line.oldNode !== undefined && line.newNode !== undefined) {
+      return { kind: 'context', oldNode: line.oldNode, newNode: line.newNode, depth: 0, code: info } satisfies FlowRow
+    }
+    return line.oldNode !== undefined
+      ? { kind: 'old', oldNode: line.oldNode, depth: 0, code: { ...info, side: 'old' as const } } satisfies FlowRow
+      : { kind: 'new', newNode: line.newNode!, depth: 0, code: info } satisfies FlowRow
+  })
+}
+
+/** Flatten a code block that exists on one side only into code-LINE rows (every line add/delete). */
+function flowRowsOfCodeSide(code: MarkdownTreeNode, side: 'old' | 'new'): FlowRow[] {
+  const info = { id: code.id, source: code, side, language: String(code.attrs.lang ?? '') }
+  return flowCodeLinesOf(code).map(line => (side === 'old'
+    ? { kind: 'old', oldNode: line, depth: 0, code: info } satisfies FlowRow
+    : { kind: 'new', newNode: line, depth: 0, code: info } satisfies FlowRow))
+}
+
+/**
+ * Flatten one side's list-item ops (inside a matched list pair) into rows.
+ *
+ * A matched-item text edit stays ONE row (the list item is a content line); its nested lists become deeper rows,
+ * matched recursively. Rows whose nodes are fully matched are context rows and break the surrounding block.
+ */
+function flowRowsOfListPair(ops: readonly TreeMatchOp[], depth: number, ordered: boolean, start: number): FlowRow[] {
+  const rows: FlowRow[] = []
+  let index = 0
+  const visit = (op: TreeMatchOp): void => {
+    if (op.kind === 'pair' && op.pair.old.type === 'list_item' && op.pair.new.type === 'list_item') {
+      const fullyMatched = pairFullyMatched(op.pair)
+      const list: NonNullable<FlowRow['list']> = { tag: ordered ? 'ol' : 'ul', index: start + index, start, task: op.pair.new.attrs.task === true }
+      index++
+      rows.push({
+        kind: fullyMatched ? 'context' : 'pair',
+        oldNode: op.pair.old,
+        newNode: op.pair.new,
+        depth,
+        list,
+      })
+      // Nested lists inside the item: recurse one level deeper. A fully matched item already renders its whole
+      // subtree, so it needs no nested rows.
+      if (!fullyMatched) {
+        for (const childOp of op.pair.children) {
+          if (childOp.kind === 'pair' && childOp.pair.new.type === 'list') {
+            const nestedStart = Number(childOp.pair.new.attrs.start ?? 1)
+            rows.push(...flowRowsOfListPair(
+              childOp.pair.children,
+              depth + 1,
+              childOp.pair.new.attrs.ordered === true,
+              nestedStart,
+            ))
+          } else if (childOp.kind === 'oldOnly' && childOp.node.type === 'list') {
+            rows.push(...flowRowsOfOneSidedList(childOp.node, 'old', depth + 1))
+          } else if (childOp.kind === 'newOnly' && childOp.node.type === 'list') {
+            rows.push(...flowRowsOfOneSidedList(childOp.node, 'new', depth + 1))
+          }
+        }
+      }
+      return
+    }
+    if (op.kind === 'oldOnly') {
+      if (isInvisibleNode(op.node)) return
+      if (op.node.type === 'list') rows.push(...flowRowsOfOneSidedList(op.node, 'old', depth))
+      else if (op.node.type === 'table') rows.push(...flowRowsOfTableSide(op.node, undefined))
+      else if (op.node.type === 'code') rows.push(...flowRowsOfCodeSide(op.node, 'old'))
+      else if (op.node.type === 'list_item') {
+        // An item that exists on ONE side only is still a LIST ITEM row: without the list context it would be
+        // drawn as a bare <li> clone and lose the custom marker/indent every other item uses.
+        const list: NonNullable<FlowRow['list']> = { tag: ordered ? 'ol' : 'ul', index: start + index, start, task: op.node.attrs.task === true }
+        index++
+        rows.push({ kind: 'old', oldNode: op.node, depth, list })
+        for (const child of op.node.children) {
+          if (child.type === 'list') rows.push(...flowRowsOfOneSidedList(child, 'old', depth + 1))
+        }
+      } else {
+        const container = flowContainerOf(op.node, undefined)
+        rows.push(container === undefined
+          ? { kind: 'old', oldNode: op.node, depth }
+          : { kind: 'old', oldNode: op.node, depth, container })
+      }
+      return
+    }
+    if (op.kind === 'newOnly') {
+      if (isInvisibleNode(op.node)) return
+      if (op.node.type === 'list') rows.push(...flowRowsOfOneSidedList(op.node, 'new', depth))
+      else if (op.node.type === 'table') rows.push(...flowRowsOfTableSide(undefined, op.node))
+      else if (op.node.type === 'code') rows.push(...flowRowsOfCodeSide(op.node, 'new'))
+      else if (op.node.type === 'list_item') {
+        const list: NonNullable<FlowRow['list']> = { tag: ordered ? 'ol' : 'ul', index: start + index, start, task: op.node.attrs.task === true }
+        index++
+        rows.push({ kind: 'new', newNode: op.node, depth, list })
+        for (const child of op.node.children) {
+          if (child.type === 'list') rows.push(...flowRowsOfOneSidedList(child, 'new', depth + 1))
+        }
+      } else {
+        const container = flowContainerOf(undefined, op.node)
+        rows.push(container === undefined
+          ? { kind: 'new', newNode: op.node, depth }
+          : { kind: 'new', newNode: op.node, depth, container })
+      }
+      return
+    }
+    const pair = op.pair
+    const node = pair.new
+    if (isInvisibleNode(node)) return
+    if (pairFullyMatched(pair)) {
+      // An unchanged code fence/table still needs the fence/table renderer (banner, native fill/wide width);
+      // falling back to one cloned node would drop those structures.
+      if (pair.old.type === 'code' && pair.new.type === 'code'
+        && String(pair.old.attrs.lang ?? '') === String(pair.new.attrs.lang ?? '')) {
+        rows.push(...flowRowsOfCodePair(pair.old, pair.new))
+        return
+      }
+      if (pair.old.type === 'table' && pair.new.type === 'table') {
+        rows.push(...flowRowsOfTableSide(pair.old, pair.new))
+        return
+      }
+      rows.push({ kind: 'context', oldNode: pair.old, newNode: pair.new, depth })
+      return
+    }
+    if (pair.old.type === 'code' && pair.new.type === 'code') {
+      const oldLanguage = String(pair.old.attrs.lang ?? '')
+      const newLanguage = String(pair.new.attrs.lang ?? '')
+      // Same language: line-level diff. A language change is a whole-fence replacement (old fence above new).
+      if (oldLanguage !== newLanguage) {
+        rows.push({ kind: 'pair', oldNode: pair.old, newNode: pair.new, depth, container: 'code' })
+        return
+      }
+      rows.push(...flowRowsOfCodePair(pair.old, pair.new))
+      return
+    }
+    if (pair.old.type === 'table' && pair.new.type === 'table') {
+      // Two shapes are diffed as the WHOLE table (old table above new table, one container block):
+      //  1. the COLUMN count/structure changed — rows cannot be aligned any more;
+      //  2. NO body row could be matched at all — every row reads as a replacement, so the table as a whole
+      //     is the honest diff unit.
+      const oldBody = flowTableRowGroups(pair.old)
+      const newBody = flowTableRowGroups(pair.new)
+      const bodyHasMatch = flowAlignTableRows(oldBody, newBody)
+        .some(entry => entry.oldCells !== undefined && entry.newCells !== undefined)
+      const wholeTable = flowTableColumnCount(pair.old) !== flowTableColumnCount(pair.new)
+        || ((oldBody.length > 0 || newBody.length > 0) && !bodyHasMatch)
+      if (wholeTable) {
+        rows.push({ kind: 'pair', oldNode: pair.old, newNode: pair.new, depth, container: 'table' })
+        return
+      }
+      rows.push(...flowRowsOfTableSide(pair.old, pair.new))
+      return
+    }
+    const container = flowContainerOf(pair.old, pair.new)
+    if (container !== undefined) {
+      rows.push({ kind: 'pair', oldNode: pair.old, newNode: pair.new, depth, container })
+      return
+    }
+    if (pair.old.type === 'list' && pair.new.type === 'list') {
+      if (flowListMarkerKey(pair.old) !== flowListMarkerKey(pair.new)) {
+        // The marker type changed (bullet list → ordered list, task style, …): the whole list is ONE block,
+        // but its items still render through the SAME list-item-row path as every other list, so marker,
+        // indent and row rhythm match. Old items come first (red group), new items after (green group).
+        rows.push(...flowRowsOfOneSidedList(pair.old, 'old', depth))
+        rows.push(...flowRowsOfOneSidedList(pair.new, 'new', depth))
+        return
+      }
+      rows.push(...flowRowsOfListPair(
+        pair.children,
+        depth,
+        pair.new.attrs.ordered === true,
+        Number(pair.new.attrs.start ?? 1),
+      ))
+      return
+    }
+    rows.push({ kind: 'pair', oldNode: pair.old, newNode: pair.new, depth })
+  }
+  for (const op of ops) visit(op)
+  return rows
+}
+
+/** Walk one side of the match plan into flat content rows (document order, list levels flattened). */
+function flowRowsOfOps(ops: readonly TreeMatchOp[], depth: number): FlowRow[] {
+  const rows: FlowRow[] = []
+  for (const op of ops) {
+    if (op.kind === 'pair') {
+      const pair = op.pair
+      if (isInvisibleNode(pair.new)) continue
+      rows.push(...flowRowsOfListPair([op], depth, pair.new.attrs.ordered === true, Number(pair.new.attrs.start ?? 1)))
+      continue
+    }
+    const node = op.node
+    if (isInvisibleNode(node)) continue
+    if (node.type === 'list') {
+      rows.push(...flowRowsOfOneSidedList(node, op.kind === 'oldOnly' ? 'old' : 'new', 0))
+      continue
+    }
+    if (node.type === 'table') {
+      rows.push(...flowRowsOfTableSide(op.kind === 'oldOnly' ? node : undefined, op.kind === 'newOnly' ? node : undefined))
+      continue
+    }
+    if (node.type === 'code') {
+      rows.push(...flowRowsOfCodeSide(node, op.kind === 'oldOnly' ? 'old' : 'new'))
+      continue
+    }
+    const container = flowContainerOf(op.kind === 'oldOnly' ? node : undefined, op.kind === 'newOnly' ? node : undefined)
+    rows.push(op.kind === 'oldOnly'
+      ? (container === undefined ? { kind: 'old', oldNode: node, depth } : { kind: 'old', oldNode: node, depth, container })
+      : (container === undefined ? { kind: 'new', newNode: node, depth } : { kind: 'new', newNode: node, depth, container }))
+  }
+  return rows
+}
+
+/** Whether a fence's rows are ONE side only (a whole-fence add/delete), for that side. */
+function flowCodeFenceIsWholeSide(rows: readonly FlowRow[], codeId: string, side: 'old' | 'new'): boolean {
+  let count = 0
+  for (const row of rows) {
+    if (row.code?.id !== codeId) continue
+    if (row.kind === 'context' || row.kind === 'pair') return false
+    if ((row.kind === 'old') !== (side === 'old')) return false
+    count++
+  }
+  return count > 0
+}
+
+/**
+ * The node whose LINES a row contributes to keep/revert on one side.
+ *
+ * A matched fence diffes by line, so its code_line nodes are the range. A WHOLE-fence add/delete is one block:
+ * its range must be the fence node (opening/closing backticks included), or reverting it would leave an empty
+ * fence behind.
+ */
+function flowRangeSideNodes(rows: readonly FlowRow[], index: number, side: 'old' | 'new'): MarkdownTreeNode[] {
+  const row = rows[index]!
+  if (row.code !== undefined) {
+    if (flowCodeFenceIsWholeSide(rows, row.code.id, side)) {
+      return side === row.code.side ? [row.code.source] : []
+    }
+    return flowSideNodes(row, side)
+  }
+  return flowSideNodes(row, side)
+}
+
+/**
+ * The syntax-tree nodes one row contributes to ONE side of the diff (a table row keeps its side in its cells).
+ */
+function flowSideNodes(row: FlowRow, side: 'old' | 'new'): MarkdownTreeNode[] {
+  if (row.tableCells !== undefined) {
+    const nodes: MarkdownTreeNode[] = []
+    for (const cell of row.tableCells) {
+      const node = side === 'old' ? cell.oldCell : cell.newCell
+      if (node !== undefined) nodes.push(node)
+    }
+    return nodes
+  }
+  const node = side === 'old' ? row.oldNode : row.newNode
+  return node === undefined ? [] : [node]
+}
+
+/**
+ * Whether the code fence starting at `start` is a WHOLE-FENCE diff (every line exists on one side only). Such a
+ * fence behaves like a whole-table fallback: it may merge with changed content directly before/after it.
+ */
+function flowCodeFenceWhole(rows: readonly FlowRow[], start: number): boolean {
+  const id = rows[start]?.code?.id
+  if (id === undefined) return false
+  let sawOld = false
+  let sawNew = false
+  let count = 0
+  for (let at = start; at < rows.length && rows[at]!.code?.id === id; at++) {
+    const kind = rows[at]!.kind
+    if (kind === 'context' || kind === 'pair') return false
+    if (kind === 'old') sawOld = true
+    else sawNew = true
+    count++
+  }
+  return count > 0 && sawOld !== sawNew
+}
+
+/** The block index of every row (-1 for a context row). Tables are hard boundaries; a whole-fence code block is not. */
+function flowRowBlockIndices(rows: readonly FlowRow[]): number[] {
+  const indices: number[] = []
+  let current = -1
+  let lastChanged = false
+  let currentTable: string | undefined
+  let currentCode: string | undefined
+  for (let at = 0; at < rows.length; at++) {
+    const row = rows[at]!
+    const tableId = row.table?.id
+    const codeId = row.code?.id
+    if (row.kind === 'context') {
+      indices.push(-1)
+      lastChanged = false
+      currentTable = tableId
+      currentCode = codeId
+      continue
+    }
+    let boundary = !lastChanged
+    if (!boundary) {
+      if (tableId !== currentTable) boundary = true
+      else if (codeId !== currentCode) {
+        if (codeId !== undefined && currentCode === undefined) {
+          boundary = !flowCodeFenceWhole(rows, at)
+        } else if (codeId === undefined && currentCode !== undefined) {
+          let start = at - 1
+          while (start > 0 && rows[start - 1]!.code?.id === currentCode) start--
+          boundary = !flowCodeFenceWhole(rows, start)
+        } else {
+          boundary = true
+        }
+      }
+    }
+    if (boundary) current++
+    currentTable = tableId
+    currentCode = codeId
+    lastChanged = true
+    indices.push(current)
+  }
+  return indices
+}
+
+/**
+ * The insertion point (1-based, "before this line") for a block that has NO content on one side: it goes right
+ * after the last row before it that DOES have that side, mapped from the merged row order.
+ */
+function flowAnchorForSide(rows: readonly FlowRow[], start: number, side: 'old' | 'new'): number {
+  for (let at = start - 1; at >= 0; at--) {
+    const nodes = flowRangeSideNodes(rows, at, side)
+    if (nodes.length > 0) return Math.max(...nodes.map(node => node.lines.end)) + 1
+  }
+  return 1
+}
+
+/** Every line the line-level diff marks changed on each side (blank separator lines included). */
+function flowChangedLines(oldText: string, newText: string): { old: Set<number>; new: Set<number> } {
+  const diff = computeWholeFileDiff(oldText, newText)
+  const oldLines = new Set<number>()
+  const newLines = new Set<number>()
+  for (const row of diff.rows) {
+    if (row.kind === 'del' && row.oldLine !== undefined) oldLines.add(row.oldLine)
+    else if (row.kind === 'add' && row.newLine !== undefined) newLines.add(row.newLine)
+  }
+  return { old: oldLines, new: newLines }
+}
+
+/**
+ * Group the flat content rows into difference blocks: consecutive CHANGED rows = ONE block; a context row is
+ * the boundary. This is the code view's hunk rule applied to Markdown content lines.
+ */
+function flowBlocksOf(
+  rows: readonly FlowRow[],
+  changed?: { old: Set<number>; new: Set<number> },
+  wholeDocument?: { side: 'old' | 'new'; oldLines: number; newLines: number },
+): FlowPreviewBlock[] {
+  const blocks: FlowPreviewBlock[] = []
+  // A WHOLE-FILE add/delete is ONE change, exactly like the code view's single hunk for a new file: no table or
+  // fence boundary may split it into several blocks.
+  if (wholeDocument !== undefined) {
+    const oldNodes: MarkdownTreeNode[] = []
+    const newNodes: MarkdownTreeNode[] = []
+    for (const row of rows) {
+      oldNodes.push(...flowSideNodes(row, 'old'))
+      newNodes.push(...flowSideNodes(row, 'new'))
+    }
+    const kind: FlowPreviewBlock['flowKind'] = rows.some(row => row.table !== undefined)
+      ? 'table'
+      : rows.some(row => row.code !== undefined) || rows.some(row => row.container === 'code')
+        ? 'code'
+        : rows.some(row => row.list !== undefined)
+          ? 'list'
+          : 'plain'
+    blocks.push({
+      index: 0,
+      lineBlock: 0,
+      units: [],
+      // The missing side is an insertion point before line 1; the present side is the whole file.
+      oldStart: 1,
+      oldEnd: wholeDocument.oldLines,
+      newStart: 1,
+      newEnd: wholeDocument.newLines,
+      merged: true,
+      invisible: [],
+      kind,
+      oldNodes,
+      newNodes,
+      flowKind: kind,
+    } as unknown as FlowPreviewBlock)
+    return blocks
+  }
+  let current: FlowRow[] = []
+  let blockStart = 0
+  /** First source line of a side in the rows from `from` on, or Infinity when that side has no later row. */
+  const nextSideStart = (from: number, side: 'old' | 'new'): number => {
+    for (let at = from; at < rows.length; at++) {
+      const nodes = flowRangeSideNodes(rows, at, side)
+      if (nodes.length > 0) return Math.min(...nodes.map(node => node.lines.start))
+    }
+    return Number.POSITIVE_INFINITY
+  }
+  /**
+   * The block's range on one side. A block with NO content on a side inserts there: the insertion point is
+   * BEFORE the next row that has that side (so the blank separator stays where the diff placed it), or after the
+   * previous row at the end of the document. A block WITH content extends its end over trailing blank lines up
+   * to the next row, so reverting a deleted paragraph also restores the blank line that went with it.
+   */
+  const sideRange = (side: 'old' | 'new', nextIndex: number): { start: number; end: number } => {
+    const nodes: MarkdownTreeNode[] = []
+    const seen = new Set<MarkdownTreeNode>()
+    for (let at = blockStart; at < nextIndex; at++) {
+      for (const node of flowRangeSideNodes(rows, at, side)) {
+        if (seen.has(node)) continue
+        seen.add(node)
+        nodes.push(node)
+      }
+    }
+    if (nodes.length === 0) {
+      const next = nextSideStart(nextIndex, side)
+      const start = Number.isFinite(next) ? next : flowAnchorForSide(rows, blockStart, side)
+      return { start, end: start - 1 }
+    }
+    const startBase = Math.min(...nodes.map(node => node.lines.start))
+    let start = startBase
+    let end = Math.max(...nodes.map(node => node.lines.end))
+    if (changed !== undefined) {
+      const changedLines = side === 'old' ? changed.old : changed.new
+      // Include the line-level hunk's blank separator lines: a blank line the line diff marks changed belongs
+      // to this block (reverting a whole fence must take its leading blank with it).
+      while (start > 1 && changedLines.has(start - 1)) start--
+      while (changedLines.has(end + 1)) end++
+    }
+    const next = nextSideStart(nextIndex, side)
+    if (Number.isFinite(next) && next - 1 > end) end = next - 1
+    return { start, end }
+  }
+  const flush = (nextIndex: number): void => {
+    if (current.length === 0) return
+    const oldNodes: MarkdownTreeNode[] = []
+    const newNodes: MarkdownTreeNode[] = []
+    for (const row of current) {
+      oldNodes.push(...flowSideNodes(row, 'old'))
+      newNodes.push(...flowSideNodes(row, 'new'))
+    }
+    const oldSpan = sideRange('old', nextIndex)
+    const newSpan = sideRange('new', nextIndex)
+    const oldStart = oldSpan.start
+    const oldEnd = oldSpan.end
+    const newStart = newSpan.start
+    const newEnd = newSpan.end
+    const kind = current.some(row => row.table !== undefined)
+      ? 'table'
+      : current.some(row => row.code !== undefined) || current.some(row => row.container === 'code')
+        ? 'code'
+        : current.some(row => row.list !== undefined)
+          ? 'list'
+          : 'plain'
+    blocks.push({
+      index: blocks.length,
+      lineBlock: blocks.length,
+      units: [],
+      oldStart,
+      oldEnd,
+      newStart,
+      newEnd,
+      merged: current.length > 1,
+      invisible: [],
+      kind,
+      oldNodes,
+      newNodes,
+      flowKind: kind,
+    } as unknown as FlowPreviewBlock)
+    current = []
+  }
+  // A table is a hard boundary. A fenced code block is a boundary only when it has a LINE-LEVEL diff; a
+  // whole-fence add/delete behaves like the whole-table fallback and may merge with adjacent changed content.
+  const indices = flowRowBlockIndices(rows)
+  let active = -1
+  for (let at = 0; at < rows.length; at++) {
+    const row = rows[at]!
+    if (row.kind === 'context') {
+      flush(at)
+      active = -1
+      continue
+    }
+    const index = indices[at]!
+    if (index !== active) {
+      flush(at)
+      active = index
+      blockStart = at
+    }
+    current.push(row)
+  }
+  flush(rows.length)
+  return blocks
+}
+
+/** Content-line count of a file text (the host's convention: a final newline does not add an empty line). */
+function flowDocumentLineCount(text: string): number {
+  if (text === '') return 0
+  const lines = text.split('\n')
+  if (lines[lines.length - 1] === '') lines.pop()
+  return lines.length
+}
+
+/** Build the paragraph-level rows/blocks 鈥?the panel's block list for the single column. */
+function flowPreviewModel(oldText: string, newText: string): { rows: FlowRow[]; blocks: FlowPreviewBlock[] } {
+  const match = matchMarkdownTrees(oldText, newText)
+  const rows = flowRowsOfOps(match.ops, 0)
+  const wholeDocument = oldText === '' || newText === ''
+    ? { side: oldText === '' ? 'new' as const : 'old' as const, oldLines: flowDocumentLineCount(oldText), newLines: flowDocumentLineCount(newText) }
+    : undefined
+  return { rows, blocks: flowBlocksOf(rows, flowChangedLines(oldText, newText), wholeDocument) }
+}
+
+/** The paragraph-level blocks, adapted to the panel's `PreviewBlock` shape. */
+export function flowPreviewBlocks(oldText: string, newText: string): PreviewBlock[] {
+  return flowPreviewModel(oldText, newText).blocks as unknown as PreviewBlock[]
+}
+
+/** The rendered element for one node, cloned and stripped of source bookkeeping. */
+function flowNodeElement(doc: RenderedDoc, node: MarkdownTreeNode, side: 'old' | 'new'): HTMLElement | undefined {
+  const resolved = treeNodeElements(doc, node)[0]
+  if (resolved === undefined) return undefined
+  // A code node resolves to the <code> element; keep the surrounding <pre> so its whitespace and line breaks
+  // survive (appending a bare <code> collapses a whole fence onto one line).
+  const element = node.type === 'code' ? (resolved.closest('pre') ?? resolved) : resolved
+  const clone = element.cloneNode(true) as HTMLElement
+  for (const marked of [clone, ...clone.querySelectorAll<HTMLElement>('[data-src-start], [data-src-end], [data-src-text], [data-md-unit], [data-md-kind], [data-md-block], [data-md-match]')]) {
+    marked.removeAttribute('data-src-start')
+    marked.removeAttribute('data-src-end')
+    marked.removeAttribute('data-src-text')
+    marked.removeAttribute('data-md-unit')
+    marked.removeAttribute('data-md-kind')
+    marked.removeAttribute('data-md-block')
+    marked.removeAttribute('data-md-match')
+    marked.classList.remove('mdAdd', 'mdDel', 'mdWordAdd', 'mdWordDel')
+  }
+  void side
+  return clone
+}
+
+/** A block-level row: the version element plus its tint/row classes. */
+function flowRowElement(row: FlowRow, kind: 'context' | 'pair' | 'old' | 'new', inner: HTMLElement): HTMLElement {
+  const holder = document.createElement('div')
+  holder.className = `mdFlowRow mdFlowRow-${kind === 'pair' ? 'pair' : kind}`
+  holder.dataset.flowDepth = String(row.depth)
+  holder.append(inner)
+  return holder
+}
+
+/** Fill one list item row: marker + its inline content (nested lists render as deeper rows). */
+function flowListItemRow(row: FlowRow, doc: RenderedDoc, side: 'old' | 'new', includeNested = false): HTMLElement {
+  const node = side === 'old' ? row.oldNode : row.newNode
+  const item = node === undefined ? document.createElement('div') : flowNodeElement(doc, node, side) ?? document.createElement('div')
+  // A CHANGED item renders its nested lists as separate rows; a context item keeps its whole subtree.
+  if (!includeNested) {
+    for (const child of [...item.children]) if (child.tagName === 'UL' || child.tagName === 'OL') child.remove()
+  }
+  const list = row.list!
+  const marker = document.createElement('span')
+  marker.className = 'mdFlowMarker'
+  if (list.task) {
+    // Marked already emits a checkbox inside the item; the custom marker IS the checkbox, so drop the clone's
+    // own input (otherwise a task row shows two checkboxes side by side). The clone is the RELIABLE source of
+    // the tick state: some marked versions put the task flag on the token but not its `checked` bit, while the
+    // rendered <input> always carries `checked=""` for `[x]`.
+    const clonedBox = item.querySelector<HTMLInputElement>('input[type="checkbox"]')
+    // The node may be a list item's inner token rather than the <li> itself; read the rendered ticket off the
+    // item's own source <li> in the document as well, so a matched task row keeps `[x]` in a changed list.
+    const sourceItem = node === undefined ? null : treeNodeElements(doc, node)[0]?.closest('li') ?? null
+    const sourceBox = sourceItem?.querySelector<HTMLInputElement>('input[type="checkbox"]') ?? null
+    const ticked = node?.attrs.checked === true
+      || clonedBox?.hasAttribute('checked') === true
+      || clonedBox?.checked === true
+      || sourceBox?.hasAttribute('checked') === true
+      || sourceBox?.checked === true
+    for (const cloned of [...item.querySelectorAll('input[type="checkbox"]')]) cloned.remove()
+    const box = document.createElement('input')
+    box.type = 'checkbox'
+    box.disabled = true
+    box.checked = ticked
+    // The preview is injected as an HTML STRING: only the `checked` content ATTRIBUTE survives serialization
+    // (the .checked property does not), so it must be written too or every box parses back unchecked.
+    box.toggleAttribute('checked', ticked)
+    marker.append(box)
+  } else if (list.tag === 'ol') {
+    marker.textContent = `${list.index}.`
+  } else {
+    marker.textContent = '•'
+  }
+  const holder = document.createElement('div')
+  holder.className = 'mdFlowListItem'
+  holder.style.setProperty('--flow-depth', String(row.depth))
+  holder.dataset.flowDepth = String(row.depth)
+  // The cloned item is an <li>: its content moves into a plain block so the custom marker is the only marker.
+  const content = document.createElement('div')
+  content.className = 'mdFlowItemContent'
+  while (item.firstChild !== null) content.append(item.firstChild)
+  // A list can be parsed as a LOOSE list on one side and a tight list on the other (marked wraps a loose item's
+  // content in <p>). Leaving that <p> in place would give one side 8px paragraph margins and the other none, so
+  // the SAME item would be 36px tall on one side and 20px on the other — a diff-only spacing artefact. Normalise
+  // the common single-paragraph item to its inline content; a multi-paragraph item keeps its paragraphs.
+  const paragraph = content.children.length === 1 && content.children[0]?.tagName === 'P' ? content.children[0] : undefined
+  const onlySentence = paragraph !== undefined && [...content.childNodes].every(child =>
+    child === paragraph || (child.nodeType === Node.TEXT_NODE && (child.textContent ?? '').trim() === ''))
+  if (onlySentence) {
+    while (paragraph!.firstChild !== null) content.insertBefore(paragraph!.firstChild, paragraph!)
+    paragraph!.remove()
+  }
+  holder.append(marker, content)
+  return holder
+}
+
+/** Render the paragraph-level single column: old above new, tinted rows grouped into hunk blocks. */
+export function renderFlowMerged(oldText: string, newText: string): string {
+  const { rows, blocks } = flowPreviewModel(oldText, newText)
+  const wholeDocument = oldText === '' || newText === ''
+  const fresh = renderAnnotated(newText)
+  const baseline = renderAnnotated(oldText)
+  const root = document.createElement('div')
+  root.className = 'mdFlowDoc'
+  // A whole-file add/delete is ONE continuous change: it is tinted by a single document-wide background layer,
+  // not by the per-segment bands (tables, fences, margins and scrollbar strips would leave white gaps).
+  if (oldText === '') root.classList.add('mdFlowDocWhole', 'mdFlowDocWhole-new')
+  else if (newText === '') root.classList.add('mdFlowDocWhole', 'mdFlowDocWhole-old')
+  let block: HTMLElement | undefined
+  let blockIndex = -1
+  const closeBlock = (): void => { block = undefined }
+  /** The block wrapper, tinted ONCE for a one-sided hunk (see the mixed case below). */
+  const blockFor = (index: number, mode: 'old' | 'new' | 'mixed'): HTMLElement => {
+    if (block !== undefined && blockIndex === index) return block
+    closeBlock()
+    block = document.createElement('div')
+    block.className = `mdFlowBlock mdFlowBlock-${mode}`
+    block.dataset.mdBlock = String(index)
+    block.dataset.mdKind = mode === 'old' ? 'del' : 'add'
+    root.append(block)
+    blockIndex = index
+    return block
+  }
+  // Change rows are grouped exactly like the model's blocks; map every row to its block so a block with many
+  // rows appends all of them into the same wrapper. A whole-file change is block 0 for every row.
+  const rowBlock = wholeDocument ? rows.map(() => 0) : flowRowBlockIndices(rows)
+  /**
+   * Render one table's row run as a REAL table.
+   *
+   * A changed block reads OLD ROWS FIRST (red), then NEW ROWS (green) — even when the block includes the
+   * header row. An unchanged header keeps a real <thead>; a changed header joins the block order inside the
+   * tbody (its cells stay <th>), because a table's structural sections cannot separate a block's red half from
+   * its green half.
+   */
+  const renderTableRun = (start: number, end: number): HTMLElement => {
+    const table = document.createElement('table')
+    table.className = 'mdFlowTable'
+    const body = document.createElement('tbody')
+    let head: HTMLTableSectionElement | undefined
+    let columns = 0
+    const headerContextOnly = (() => {
+      let sawHeader = false
+      for (let at = start; at < end; at++) {
+        if (rows[at]!.tableHeader !== true) continue
+        sawHeader = true
+        if ((rowBlock[at] ?? -1) >= 0) return false
+      }
+      return sawHeader
+    })()
+    /** Character runs between the old and new version of one matched table cell. */
+    const cellRuns = (cell: NonNullable<FlowRow['tableCells']>[number]): { del: IntraRun[]; add: IntraRun[] } | undefined => {
+      if (cell.oldCell === undefined || cell.newCell === undefined) return undefined
+      const oldCellElement = flowNodeElement(baseline, cell.oldCell, 'old')
+      const newCellElement = flowNodeElement(fresh, cell.newCell, 'new')
+      if (oldCellElement === undefined || newCellElement === undefined) return undefined
+      if (oldCellElement.tagName !== newCellElement.tagName) return undefined
+      const oldText = textOfSubtree(oldCellElement)
+      const newText = textOfSubtree(newCellElement)
+      if (oldText === newText) return undefined
+      return intraRunsOf(oldText, newText)
+    }
+    const makeTr = (row: FlowRow, at: number, side: 'old' | 'new'): HTMLElement => {
+      const owner = rowBlock[at] ?? -1
+      const tr = document.createElement('tr')
+      columns = Math.max(columns, (row.tableCells ?? []).length)
+      for (const cell of row.tableCells ?? []) {
+        const node = side === 'old' ? (cell.oldCell ?? cell.newCell) : (cell.newCell ?? cell.oldCell)
+        if (node === undefined) continue
+        const td = flowNodeElement(side === 'old' ? baseline : fresh, node, side)
+        if (td !== undefined) {
+          const runs = cellRuns(cell)
+          if (runs !== undefined) {
+            wrapSubtreeChangedRuns(td, side === 'old' ? runs.del : runs.add, side === 'old' ? 'mdWordDel' : 'mdWordAdd')
+          }
+          tr.append(td)
+        }
+      }
+      if (owner >= 0) {
+        tr.classList.add('mdFlowTr', side === 'old' ? 'mdFlowTr-old' : 'mdFlowTr-new')
+        tr.dataset.mdKind = side === 'old' ? 'del' : 'add'
+        tr.dataset.mdBlock = String(owner)
+        // A changed table row IS the change (rule B in `previewBlockAt`): the whole row is the hover target.
+        tr.dataset.mdWholeRow = ''
+      }
+      return tr
+    }
+    for (let at = start; at < end;) {
+      const row = rows[at]!
+      const owner = rowBlock[at] ?? -1
+      if (row.tableHeader === true && headerContextOnly) {
+        const tr = makeTr(row, at, 'new')
+        head ??= document.createElement('thead')
+        head.append(tr)
+        at++
+        continue
+      }
+      if (owner < 0) {
+        body.append(makeTr(row, at, 'new'))
+        at++
+        continue
+      }
+      let groupEnd = at
+      while (groupEnd < end && (rowBlock[groupEnd] ?? -1) === owner) groupEnd++
+      for (const side of ['old', 'new'] as const) {
+        for (let inner = at; inner < groupEnd; inner++) {
+          const sideRow = rows[inner]!
+          const hasCell = (sideRow.tableCells ?? []).some(cell => side === 'old' ? cell.oldCell !== undefined : cell.newCell !== undefined)
+          if (hasCell) body.append(makeTr(sideRow, inner, side))
+        }
+      }
+      at = groupEnd
+    }
+    if (head !== undefined) table.append(head)
+    table.append(body)
+    // The native Markdown table rule: under four columns fill the column, four or more keep their natural
+    // width inside a horizontal scroller.
+    const wrap = document.createElement('div')
+    wrap.className = `mdFlowTableWrap ${columns >= 4 ? 'mdFlowTableWrap-wide' : 'mdFlowTableWrap-fill'}`
+    wrap.append(table)
+    // Marks a table that actually carries a difference, for the inter-block separator spacing.
+    if (rows.slice(start, end).some((_row, offset) => (rowBlock[start + offset] ?? -1) >= 0)) {
+      wrap.classList.add('mdFlowTableWrap-diff')
+    }
+    // EVERY changed table gets an outer, unscrolled tint layer: the whole table block is one continuous colour
+    // region (row bands run edge to edge behind the transparent table), and a wide table's scroller can neither
+    // clip the bands nor inflate its scrollWidth with them.
+    const outer = document.createElement('div')
+    outer.className = 'mdFlowTableOuter'
+    if (wrap.classList.contains('mdFlowTableWrap-diff')) outer.classList.add('mdFlowTableOuter-diff')
+    const tintLayer = document.createElement('div')
+    tintLayer.className = 'mdFlowTableTintLayer'
+    outer.append(tintLayer, wrap)
+    return outer
+  }
+  /** The native fenced-block banner: language on the left, a copy button on the right. */
+  const codeBannerOf = (label: string, owner: number, copyText: () => string): HTMLElement => {
+    const banner = document.createElement('div')
+    banner.className = 'mdFlowCodeBanner'
+    if (owner >= 0) banner.dataset.mdBlock = String(owner)
+    const language = document.createElement('span')
+    language.className = 'mdFlowCodeBannerLang'
+    language.textContent = label === '' ? '无语言' : label
+    const copyButton = document.createElement('button')
+    copyButton.type = 'button'
+    copyButton.className = 'mdFlowCodeBannerCopy'
+    copyButton.title = '复制代码'
+    copyButton.setAttribute('aria-label', '复制代码')
+    copyButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" stroke="currentColor"/><path d="M10.5 5.5V4a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5" stroke="currentColor"/></svg>'
+    copyButton.addEventListener('click', event => {
+      event.preventDefault()
+      event.stopPropagation()
+      void writeClipboard(copyText())
+      copyButton.dataset.copied = 'true'
+      window.setTimeout(() => { delete copyButton.dataset.copied }, 1200)
+    })
+    banner.append(language, copyButton)
+    return banner
+  }
+  /**
+   * A WHOLE fenced block that is itself the change (a language change, or an added/deleted fence): one card with
+   * the native banner, the surface and a tint layer underneath — the same structure as a line-level code diff.
+   */
+  const renderWholeCodeFence = (node: MarkdownTreeNode, side: 'old' | 'new', owner: number): HTMLElement => {
+    const shell = document.createElement('div')
+    shell.className = 'mdFlowCodeShell'
+    const tintLayer = document.createElement('div')
+    tintLayer.className = 'mdFlowCodeTintLayer'
+    const card = document.createElement('div')
+    card.className = `mdFlowCodeBlock mdFlowCodeBlock-diff mdFlowCodeBlock-${side}`
+    card.dataset.mdBlock = String(owner)
+    card.dataset.mdKind = side === 'old' ? 'del' : 'add'
+    card.dataset.mdWholeRow = ''
+    const lines = flowCodeLinesOf(node).map(line => flowCodeLineText(line))
+    const banner = codeBannerOf(String(node.attrs.lang ?? ''), owner, () => lines.join('\n'))
+    const content = document.createElement('div')
+    content.className = 'mdFlowCodeContent'
+    for (const line of lines) {
+      const row = document.createElement('div')
+      row.className = 'mdFlowCodeRow'
+      const text = document.createElement('span')
+      text.className = 'mdFlowCodeText'
+      text.textContent = line
+      row.append(text)
+      content.append(row)
+    }
+    card.append(banner, content)
+    shell.append(tintLayer, card)
+    return shell
+  }
+  /**
+   * Render one fenced code block's row run as ONE <pre><code>. Equal lines stay plain context; a changed block
+   * reads its OLD lines first (red), then its NEW lines (green), exactly like the code view's hunks.
+   */
+  const renderCodeRun = (start: number, end: number, plain = false): HTMLElement => {
+    const shell = document.createElement('div')
+    shell.className = 'mdFlowCodeShell'
+    const tintLayer = document.createElement('div')
+    tintLayer.className = 'mdFlowCodeTintLayer'
+    const finish = (): HTMLElement => {
+      block.append(banner, content)
+      shell.append(tintLayer, block)
+      return shell
+    }
+    const block = document.createElement('div')
+    block.className = plain ? 'mdFlowCodeBlock mdFlowCodeBlock-inline' : 'mdFlowCodeBlock'
+    // A fenced block carrying its OWN line-level diff (not a plain inline fence inside a merged hunk).
+    if (rows.slice(start, end).some(row => row.kind !== 'context')) block.classList.add('mdFlowCodeBlock-diff')
+    const first = rows[start]!.code
+    if (first !== undefined && first.language !== '') block.dataset.lang = first.language
+    const wholeKinds = new Set(rows.slice(start, end).map(row => row.kind))
+    const wholeSide: 'old' | 'new' | undefined = wholeKinds.size === 1 && wholeKinds.has('old')
+      ? 'old'
+      : wholeKinds.size === 1 && wholeKinds.has('new') ? 'new' : undefined
+    if (wholeSide !== undefined && !plain) {
+      block.classList.add(`mdFlowCodeBlock-${wholeSide}`)
+      const owner = rowBlock[start] ?? -1
+      if (owner >= 0) {
+        block.dataset.mdBlock = String(owner)
+        block.dataset.mdKind = wholeSide === 'old' ? 'del' : 'add'
+        block.dataset.mdWholeRow = ''
+      }
+    }
+    const bannerOwner = rowBlock[start] ?? -1
+    const banner = codeBannerOf(
+      first === undefined ? '' : first.language,
+      // The banner belongs to the change only when the WHOLE fence is the change (language change, added/deleted
+      // block). On a line-level diff the banner is unchanged chrome: hovering it must not hold the toolbar open.
+      wholeSide === undefined ? -1 : bannerOwner,
+      () => {
+        const lines: string[] = []
+        for (let at = start; at < end; at++) {
+          const row = rows[at]!
+          const node = wholeSide === 'old'
+            ? (row.oldNode ?? row.newNode)
+            : (row.newNode ?? (wholeSide === 'new' ? row.oldNode : undefined))
+          if (node !== undefined) lines.push(flowCodeLineText(node))
+        }
+        return lines.join('\n')
+      },
+    )
+    const content = document.createElement('div')
+    content.className = 'mdFlowCodeContent'
+    const makeRow = (side: 'old' | 'new' | undefined, owner: number, node: MarkdownTreeNode): HTMLElement => {
+      const line = document.createElement('div')
+      line.className = side === undefined
+        ? 'mdFlowCodeRow'
+        : `mdFlowCodeRow mdFlowCodeRow-${side}`
+      if (side !== undefined) line.dataset.mdKind = side === 'old' ? 'del' : 'add'
+      if (owner >= 0) line.dataset.mdBlock = String(owner)
+      const text = document.createElement('span')
+      text.className = 'mdFlowCodeText'
+      text.textContent = flowCodeLineText(node)
+      line.append(text)
+      return line
+    }
+    if (wholeSide !== undefined) {
+      for (let at = start; at < end; at++) {
+        const row = rows[at]!
+        const node = row.newNode ?? row.oldNode
+        if (node !== undefined) content.append(makeRow(undefined, -1, node))
+      }
+      return finish()
+    }
+    for (let at = start; at < end;) {
+      const row = rows[at]!
+      const owner = rowBlock[at] ?? -1
+      if (owner < 0) {
+        const node = row.newNode ?? row.oldNode
+        if (node !== undefined) content.append(makeRow(undefined, -1, node))
+        at++
+        continue
+      }
+      let groupEnd = at
+      while (groupEnd < end && (rowBlock[groupEnd] ?? -1) === owner) groupEnd++
+      for (const side of ['old', 'new'] as const) {
+        for (let inner = at; inner < groupEnd; inner++) {
+          const sideRow = rows[inner]!
+          const node = side === 'old' ? sideRow.oldNode : sideRow.newNode
+          if (node !== undefined) content.append(makeRow(side, owner, node))
+        }
+      }
+      at = groupEnd
+    }
+    return finish()
+  }
+  /** Whether a block's rows include ordinary (non-code) content; such a block renders as ONE wrapper. */
+  const blockHasNormalRows = (start: number, ownerIndex: number): boolean => {
+    for (let at = start; at < rows.length && rows[at]!.kind !== 'context' && rowBlock[at] === ownerIndex; at++) {
+      if (rows[at]!.table === undefined && rows[at]!.code === undefined) return true
+    }
+    return false
+  }
+  /**
+   * Render ONE difference block: its OLD side first (red group), then its NEW side (green group). A whole-fence
+   * code block merged into the block (the whole-table-fallback rule) is drawn INSIDE the same wrapper, so the
+   * merged block reads as one block instead of two visually separate carriers.
+   */
+  /**
+   * Character-level runs for a matched PAIR row, so only the words that changed get the stronger red/green wash
+   * inside the block's own band (the block tint stays the coarse "this whole region changed" layer).
+   * Undefined when the two sides are not the same element kind (a type change stays a whole-element difference).
+   */
+  const wordRunsCache = new Map<number, { del: IntraRun[]; add: IntraRun[] } | undefined>()
+  const wordRunsAt = (at: number): { del: IntraRun[]; add: IntraRun[] } | undefined => {
+    if (wordRunsCache.has(at)) return wordRunsCache.get(at)
+    const row = rows[at]!
+    let result: { del: IntraRun[]; add: IntraRun[] } | undefined
+    // A structural container pair (whole table / whole fence) is a BLOCK difference: its two shapes need not
+    // line up, and wrapping word runs across table cells can foster-parent inline spans out of the table.
+    if (row.kind === 'pair' && row.container === undefined && row.oldNode !== undefined && row.newNode !== undefined) {
+      const oldElement = flowNodeElement(baseline, row.oldNode, 'old')
+      const newElement = flowNodeElement(fresh, row.newNode, 'new')
+      if (oldElement !== undefined && newElement !== undefined && oldElement.tagName === newElement.tagName) {
+        const oldText = textOfSubtree(oldElement)
+        const newText = textOfSubtree(newElement)
+        if (oldText !== newText) result = intraRunsOf(oldText, newText)
+      }
+    }
+    wordRunsCache.set(at, result)
+    return result
+  }
+  const applyWordRuns = (element: HTMLElement, side: 'old' | 'new', runs: { del: IntraRun[]; add: IntraRun[] }): void => {
+    wrapSubtreeChangedRuns(element, side === 'old' ? runs.del : runs.add, side === 'old' ? 'mdWordDel' : 'mdWordAdd')
+  }
+  const renderFlowBlockAt = (start: number, ownerIndex: number): number => {
+    let end = start
+    while (end < rows.length && rows[end]!.kind !== 'context'
+      && rowBlock[end] === ownerIndex && rows[end]!.table === undefined) end++
+    const owner = blocks[ownerIndex]!
+    const hasOld = owner.oldNodes.length > 0
+    const hasNew = owner.newNodes.length > 0
+    const mode = hasOld && hasNew ? 'mixed' : hasOld ? 'old' : 'new'
+    const wrapper = blockFor(owner.index, mode)
+    let oldHost: HTMLElement = wrapper
+    let newHost: HTMLElement = wrapper
+    if (mode === 'mixed') {
+      const oldGroup = document.createElement('div')
+      oldGroup.className = 'mdFlowGroup mdFlowGroup-old'
+      const newGroup = document.createElement('div')
+      newGroup.className = 'mdFlowGroup mdFlowGroup-new'
+      wrapper.append(oldGroup, newGroup)
+      oldHost = oldGroup
+      newHost = newGroup
+    }
+    const appendRow = (host: HTMLElement, row: FlowRow, child: HTMLElement): void => {
+      const holder = document.createElement('div')
+      holder.className = 'mdFlowRow'
+      holder.dataset.flowDepth = String(row.depth)
+      holder.append(child)
+      host.append(holder)
+    }
+    const appendSide = (side: 'old' | 'new'): void => {
+      const host = side === 'old' ? oldHost : newHost
+      for (let at = start; at < end;) {
+        const row = rows[at]!
+        if (row.container === 'code') {
+          // A language change is a WHOLE-fence replacement: old fence card (with its language banner) above the
+          // new one, never a line-by-line comparison across languages.
+          const node = side === 'old' ? row.oldNode : row.newNode
+          if (node !== undefined && node.type === 'code') {
+            host.append(renderWholeCodeFence(node, side, rowBlock[at] ?? -1))
+          }
+          at++
+          continue
+        }
+        if (row.code !== undefined) {
+          const codeId = row.code.id
+          let fenceEnd = at
+          while (fenceEnd < end && rows[fenceEnd]!.code?.id === codeId) fenceEnd++
+          const kinds = new Set(rows.slice(at, fenceEnd).map(item => item.kind))
+          const fenceSide = kinds.size === 1 && kinds.has('old') ? 'old' : kinds.size === 1 && kinds.has('new') ? 'new' : undefined
+          if (fenceSide === side) host.append(renderCodeRun(at, fenceEnd, true))
+          at = fenceEnd
+          continue
+        }
+        const node = side === 'old' ? row.oldNode : row.newNode
+        if (node !== undefined) {
+          const runs = wordRunsAt(at)
+          if (row.list !== undefined) {
+            const item = flowListItemRow(row, side === 'old' ? baseline : fresh, side)
+            if (runs !== undefined) {
+              const target = item.querySelector<HTMLElement>('.mdFlowItemContent') ?? item
+              applyWordRuns(target, side, runs)
+            }
+            appendRow(host, row, item)
+          } else {
+            const element = flowNodeElement(side === 'old' ? baseline : fresh, node, side)
+            if (element !== undefined) {
+              if (runs !== undefined) applyWordRuns(element, side, runs)
+              appendRow(host, row, element)
+            }
+          }
+        }
+        at++
+      }
+    }
+    appendSide('old')
+    appendSide('new')
+    return end
+  }
+  for (let index = 0; index < rows.length;) {
+    const row = rows[index]!
+    if (row.table !== undefined) {
+      closeBlock()
+      const tableId = row.table.id
+      let end = index
+      while (end < rows.length && rows[end]!.table?.id === tableId) end++
+      root.append(renderTableRun(index, end))
+      index = end
+      continue
+    }
+    if (row.kind === 'context') {
+      closeBlock()
+      if (row.code !== undefined) {
+        // An UNCHANGED fenced block is still a fenced block: draw it with the same native banner/surface
+        // structure as a changed one (a cloned bare <pre> would lose the language bar and the card).
+        const codeId = row.code.id
+        let end = index
+        while (end < rows.length && rows[end]!.kind === 'context' && rows[end]!.code?.id === codeId) end++
+        root.append(renderCodeRun(index, end))
+        index = end
+        continue
+      }
+      if (row.list !== undefined) {
+        root.append(flowRowElement(row, 'context', flowListItemRow(row, fresh, 'new', true)))
+      } else {
+        const element = flowNodeElement(fresh, row.newNode!, 'new')
+        if (element !== undefined) root.append(flowRowElement(row, 'context', element))
+      }
+      index++
+      continue
+    }
+    const ownerIndex = rowBlock[index]!
+    if (row.code !== undefined) {
+      if (!blockHasNormalRows(index, ownerIndex)) {
+        // A WHOLE code block on its own: draw the fence with its own tint classes and block id.
+        closeBlock()
+        const codeId = row.code.id
+        let end = index
+        while (end < rows.length && rows[end]!.code?.id === codeId) end++
+        root.append(renderCodeRun(index, end))
+        index = end
+      } else {
+        // Merged with ordinary content: the wrapper draws the fence inside its red/green group.
+        index = renderFlowBlockAt(index, ownerIndex)
+      }
+      continue
+    }
+    index = renderFlowBlockAt(index, ownerIndex)
+  }
+  return `<div class="${root.className}">${root.innerHTML}</div>`
+}
+
+/* ========================== side-by-side flow renderer ========================== */
+
+/**
+ * The same flow model, rendered as TWO aligned columns: old left, new right. Every difference block is one grid
+ * row whose two cells are the red (old) and green (new) halves of the change, so a matched block's colour reads
+ * as one continuous band across the gutter. Unchanged rows are context grid rows (same content on both sides).
+ */
+export function renderFlowDouble(oldText: string, newText: string): string {
+  const { rows } = flowPreviewModel(oldText, newText)
+  const baseline = renderAnnotated(oldText)
+  const fresh = renderAnnotated(newText)
+  const wholeSide: 'old' | 'new' | undefined = oldText === '' ? 'new' : newText === '' ? 'old' : undefined
+  const rowBlock = wholeSide !== undefined ? rows.map(() => 0) : flowRowBlockIndices(rows)
+  const root = document.createElement('div')
+  root.className = 'mdFlowDoc mdFlowDouble'
+  if (wholeSide !== undefined) root.classList.add(`mdFlowDoubleWhole-${wholeSide}`)
+
+  const cellOf = (side: 'old' | 'new'): HTMLElement => {
+    const cell = document.createElement('div')
+    cell.className = `mdFlowDoubleCell mdFlowDoubleCell-${side}`
+    return cell
+  }
+  const rowHolder = (row: FlowRow, element: HTMLElement): HTMLElement => {
+    const holder = document.createElement('div')
+    holder.className = 'mdFlowRow'
+    holder.dataset.flowDepth = String(row.depth)
+    holder.append(element)
+    return holder
+  }
+  /** One row's markdown element for one side. */
+  const rowElementOf = (row: FlowRow, side: 'old' | 'new', doc: RenderedDoc, includeNested: boolean): HTMLElement | undefined => {
+    const node = side === 'old' ? row.oldNode : row.newNode
+    if (node === undefined) return undefined
+    const element = row.list !== undefined
+      ? flowListItemRow(row, doc, side, includeNested)
+      : flowNodeElement(doc, node, side)
+    return element === undefined ? undefined : rowHolder(row, element)
+  }
+
+  /** Character-level runs for a matched pair row, so each column washes only the words that changed. */
+  const wordRunsCache = new Map<number, { del: IntraRun[]; add: IntraRun[] } | undefined>()
+  const wordRunsAt = (at: number): { del: IntraRun[]; add: IntraRun[] } | undefined => {
+    if (wordRunsCache.has(at)) return wordRunsCache.get(at)
+    const row = rows[at]!
+    let result: { del: IntraRun[]; add: IntraRun[] } | undefined
+    // A structural container pair (whole table / whole fence) is a BLOCK difference: its two shapes need not
+    // line up, and wrapping word runs across table cells can foster-parent inline spans out of the table.
+    if (row.kind === 'pair' && row.container === undefined && row.oldNode !== undefined && row.newNode !== undefined) {
+      const oldElement = flowNodeElement(baseline, row.oldNode, 'old')
+      const newElement = flowNodeElement(fresh, row.newNode, 'new')
+      if (oldElement !== undefined && newElement !== undefined && oldElement.tagName === newElement.tagName) {
+        const oldText = textOfSubtree(oldElement)
+        const newText = textOfSubtree(newElement)
+        if (oldText !== newText) result = intraRunsOf(oldText, newText)
+      }
+    }
+    wordRunsCache.set(at, result)
+    return result
+  }
+  const applyWordRuns = (element: HTMLElement, side: 'old' | 'new', runs: { del: IntraRun[]; add: IntraRun[] }): void => {
+    wrapSubtreeChangedRuns(element, side === 'old' ? runs.del : runs.add, side === 'old' ? 'mdWordDel' : 'mdWordAdd')
+  }
+
+  /** Number of columns in a table block (for the native fill/wide rule). */
+  const tableColumnsOf = (start: number, end: number): number => {
+    let columns = 0
+    for (let at = start; at < end; at++) columns = Math.max(columns, (rows[at]!.tableCells ?? []).length)
+    return columns
+  }
+  const tableWrapOf = (table: HTMLElement, columns: number): HTMLElement => {
+    const wrap = document.createElement('div')
+    wrap.className = `mdFlowTableWrap ${columns >= 4 ? 'mdFlowTableWrap-wide' : 'mdFlowTableWrap-fill'}`
+    wrap.append(table)
+    return wrap
+  }
+
+  /** One changed table's side: a real table for this column, its changed rows tinted by their side class. */
+  const tableSideOf = (start: number, end: number, side: 'old' | 'new', doc: RenderedDoc): HTMLElement => {
+    const table = document.createElement('table')
+    table.className = 'mdFlowTable'
+    const body = document.createElement('tbody')
+    const head = document.createElement('thead')
+    let headerChanged = false
+    for (let at = start; at < end; at++) {
+      const row = rows[at]!
+      if (row.tableHeader === true && (rowBlock[at] ?? -1) >= 0) headerChanged = true
+    }
+    for (let at = start; at < end; at++) {
+      const row = rows[at]!
+      const owner = rowBlock[at] ?? -1
+      // ONLY this side's cells: falling back to the other side would duplicate a one-sided row into both
+      // columns and break the column count (the reported overlapping table headers).
+      const cellEntries = (row.tableCells ?? [])
+        .map(cell => ({ cell, node: side === 'old' ? cell.oldCell : cell.newCell }))
+        .filter((entry): entry is { cell: NonNullable<FlowRow['tableCells']>[number]; node: MarkdownTreeNode } => entry.node !== undefined)
+      if (cellEntries.length === 0) continue
+      const tr = document.createElement('tr')
+      for (const { cell, node } of cellEntries) {
+        const element = flowNodeElement(doc, node, side)
+        if (element === undefined) continue
+        // A matched cell may differ in only a word: wash that word, not the whole cell.
+        if (cell.oldCell !== undefined && cell.newCell !== undefined) {
+          const oldCellElement = flowNodeElement(baseline, cell.oldCell, 'old')
+          const newCellElement = flowNodeElement(fresh, cell.newCell, 'new')
+          if (oldCellElement !== undefined && newCellElement !== undefined && oldCellElement.tagName === newCellElement.tagName) {
+            const oldText = textOfSubtree(oldCellElement)
+            const newText = textOfSubtree(newCellElement)
+            if (oldText !== newText) {
+              const runs = intraRunsOf(oldText, newText)
+              if (runs !== undefined) {
+                wrapSubtreeChangedRuns(element, side === 'old' ? runs.del : runs.add, side === 'old' ? 'mdWordDel' : 'mdWordAdd')
+              }
+            }
+          }
+        }
+        tr.append(element)
+      }
+      if (owner >= 0 && row.kind !== 'context') {
+        tr.classList.add('mdFlowTr', side === 'old' ? 'mdFlowTr-old' : 'mdFlowTr-new')
+        tr.dataset.mdBlock = String(owner)
+        tr.dataset.mdKind = side === 'old' ? 'del' : 'add'
+        tr.dataset.mdWholeRow = ''
+      }
+      if (row.tableHeader === true && !headerChanged) head.append(tr)
+      else body.append(tr)
+    }
+    if (head.childElementCount > 0) table.append(head)
+    table.append(body)
+    return table
+  }
+
+  /** One native code card (banner + lines) for one column; changed lines carry their side's tint. */
+  const codeCardOf = (label: string, lines: readonly { text: string; changed: 'old' | 'new' | undefined; block: number }[]): HTMLElement => {
+    const card = document.createElement('div')
+    card.className = 'mdFlowCodeBlock mdFlowDoubleCode'
+    const language = document.createElement('div')
+    language.className = 'mdFlowCodeBanner'
+    const languageLabel = document.createElement('span')
+    languageLabel.className = 'mdFlowCodeBannerLang'
+    languageLabel.textContent = label === '' ? '无语言' : label
+    language.append(languageLabel)
+    const content = document.createElement('div')
+    content.className = 'mdFlowCodeContent'
+    for (const entry of lines) {
+      const line = document.createElement('div')
+      line.className = entry.changed === undefined ? 'mdFlowCodeRow' : `mdFlowCodeRow mdFlowCodeRow-${entry.changed}`
+      if (entry.changed !== undefined) line.dataset.mdKind = entry.changed === 'old' ? 'del' : 'add'
+      if (entry.block >= 0) line.dataset.mdBlock = String(entry.block)
+      const text = document.createElement('span')
+      text.className = 'mdFlowCodeText'
+      text.textContent = entry.text
+      line.append(text)
+      content.append(line)
+    }
+    card.append(language, content)
+    return card
+  }
+  const codeLinesOf = (start: number, end: number, side: 'old' | 'new'): { text: string; changed: 'old' | 'new' | undefined; block: number }[] => {
+    const lines: { text: string; changed: 'old' | 'new' | undefined; block: number }[] = []
+    for (let at = start; at < end; at++) {
+      const row = rows[at]!
+      const node = side === 'old' ? row.oldNode : row.newNode
+      if (node === undefined) continue
+      const owner = rowBlock[at] ?? -1
+      const changed = owner >= 0 && row.kind !== 'context' ? side : undefined
+      lines.push({ text: flowCodeLineText(node), changed, block: owner })
+    }
+    return lines
+  }
+  const codeLanguageOf = (start: number, side: 'old' | 'new'): string => {
+    for (let at = start; at < rows.length; at++) {
+      const code = rows[at]!.code
+      if (code === undefined) continue
+      if (code.side === side) return code.language
+    }
+    return rows[start]?.code?.language ?? ''
+  }
+  /** One changed fenced block's side: a native code card (banner + lines) for this column. */
+  const codeSideOf = (start: number, end: number, side: 'old' | 'new', _doc: RenderedDoc): HTMLElement => {
+    const lines = codeLinesOf(start, end, side)
+    return codeCardOf(codeLanguageOf(start, side), lines)
+  }
+  /** One aligned side-by-side code line: text on each side (missing side = placeholder), tint flags, block id. */
+  interface DoubleCodeEntry {
+    oldText?: string
+    newText?: string
+    oldChanged: boolean
+    newChanged: boolean
+    block: number
+  }
+  /** Pair consecutive changed code legs by index, so matched lines stay on the SAME visual row in both columns. */
+  const pairChangedCode = (target: DoubleCodeEntry[], oldLegs: MarkdownTreeNode[], newLegs: MarkdownTreeNode[], block: number): void => {
+    const count = Math.max(oldLegs.length, newLegs.length)
+    for (let at = 0; at < count; at++) {
+      target.push({
+        ...(oldLegs[at] === undefined ? {} : { oldText: flowCodeLineText(oldLegs[at]!) }),
+        ...(newLegs[at] === undefined ? {} : { newText: flowCodeLineText(newLegs[at]!) }),
+        oldChanged: oldLegs[at] !== undefined,
+        newChanged: newLegs[at] !== undefined,
+        block,
+      })
+    }
+  }
+  const alignedCodeEntriesOfRows = (start: number, end: number): DoubleCodeEntry[] => {
+    const entries: DoubleCodeEntry[] = []
+    for (let at = start; at < end;) {
+      const row = rows[at]!
+      if (row.kind === 'context') {
+        entries.push({
+          oldText: row.oldNode === undefined ? '' : flowCodeLineText(row.oldNode),
+          newText: row.newNode === undefined ? '' : flowCodeLineText(row.newNode),
+          oldChanged: false,
+          newChanged: false,
+          block: rowBlock[at] ?? -1,
+        })
+        at++
+        continue
+      }
+      const oldLegs: MarkdownTreeNode[] = []
+      const newLegs: MarkdownTreeNode[] = []
+      let block = -1
+      while (at < end && rows[at]!.kind !== 'context') {
+        const rowAt = rows[at]!
+        if (rowAt.oldNode !== undefined) oldLegs.push(rowAt.oldNode)
+        if (rowAt.newNode !== undefined) newLegs.push(rowAt.newNode)
+        if (block < 0) block = rowBlock[at] ?? -1
+        at++
+      }
+      pairChangedCode(entries, oldLegs, newLegs, block)
+    }
+    return entries
+  }
+  const alignedCodeEntriesOfPair = (row: FlowRow, owner: number): DoubleCodeEntry[] => {
+    if (row.oldNode === undefined || row.newNode === undefined) {
+      const entries: DoubleCodeEntry[] = []
+      const nodes = row.oldNode === undefined ? flowCodeLinesOf(row.newNode!) : flowCodeLinesOf(row.oldNode)
+      for (const node of nodes) {
+        entries.push({
+          ...(row.oldNode === undefined ? { newText: flowCodeLineText(node) } : { oldText: flowCodeLineText(node) }),
+          oldChanged: row.oldNode !== undefined,
+          newChanged: row.newNode !== undefined,
+          block: owner,
+        })
+      }
+      return entries
+    }
+    const aligned = flowAlignCodeLines(flowCodeLinesOf(row.oldNode), flowCodeLinesOf(row.newNode))
+    const entries: DoubleCodeEntry[] = []
+    for (let at = 0; at < aligned.length;) {
+      const entry = aligned[at]!
+      if (entry.oldNode !== undefined && entry.newNode !== undefined) {
+        entries.push({ oldText: flowCodeLineText(entry.oldNode), newText: flowCodeLineText(entry.newNode), oldChanged: false, newChanged: false, block: owner })
+        at++
+        continue
+      }
+      const oldLegs: MarkdownTreeNode[] = []
+      const newLegs: MarkdownTreeNode[] = []
+      while (at < aligned.length && (aligned[at]!.oldNode === undefined || aligned[at]!.newNode === undefined)) {
+        const leg = aligned[at]!
+        if (leg.oldNode !== undefined) oldLegs.push(leg.oldNode)
+        if (leg.newNode !== undefined) newLegs.push(leg.newNode)
+        at++
+      }
+      pairChangedCode(entries, oldLegs, newLegs, owner)
+    }
+    return entries
+  }
+  const codeCardOfEntries = (label: string, side: 'old' | 'new', entries: readonly DoubleCodeEntry[]): HTMLElement => codeCardOf(
+    label,
+    entries.map(entry => ({
+      text: (side === 'old' ? entry.oldText : entry.newText) ?? '',
+      changed: (side === 'old' ? entry.oldChanged : entry.newChanged) ? side : undefined,
+      block: entry.block,
+    })),
+  )
+  /** A WHOLE fence as ONE card per column, every line carrying its side's tint (no per-block card fragmentation). */
+  const codeFenceUnit = (start: number, end: number): HTMLElement => {
+    const unit = document.createElement('div')
+    unit.className = 'mdFlowDoubleRow mdFlowDoubleRow-code'
+    if (rows.slice(start, end).some((_row, offset) => (rowBlock[start + offset] ?? -1) >= 0)) {
+      unit.classList.add('mdFlowDoubleRegion-diff')
+    }
+    const entries = alignedCodeEntriesOfRows(start, end)
+    appendCell(unit, 'old', codeCardOfEntries(codeLanguageOf(start, 'old'), 'old', entries))
+    appendCell(unit, 'new', codeCardOfEntries(codeLanguageOf(start, 'new'), 'new', entries))
+    return unit
+  }
+  /** A LANGUAGE-change pair: both cards show their own language banner, old block red / new block green. */
+  const codePairUnit = (row: FlowRow, owner: number): HTMLElement => {
+    const unit = document.createElement('div')
+    // A LANGUAGE change is a whole-block difference (single column tints the whole fence, banner included):
+    // mark the row so the panel paints ONE full-half band behind the cards instead of per-line bands.
+    unit.className = 'mdFlowDoubleRow mdFlowDoubleRow-code mdFlowDoubleCodeWhole mdFlowDoubleRegion-diff'
+    const entries = alignedCodeEntriesOfPair(row, owner)
+    const oldLabel = row.oldNode === undefined ? '' : String(row.oldNode.attrs.lang ?? '')
+    const newLabel = row.newNode === undefined ? '' : String(row.newNode.attrs.lang ?? '')
+    appendCell(unit, 'old', codeCardOfEntries(oldLabel, 'old', entries))
+    appendCell(unit, 'new', codeCardOfEntries(newLabel, 'new', entries))
+    return unit
+  }
+
+  /** All of a block's content for one column, in row order (tables and fences included). */
+  const sideContentOf = (start: number, end: number, side: 'old' | 'new', doc: RenderedDoc): HTMLElement | undefined => {
+    const content = document.createElement('div')
+    content.className = 'mdFlowDoubleContent'
+    /** Row order in this column's block; the panel pairs equal slots across the two columns to level heights. */
+    let pairSlot = 0
+    for (let at = start; at < end;) {
+      const row = rows[at]!
+      if (row.table !== undefined) {
+        const tableId = row.table.id
+        let tableEnd = at
+        while (tableEnd < end && rows[tableEnd]!.table?.id === tableId) tableEnd++
+        const table = tableSideOf(at, tableEnd, side, doc)
+        if (table.childElementCount > 0) content.append(tableWrapOf(table, tableColumnsOf(at, tableEnd)))
+        at = tableEnd
+        continue
+      }
+      if (row.code !== undefined) {
+        const codeId = row.code.id
+        let codeEnd = at
+        while (codeEnd < end && rows[codeEnd]!.code?.id === codeId) codeEnd++
+        content.append(codeSideOf(at, codeEnd, side, doc))
+        pairSlot++
+        at = codeEnd
+        continue
+      }
+      const element = rowElementOf(row, side, doc, false)
+      if (element !== undefined) {
+        const runs = wordRunsAt(at)
+        // The holder is only the flow row wrapper; the runs belong to the rendered element inside it (and, for
+        // a list item, to its content block — the marker is not text).
+        if (runs !== undefined) {
+          const target = element.querySelector<HTMLElement>('.mdFlowItemContent')
+            ?? (element.firstElementChild as HTMLElement | null)
+            ?? element
+          applyWordRuns(target, side, runs)
+        }
+        element.dataset.doublePair = String(pairSlot++)
+        content.append(element)
+      }
+      at++
+    }
+    return content.childElementCount === 0 ? undefined : content
+  }
+
+  const appendCell = (row: HTMLElement, side: 'old' | 'new', content: HTMLElement | undefined): void => {
+    const cell = cellOf(side)
+    if (content === undefined) cell.classList.add('mdFlowDoubleCell-empty')
+    else cell.append(content)
+    row.append(cell)
+  }
+
+  const diffUnit = (owner: number, start: number, end: number): HTMLElement => {
+    const row = document.createElement('div')
+    row.className = 'mdFlowDoubleRow mdFlowDoubleRow-diff mdFlowDoubleRegion-diff'
+    row.dataset.mdBlock = String(owner)
+    const oldContent = sideContentOf(start, end, 'old', baseline)
+    const newContent = sideContentOf(start, end, 'new', fresh)
+    row.dataset.mdKind = oldContent !== undefined && newContent !== undefined ? 'mixed' : oldContent !== undefined ? 'del' : 'add'
+    appendCell(row, 'old', oldContent)
+    appendCell(row, 'new', newContent)
+    return row
+  }
+  const contextRow = (row: FlowRow): HTMLElement => {
+    const unit = document.createElement('div')
+    unit.className = 'mdFlowDoubleRow mdFlowDoubleRow-context'
+    const left = rowElementOf(row, 'old', baseline, true)
+    const right = rowElementOf(row, 'new', fresh, true)
+    appendCell(unit, 'old', left)
+    appendCell(unit, 'new', right)
+    return unit
+  }
+  const tableUnit = (start: number, end: number): HTMLElement => {
+    const unit = document.createElement('div')
+    unit.className = 'mdFlowDoubleRow mdFlowDoubleRow-table'
+    if (rows.slice(start, end).some((_row, offset) => (rowBlock[start + offset] ?? -1) >= 0)) {
+      unit.classList.add('mdFlowDoubleRegion-diff')
+    }
+    const columns = tableColumnsOf(start, end)
+    const left = tableWrapOf(tableSideOf(start, end, 'old', baseline), columns)
+    const right = tableWrapOf(tableSideOf(start, end, 'new', fresh), columns)
+    appendCell(unit, 'old', left)
+    appendCell(unit, 'new', right)
+    return unit
+  }
+
+  if (wholeSide !== undefined) {
+    const unit = diffUnit(0, 0, rows.length)
+    root.append(unit)
+    return `<div class="${root.className}">${root.innerHTML}</div>`
+  }
+
+  for (let index = 0; index < rows.length;) {
+    const row = rows[index]!
+    if (row.table !== undefined) {
+      const tableId = row.table.id
+      let end = index
+      while (end < rows.length && rows[end]!.table?.id === tableId) end++
+      root.append(tableUnit(index, end))
+      index = end
+      continue
+    }
+    if (row.container === 'code') {
+      root.append(codePairUnit(row, rowBlock[index] ?? -1))
+      index++
+      continue
+    }
+    if (row.code !== undefined) {
+      // A whole fenced block is ONE card per column: its context and changed lines must not become separate
+      // grid rows with their own banner.
+      const codeId = row.code.id
+      let end = index
+      while (end < rows.length && rows[end]!.code?.id === codeId) end++
+      root.append(codeFenceUnit(index, end))
+      index = end
+      continue
+    }
+    if (row.kind === 'context') {
+      root.append(contextRow(row))
+      index++
+      continue
+    }
+    const owner = rowBlock[index]!
+    let end = index
+    while (end < rows.length && rows[end]!.kind !== 'context' && rowBlock[end] === owner) end++
+    if (end === index) end = index + 1
+    root.append(diffUnit(owner, index, end))
+    index = end
+  }
+  return `<div class="${root.className}">${root.innerHTML}</div>`
 }
 

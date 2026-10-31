@@ -127,23 +127,25 @@ test.describe('the preview keeps its scroll across a Keep', () => {
    * visible unchanged block — the place the reader's eye actually rests.
    */
   const keepAboveAndMeasure = async (): Promise<{ before: number; after: number; scrollBefore: number; scrollAfter: number }> => {
-    const setup = await page.evaluate(() => {
+    const target = page.locator('[data-diff-md-preview-body]').first().getByText('旧版说明：拷贝完成后重启服务。').first()
+    await target.waitFor({ timeout: 20_000 })
+    // Scroll the old-only paragraph (the change that loses all its height on Keep) just ABOVE the viewport.
+    await page.evaluate(({ text }: { text: string }) => {
       const body = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
-      body.scrollTop = Math.round((body.scrollHeight - body.clientHeight) * 0.55)
+      body.scrollTop = 0
       delete document.documentElement.dataset.previewScrollAnchor
-      const bodyRect = body.getBoundingClientRect()
-      const chip = [...body.querySelectorAll<HTMLElement>('[data-md-block="0"]')].find(element =>
-        element.classList.contains('mdSourcePair'))
-      if (chip === undefined) return null
-      chip.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
-      return {
-        scrollTop: body.scrollTop,
-        chipAbove: chip.getBoundingClientRect().bottom < bodyRect.top,
-      }
-    })
-    expect(setup, 'the fixture must render the front-matter chip').not.toBeNull()
-    expect(setup!.chipAbove, 'the kept change must sit above the viewport').toBe(true)
-    await sleep(250)
+      const element = [...body.querySelectorAll<HTMLElement>('p,li,h1,h2,h3,h4,h5,h6')].find(item => (item.textContent ?? '').includes(text))
+      if (element === undefined) return
+      const rect = element.getBoundingClientRect()
+      body.scrollTop = rect.top - body.getBoundingClientRect().top + body.scrollTop + rect.height + 150
+    }, { text: '旧版说明：拷贝完成后重启服务。' })
+    await page.waitForTimeout(600)
+    const above = await target.evaluate(element => element.getBoundingClientRect().bottom < (document.querySelector('[data-diff-md-preview-body]') as HTMLElement).getBoundingClientRect().top)
+    expect(above, 'the kept change must sit above the viewport').toBe(true)
+    const scrollBefore = await page.evaluate(() => (document.querySelector('[data-diff-md-preview-body]') as HTMLElement).scrollTop)
+    // The paragraph is above the viewport, so hover it programmatically (the panel listens for mouseover).
+    await target.evaluate(element => element.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })))
+    await sleep(400)
     await page.evaluate(() => {
       document.querySelector('[data-diff-block-keep]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
@@ -193,7 +195,7 @@ test.describe('the preview keeps its scroll across a Keep', () => {
       lastTop = after.top
     }
     expect(after.top, 'the anchor block must still be on screen').not.toBeNull()
-    return { before: anchor!.screenTop, after: after.top!, scrollBefore: setup!.scrollTop, scrollAfter: after.scrollTop }
+    return { before: anchor!.screenTop, after: after.top!, scrollBefore, scrollAfter: after.scrollTop }
   }
 
   test('single column: the anchor stays put', async () => {
@@ -204,10 +206,10 @@ test.describe('the preview keeps its scroll across a Keep', () => {
     expect(Math.abs(measured.after - measured.before)).toBeLessThanOrEqual(2)
     // The scroll offset itself moved to make that true: the document got shorter above the viewport.
     expect(measured.scrollAfter).not.toBe(measured.scrollBefore)
-    // Put the source twin back for the double-column case: the two layouts are measured on the same diff.
+    // Put the old-only paragraph back for the double-column case: the two layouts are measured on the same diff.
     await pressUndo(page)
     await page.waitForTimeout(800)
-    await page.locator('.mdSourcePair').first().waitFor({ timeout: 20_000 })
+    await page.locator('[data-diff-md-preview-body]').first().getByText('旧版说明：拷贝完成后重启服务。').first().waitFor({ timeout: 20_000 })
   })
 
   test('double column: the anchor stays put', async () => {

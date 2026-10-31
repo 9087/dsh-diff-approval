@@ -83,7 +83,7 @@ const SPACING_TYPES = new Set(['space'])
 
 /** Parent attribute names copied from a token onto its node (the rest are parser bookkeeping). */
 const ATTR_KEYS = [
-  'depth', 'lang', 'href', 'title', 'ordered', 'start', 'task', 'loose', 'align', 'header', 'block', 'pre',
+  'depth', 'lang', 'href', 'title', 'ordered', 'start', 'task', 'checked', 'loose', 'align', 'header', 'block', 'pre',
 ] as const
 
 /** How a document's source is split for offset→line lookups. */
@@ -261,6 +261,13 @@ function attrsOf(token: TokenLike): Record<string, string | number | boolean> {
     if (key === 'align' && Array.isArray(value) && value.every((entry): entry is string => typeof entry === 'string')) {
       attrs.align = value.join(',')
     }
+  }
+  // Some marked versions keep only the `task` flag on a list item token (the rendered HTML still carries the
+  // checkbox) — read the tick straight from the item's own source so a matched `[x]` row renders as ticked.
+  if (attrs.task === true && attrs.checked === undefined) {
+    const raw = String((token as Record<string, unknown>).raw ?? '')
+    const tick = /\[([ xX])\]/.exec(raw)
+    if (tick !== null) attrs.checked = tick[1]?.toLowerCase() === 'x'
   }
   return attrs
 }

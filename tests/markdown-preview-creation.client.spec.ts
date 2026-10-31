@@ -1,7 +1,7 @@
 // The Markdown preview's BLOCK rules, in a CREATION diff (empty baseline → new file) and in table edits.
 //
 // A "block" is what the preview numbers, navigates, frames and keeps/reverts; a "unit" is the character-level
-// change that is highlighted inside it. The rules this file pins down (see `Saved/md-table-blocks-spec.md`):
+// change that is highlighted inside it. The rules this file pins down (see `scratch/md-table-blocks-spec.md`):
 //
 //   1. a pure addition/deletion hunk is ONE block — a whole new paragraph/list/table/document, however many
 //      units its lines were cut into (a whole new file must NOT read as one block per changed line);

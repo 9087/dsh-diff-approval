@@ -28,7 +28,7 @@ import { createPendingDiffStore } from '../src/client/store.ts'
 import { directoryOfPath, resolveMarkdownHref } from '../src/client/path-match.ts'
 import { publishSessionId } from '../src/client/session-seat.ts'
 import type { DiffApprovalPort } from '../src/client/port.ts'
-import { previewUnits, renderMarkdownPreview } from '../src/client/markdown-preview.ts'
+import { previewUnits, renderMarkdownPreview, TREE_DIFF_SETTING } from '../src/client/markdown-preview.ts'
 import { highlightWindow } from '../src/client/highlight.ts'
 import type { PendingDiffSnapshot } from '../src/client/slots.ts'
 
@@ -14508,19 +14508,18 @@ describe('PendingPanel', () => {
     expect(tinted.length).toBeGreaterThan(0)
     for (const element of tinted) expect(element.hasAttribute('data-md-block')).toBe(true)
 
-    // Hovering the second block shows the same frame the source view shows, hung under the element the pointer
-    // is on — its left edge is the element's, not the pane's right edge.
+    // Hovering the second block shows the frame the source view shows: pinned to the pane's RIGHT edge (the
+    // code view's own anchor), not to the hovered element's left edge.
     fireEvent.mouseOver(document.querySelector('[data-md-block="1"]') as HTMLElement)
     const frame = document.querySelector('[data-diff-block-actions]') as HTMLElement
     expect(frame).not.toBeNull()
     expect(frame.querySelector('[data-diff-block-position]')!.textContent)
       .toBe('panel.blockPosition {"current":2,"total":2}')
     expect(document.querySelector('[data-diff-md-preview-content]')).not.toBeNull()
-    expect(frame.hasAttribute('data-diff-anchored')).toBe(true)
-    // jsdom reports every rect as 0, so the anchored offsets are 0 here. The right edge is left to the
-    // stylesheet's `right: auto` rule for anchored frames, so nothing inline overrides it.
-    expect(frame.style.left).toBe('0px')
-    expect(frame.style.right).toBe('')
+    expect(frame.hasAttribute('data-diff-anchored')).toBe(false)
+    // jsdom reports every rect as 0, so the right inset is 0 and the stylesheet's right:auto override is gone.
+    expect(frame.style.right).toBe('0px')
+    expect(frame.style.left).toBe('')
     expect(frame.style.top).toBe('0px')
 
     // Keep runs on that unit's own characters, inside the fourth line's source range: the third line is
@@ -14538,7 +14537,7 @@ describe('PendingPanel', () => {
     })
   })
 
-  it('applies a keep to every block a preview selection covers', async () => {
+  it('offers no multi-block keep/revert frame for a preview selection', async () => {
     const file = entry({
       id: 'entry-md-select',
       path: '/repo/README.md',
@@ -14551,8 +14550,7 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByText('README.md'))
     fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
 
-    // The two lines are two units, each carried by its own word runs (the merged paragraph itself is not
-    // tagged), so the selection spans every outermost tagged run: start before the first, end after the last.
+    // Select across the rendered changes: the preview used to turn that into a multi-block keep/revert frame.
     const blocks = [...document.querySelectorAll('[data-md-block]')]
       .filter(element => element.parentElement?.closest('[data-md-block]') === null)
     expect(blocks.length).toBeGreaterThan(0)
@@ -14564,21 +14562,12 @@ describe('PendingPanel', () => {
     selection!.removeAllRanges()
     selection!.addRange(range)
     act(() => { document.dispatchEvent(new Event('selectionchange')) })
+    await act(async () => { await Promise.resolve() })
 
-    // The selection frame replaces the hover frame and carries the combined range.
-    const frame = document.querySelector('[data-diff-selection-actions]')
-    expect(frame).not.toBeNull()
-    expect(document.querySelector('[data-diff-block-actions]')).toBeNull()
-    fireEvent.click(frame!.querySelector('[data-diff-selection-keep]') as HTMLElement)
-
-    // Covering every block resolves the file, so the panel asks about removing it
-    // (the same prompt the source view routes a whole-file block action through).
-    await waitFor(() => { expect(document.querySelector('[data-diff-confirm]')).not.toBeNull() })
-    fireEvent.click(document.querySelector('[data-diff-confirm-remove]') as HTMLElement)
-    await waitFor(() => {
-      expect((props.onBlockKeep as unknown as { mock: { calls: unknown[][] } }).mock.calls)
-        .toEqual([[S1, 'entry-md-select', { oldStart: 2, oldEnd: 3, newStart: 2, newEnd: 3 }, true]])
-    })
+    // The feature is gone: a preview selection never raises a keep/revert frame, and no keep is called.
+    expect(document.querySelector('[data-diff-selection-actions]')).toBeNull()
+    expect((props.onBlockKeep as unknown as { mock: { calls: unknown[][] } }).mock.calls).toHaveLength(0)
+    expect((props.onBlockRevert as unknown as { mock: { calls: unknown[][] } }).mock.calls).toHaveLength(0)
   })
 
   it('tags the double-column preview too, and drops the hover frame on leaving', () => {
@@ -14709,14 +14698,13 @@ describe('PendingPanel', () => {
     expect(frame()?.style.top).toBe('122px')
     expect(vi.mocked(renderMarkdownPreview).mock.calls.length).toBe(markdownRenders)
 
-    // A change near the pane's bottom edge cannot hang its frame underneath without the pane clipping it, so
-    // the frame goes ABOVE the change instead: the change's top sits at 160 in the pane, and the frame's
-    // bottom keeps the same 2px of air above it (160 − 2 = 158).
+    // A change near the pane's bottom edge cannot hang its frame underneath without the pane clipping it: the
+    // frame is pinned to the pane's bottom edge instead (the code view's own clamping behaviour).
     mockUnitBox(200, 420)
     fireEvent.mouseLeave(document.querySelector('[data-diff-md-preview-body]')!.parentElement as HTMLElement)
     expect(frame()).toBeNull()
     fireEvent.mouseOver(block)
-    await waitFor(() => { expect(frame()?.style.top).toBe('158px') })
+    await waitFor(() => { expect(frame()?.style.top).toBe('300px') })
   })
 
   it('jumps between preview blocks from the toolbar, the chord and the file list', () => {
@@ -15350,36 +15338,28 @@ describe('PendingPanel', () => {
     expect(position()).toBe('panel.blockPosition {"current":2,"total":2}')
   })
 
-  it('dims every OTHER change\'s red/green tint while one is hovered, and restores it when the pointer leaves', async () => {
-    // Style experiment: no dashed outline. The hovered change keeps its tint at full strength and every other
-    // difference block keeps only 20% of its red/green (the text itself never fades).
+  it('raises the toolbar over a changed run without drawing the old hover fade', async () => {
     const body = previewBodyOf(entry({
       path: '/repo/README.md',
       oldText: 'old one\n\nold two\n',
       newText: 'new one\n\nnew two\n',
     }))
-    const faded = (): HTMLElement[] => [...document.querySelectorAll<HTMLElement>('.mdHoverFaded')]
     const frame = (): HTMLElement | null => document.querySelector('[data-diff-block-actions]')
-    expect(faded()).toHaveLength(0)
     fireEvent.mouseOver(body.querySelector('.mdWordAdd') as HTMLElement)
     expect(frame()).not.toBeNull()
-    // No dashed boxes at all; the hovered block is not faded, at least one other is.
+    // The outline/fade experiment is off: no dashed unit boxes, no faded blocks.
     expect(document.querySelectorAll('[data-diff-unit-outline]')).toHaveLength(0)
-    expect(faded().length).toBeGreaterThanOrEqual(1)
-    expect(document.querySelector('.mdWordAdd')!.closest('.mdHoverFaded')).toBeNull()
-    // Leaving the change for the surrounding context hides the frame and restores the dimmed blocks.
+    expect(document.querySelectorAll('.mdHoverFaded')).toHaveLength(0)
+    // Leaving the change for the surrounding context hides the frame again.
     fireEvent.mouseOver(body)
-    await waitFor(() => {
-      expect(frame()).toBeNull()
-      expect(faded()).toHaveLength(0)
-    })
+    await waitFor(() => { expect(frame()).toBeNull() })
   })
 
-  it('keeps BOTH matched versions of the hovered change out of the fade, in the double column', () => {
+  it('draws BOTH sides of a change in the flow double column', () => {
     const props = panelProps({
       read: true,
       files: [entry({
-        id: 'entry-md-double-fade',
+        id: 'entry-md-double-flow',
         path: '/repo/README.md',
         oldText: 'A link to [the docs](https://example.com/old).\n\nSecond old line.\n',
         newText: 'A link to [the docs](https://example.com/new).\n\nSecond new line.\n',
@@ -15390,20 +15370,22 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('README.md'))
     fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLElement)
-    fireEvent.click(document.querySelector('[data-diff-toggle-view]') as HTMLElement)
-    expect(document.querySelectorAll('[data-diff-unit-outline]')).toHaveLength(0)
-    const left = document.querySelector('.mdDoubleCellOld [data-md-block]') as HTMLElement
-    const right = document.querySelector('.mdDoubleCellNew [data-md-block]') as HTMLElement
-    expect(left).not.toBeNull()
-    expect(right).not.toBeNull()
-    const block = left.dataset.mdBlock
-    expect(right.dataset.mdBlock).toBe(block)
-    fireEvent.mouseOver(left)
-    // Both columns' versions of the hovered block stay opaque; another block is faded.
-    const hoveredCarriers = [...document.querySelectorAll<HTMLElement>(`[data-md-block="${block}"]`)]
-    expect(hoveredCarriers.length).toBeGreaterThanOrEqual(2)
-    for (const carrier of hoveredCarriers) expect(carrier.classList.contains('mdHoverFaded')).toBe(false)
-    expect(document.querySelectorAll('.mdHoverFaded').length).toBeGreaterThanOrEqual(1)
+    localStorage.setItem(TREE_DIFF_SETTING, '1')
+    try {
+      fireEvent.click(document.querySelector('[data-diff-toggle-view]') as HTMLElement)
+      expect(document.querySelectorAll('.mdFlowDouble')).toHaveLength(1)
+      const rows = [...document.querySelectorAll<HTMLElement>('.mdFlowDoubleRow-diff')]
+      expect(rows.length).toBeGreaterThanOrEqual(1)
+      const block = rows[0]!.dataset.mdBlock
+      expect(block).toBeDefined()
+      // Both halves of the change are in that one block row.
+      expect(rows[0]!.querySelectorAll('.mdFlowDoubleCell-old').length).toBe(1)
+      expect(rows[0]!.querySelectorAll('.mdFlowDoubleCell-new').length).toBe(1)
+      fireEvent.mouseOver(rows[0]!)
+      expect(document.querySelector('[data-diff-block-actions]')).not.toBeNull()
+    } finally {
+      localStorage.removeItem(TREE_DIFF_SETTING)
+    }
   })
 
   it('shows BOTH sides of a change in the double column source row', () => {
@@ -17377,7 +17359,7 @@ describe('Markdown preview · structure renderer edge cases', () => {
   })
 
   it('puts a deleted paragraph after the paragraph it followed, as its own change', () => {
-    // The `Saved/demo.md` shape: a retargeted link, and two lines below it a paragraph that exists only in the
+    // The `scratch/demo.md` shape: a retargeted link, and two lines below it a paragraph that exists only in the
     // old version. The paragraph is a change of its OWN — separated from the link by the line boundary, so it
     // can be kept/reverted alone — and it stays where the source has it: BELOW the link, not in front of the
     // element the pairing happened to walk into first.

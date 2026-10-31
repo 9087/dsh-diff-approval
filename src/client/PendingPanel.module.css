@@ -872,18 +872,13 @@
   margin-right: 0;
 }
 
-/* A preview frame that hangs under the change it belongs to: it is placed by its LEFT edge (the element's
-   own), so the toolbar reads as attached to that change rather than pinned to the pane's corner. */
-.blockActions[data-diff-anchored] {
-  right: auto;
-}
-
 /* The layer the hover outlines live in: it covers the pane so their `left`/`right` insets are measured from
    the pane, and it never takes the pointer (a box is decoration, not a target). */
 .mdUnitOutlineLayer {
   position: absolute;
   inset: 0;
-  z-index: 2;
+  /* Above the Markdown's own layers (flow tints and code cards): the dashed focus outline must not be hidden. */
+  z-index: 5;
   pointer-events: none;
 }
 /* The hovered change's frame: a dashed rule in the PRODUCT colour (the same accent links and the diff's own
@@ -1384,12 +1379,14 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
-/* Rendered-Markdown preview styles, aligned with DSH via the same theme tokens:
-   body text, borders, and the code-block surface the rest of the app uses. */
+/* Rendered-Markdown preview styles: the element baseline mirrors the app's own Markdown renderer
+   (`dsh-client-ui-primitives/lib/markdown/MarkdownText.module.css`) so the preview reads like every other
+   Markdown surface in the product. Diff tint layers are added on top of this baseline, never instead of it. */
 .mdPreviewBody {
-  font-size: 13px;
-  line-height: 20px;
-  word-break: break-word;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font: var(--dsw-font-markdown-base);
+  color: var(--dsw-alias-label-primary);
 }
 .mdPreviewBody > :first-child {
   margin-top: 0;
@@ -1397,95 +1394,183 @@
 .mdPreviewBody > :last-child {
   margin-bottom: 0;
 }
-.mdPreviewBody h1,
-.mdPreviewBody h2,
-.mdPreviewBody h3,
-.mdPreviewBody h4,
+.mdPreviewBody strong {
+  font-weight: 600;
+}
+.mdPreviewBody h1 {
+  font: var(--dsw-font-markdown-h1);
+  margin: 32px 0 16px;
+}
+.mdPreviewBody h2 {
+  font: var(--dsw-font-markdown-h2);
+  margin: 32px 0 16px;
+}
+.mdPreviewBody h3 {
+  font: var(--dsw-font-markdown-h3);
+  margin: 32px 0 16px;
+}
+.mdPreviewBody h4 {
+  font: var(--dsw-font-markdown-h4);
+  margin: 16px 0;
+}
 .mdPreviewBody h5,
 .mdPreviewBody h6 {
-  margin: 16px 0 8px;
-  font-weight: 600;
-  line-height: 1.3;
+  font: var(--dsw-font-markdown-base-strong);
+  margin: 16px 0;
 }
-.mdPreviewBody h1 { font-size: 22px; }
-.mdPreviewBody h2 { font-size: 19px; }
-.mdPreviewBody h3 { font-size: 16px; }
-.mdPreviewBody h4 { font-size: 15px; }
-.mdPreviewBody h5 { font-size: 14px; }
-.mdPreviewBody h6 { font-size: 13px; }
+.mdPreviewBody :where(h1, h2, h3, h4, h5, h6) strong {
+  font-weight: inherit;
+}
 .mdPreviewBody p {
-  margin: 8px 0;
+  margin: 16px 0;
 }
-.mdPreviewBody ul,
-.mdPreviewBody ol {
-  margin: 8px 0;
-  padding-left: 22px;
+.mdPreviewBody :where(h4, h5, h6) + :where(ul, ol) {
+  margin-top: 8px;
 }
-.mdPreviewBody li {
-  margin: 2px 0;
+.mdPreviewBody :where(h4, h5, h6):has(+ :where(ul, ol)) {
+  margin-bottom: 8px;
 }
 .mdPreviewBody a {
-  color: var(--dsw-alias-state-business-primary);
+  color: var(--dsw-alias-link);
+  font-weight: 500;
   text-decoration: none;
 }
 .mdPreviewBody a:hover {
-  text-decoration: underline;
+  text-decoration: underline dotted var(--dsw-alias-link);
+  text-underline-offset: 3px;
 }
-.mdPreviewBody code {
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-family: var(--dsw-font-markdown-code-block);
-  font-size: 12.5px;
-  /* A neutral gray chip, fairly translucent so the block's add/del tint shows
-     through and the chip doesn't sit as a solid box. */
-  background: color-mix(in srgb, #9e9e9e 25%, transparent);
+.mdPreviewBody :where(ul, ol) {
+  margin: 16px 0;
+  padding-left: 18px;
 }
-.mdPreviewBody pre {
-  /* Sideways only: a fenced block has long lines to scroll and no height of its own (it grows), so
-     it is a scroller in x alone. `overscroll-behavior` is two axes — a plain `none` here swallowed
-     the wheel that had nowhere to go inside the block, so the preview around it never scrolled
-     while the pointer sat on the code. */
-  overscroll-behavior-x: none;
-  margin: 8px 0;
-  padding: 10px 12px;
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 8px;
-  overflow: auto;
-  font-family: var(--dsw-font-markdown-code-block);
-  font-size: 12.5px;
-  line-height: 18px;
-  /* Same neutral-gray chip as inline code, so fenced blocks and inline ``code``
-     read consistently (and don't sit as a hard box over a diff tint). */
-  background: color-mix(in srgb, #9e9e9e 25%, transparent);
+.mdPreviewBody li:not(:first-child) {
+  margin-top: 6px;
 }
-.mdPreviewBody pre code {
-  padding: 0;
-  background: none;
-  display: block;
+.mdPreviewBody li > :where(ul, ol) {
+  margin-top: 4px;
 }
-.mdPreviewBody blockquote {
-  margin: 8px 0;
-  padding: 0 12px;
-  border-left: 3px solid var(--dsw-alias-border-l2);
+.mdPreviewBody li::marker {
+  line-height: 24px;
   color: var(--dsw-alias-label-secondary);
 }
+.mdPreviewBody :where(ul, ol) ol {
+  list-style-position: inside;
+  padding-left: 0;
+}
+.mdPreviewBody :where(ul, ol) ol li p {
+  display: inline;
+}
+.mdPreviewBody li > p {
+  margin: 8px 0;
+}
+.mdPreviewBody li > *:first-child {
+  margin-top: 0;
+}
 .mdPreviewBody hr {
-  height: 1px;
-  margin: 16px 0;
+  display: block;
   border: none;
-  background: var(--dsw-alias-border-l1);
+  height: 0.5px;
+  margin: 32px 0;
+  background: var(--dsw-alias-border-l2);
+}
+.mdPreviewBody blockquote {
+  border-left: 2px solid var(--dsw-alias-label-caption);
+  margin: 16px 0 0;
+  padding-left: 14px;
+}
+.mdPreviewBody pre {
+  /* A fenced block that is NOT part of a difference renders natively: the app's code-block surface, radius,
+     content padding and font, at full opacity. Changed code blocks use the custom `.mdFlowCodeBlock` shell
+     instead, with the tint layer underneath and a translucent surface. */
+  margin: 16px 0;
+  padding: 16px;
+  background: var(--dsw-alias-markdown-code-block);
+  border-radius: var(--dsw-radius-lg);
+  font: var(--dsw-font-markdown-code-block);
+  white-space: pre-wrap;
+  word-break: break-all;
+  /* A fenced block is a horizontal scroller: opt out of the bounce on the axis it scrolls, so a
+     wheel at its edge does not rubber-band the panel behind it. */
+  overscroll-behavior-x: none;
+  overflow: auto;
+}
+.mdPreviewBody :not(pre) > code {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  font: var(--dsw-font-markdown-code);
+  font-family: var(--ds-font-family-code);
+  font-size: 0.875em !important;
+  /* Native opacity whenever the chip is NOT part of a difference; a chip inside a changed block is mixed down
+     so the block's bottom tint reads through it (see the override near the flow renderer styles). */
+  background-color: var(--dsw-alias-markdown-inline-code);
+  border: 0.5px solid var(--dsw-alias-border-l1);
+  border-radius: var(--dsw-radius-sm);
+  padding: 0 5px;
+}
+.mdPreviewBody :where(h1, h2, h3, h4, h5, h6) code {
+  font: inherit;
+  font-family: var(--ds-font-family-code);
+}
+/* Tables follow the same width rule as the native renderer: under four columns fill the column, four or more
+   keep their natural width inside a horizontal scroller. The `mdFlowTableWrap-*` class is set by the renderer
+   from the table's column count. `-fill` does not scroll, so the full-bleed diff tint can leave the table box. */
+.mdPreviewBody :global(.mdFlowTableWrap) {
+  max-width: 100%;
+}
+.mdPreviewBody :global(.mdFlowTableWrap-fill) {
+  overflow-x: visible;
+}
+.mdPreviewBody :global(.mdFlowTableWrap-wide) {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
 }
 .mdPreviewBody table {
-  margin: 8px 0;
   border-collapse: collapse;
+  width: 100%;
 }
-.mdPreviewBody th,
+.mdPreviewBody :global(.mdFlowTableWrap-wide) table {
+  width: max-content;
+  max-width: max-content;
+}
+.mdPreviewBody th {
+  text-align: start;
+  padding: 10px 16px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l3);
+  border-top: none;
+  font: var(--dsw-font-markdown-table-head);
+  max-width: 320px;
+  max-width: min(30vw, 320px);
+  min-width: 100px;
+}
 .mdPreviewBody td {
-  padding: 4px 10px;
-  border: 1px solid var(--dsw-alias-border-l1);
+  padding: 10px 16px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
+  font: var(--dsw-font-markdown-table);
+  max-width: 320px;
+  max-width: min(30vw, 320px);
+  min-width: 100px;
+}
+.mdPreviewBody th:first-child,
+.mdPreviewBody td:first-child {
+  padding-left: 0;
+}
+.mdPreviewBody td:last-child {
+  padding-right: 0;
+}
+.mdPreviewBody table code {
+  font-size: 11px;
 }
 .mdPreviewBody img {
+  /* The native Markdown image: block-level, auto width, rounded corners on the page surface. */
+  display: block;
+  width: auto;
   max-width: 100%;
+  height: auto;
+  margin: 0;
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-base);
+  object-fit: contain;
 }
 /* A Markdown image the preview could not inline (outside the workspace, missing,
    or unreadable): a gray placeholder box with the original path centred, so the
@@ -3202,7 +3287,9 @@
   /* Match the status bar's surface: both sit on the diff's code-block tint. */
   background: var(--dsw-alias-markdown-code-block);
   box-shadow: var(--dsw-shadow-lv1);
-  z-index: 2;
+  /* Above EVERY layer of the rendered Markdown (flow tints are 0-2, code lines/banners 3, code frames 4):
+     the hover toolbar must never be covered by a code block, a wide-table card or a banner. */
+  z-index: 30;
 }
 
 /* The preview's toolbar with the change's source row under it: the buttons line up on top, the hidden part of
@@ -5007,4 +5094,506 @@
 .mdPreviewBody :global(.mdImageFrame img),
 .mdPreviewBody :global(.mdTwinColumn) {
   border-radius: 0;
+}
+
+/* ==================== paragraph-level flow renderer ==================== */
+/* ONE background layer per tinted region. A one-sided hunk paints its WHOLE block once; a mixed hunk paints
+   one red group and one green group; table rows tint their cells; a fenced block paints its tint layer under
+   the code surface. Content keeps the normal Markdown layout and margins; each background layer is the bottom
+   of its own region and runs edge to edge, while the text column stays where the plain rendering puts it. */
+.mdPreviewBody :global(.mdFlowDoc) {
+  width: 100%;
+  min-width: 0;
+}
+/* A WHOLE-FILE add/delete is one continuous colour region: a single document-wide tint layer behind everything
+   (code surfaces, table cells and banner strips drop their own fills, so no white gap or double colour is left
+   between segments). */
+.mdPreviewBody :global(.mdFlowDocWhole) {
+  position: relative;
+  /* Contains the children's collapsing margins, so the single tint layer covers their whitespace too. */
+  display: flow-root;
+  isolation: isolate;
+}
+.mdPreviewBody :global(.mdFlowDocWhole)::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  left: 50%;
+  width: 100vw;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.mdPreviewBody :global(.mdFlowDocWhole-new)::before {
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 16%, transparent);
+}
+.mdPreviewBody :global(.mdFlowDocWhole-old)::before {
+  background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 18%, transparent);
+}
+/* Per-segment tints are off inside a whole-file change (the document layer already covers their areas). */
+.mdPreviewBody :global(.mdFlowDocWhole) :global(.mdFlowBlock)::before,
+.mdPreviewBody :global(.mdFlowDocWhole) :global(.mdFlowGroup)::before,
+.mdPreviewBody :global(.mdFlowDocWhole) :global(.mdFlowCodeTintLayer),
+.mdPreviewBody :global(.mdFlowDocWhole) :global(.mdFlowTableTintLayer) {
+  display: none;
+}
+.mdPreviewBody :global(.mdFlowDocWhole) :global(.mdFlowCodeBlock),
+.mdPreviewBody :global(.mdFlowDocWhole) :global(.mdFlowCodeBanner) {
+  background: transparent;
+}
+.mdPreviewBody :global(.mdFlowDocWhole) :global(.mdFlowTr-old > *),
+.mdPreviewBody :global(.mdFlowDocWhole) :global(.mdFlowTr-new > *) {
+  background-color: transparent;
+}
+.mdPreviewBody :global(.mdFlowDocWhole) :global(.mdFlowTr-old > :first-child::before),
+.mdPreviewBody :global(.mdFlowDocWhole) :global(.mdFlowTr-new > :first-child::before),
+.mdPreviewBody :global(.mdFlowDocWhole) :global(.mdFlowTr-old > :last-child::after),
+.mdPreviewBody :global(.mdFlowDocWhole) :global(.mdFlowTr-new > :last-child::after) {
+  display: none;
+}
+/* The native hairlines are translucent in a whole-file change, so the single colour reads through them. */
+.mdPreviewBody :global(.mdFlowDocWhole) th,
+.mdPreviewBody :global(.mdFlowDocWhole) td {
+  border-bottom-color: color-mix(in srgb, var(--dsw-alias-border-l3) 55%, transparent);
+}
+.mdPreviewBody :global(.mdFlowBlock),
+.mdPreviewBody :global(.mdFlowGroup) {
+  position: relative;
+  display: flow-root;
+  width: 100%;
+  box-sizing: border-box;
+}
+/* Two difference regions that meet without a context row between them (a changed table is a hard boundary, so a
+   changed paragraph right before/after it starts a new region) keep a small blank separator: their full-width
+   tints would otherwise touch and read as one continuous wall. */
+.mdPreviewBody :global(.mdFlowDoc > .mdFlowBlock) + :global(.mdFlowBlock),
+.mdPreviewBody :global(.mdFlowDoc > .mdFlowBlock) + :global(.mdFlowTableOuter-diff),
+.mdPreviewBody :global(.mdFlowDoc > .mdFlowTableOuter-diff) + :global(.mdFlowBlock),
+.mdPreviewBody :global(.mdFlowDoc > .mdFlowTableOuter-diff) + :global(.mdFlowTableOuter-diff),
+.mdPreviewBody :global(.mdFlowDoc > .mdFlowTableOuter-diff) + :global(.mdFlowTableOuter),
+.mdPreviewBody :global(.mdFlowDoc > .mdFlowTableOuter) + :global(.mdFlowTableOuter-diff) {
+  margin-top: 8px;
+}
+/* The tint layer: behind the content, full panel width, clipped by the preview body. */
+.mdPreviewBody :global(.mdFlowBlock)::before,
+.mdPreviewBody :global(.mdFlowGroup)::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 100vw;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.mdPreviewBody :global(.mdFlowBlock-old)::before,
+.mdPreviewBody :global(.mdFlowGroup-old)::before {
+  background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 18%, transparent);
+}
+.mdPreviewBody :global(.mdFlowBlock-new)::before,
+.mdPreviewBody :global(.mdFlowGroup-new)::before {
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 16%, transparent);
+}
+/* Clip the painted layer horizontally without giving up the body's vertical scroll. */
+.mdPreviewBody:has(:global(.mdFlowDoc)) {
+  overflow-x: hidden;
+  overflow-y: auto;
+  /* The document's own top/bottom padding moves onto the first/last CONTEXT row (below). When that edge row
+     is a difference block instead, the block's tint reaches the preview's edge, so the top/bottom margin is
+     part of the colored region rather than a white strip above/below it. */
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.mdPreviewBody :global(.mdFlowDoc > .mdFlowRow:first-child) {
+  padding-top: 12px;
+}
+.mdPreviewBody :global(.mdFlowDoc > .mdFlowRow:last-child) {
+  padding-bottom: 12px;
+}
+.mdPreviewBody :global(.mdFlowRow) {
+  width: 100%;
+  box-sizing: border-box;
+}
+.mdPreviewBody :global(.mdFlowListItem) {
+  position: relative;
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  /* The native markdown list indents one level by 18px and puts the item content after the marker's column. */
+  padding-left: calc(var(--flow-depth, 0) * 18px + 18px);
+}
+/* The native list's inter-item gap (`li:not(:first-child) { margin-top: 6px }`). */
+.mdPreviewBody :global(.mdFlowRow) + :global(.mdFlowRow) > :global(.mdFlowListItem) {
+  margin-top: 6px;
+}
+.mdPreviewBody :global(.mdFlowMarker) {
+  position: absolute;
+  top: 0;
+  left: calc(var(--flow-depth, 0) * 18px);
+  width: 14px;
+  line-height: 24px;
+  color: var(--dsw-alias-label-secondary);
+  text-align: right;
+  user-select: none;
+}
+.mdPreviewBody :global(.mdFlowMarker) input[type='checkbox'] {
+  margin: 0;
+  /* The marker is one 24px line box above the item's first line: lower the baseline-aligned box by 1.5px so its
+     centre lands on the FIRST line's text centre — and it stays on the first line when the item's text wraps. */
+  vertical-align: -1.5px;
+  accent-color: var(--dsw-alias-label-secondary);
+}
+/* The same rule for a task list rendered from a native <li><input> clone (an unchanged task list). */
+.mdPreviewBody :global(.mdFlowRow) li > input[type='checkbox'] {
+  vertical-align: -1.5px;
+}
+.mdPreviewBody :global(.mdFlowItemContent) {
+  min-width: 0;
+}
+/* A table is rendered as ONE real table and keeps the NATIVE Markdown table layout (fill/wide width, native
+   borders/padding). A changed table block is ONE continuous colour region: the measured bands in
+   `.mdFlowTableTintLayer` paint it edge to edge BEHIND the table, and the changed cells are transparent so the
+   colour (and its row hairlines) reads through. */
+.mdPreviewBody :global(.mdFlowTable) {
+  /* Native `.mdPreviewBody table` rules own the table's own layout; this class marks the change surface. */
+}
+.mdPreviewBody :global(.mdFlowTr-old > *),
+.mdPreviewBody :global(.mdFlowTr-new > *) {
+  position: relative;
+  background-color: transparent;
+}
+/* A table whose bands come from its enclosing hunk (whole-table fallback) is already covered there. */
+.mdPreviewBody :global(.mdFlowTableOuter) {
+  position: relative;
+}
+.mdPreviewBody :global(.mdFlowTableOuter) > :global(.mdFlowTableWrap) {
+  position: relative;
+  z-index: 1;
+}
+.mdPreviewBody :global(.mdFlowTableTintLayer) {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+.mdPreviewBody :global(.mdFlowTableTintBand) {
+  position: absolute;
+  left: 50%;
+  width: 100vw;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.mdPreviewBody :global(.mdFlowTableTintBand-old) {
+  background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 18%, transparent);
+}
+.mdPreviewBody :global(.mdFlowTableTintBand-new) {
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 16%, transparent);
+}
+/* Inside a wide table the row cells are transparent: the outer band paints the colour, diagonally independent of
+   the horizontal scroll offset. */
+.mdPreviewBody :global(.mdFlowTableOuter) :global(.mdFlowTr-old > *),
+.mdPreviewBody :global(.mdFlowTableOuter) :global(.mdFlowTr-new > *) {
+  background-color: transparent;
+}
+/* A wide table whose bands come from its enclosing hunk (whole-table fallback) is already covered there. */
+.mdPreviewBody :global(.mdFlowTableWrap-wide) :global(.mdFlowTr-old > :first-child::before),
+.mdPreviewBody :global(.mdFlowTableWrap-wide) :global(.mdFlowTr-new > :first-child::before),
+.mdPreviewBody :global(.mdFlowTableWrap-wide) :global(.mdFlowTr-old > :last-child::after),
+.mdPreviewBody :global(.mdFlowTableWrap-wide) :global(.mdFlowTr-new > :last-child::after) {
+  display: none;
+}
+/* A fenced block is a SHELL with a tint layer UNDER its native surface: the tint layer is the bottom of the
+   block, the (translucent) code surface sits above it, and the text sits on top. This is the same layering for
+   a line-level diff and for a whole added/deleted fence. */
+.mdPreviewBody :global(.mdFlowCodeShell) {
+  position: relative;
+  display: flow-root;
+}
+.mdPreviewBody :global(.mdFlowCodeTintLayer) {
+  position: absolute;
+  inset: 0;
+  /* EXPERIMENT: tint ABOVE the code surface (in front of 底板), text still above it. */
+  z-index: 2;
+  pointer-events: none;
+}
+.mdPreviewBody :global(.mdFlowCodeTintBand) {
+  position: absolute;
+  left: 50%;
+  width: 100vw;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.mdPreviewBody :global(.mdFlowCodeTintBand-old) {
+  background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 18%, transparent);
+}
+.mdPreviewBody :global(.mdFlowCodeTintBand-new) {
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 16%, transparent);
+}
+.mdPreviewBody :global(.mdFlowCodeBlock) {
+  position: relative;
+  /* EXPERIMENT: no stacking context here — the tint layer above can paint over the surface, while the code
+     rows (z-index 3) stay above the tint. */
+  z-index: auto;
+  margin: 16px 0;
+  padding: 0;
+  color: var(--dsw-alias-label-primary);
+  /* A fenced block with NO difference keeps the native Markdown surface at full opacity. */
+  background: var(--dsw-alias-markdown-code-block);
+  border-radius: var(--dsw-radius-lg);
+  font: var(--dsw-font-markdown-code-block);
+  overflow: visible;
+}
+/* The native fenced-block banner: language left, copy right, its own tinted strip above the code content. */
+.mdPreviewBody :global(.mdFlowCodeBanner) {
+  position: relative;
+  /* Above the tint layer (z-index 2), like the code rows; its BACKDROP is tinted below when the fence is a
+     whole difference (see the transparent-banner rules below). */
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 14px;
+  border-top-left-radius: var(--dsw-radius-lg);
+  border-top-right-radius: var(--dsw-radius-lg);
+  background: var(--dsw-alias-markdown-code-block-banner);
+  font: 11px/18px var(--dsw-font-family);
+}
+/* A WHOLE-fence difference (language change, added/deleted block, or a fence inside a merged hunk) tints the
+   banner row too: the banner drops its opaque strip so the red/green layer shows on the language line as well,
+   while its text stays above the tint. */
+.mdPreviewBody :global(.mdFlowCodeBlock-old) :global(.mdFlowCodeBanner),
+.mdPreviewBody :global(.mdFlowCodeBlock-new) :global(.mdFlowCodeBanner),
+.mdPreviewBody :global(.mdFlowBlock) :global(.mdFlowCodeBlock) :global(.mdFlowCodeBanner),
+.mdPreviewBody :global(.mdFlowGroup) :global(.mdFlowCodeBlock) :global(.mdFlowCodeBanner) {
+  background: transparent;
+}
+.mdPreviewBody :global(.mdFlowCodeBannerLang) {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--ds-font-family-code);
+  font-size: 11px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mdPreviewBody :global(.mdFlowCodeBannerCopy) {
+  display: flex;
+  flex: none;
+  align-items: center;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+.mdPreviewBody :global(.mdFlowCodeBannerCopy[data-copied]) {
+  color: var(--dsw-alias-state-success-primary);
+}
+.mdPreviewBody :global(.mdFlowCodeContent) {
+  padding: 16px;
+}
+/* A code block that IS part of a change (its own line diff, a whole added/deleted fence, or any code block
+   inside a tinted hunk) mixes its surface down to 30% and re-paints the frame above the tint. */
+.mdPreviewBody :global(.mdFlowBlock) :global(.mdFlowCodeBlock),
+.mdPreviewBody :global(.mdFlowGroup) :global(.mdFlowCodeBlock),
+.mdPreviewBody :global(.mdFlowCodeBlock-old),
+.mdPreviewBody :global(.mdFlowCodeBlock-new),
+.mdPreviewBody :global(.mdFlowCodeBlock-diff) {
+  background: color-mix(in srgb, var(--dsw-alias-markdown-code-block) 30%, transparent);
+}
+/* A code block that is entirely inside a merged hunk already has that hunk's full-width tint behind it. Adding
+   the block's own band would stack two greens/reds and show as a darker strip inside the card, so here the card
+   surface is simply transparent and the hunk's bottom tint shows through unchanged. */
+.mdPreviewBody :global(.mdFlowBlock) :global(.mdFlowCodeBlock),
+.mdPreviewBody :global(.mdFlowGroup) :global(.mdFlowCodeBlock) {
+  background: transparent;
+}
+/* Every fenced block — changed or context — reads as the same rounded card: the native surface alone is almost
+   white on a light theme, so the frame is what makes the code block's shape visible. It draws above the tint. */
+.mdPreviewBody :global(.mdFlowCodeBlock)::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: inherit;
+  pointer-events: none;
+}
+/* The inline-code chip obeys the same rule: native chip at rest, mixed down inside a tinted hunk. A context row
+   of a changed TABLE is inside the hunk wrapper too, so it is explicitly restored to the native chip. */
+.mdPreviewBody :global(.mdFlowBlock) :not(pre) > code,
+.mdPreviewBody :global(.mdFlowGroup) :not(pre) > code {
+  background-color: color-mix(in srgb, var(--dsw-alias-markdown-inline-code) 30%, transparent);
+}
+.mdPreviewBody :global(.mdFlowTable) tr:not([data-md-kind]) :not(pre) > code {
+  background-color: var(--dsw-alias-markdown-inline-code);
+}
+.mdPreviewBody :global(.mdFlowCodeRow) {
+  position: relative;
+  /* Above the tint layer (z-index 2) for the experiment; the card surface is below both. */
+  z-index: 3;
+  display: block;
+  min-height: 1lh;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.mdPreviewBody :global(.mdFlowCodeText) {
+  position: relative;
+}
+
+/* ==================== side-by-side flow renderer ==================== */
+/* Two aligned columns: each difference block is ONE grid row, its left half red and right half green, so the
+   colour reads as a continuous band across the gutter. Context rows show the same content on both sides. */
+.mdPreviewBody :global(.mdFlowDouble) {
+  position: relative;
+  width: 100%;
+}
+/* One continuous divider down the gutter, between the old and the new column. It never takes the pointer. */
+.mdPreviewBody :global(.mdFlowDouble)::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  margin-left: -0.5px;
+  background: var(--dsw-alias-border-l2);
+  pointer-events: none;
+  z-index: 2;
+}
+/* Two ADJACENT difference regions keep the single column's 8px of air between their colour bands: without it a
+   changed table row (or a changed fence) and the block right after it read as one continuous region. */
+.mdPreviewBody :global(.mdFlowDoubleRegion-diff) + :global(.mdFlowDoubleRegion-diff) {
+  margin-top: 8px;
+}
+.mdPreviewBody :global(.mdFlowDoubleRow) {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  /* The gutter: each column keeps a native-looking margin of its own instead of running into the other. The
+     tint band below spans it, so the two halves still read as one continuous change. */
+  column-gap: 24px;
+  align-items: stretch;
+  width: 100%;
+}
+.mdPreviewBody :global(.mdFlowDoubleCell) {
+  min-width: 0;
+  display: flow-root;
+}
+/* One continuous band per difference row, running edge to edge across the pane: red over the old half, green
+   over the new half, meeting at the column gutter. */
+.mdPreviewBody :global(.mdFlowDoubleRow-diff)::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 100vw;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.mdPreviewBody :global(.mdFlowDoubleRow-diff[data-md-kind='mixed'])::before {
+  background: linear-gradient(to right,
+    color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 18%, transparent) 0 50%,
+    color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 16%, transparent) 50% 100%);
+}
+.mdPreviewBody :global(.mdFlowDoubleRow-diff[data-md-kind='del'])::before {
+  background: linear-gradient(to right,
+    color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 18%, transparent) 0 50%,
+    transparent 50% 100%);
+}
+.mdPreviewBody :global(.mdFlowDoubleRow-diff[data-md-kind='add'])::before {
+  background: linear-gradient(to right,
+    transparent 0 50%,
+    color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 16%, transparent) 50% 100%);
+}
+/* A changed TABLE row is painted per row but across its OWN column only: the band may be wider than the table
+   (the column's full width) yet never crosses the gutter into the other side. Measured in the panel effect. */
+.mdPreviewBody :global(.mdFlowDoubleRow-table) {
+  position: relative;
+}
+.mdPreviewBody :global(.mdFlowDoubleRow-table) > :global(.mdFlowDoubleCell) {
+  position: relative;
+  z-index: 1;
+}
+.mdPreviewBody :global(.mdFlowDoubleTintLayer) {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+.mdPreviewBody :global(.mdFlowDoubleTintBand) {
+  position: absolute;
+  pointer-events: none;
+}
+.mdPreviewBody :global(.mdFlowDoubleTintBand-old) {
+  background-color: color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 18%, transparent);
+}
+.mdPreviewBody :global(.mdFlowDoubleTintBand-new) {
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 16%, transparent);
+}
+/* The table itself is transparent inside the column: the band above paints the row's colour. */
+.mdPreviewBody :global(.mdFlowDoubleRow-table) :global(.mdFlowTr-old > *),
+.mdPreviewBody :global(.mdFlowDoubleRow-table) :global(.mdFlowTr-new > *) {
+  background-color: transparent;
+}
+/* A changed CODE LINE keeps its own tint inside the code card, so one whole fence stays ONE card per column. */
+.mdPreviewBody :global(.mdFlowDoubleRow-code) {
+  position: relative;
+}
+/* A LANGUAGE change is a WHOLE-block difference (same as the single column): one band over the whole own half,
+   banner and card padding included, instead of per-line tint. */
+.mdPreviewBody :global(.mdFlowDoubleRow-code.mdFlowDoubleCodeWhole)::before {
+  content: '';
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 100vw;
+  transform: translateX(-50%);
+  pointer-events: none;
+  background: linear-gradient(to right,
+    color-mix(in srgb, var(--md-diff-del-color, var(--dsw-alias-state-error-primary)) 18%, transparent) 0 50%,
+    color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 16%, transparent) 50% 100%);
+}
+.mdPreviewBody :global(.mdFlowDoubleRow-code) > :global(.mdFlowDoubleCell) {
+  position: relative;
+  z-index: 1;
+}
+.mdPreviewBody :global(.mdFlowDoubleRow-code) :global(.mdFlowCodeBlock),
+.mdPreviewBody :global(.mdFlowDoubleRow-code) :global(.mdFlowCodeBanner) {
+  background: transparent;
+}
+.mdPreviewBody :global(.mdFlowDouble) :global(.mdFlowCodeRow-old),
+.mdPreviewBody :global(.mdFlowDouble) :global(.mdFlowCodeRow-new) {
+  background-color: transparent;
+}
+/* Inline-code chips follow the single column: native at rest, mixed to 30% inside a changed region so the
+   block's tint (which sits below the text) reads through the chip instead of being covered by an opaque chip. */
+.mdPreviewBody :global(.mdFlowDoubleRow-diff) :not(pre) > code,
+.mdPreviewBody :global(.mdFlowDoubleRow-table) :global(.mdFlowTr-old) :not(pre) > code,
+.mdPreviewBody :global(.mdFlowDoubleRow-table) :global(.mdFlowTr-new) :not(pre) > code {
+  background-color: color-mix(in srgb, var(--dsw-alias-markdown-inline-code) 30%, transparent);
+}
+/* A code card inside a tinted column is transparent, so the block colour shows through its banner and padding. */
+.mdPreviewBody :global(.mdFlowDoubleRow-diff) :global(.mdFlowCodeBlock),
+.mdPreviewBody :global(.mdFlowDoubleRow-diff) :global(.mdFlowCodeBanner) {
+  background: transparent;
+}
+.mdPreviewBody :global(.mdFlowDoubleContent) {
+  display: flow-root;
+}
+/* Inside a half-width column a table may be wider than the column; it must scroll INSIDE the column instead of
+   spilling over the gutter/panel edge (the single column lets a fill table's full-bleed bands overflow). */
+.mdPreviewBody :global(.mdFlowDouble) :global(.mdFlowTableWrap) {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
 }
