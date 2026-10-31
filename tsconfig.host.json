@@ -38,6 +38,7 @@
     "src/open.ts",
     "src/pending.ts",
     "src/persist.ts",
+    "src/shell-capture.ts",
     "src/types.ts",
     "src/vcs.ts",
     "src/version.ts"

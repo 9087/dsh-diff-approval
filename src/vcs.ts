@@ -20,6 +20,13 @@
  *   (`p4 status`, which can be slow); with the preference off only already-opened files are read.
  *   A file that is new but already under version control (git `A`, svn `added`) needs no
  *   preference: it is an uncommitted change like any other.
+ *
+ * The same read-only plumbing also answers a SHELL BOUNDARY's question — what did one command change,
+ * against the revision it started from ({@link gitChangesSince}) — which is what keeps a shell edit in
+ * the review list after the command has committed it. Linked worktrees are discovered through the
+ * repository itself ({@link gitWorktrees}), because a session's shell can run in a checkout outside its
+ * workspace. See `shell-capture.ts` for the boundary that records the revision and pairs it with the
+ * command's result.
  * @module dsh-diff-approval/vcs
  */
 
@@ -416,6 +423,176 @@ async function gitChanges(input: VcsImportInput): Promise<VcsChange[]> {
     changes.push({ path: absolute, earlierVersion: baseline.found ? 'file' : 'none', oldText, newText })
   }
   return changes
+}
+
+/**
+ * Enumerate one git checkout's changes against an ARBITRARY revision, not `HEAD`.
+ *
+ * The import's question is "what is not committed yet", and it answers it against `HEAD`. A SHELL
+ * BOUNDARY asks a different question — "what did this command change?" — so its baseline is the
+ * revision the command STARTED from, recorded before the command ran. That is the commit-proof
+ * property in one sentence: the working tree is compared with a revision the command has already left
+ * behind, so a `git commit` inside the command moves `HEAD` but not the baseline.
+ *
+ * Both sides of a change come from here. The old side is read off `base` (a path the revision does not
+ * carry is a creation, `earlierVersion: 'none'`), the new side off the working tree, and a deletion's
+ * new side is empty text. A rename arrives as TWO records — the old path's deletion and the new path's
+ * creation — because the store is keyed by path and each side reverts on its own; the import has always
+ * shaped a move the same way.
+ *
+ * Untracked files are read off `git status` as well: `git diff` never lists a file the index has not
+ * seen, and a file created and committed inside the command is tracked by the time this runs. The two
+ * sources together are what make "created, then committed" visible.
+ *
+ * @param input - the checkout's root, the baseline revision, and the deployment's shell executor.
+ * @returns every change between `base` and the working tree, in git's order.
+ * @throws when git fails for any reason — a stale baseline, a corrupt object — because a partial list
+ *   read as a whole one would silently lose the rest.
+ */
+export async function gitChangesSince(input: {
+  root: string
+  base: string
+  shell: ShellExecutorLike
+  readText: VcsFileReader
+  signal: AbortSignal | undefined
+}): Promise<VcsChange[]> {
+  const { root, base, shell, readText, signal } = input
+  /** The working tree's content of one repository-relative path. An unreadable path reads as empty
+   *  text, the same tolerance the import gives a file the backend will not decode. */
+  const workingText = async (rel: string): Promise<string> => (await readText(resolve(root, rel))) ?? ''
+  const changes = new Map<string, VcsChange>()
+  // `-M` asks for rename detection explicitly: a checkout need not configure `diff.renames`, and a move
+  // would otherwise arrive as an add plus a delete that share nothing. `-z` keeps awkward paths (spaces,
+  // quotes, non-ASCII) one NUL field each.
+  const stdout = await runShell(shell, `git -c core.quotepath=false diff -M --name-status -z ${shq(base)}`, root, signal)
+  const queue = stdout.split('\0')
+  // `-z` output is NUL-terminated, so a missing terminator means truncated output, never an empty field.
+  if (queue.at(-1) !== '') throw new Error(`git diff against ${base}: output is not NUL-terminated`)
+  queue.pop()
+  while (queue.length > 0) {
+    const status = queue.shift() ?? ''
+    if (status === '') continue
+    const code = status[0]
+    if (code === 'R' || code === 'C') {
+      const from = queue.shift()
+      const to = queue.shift()
+      if (from === undefined || to === undefined) throw new Error(`git diff against ${base}: malformed ${status} record`)
+      if (code === 'R') {
+        const baseline = await readGitBlob(root, base, from, shell, signal)
+        changes.set(from, {
+          path: resolve(root, from),
+          earlierVersion: 'file',
+          oldText: baseline.found ? baseline.text : '',
+          newText: '',
+        })
+      }
+      changes.set(to, {
+        path: resolve(root, to),
+        earlierVersion: 'none',
+        oldText: '',
+        newText: await workingText(to),
+      })
+      continue
+    }
+    const rel = queue.shift()
+    if (rel === undefined) throw new Error(`git diff against ${base}: malformed ${status} record`)
+    if (code === 'A') {
+      changes.set(rel, { path: resolve(root, rel), earlierVersion: 'none', oldText: '', newText: await workingText(rel) })
+      continue
+    }
+    if (code === 'D') {
+      const baseline = await readGitBlob(root, base, rel, shell, signal)
+      changes.set(rel, {
+        path: resolve(root, rel),
+        earlierVersion: 'file',
+        oldText: baseline.found ? baseline.text : '',
+        newText: '',
+      })
+      continue
+    }
+    if (code === 'M' || code === 'T') {
+      const baseline = await readGitBlob(root, base, rel, shell, signal)
+      changes.set(rel, {
+        path: resolve(root, rel),
+        earlierVersion: baseline.found ? 'file' : 'none',
+        oldText: baseline.found ? baseline.text : '',
+        newText: await workingText(rel),
+      })
+      continue
+    }
+    // `U` (an unresolved merge), `X` (unknown) and `B` (a broken pairing) say nothing a review can act
+    // on, so the record is skipped rather than given a guessed baseline.
+  }
+  // Untracked files: created after the baseline and never added, so `git diff` cannot see them. The
+  // status command is rename-detection-off and NUL-separated, the same one the import uses.
+  const status = await runShell(shell, GIT_STATUS_COMMAND, root, signal)
+  for (const { xy, rel } of parseGitPorcelainZ(status)) {
+    if (xy !== '??') continue
+    changes.set(rel, { path: resolve(root, rel), earlierVersion: 'none', oldText: '', newText: await workingText(rel) })
+  }
+  return [...changes.values()]
+}
+
+/**
+ * Every working tree linked to one git checkout: the checkout itself and every `git worktree add`
+ * beside it.
+ *
+ * A session's shell can run inside a linked worktree (a `/tmp` checkout is exactly what this is for),
+ * and those files are outside the session's workspace: the workspace's own scan, and the
+ * workspace-scoped import, can never see them — while a change made there still belongs in the review
+ * list. Asking the repository for its own worktrees is the one discovery that needs no guess about
+ * which directory a command meant.
+ *
+ * @param root - the checkout whose worktrees to list.
+ * @param shell - the deployment's shell executor.
+ * @param signal - the caller's abort signal.
+ * @returns the absolute paths of the working trees that exist on disk.
+ * @throws when git fails; a caller that can do without them catches and keeps the checkout alone.
+ */
+export async function gitWorktrees(
+  root: string,
+  shell: ShellExecutorLike,
+  signal: AbortSignal | undefined,
+): Promise<string[]> {
+  const stdout = await runShell(shell, 'git worktree list --porcelain', root, signal)
+  const worktrees: string[] = []
+  for (const block of stdout.split(/\r?\n\r?\n/)) {
+    const lines = block.split(/\r?\n/)
+    // A bare checkout (`--bare`, a server repository) has no working tree to diff: it has a `bare` line
+    // and its `worktree` path is the repository directory itself.
+    if (lines.includes('bare')) continue
+    const recorded = lines.find(line => line.startsWith('worktree '))?.slice('worktree '.length)
+    if (recorded === undefined || recorded.length === 0) continue
+    const path = resolve(recorded)
+    if (existsSync(path)) worktrees.push(path)
+  }
+  return worktrees
+}
+
+/**
+ * The revision a checkout has checked out right now, or `undefined` when it has none.
+ *
+ * An unborn branch — a repository with no commits yet — is the ordinary absence: there is no revision
+ * to diff against, so a shell boundary over it records nothing. A VCS fault is answered as absence too,
+ * on purpose: this runs in `tools/pre-execute`, in front of a command the model is waiting to run, and
+ * a broken repository must cost a capture, never the command.
+ *
+ * @param root - the checkout to read.
+ * @param shell - the deployment's shell executor.
+ * @param signal - the caller's abort signal.
+ * @returns the commit `HEAD` names, or `undefined` when it names none.
+ */
+export async function gitHeadRevision(
+  root: string,
+  shell: ShellExecutorLike,
+  signal: AbortSignal | undefined,
+): Promise<string | undefined> {
+  try {
+    const revision = (await runShell(shell, 'git rev-parse --verify HEAD', root, signal)).trim()
+    return revision.length > 0 ? revision : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** Unescape the XML entities `svn status --xml` writes into paths. */
