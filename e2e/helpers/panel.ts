@@ -29,14 +29,14 @@ export function floatCard(page: Page): Locator {
   return page.locator('[data-diff-floating-file-list]').first()
 }
 
-/** The knob on the panel's edge that folds the floating list out and away. */
+/** The review sidebar's switch in the diff toolbar: opens/closes the floating card, or hides the docked column. */
 export function floatToggle(page: Page): Locator {
-  return page.locator('[data-diff-file-list-toggle]').first()
+  return page.locator('[data-diff-review-sidebar-toggle]').first()
 }
 
 /**
- * Get the floating file list on screen: narrow the window until the list's
- * breakpoint folds it, and open the card with the knob if it is folded away.
+ * Get the floating review sidebar on screen: narrow the window until the sidebar's
+ * breakpoint folds it, and open the card with the toolbar's switch if it is folded away.
  *
  * The card is what every "a press on the list's own confirm must not fold this"
  * assertion is about, so it has to really be there.

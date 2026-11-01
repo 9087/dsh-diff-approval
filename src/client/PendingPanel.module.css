@@ -1717,77 +1717,6 @@
   align-items: stretch;
 }
 
-/* The folded file list's knob: it sits in the floating card's own top-left
-   corner, placed from the same measured box the card uses (see the panel), so
-   opening the list covers it exactly. It lives outside the diff view's action row
-   because that row is not drawn while no file is open — which left the folded
-   list with no way back. Sized like the toolbar's icon actions (28x28 with a 14px
-   glyph) and below the card (`.fileListFloat`) in z-order. */
-.fileListKnob {
-  position: absolute;
-  z-index: 39;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  box-sizing: border-box;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-base);
-  /* Opaque at rest: it is the only way back to the file list once the list has folded, so
-     it stays legible over whatever code happens to sit under it. The halo below is what
-     keeps it from reading as part of that code. */
-  color: var(--dsw-alias-label-primary);
-  cursor: pointer;
-  /* A firmer outer glow than the other floating chrome (`.dsw-shadow-lv2`): this knob is
-     the file list's only entry once the list has folded, and it sits over the code, so it
-     needs the halo to read as a control rather than a mark in the diff. The elevation
-     token carries its own hairline stroke, which keeps the button's edge crisp over a
-     light row. */
-  box-shadow: var(--dsw-elevation-prominent);
-}
-
-/* While the list itself is open the glow belongs to nothing — the card is painted over the
-   knob but NOT over the halo around it, so a 20px glow would fringe out past the card's
-   top-left corner and read as a glow on the card — and the button itself is hidden, since
-   the card covers it anyway. */
-.fileListKnob[data-open] {
-  box-shadow: none;
-  opacity: 0;
-}
-
-/* Not open means the card is on its way out (or gone), and that is where the button comes
-   from: it waits half a second for the card to leave, then fades up over 320ms. An
-   animation rather than a transition, which matters when the list is folded and unfolded
-   quickly: reopening drops the selector, so the fade is cancelled where it stands instead
-   of being left half-applied, and the next fold plays it again from the beginning, delay
-   included. The halo rides along, since an element's own opacity carries its shadow. */
-.fileListKnob:not([data-open]) {
-  animation: fileListKnobIn 320ms ease-in-out 500ms both;
-}
-
-@keyframes fileListKnobIn {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-.fileListKnob:hover,
-.fileListKnob:focus-visible {
-  /* Keep the surface opaque. The knob floats over the code view, and the hover tint
-     the app publishes is translucent (it is meant to be painted over a surface, the
-     way the docked list's divider sits on the panel): used as the fill on its own it
-     lets the code read through the button. Layered over the knob's own surface, the
-     hover reads the same as everywhere else and nothing shows through. */
-  background-color: var(--dsw-alias-bg-base);
-  background-image: linear-gradient(var(--dsw-alias-interactive-bg-hover), var(--dsw-alias-interactive-bg-hover));
-}
-
 /* The floating (collapsed) file list: when the pane would take more than a
    third of the panel, it folds to a button and the diff takes the full width;
    the list then floats over the code scroll box as a rounded, inset card. Its
@@ -1812,18 +1741,17 @@
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 12px;
   background: var(--dsw-alias-bg-base);
-  /* No glow of its own: the halo belongs to the knob that reveals the list (see
-     `.fileListKnob`), and a floating card is delineated well enough by its border and its
-     opaque surface. It also has no entrance to play — it is simply there when the knob is
-     pressed — and folding it away is the one thing that animates. The origin is the
-     corner the knob sits in, which is the corner the exit shrinks toward. */
+  /* No glow of its own: the floating card is delineated well enough by its border and its
+     opaque surface. It also has no entrance to play — it is simply there when the toolbar's
+     switch is pressed — and folding it away is the one thing that animates. The origin is
+     the card's top-left corner, which is the corner the exit shrinks toward. */
   box-shadow: none;
   transform-origin: top left;
 }
 
 /* Folding the card away: a soft version of the entrance it used to have, run backwards —
-   the card gives up a few percent of its size toward the corner the knob sits in (the
-   transform origin) while it fades out across the same 140ms. Deliberately gentle: the
+   the card gives up a few percent of its size toward its top-left corner (the transform
+   origin) while it fades out across the same 140ms. Deliberately gentle: the
    fade carries the exit and the shrink is only there to give it a direction, so the card
    does not appear to lunge at the corner. The class is added while the panel still counts
    the card as open, so it stays mounted for exactly as long as the animation runs; it takes
@@ -2007,8 +1935,8 @@
 }
 
 .floatResizeHandle:hover {
-  /* Opaque for the same reason the knob is: this strip lies over the code view, and
-     a translucent fill would let the code show through it mid-drag. */
+  /* Opaque because this strip lies over the code view: a translucent fill would let the
+     code show through it mid-drag. */
   background-color: var(--dsw-alias-bg-base);
   background-image: linear-gradient(var(--dsw-alias-border-l2), var(--dsw-alias-border-l2));
 }
@@ -2482,6 +2410,12 @@
   font-size: 12px;
   font-weight: 500;
   line-height: 16px;
+}
+
+/* The heading's count is part of its label, the way the tabs' counts are: one small gap, since this
+   heading is a text line rather than the tab strip's flex row. */
+.listTitle .tabCount {
+  margin-left: 4px;
 }
 
 /* Two segments of one control rather than two buttons — the pair shares the row, and the active one
@@ -3128,6 +3062,23 @@
      in the same bar align with them; the icon stays centered when taller. */
   min-height: 25px;
   padding: 4px 6px;
+}
+
+/* The review sidebar's switch is a two-state control, not a one-shot action: while the sidebar is
+   showing it is a white chip on the toolbar's slightly grey code-block tint. White on that tint is only a
+   few levels apart, so the chip needs its own edge and a whisper of height to read as white at all — the
+   lightest edge available, plus a 1px soft shadow that is barely a shadow. No brand colour, and nothing
+   stronger than that: the hover state layers the app's hover tint over the same white surface. */
+.sidebarSwitch[data-active] {
+  border-color: var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--dsw-alias-label-primary) 8%, transparent);
+}
+
+.sidebarSwitch[data-active]:hover:not(:disabled) {
+  background-color: var(--dsw-alias-bg-base);
+  background-image: linear-gradient(var(--dsw-alias-interactive-bg-hover), var(--dsw-alias-interactive-bg-hover));
 }
 
 /* Panel close button: quiet header chrome — no border or fill at rest, a

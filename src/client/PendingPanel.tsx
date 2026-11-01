@@ -1430,6 +1430,15 @@ interface PendingDiffProps {  file: PendingFileDiff
    * `openPreviewLink` for what is or is not a file link.
    */
   onPreviewLink: (path: string, x: number, y: number) => void
+  /**
+   * The REVIEW SIDEBAR's visibility switch, in this pane's toolbar.
+   *
+   * The approval sidebar (the panel's tabs: pending files, comments) is either docked beside the code or
+   * floating over it as a card. Either way this pane's toolbar carries the switch at its far left, next to the
+   * diff's own controls behind a hairline — it is chrome of the SIDEBAR, not of the diff, and it is the one
+   * control that hides or shows the sidebar in both presentations.
+   */
+  reviewSidebar?: { readonly open: boolean; readonly toggle: () => void } | undefined
 }
 
 /** The diff body's row class per line kind. */
@@ -4295,7 +4304,7 @@ export function inlineItemCount(widths: readonly number[], available: number, ga
 }
 
 /** The selected file's diff, actions, jump controls, and copy toolbar. */
-function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, landingLine, landingOld, landingComment, landingCard, onLanded, failedMessage, commentSkill, comments, commentAnswers, commentsRevision, commentLines, onCommentAdd, onCommentRemove, onCommentAsk, onCommentSeen, onPasteReference, onToast, t, onAddTypedPath, onPreviewLink, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, releaseChip }: PendingDiffProps) {
+function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFlash, landingTop, landingTick, landingRow, landingLine, landingOld, landingComment, landingCard, onLanded, failedMessage, commentSkill, comments, commentAnswers, commentsRevision, commentLines, onCommentAdd, onCommentRemove, onCommentAsk, onCommentSeen, onPasteReference, onToast, t, onAddTypedPath, onPreviewLink, onKeep, onRevert, onRefreshVcs, onBlockKeep, onBlockRevert, onOpen, onPreviewImage, releaseChip, reviewSidebar }: PendingDiffProps) {
   // The same five search-bar tooltips as the split view, plus the copy-reference button, decided once
   // (see `chords.ts`): this host's keycaps where it can draw them, the pre-0.1.7-rc.2 glued label
   // where it cannot. The toolbar's own items decide per item, in their map below.
@@ -9070,6 +9079,33 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
         </Tooltip>
       </div>
       <div className={css.diffActions}>
+        {/* The review sidebar's own switch, at the toolbar's far left: the box holds the pending files AND
+            their comments, and this is whether it shows — docked beside the code or floating over it. A
+            hairline separates its control from the diff's own actions (search among them), so it reads as a
+            panel for the sidebar rather than as another thing to do to the file. */}
+        {reviewSidebar !== undefined && (
+          <>
+            <Tooltip
+              label={t(reviewSidebar.open ? 'action.hideFileList' : 'action.showFileList')}
+              side="bottom"
+              delayMs={500}
+            >
+              <button
+                type="button"
+                className={`${css.action} ${css.iconAction} ${css.sidebarSwitch}`}
+                data-diff-review-sidebar-toggle
+                data-active={reviewSidebar.open || undefined}
+                aria-label={t(reviewSidebar.open ? 'action.hideFileList' : 'action.showFileList')}
+                aria-expanded={reviewSidebar.open}
+                aria-pressed={reviewSidebar.open}
+                onClick={reviewSidebar.toggle}
+              >
+                <IconListPenOutline16 size={14} />
+              </button>
+            </Tooltip>
+            <span className={css.divider} data-diff-review-sidebar-divider aria-hidden="true" />
+          </>
+        )}
         <div className={css.diffActionInfo} data-diff-actions ref={actionGroupRef}>
           {showStats && (
             <span className={css.diffStats} ref={actionStatsRef}>{t('panel.stats', { added: model.diff.added, removed: model.diff.removed })}</span>
@@ -10516,9 +10552,17 @@ export function PendingPanel({
   /** File-list pane width, adjustable by dragging the divider. It opens AT the floor, which is the
    *  width the bulk footer needs for its three labels, so a fresh pane cannot wrap them either. */
   const [listWidth, setListWidth] = useState(MIN_LIST_WIDTH_PX)
-  /** Whether the floating (collapsed) file list is currently shown. */
+  /** Whether the floating (collapsed) review sidebar is currently shown. */
   const [floatOpen, setFloatOpen] = useState(false)
-  /** Whether the file list is always folded, whatever the width allows. */
+  /**
+   * Whether the review sidebar is shown while DOCKED beside the code.
+   *
+   * The toolbar's sidebar switch works in both presentations: floating it opens/closes the card, docked it
+   * hides/shows the column. Docked starts shown — the panel opens to its list — and hiding it hands the whole
+   * pane to the diff.
+   */
+  const [dockOpen, setDockOpen] = useState(true)
+  /** Whether the review sidebar is always folded, whatever the width allows. */
   const [forceFloat, setForceFloat] = useState(() => fileListFloat())
   /** The review panel's width, measured so the file list can collapse when it
    * would take more than a third of it (browser zoom / window resize). */
@@ -10637,11 +10681,11 @@ export function PendingPanel({
     ? panelWidth > 0 && panelWidth < DOCK_TWO_COLUMN_MIN_PX
     : viewportWidth < SIDEBAR_AUTO_COLLAPSE_PX)
   /**
-   * Set when a fresh showing of the panel should start with the folded list open —    * the panel opens to show the list, and the knob that reveals it is for folding
-   * it away again — and spent by the first frame it can be spent on. The folded
-   * mode is not always known on that frame: a docked panel measures its own width a
-   * frame after it mounts. A hand on the list's own switches clears it, so the
-   * reader's choice always wins over the default.
+   * Set when a fresh showing of the panel should start with the folded list open: the panel opens to
+   * show the list, and the toolbar's switch is for folding it away again. Spent by the first frame it
+   * can be spent on, because the folded mode is not always known on that frame: a docked panel measures
+   * its own width a frame after it mounts. A hand on the list's own switches clears it, so the reader's
+   * choice always wins over the default.
    */
   const startListOpenRef = useRef(false)
   // The card is on its way into the corner: still mounted (and still `floatOpen`) so the
@@ -10665,7 +10709,7 @@ export function PendingPanel({
   }
   const toggleFileList = (): void => {
     startListOpenRef.current = false
-    // Pressing the knob again while the card is being drawn into the corner takes the fold
+    // Pressing the toolbar switch again while the card is being drawn into the corner takes the fold
     // back: the card never left the DOM, so it is simply there again.
     if (floatClosing) {
       if (foldTimerRef.current !== undefined) window.clearTimeout(foldTimerRef.current)
@@ -10683,8 +10727,8 @@ export function PendingPanel({
     setForceFloat(next)
     setFileListFloat(next)
     // The switch says where the list lives, not whether it is there: folding it for good leaves
-    // the card up — the list the reader was just looking at stays on screen, and the knob is the
-    // gesture that folds it away — while turning the fold off puts the list back in its column,
+    // the card up — the list the reader was just looking at stays on screen, and the toolbar switch is
+    // the gesture that folds it away — while turning the fold off puts the list back in its column,
     // which needs no card at all.
     if (next) setFloatOpen(true)
   }
@@ -10710,9 +10754,9 @@ export function PendingPanel({
     setFloatOpen(true)
   }, [open, docked, floatMode])
 
-  // Clicking anywhere outside the floating card — or on the toggle button, which
-  // toggles it, or on the card's width grip, which sits just outside its right
-  // edge — folds the floating list back, through the same corner fold the knob uses.
+  // Clicking anywhere outside the floating card folds it back. Two places are not "outside" in that sense:
+  // the toolbar's own switch (its press toggles the card itself) and the card's width grip (which sits just
+  // outside its right edge and drags it). Neither may fold the card through this rule.
   useEffect(() => {
     if (!floatMode || !floatOpen) return
     const el = panelRef.current
@@ -10721,7 +10765,7 @@ export function PendingPanel({
       const target = event.target as Node | null
       if (target instanceof Element
         && (target.closest('[data-diff-floating-file-list]') !== null
-          || target.closest('[data-diff-file-list-toggle]') !== null
+          || target.closest('[data-diff-review-sidebar-toggle]') !== null
           || target.closest('[data-diff-float-resize]') !== null
           // An open MENU or DIALOG is part of this list's own work, not somewhere else the reader walked
           // off to. Both are drawn INSIDE the panel (the row menu raises the confirmation that answers it),
@@ -10739,8 +10783,8 @@ export function PendingPanel({
 
   // Where the floating file list goes: it is measured from the code view when a
   // file is open, and from the detail pane when none is — so the folded list has
-  // a box either way. Both the card and the knob on its corner are placed from
-  // this one box, which is what keeps them aligned.
+  // a box either way. The card is placed from this one box, which is also what keeps
+  // its fold's top-left origin over the content it came from.
   //
   // The box has to follow the *content*, not just the panel's own size. Opening
   // the first file mounts the diff's action row above the code view, which moves
@@ -11034,7 +11078,7 @@ export function PendingPanel({
     wasShowingRef.current = showing
     if (!showing) return
     // A fresh showing starts with the folded list open: the panel opens to show the
-    // list, and the knob that reveals it is for folding it away again. Marked here,
+    // list, and the toolbar's switch is for folding it away again. Marked here,
     // before any selection decision: a showing on an empty list has no file to pick,
     // and the list that arrives later belongs to this same showing. (The mark is
     // spent once the folded mode is known — see below.)
@@ -12217,7 +12261,13 @@ export function PendingPanel({
                 aria-selected={activeTab === 'pending'}
                 onClick={() => { setListTab('pending') }}
               >
-                {t('panel.tab.pending')}
+                {/* What is in the list the tab names: the files waiting for a decision. Written like the
+                    comment tab's count — the number rides the label, and nothing at all when there is
+                    nothing to count, since a zero would say "there is a list here" with nothing in it. */}
+                <span>{t('panel.tab.pending')}</span>
+                {files.length > 0 && (
+                  <span className={css.tabCount} data-diff-pending-count>{files.length}</span>
+                )}
               </button>
               <button
                 type="button"
@@ -12237,13 +12287,19 @@ export function PendingPanel({
               </button>
             </div>
           ) : (
-            <h3 className={css.listTitle} data-diff-list-title>{t(`panel.tab.${activeTab}`)}</h3>
+            <h3 className={css.listTitle} data-diff-list-title>
+              {t(`panel.tab.${activeTab}`)}
+              {activeTab === 'pending' && files.length > 0 && (
+                <span className={css.tabCount} data-diff-pending-count>{files.length}</span>
+              )}
+            </h3>
           )}
           {/* The tabs take the room up to the toggle themselves (the strip is the flexible item), so
               the spacer is only what pushes the toggle over when a lone title leaves the row slack. */}
           {listTabs.length <= 1 && <span className={css.flexSpacer} />}
-          {/* Fold the list away for good, whatever the width allows. The choice is stored, so it
-              survives a reopen. */}
+          {/* Keep the LIST floating over the code whatever the width allows: the switch says where the
+              list lives, not whether it is there (the toolbar's own switch shows and hides the card).
+              The choice is stored, so it survives a reopen. */}
           <Tooltip label={t(forceFloat ? 'action.fileListFloatOff' : 'action.fileListFloatOn')} side="bottom" delayMs={500}>
             <button
               type="button"
@@ -12989,41 +13045,15 @@ export function PendingPanel({
             </div>
           ) : (
             <div className={css.split} ref={splitRef}>
-              {/* Folding the list away must not fold its switch away with it: the
-                  knob lives on the panel's left edge, below the diff toolbar,
-                  rather than inside the diff view — which is not drawn at all
-                  while no file is open, and took the switch down with it. */}
-              {floatMode && (
-                <Tooltip label={t(floatOpen ? 'action.hideFileList' : 'action.showFileList')} side="bottom" delayMs={500}>
-                  <button
-                    type="button"
-                    className={css.fileListKnob}
-                    // Exactly the floating card's own corner — the same measured
-                    // box, the same inset — so opening the list covers the knob
-                    // rather than sitting beside it. Below the card in z-order.
-                    style={{
-                      left: (floatBox?.left ?? 0) + FLOAT_LIST_MARGIN_PX,
-                      top: (floatBox?.top ?? 0) + FLOAT_LIST_MARGIN_PX,
-                    }}
-                    data-diff-file-list-toggle
-                    // The card covers the knob but not its glow, which would otherwise
-                    // fringe past the card's corner while the list is open: the halo is
-                    // for the button standing on its own (see `.fileListKnob[data-open]`).
-                    data-open={floatOpen || undefined}
-                    aria-label={t(floatOpen ? 'action.hideFileList' : 'action.showFileList')}
-                    aria-expanded={floatOpen}
-                    onClick={toggleFileList}
-                  >
-                    <IconListPenOutline16 size={14} />
-                  </button>
-                </Tooltip>
-              )}
-              {!floatMode && (
+              {/* The review sidebar's switch lives in the diff toolbar (see `PendingDiff`'s `reviewSidebar`)
+                  in both presentations, so nothing is drawn on the panel's edge any more. Docked, the switch
+                  can also hide this column, handing the pane to the diff. */}
+              {!floatMode && dockOpen && (
                 <nav className={css.fileList} style={{ width: listWidth }} data-diff-approval-file-list>
                   {fileListBody}
                 </nav>
               )}
-              {!floatMode && <div className={css.resizeHandle} data-diff-resize onPointerDown={startResize} />}
+              {!floatMode && dockOpen && <div className={css.resizeHandle} data-diff-resize onPointerDown={startResize} />}
               <div className={css.detail} data-diff-detail>
                 {/* The detail belongs to a session: without one there is no list to have
                     picked a file from, and nothing that could answer a comment. */}
@@ -13078,6 +13108,10 @@ export function PendingPanel({
                     onOpen={onOpen}
                     onPreviewImage={onPreviewImage}
                     releaseChip={releaseChip}
+                    reviewSidebar={{
+                      open: floatMode ? floatOpen : dockOpen,
+                      toggle: () => { if (floatMode) toggleFileList(); else setDockOpen(current => !current) },
+                    }}
                   />
                 )}
               </div>

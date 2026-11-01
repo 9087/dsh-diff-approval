@@ -20,7 +20,7 @@ import {
   newGuiPage, openListTab, openPanel, openSession, pressRedo, pressUndo, row,
 } from './helpers/gui.ts'
 
-import { dockPanel, dockedPanel, floatCard, openFloatList, setViewport, writeComment } from './helpers/panel.ts'
+import { dockPanel, dockedPanel, floatCard, floatToggle, openFloatList, setViewport, writeComment } from './helpers/panel.ts'
 
 /** Four changed text files plus a markdown one, so every feature below has something of its own. */
 const FILES: SeededFile[] = [
@@ -245,6 +245,38 @@ test.describe('面板功能：搜索 / 跳转 / 视图 / 浮动列表 / 预览 /
     await expect(floatCard(page)).toHaveCount(0, { timeout: 20_000 })
     await ensurePanelList(page)
     await expect(page.locator('[data-diff-file]').first()).toBeVisible({ timeout: 20_000 })
+  })
+
+  test('s4b. 审批侧边栏开关：浮窗下按一下关、再按一下开，打开时有按下态', async () => {
+    test.setTimeout(120_000)
+    // The switch is a TOGGLE in the floating presentation too: a press closes the card, a second press
+    // opens it — and while it is open the button carries its own pressed state (data-active, styled fill).
+    await openFloatList(page)
+    const toggle = floatToggle(page)
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true', { timeout: 20_000 })
+    expect(await toggle.evaluate(element => element.hasAttribute('data-active'))).toBe(true)
+    // It is the far-left control of its row, with the hairline between it and the diff's own actions.
+    expect(await toggle.evaluate(element => element.previousElementSibling === null)).toBe(true)
+    expect(await toggle.evaluate(element => element.nextElementSibling?.hasAttribute('data-diff-review-sidebar-divider') ?? false)).toBe(true)
+
+    await toggle.click({ timeout: 20_000 })
+    await expect(floatCard(page)).toHaveCount(0, { timeout: 20_000 })
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false', { timeout: 20_000 })
+    expect(await toggle.evaluate(element => element.hasAttribute('data-active'))).toBe(false)
+
+    await toggle.click({ timeout: 20_000 })
+    await expect(floatCard(page)).toBeVisible({ timeout: 20_000 })
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true', { timeout: 20_000 })
+
+    // Docked (wide), the same switch hides the sidebar column and brings it back.
+    await setViewport(page, 1400)
+    await ensurePanelList(page)
+    const sidebar = page.locator('[data-diff-approval-file-list]')
+    await expect(sidebar).toHaveCount(1, { timeout: 20_000 })
+    await toggle.click({ timeout: 20_000 })
+    await expect(sidebar).toHaveCount(0, { timeout: 20_000 })
+    await toggle.click({ timeout: 20_000 })
+    await expect(sidebar).toHaveCount(1, { timeout: 20_000 })
   })
 
   test('s5. markdown 预览：打开后画出渲染过的正文', async () => {
