@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.37.0](https://github.com/9087/dsh-diff-approval/compare/v0.36.1...v0.37.0) (2026-11-01)
+
+### Features
+
+* **panel:** deliver a comment as a titled trigger card in the chat ([c6edcac](https://github.com/9087/dsh-diff-approval/commit/c6edcac3d89968e1213ce61ce2c52435aefefd05))
+* **panel:** one review-sidebar switch in the diff toolbar ([9fed49b](https://github.com/9087/dsh-diff-approval/commit/9fed49bdced7cec43b709f2eac0c3187e6ab2c6d))
+* **panel:** structure-rendered Markdown diff behind a temporary switch ([9ad580c](https://github.com/9087/dsh-diff-approval/commit/9ad580c4c8cacef5cc28c263af861bc974d97b98))
+* **preview:** code changes by line, and one continuous tint for merged blocks ([bb4912e](https://github.com/9087/dsh-diff-approval/commit/bb4912e7f83fcc224332a87f0a20b0e7af5f308c))
+* **preview:** compare code fences by line only when the languages match ([6b9eed5](https://github.com/9087/dsh-diff-approval/commit/6b9eed595ddd6e939830ca6c4b9cc92880b28637))
+* **preview:** hover focus by tint, not outline; square change blocks ([a661a7a](https://github.com/9087/dsh-diff-approval/commit/a661a7a31583057c8ba8bbeb73721a9b3ee0c57e))
+* **preview:** one flow model for the single and double columns ([a82fa2c](https://github.com/9087/dsh-diff-approval/commit/a82fa2cda0c3527579c7becc36d448324c7007bb))
+* **preview:** source twins, image cards and per-unit matching polish ([5d0b9b8](https://github.com/9087/dsh-diff-approval/commit/5d0b9b828268ba15dd2eb2c69dcd149917cb4189))
+* **preview:** stack code and image pairs, and tint a whole differing-language fence in the double column ([32eb665](https://github.com/9087/dsh-diff-approval/commit/32eb66520e72a7616faac50c0d0c30296bb3d3ce))
+* **preview:** tree-first diff built from syntax-tree inline children ([ad8fb8b](https://github.com/9087/dsh-diff-approval/commit/ad8fb8bb305f2ffc1e904d874dcb34b019a7e2ff))
+
+### Bug Fixes
+
+* **panel:** frame each side of the double column, and pair heading/rule twins side by side ([9b7849c](https://github.com/9087/dsh-diff-approval/commit/9b7849c8dc0ac9c08f6eb83772438681dcf262e0))
+* **panel:** hold the reader's place across a preview keep or revert ([c24adc7](https://github.com/9087/dsh-diff-approval/commit/c24adc72a0c38b2c9036f14f34f581a1cd6a26ce))
+* **panel:** mark swallowed table text where it is drawn, and snap sideways drift ([c142bd8](https://github.com/9087/dsh-diff-approval/commit/c142bd8be32407f1847a5641b322b5df18e34c02))
+* **panel:** one frame for the two marker chips and for a code line pair ([6c8c786](https://github.com/9087/dsh-diff-approval/commit/6c8c7869516833302af3dc8eb950a2f38a06efae))
+* **panel:** put the hover frame on the tint's own edge, one frame for merged blocks ([8d34260](https://github.com/9087/dsh-diff-approval/commit/8d342600e385c6067fc2cf1f794fddb90c5dcca8))
+* **preview:** align the double column by the tree's own matches ([1671701](https://github.com/9087/dsh-diff-approval/commit/1671701e846c96b463713c1104aaf15a21d4f7c2))
+* **preview:** draw code-line runs after the fence opening, not inside it ([c52399d](https://github.com/9087/dsh-diff-approval/commit/c52399da9e58cd46ab7403ce785d4f04579f0b71))
+* **preview:** flash a jumped-to block only after its images settle ([e04c12b](https://github.com/9087/dsh-diff-approval/commit/e04c12b2c737e99cc6bfd28b788953503da60801))
+* **preview:** keep sub-line blocks on whole lines, align matched list rows, draw inline type changes in place ([ad2ad84](https://github.com/9087/dsh-diff-approval/commit/ad2ad84f4e93aef22b547c79401fc3a85533363f))
+* **preview:** re-inline images, pair loose lists, and skip empty word runs ([583eb1b](https://github.com/9087/dsh-diff-approval/commit/583eb1bf0bebc5db44ed63d2d96ca2a6673c82c5))
+* **preview:** report an invisible change as one block per side, not one split block ([44fd5a4](https://github.com/9087/dsh-diff-approval/commit/44fd5a4abf2c861731d4ded4f657fb4957c96745))
+* **preview:** stack heading/rule pairs tightly instead of side by side ([ad64bc9](https://github.com/9087/dsh-diff-approval/commit/ad64bc9ec20bced94bd56685ca14291109a531cb))
+
 ## [0.36.1](https://github.com/9087/dsh-diff-approval/compare/v0.36.0...v0.36.1) (2026-10-19)
 
 ### Bug Fixes
