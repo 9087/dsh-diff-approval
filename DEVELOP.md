@@ -33,6 +33,7 @@ pnpm run typecheck   # tsc over both faces
 pnpm run build       # emits lib/index.js and lib/client.js
 pnpm test            # the unit suite (vitest)
 pnpm run e2e         # the browser suite (Playwright, against a real host)
+pnpm run screenshots # regenerate the README figures from a real browser (opt-in, see below)
 pnpm run compat      # the compatibility matrix: this checkout against the supported DSH releases
 pnpm run compat:newer # …and against published releases newer than the latest
 pnpm run verify:release # after a release is pushed: did the tag's commit pass CI, and did npm get that version
@@ -43,6 +44,35 @@ pnpm run fonts:plan  # what a page actually downloads, by how many hanzi it show
 The build is also a CI gate in its own right: after `pnpm run build`, `node scripts/check-reproducible-build.mjs`
 builds again and compares the bytes, so the bundle has to be a function of the source (see `build/css-class-map.ts`
 for the CSS-module mapping that made it so). There is no script alias for that check — it is one command.
+
+## README screenshots
+
+`README.md` and `README.zh.md` embed four figures per language, under these names: `floating-panel`,
+`docked-sidebar`, `markdown-preview` and `comment-card`. The docked pair use a right sidebar widened to about two
+thirds of the window; the Markdown preview is captured in that sidebar's fullscreen mode. They are generated, not
+drawn by hand:
+
+```sh
+pnpm run build       # the screenshot host serves lib/, not src/
+pnpm run screenshots # needs `dsh` on PATH, or DSH_BIN
+```
+
+`pnpm run screenshots` runs `e2e/screenshots.spec.ts` with `README_SHOTS=1` (a plain `pnpm run e2e` skips that
+spec, so ordinary test runs never rewrite committed images). The spec boots throwaway `dsh web` hosts against a
+temporary `DSH_HOME`, seeds a believable six-file project (an HTML page, its JS/CSS, a README whose heading,
+table and list changed, a changelog and a route list) and captures both languages: the host is restarted with
+`locale.preference` set and each browser context uses a matching locale, so the shell and the panel's labels
+agree. English writes `docs/images/name.png`, Chinese `docs/images/name.zh.png`. It also rewrites
+`screenshots.json`, the manifest of the committed figures.
+
+The conversation in the docked figures cannot come from a model (the suite has no key), so each host is booted with
+`--patch e2e/fixtures/profile.patch.yml`: that mounts `e2e/fixtures/seed-screenshot-session.mjs`, a fixture plugin
+that publishes ONE live session carrying a finished user prompt and a finished assistant reply. Its
+`e2e/fixtures/package.json` gives the fixture its own package root, so the loader does not see two
+`dsh-diff-approval` packages.
+
+The seeded project is `C:\PROJECTS\dsh-homepage` (removed again by the spec), so the path the panel header shows
+in the figures reads like a real checkout. The throwaway home stays in gitignored `scratch/readme-fixture`.
 
 ## The loop while working
 

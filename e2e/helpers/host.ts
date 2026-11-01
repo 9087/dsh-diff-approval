@@ -141,14 +141,32 @@ async function canBind(port: number): Promise<boolean> {
  * @param workspace - the host's working directory (the session's workspace root).
  * @param logFile - where the child's stdout+stderr go. A FILE, not a pipe: the output
  *   is what the URL is parsed from, and it is also the post-mortem when a boot fails.
+ * @param options - extra CLI arguments (e.g. `--patch` for a fixture overlay) and the
+ *   fixture locale, exported as `DSH_E2E_LOCALE` so a fixture can publish strings in it.
  */
-export async function startHost(dsh: DshCommand, home: string, workspace: string, logFile: string): Promise<Host> {
+export async function startHost(
+  dsh: DshCommand,
+  home: string,
+  workspace: string,
+  logFile: string,
+  options: { extraArgs?: readonly string[]; locale?: string } = {},
+): Promise<Host> {
   const port = await freePort()
   const fd = openSync(logFile, 'a')
   const proc = spawn(
     dsh.cmd,
-    [...dsh.prefix, 'web', '--host', '127.0.0.1', '--port', String(port), '--no-open'],
-    { cwd: workspace, env: { ...process.env, DSH_HOME: home }, stdio: ['ignore', fd, fd], windowsHide: true },
+    [...dsh.prefix, 'web', ...(options.extraArgs ?? []), '--host', '127.0.0.1', '--port', String(port), '--no-open'],
+    {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        DSH_HOME: home,
+        DSH_E2E_WORKSPACE: workspace,
+        ...(options.locale === undefined ? {} : { DSH_E2E_LOCALE: options.locale }),
+      },
+      stdio: ['ignore', fd, fd],
+      windowsHide: true,
+    },
   )
   const pattern = new RegExp(`http://127\\.0\\.0\\.1:${port}/\\?token=\\S+`)
   const deadline = Date.now() + 120_000
@@ -167,6 +185,27 @@ export async function startHost(dsh: DshCommand, home: string, workspace: string
 export function tail(file: string): string {
   if (!existsSync(file)) return '(no log)'
   return readFileSync(file, 'utf8').split('\n').slice(-25).join('\n')
+}
+
+/**
+ * Wait for a fixture plugin to announce itself in the host log.
+ *
+ * A fixture session is published by the host, not by the GUI, so the test has no reply to parse; the plugin
+ * prints a marker line instead (the same pattern the reference `dsh-shell-progress` suite uses).
+ * @param logFile - the host's stdout+stderr file.
+ * @param marker - the literal prefix to look for.
+ * @param timeoutMs - how long the fixture gets to run.
+ * @returns the text after the marker, on the matching line.
+ */
+export async function waitForLogMarker(logFile: string, marker: string, timeoutMs = 60_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const text = existsSync(logFile) ? readFileSync(logFile, 'utf8') : ''
+    const line = text.split('\n').find(entry => entry.includes(marker))
+    if (line !== undefined) return line.slice(line.indexOf(marker) + marker.length).trim()
+    if (Date.now() >= deadline) throw new Error(`the host log never carried ${marker}:\n${tail(logFile)}`)
+    await sleep(200)
+  }
 }
 
 /**

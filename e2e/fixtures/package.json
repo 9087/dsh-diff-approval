@@ -1,0 +1,5 @@
+{
+  "name": "e2e-screenshot-fixtures",
+  "private": true,
+  "type": "module"
+}

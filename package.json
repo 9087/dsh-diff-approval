@@ -62,6 +62,7 @@
     "compat": "node scripts/dsh-compat.mjs",
     "compat:newer": "node scripts/dsh-compat.mjs --newer",
     "verify:release": "node scripts/verify-release.mjs",
+    "screenshots": "node scripts/screenshots.mjs",
     "fonts:check": "python -m scripts.fonts.build --check",
     "fonts:plan": "python -m scripts.fonts.build --plan",
     "prepare": "tsc -b tsconfig.json && tsdown --env.DSH_BUILD_FACE client",

@@ -10,19 +10,15 @@ English | [中文](README.zh.md)
 
 A DeepSeek Harness (DSH) plugin for pending-change review: it automatically tracks every successful `edit`, `write`, and editor (`str_replace_editor`) mutation, folds them into a single pending list in the sidebar where each file's diff can be reviewed and kept/reverted — and it can also import the workspace's version-control repository's local changes (Git / SVN / Perforce) in one click.
 
-![Pending changes panel](docs/images/pending-panel.png)
+![Floating review panel](docs/images/floating-panel.png)
 
-The panel also collapses its file list into a floating card; while floating, each of its four edges — the left sidebar, the header above, the right sidebar, the composer below — can be chosen to be covered (all four is what used to be fullscreen, and covering nothing is a plain floating card), and it can dock as a tab in the right sidebar:
+The panel also collapses its file list into a floating card; while floating, each of its four edges — the left sidebar, the header above, the right sidebar, the composer below — can be chosen to be covered (all four is what used to be fullscreen, and covering nothing is a plain floating card).
 
 Two entries open it: the row at the sidebar foot, and a button in the Session header's right-hand controls — the cluster the app keeps its own per-session actions in (where "Download session log" lives) — so the review stays one click away with the sidebar collapsed or hidden.
 
-| Collapsed file list | Covering everything |
-| --- | --- |
-| ![Collapsed file list](docs/images/file-list-collapsed.png) | ![Covering everything](docs/images/fullscreen.png) |
+The panel can also dock as a tab in the app's right sidebar:
 
-For Markdown files, the source-line diff can also be shown as a rendered before/after preview:
-
-![Markdown preview](docs/images/markdown.png)
+![Docked in the right sidebar](docs/images/docked-sidebar.png)
 
 ## ✨ Features
 
@@ -37,9 +33,13 @@ For Markdown files, the source-line diff can also be shown as a rendered before/
 - **Highlight language**: auto-detected from the file extension, or overridden from a dropdown.
 - **Auto-wrap**: a "Wrap lines" toggle beside the language selector wraps long lines for that language (CJK breaks between characters, Latin words stay whole), remembered per language.
 - **Side-by-side split view**: an opt-in two-column diff (left "before" | right "current"), line-aligned with per-side horizontal scrolling and a shared vertical scrollbar. Toggle it from the toolbar or in settings (default: single-column unified view). In split view, changed blocks are aligned by content similarity and changed lines show intra-line word diffs — whole words for Latin text, per-character for CJK.
-- **Markdown preview**: for Markdown files, toggle between the source-line diff and a rendered before/after preview (`Preview` / `Source`); the preview content max width is configurable. With "Structure-rendered Markdown diff" in the "Diff view" group on, the diff is mapped onto the document's own Markdown rendering — lists, tables and code blocks keep their structure — and even a change the rendering cannot show is marked. The switch is off by default; while it is off the preview keeps the original fragment renderer.
+- **Markdown preview**: for Markdown files, toggle between the source-line diff and a rendered before/after preview (`Preview` / `Source`); the preview content max width is configurable. With "Structure-rendered Markdown diff" in the "Diff view" group on, the diff is mapped onto the document's own Markdown rendering: lists, tables, headings and code blocks keep their structure; character-level changes are marked, and even a change the rendering cannot show is flagged. The switch is off by default; while it is off the preview keeps the original fragment renderer. The figure below shows the structure-rendered two-column view, with word-level highlights and the hovered block's Keep / Revert toolbar.
+
+  ![Markdown preview](docs/images/markdown-preview.png)
 - **Customizable appearance**: from the "Diff view" settings group, adjust the diff's code font size (%), line height (px), the added / removed line colors, and the tab width (2 / 4 / 8 spaces), with a live preview.
-- **Comments & annotations**: select any lines and write a comment. The card is anchored below the selected lines and holds the discussion with the agent. Comment mode is on by default and can be turned off in settings. The agent can comment on its own (annotate): asking it to annotate a piece of code is one way to read that code faster. Say "annotate this project's startup flow for me" and it marks the entry point, the initialisation order and the important branches, line by line, to be read in order. In the side-by-side view the comment quotes both sides of the change, the removed lines and the added ones, so the agent reads the whole replacement.
+- **Comments & annotations**: select any lines and write a comment. The card is anchored below the selected lines and holds the discussion with the agent; it shows the `(file:line)` anchor, the note, and its own comment box. Comment mode is on by default and can be turned off in settings. The agent can comment on its own (annotate): asking it to annotate a piece of code is one way to read that code faster. Say "annotate this project's startup flow for me" and it marks the entry point, the initialisation order and the important branches, line by line, to be read in order. In the side-by-side view the comment quotes both sides of the change, the removed lines and the added ones, so the agent reads the whole replacement.
+
+  ![Comment card](docs/images/comment-card.png)
 - **File menu**: on by default (the "File menu" row in the "Diff view" group turns it off). It takes over the click on some file links: a file row in the shell's edited / produced lists, an `@file` reference or file link in a message, and a relative link in this plugin's Markdown preview, and offers: **Open as usual** (the shell's own behaviour, replayed), **View in the review panel**, and **Copy file path**.
 - **Bundled CJK code font**: the panel ships JetBrains Maple Mono, subset and sliced by `unicode-range`; it is on by default and can be turned off in settings.
 - **External changes**: files already in the pending list are monitored — if one is later modified outside the reviewed edits (another tool, an editor), the panel adopts the new content and flags the divergence.

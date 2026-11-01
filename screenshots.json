@@ -1,6 +1,10 @@
 [
-  "docs/images/pending-panel.png",
-  "docs/images/markdown.png",
-  "docs/images/file-list-collapsed.png",
-  "docs/images/fullscreen.png"
+  "docs/images/floating-panel.png",
+  "docs/images/docked-sidebar.png",
+  "docs/images/markdown-preview.png",
+  "docs/images/comment-card.png",
+  "docs/images/floating-panel.zh.png",
+  "docs/images/docked-sidebar.zh.png",
+  "docs/images/markdown-preview.zh.png",
+  "docs/images/comment-card.zh.png"
 ]

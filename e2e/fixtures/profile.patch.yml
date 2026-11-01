@@ -1,0 +1,7 @@
+# e2e/README-only overlay: mount the fixture session into the throwaway screenshot profile.
+#
+# Applied after every bundle layer. A relative `name` on an inserted row is rewritten to a `file://` URL beside
+# this file by dsh-app-boot, so the fixture needs no package manifest, no build step and no node_modules link.
+- insert:
+    - id: e2e-screenshot-session
+      name: ./seed-screenshot-session.mjs
