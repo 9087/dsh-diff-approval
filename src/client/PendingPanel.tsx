@@ -4680,14 +4680,54 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   // The dependency is the HTML ITSELF, not just the file and layout: flipping the
   // structure renderer (`mdStyle`) re-renders the body with fresh, unresolved
   // `<img>` nodes, and a narrower list of deps left those broken until a reload.
-  // After inlining, bump the tick so the ruler re-measures the images' true
-  // heights (a data URI gives the <img> a real size).
+  //
+  // The pass also tells the pane when the body has SETTLED: while local images are still resolving, jumps
+  // hold their flash back (see `previewFlashDeferredRef`), because a collapsed picture changes the height of
+  // every block under it and the box would drift. The tick that re-measures is bumped only after the inlined
+  // images have decoded and one layout frame has passed — rewriting `src` alone does not give an `<img>` a
+  // box.
   useEffect(() => {
     if (!previewActive) return
     const body = mdPreviewBodyRef.current
     if (body === null) return
-    void resolvePreviewImages(body, file.path, workspacePath, (path) => onPreviewImage(file.sessionId, path))
-      .then(() => setMdImageTick(tick => tick + 1))
+    /** Whether the resolver will touch this image: only a relative src is inlined. */
+    const needsInlining = (image: HTMLImageElement): boolean => {
+      const src = image.getAttribute('src') ?? ''
+      return src !== '' && !/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(src)
+    }
+    const inlining = [...body.querySelectorAll<HTMLImageElement>('img[src]')].some(needsInlining)
+    // A fresh body render (a renderer flip, a content change, a new file) ends whatever flash the old body
+    // was waiting to draw: the jump it belonged to is no longer the thing on screen. A jump raised together
+    // with this render is recorded again by the landing effect, which runs after this one.
+    previewFlashDeferredRef.current = undefined
+    previewImagesPendingRef.current = inlining
+    let cancelled = false
+    void (async () => {
+      try {
+        await resolvePreviewImages(body, file.path, workspacePath, (path) => onPreviewImage(file.sessionId, path))
+        if (!inlining) return
+        // Decode, not just re-src: an <img> has no box until its bitmap is there. Capped: a decode that
+        // hangs must not hold the reader's flash forever — the box is then measured on what the browser
+        // has, which is the best anyone can do.
+        const decoded = Promise.all([...body.querySelectorAll<HTMLImageElement>('img[src^="data:"]')].map(image =>
+          typeof image.decode === 'function' ? image.decode().catch(() => {}) : Promise.resolve()))
+        await Promise.race([
+          decoded,
+          new Promise<void>((resolve) => { window.setTimeout(resolve, 400) }),
+        ])
+        // And one frame for the document's own box to catch up with the decoded size.
+        await new Promise<void>((resolve) => {
+          if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(() => { resolve() })
+          else window.setTimeout(resolve, 0)
+        })
+      } finally {
+        if (!cancelled) {
+          previewImagesPendingRef.current = false
+          setMdImageTick(tick => tick + 1)
+        }
+      }
+    })()
+    return () => { cancelled = true }
   }, [previewActive, previewHtml, file.path, file.sessionId, workspacePath, onPreviewImage])
 
   // Overview-ruler markers: one per maximal run of same-kind changed rows, as
@@ -5003,6 +5043,24 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   const [previewFlash, setPreviewFlash] = useState<PreviewFlashPlacement | undefined>(undefined)
   const previewFlashRef = useRef<HTMLDivElement>(null)
   const previewFlashPendingRef = useRef(false)
+  /**
+   * A jump whose flash must wait for the preview's images: the block it landed on and the flash
+   * generation it belongs to.
+   *
+   * An `<img>` with only a relative src has no size until the image pass inlines it, so a box measured
+   * the moment a jump lands is the collapsed block's — and it drifts away as the pictures resolve. The
+   * flash is therefore held back until the images are in and decoded, and drawn then. `flash` is checked
+   * against the newest request: a later jump bumps the nonce, so the older block is never flashed after
+   * the reader has already moved on.
+   */
+  const previewFlashDeferredRef = useRef<{ block: number; flash: number } | undefined>(undefined)
+  /** Counts flash requests, so a deferred one can tell whether a newer jump has taken its place. */
+  const flashNonceRef = useRef(0)
+  /** Whether the preview body still has local images resolving — jumps flash only once it is false. */
+  const previewImagesPendingRef = useRef(false)
+  /** This render's `focus`, readable from effects (which cannot see the state without a dependency). */
+  const focusStateRef = useRef(0)
+  focusStateRef.current = focus
   /** The offset the file now showing was asked to open at, held until the landing
    *  effect below spends it (that effect runs a render later than the switch). */
   const landingTopRef = useRef<number | undefined>(undefined)
@@ -5081,6 +5139,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   const pinShakeRef = useRef(false)
   const bumpFlash = (shake: boolean): void => {
     pinShakeRef.current = shake
+    flashNonceRef.current += 1
     setFlashKey(prev => prev + 1)
     // The preview draws the flash itself (from the rendered block, not from
     // rows), so the landing path is told to build one for the block it lands on.
@@ -5097,6 +5156,8 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
    */
   const clearFlash = (): void => {
     previewFlashPendingRef.current = false
+    // A flash still waiting for the images belongs to the frame that is being taken away.
+    previewFlashDeferredRef.current = undefined
     setPreviewFlash(undefined)
     setFlashKey(0)
   }
@@ -5730,6 +5791,28 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     setPreviewUnitBoxes(boxes)
     previewUnitBoxesStateRef.current = boxes
   }, [mdPreview, lang, previewUnit, hoveredBlock, previewUnitMode, splitView, file.oldText, file.newText, mdImageTick, previewFrameForUnit, previewUnitGeometry, previewUnitBoxesFor])
+
+  /**
+   * Draw the flash a jump held back while the preview's local images were resolving.
+   *
+   * The image pass bumps `mdImageTick` once the inlined pictures have decoded and the document has had a
+   * layout frame — the first moment the landed block's box is its true one. Only the newest request is drawn:
+   * a later jump has bumped the nonce and replaced the request, and a focus the reader has moved away from is
+   * not flashed after the fact. Both of those are the drift this exists to avoid.
+   */
+  useLayoutEffect(() => {
+    if (!previewActive) {
+      // Leaving the preview (or unmounting it) ends any flash it was waiting to draw.
+      previewFlashDeferredRef.current = undefined
+      return
+    }
+    const deferred = previewFlashDeferredRef.current
+    if (deferred === undefined) return
+    previewFlashDeferredRef.current = undefined
+    if (deferred.flash !== flashNonceRef.current) return
+    if (focusStateRef.current !== deferred.block) return
+    setPreviewFlash(previewFlashFor(deferred.block))
+  }, [mdImageTick, previewActive])
 
   // Hover must NOT change any difference colour: the tint is read-only while the toolbar follows the pointer.
   useLayoutEffect(() => {
@@ -7708,7 +7791,16 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       // and this landing path builds it from the rendered block.
       if (previewFlashPendingRef.current) {
         previewFlashPendingRef.current = false
-        setPreviewFlash(previewFlashFor(focus))
+        if (previewImagesPendingRef.current) {
+          // The body is still growing around its local pictures, so a box measured now would be the
+          // collapsed block's and would drift as they resolve. Hold the flash for the newest jump and let
+          // the image pass draw it once the layouts are settled; any older frame goes now.
+          previewFlashDeferredRef.current = { block: focus, flash: flashNonceRef.current }
+          setPreviewFlash(undefined)
+        } else {
+          previewFlashDeferredRef.current = undefined
+          setPreviewFlash(previewFlashFor(focus))
+        }
       }
       return
     }

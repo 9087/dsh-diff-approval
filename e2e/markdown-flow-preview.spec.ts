@@ -8,7 +8,8 @@
 // The old tree-column preview spec that lived here exercised `renderTreeMerged` / `renderTreeDocuments`, which
 // were removed once the panel moved entirely to the flow renderers; its replacement is this file.
 
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test'
 import {
   bootstrapHome, claimSession, makeFixture, resolveDsh, seedPending, startHost, stopHost,
@@ -51,6 +52,19 @@ const REVERT_NEW = [
 const ADD_NEW = '# 全新增\n\n新增段落。\n'
 const DEL_OLD = '# 全删除\n\n删除段落。\n'
 
+// A picture's change: the block's height comes from the image, which is inlined AFTER the body renders. The
+// flash measured before that inline is the collapsed block's, which is the drift the last test pins.
+const IMAGE_OLD = [
+  '# 图片', '',
+  '旧段落。', '',
+].join('\n')
+const IMAGE_NEW = [
+  '# 图片', '',
+  '![截图](shot.svg)', '',
+].join('\n')
+/** A real (if plain) SVG so the host's preview-image read returns bytes the browser lays out. */
+const SHOT_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="160"><rect width="240" height="160" fill="#dbeafe"/></svg>'
+
 let fixture: Fixture
 let browser: Browser
 let page: Page
@@ -60,6 +74,7 @@ let mainId: string
 let revertId: string
 let addId: string
 let delId: string
+let imageId: string
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => { setTimeout(resolve, ms) })
 
@@ -78,6 +93,7 @@ test.describe('flow preview', () => {
       { name: 'flow-revert.md', oldText: REVERT_OLD, newText: REVERT_NEW },
       { name: 'flow-add.md', oldText: '', newText: ADD_NEW },
       { name: 'flow-delete.md', oldText: DEL_OLD, newText: '' },
+      { name: 'flow-image.md', oldText: IMAGE_OLD, newText: IMAGE_NEW },
     ]
     fixture = makeFixture('flow-preview')
     const workspaceId = await bootstrapHome(dsh, fixture)
@@ -97,6 +113,10 @@ test.describe('flow preview', () => {
     revertId = seeded.entries[1]!.id
     addId = seeded.entries[2]!.id
     delId = seeded.entries[3]!.id
+    imageId = seeded.entries[4]!.id
+    // The image itself is a workspace file, not a pending one: the preview's image read only needs it on
+    // disk at the path the Markdown names (the seeded file's own folder).
+    writeFileSync(join(fixture.workspace, 'shot.svg'), SHOT_SVG)
     claimSession(fixture, workspaceId, sessionId)
 
     host = await startHost(dsh, fixture.home, fixture.workspace, fixture.logFile)
@@ -254,5 +274,37 @@ test.describe('flow preview', () => {
     await expect(page.locator('.mdFlowDoubleRow-diff')).toHaveCount(1)
     await expect(page.locator('.mdFlowDoubleRow-diff')).toHaveAttribute('data-md-kind', 'del')
     await expect(page.locator('.mdFlowDoubleCell-new.mdFlowDoubleCell-empty')).toHaveCount(1)
+  })
+
+  test('single column: a picture change flashes on the block only after the image is in', async () => {
+    test.setTimeout(300_000)
+    // The previous case left the double column up; the reader lands this file in the single column, so pin
+    // that FIRST — the flash is measured in the layout it lands in, and switching layouts after it would be
+    // testing a different drift.
+    await ensureSingle()
+    await openPreview(imageId)
+    const previewBody = body()
+    // The picture is inlined (the data URI is what gives it a box at all)…
+    await expect(previewBody.locator('img[src^="data:image/"]')).toBeVisible({ timeout: 20_000 })
+    // …and the flash it raised outlines the SETTLED block. A box measured before the inline pass would be
+    // the collapsed block's, and its bottom would sit above the picture now filling the block.
+    const flash = page.locator('[data-diff-block-flash]').first()
+    await expect(flash).toHaveCount(1, { timeout: 20_000 })
+    await page.waitForTimeout(400)
+    const boxes = await page.evaluate(() => {
+      const flashElement = document.querySelector<HTMLElement>('[data-diff-block-flash]')
+      const blocks = [...document.querySelectorAll<HTMLElement>('[data-md-block="0"]')]
+      if (flashElement === null || blocks.length === 0) return null
+      const flashBox = flashElement.getBoundingClientRect()
+      return {
+        flashTop: flashBox.top,
+        flashBottom: flashBox.bottom,
+        blockTop: Math.min(...blocks.map(block => block.getBoundingClientRect().top)),
+        blockBottom: Math.max(...blocks.map(block => block.getBoundingClientRect().bottom)),
+      }
+    })
+    expect(boxes).not.toBeNull()
+    expect(Math.abs(boxes!.flashTop - boxes!.blockTop)).toBeLessThan(2)
+    expect(Math.abs(boxes!.flashBottom - boxes!.blockBottom)).toBeLessThan(2)
   })
 })

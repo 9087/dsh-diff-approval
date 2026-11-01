@@ -14860,6 +14860,80 @@ describe('PendingPanel', () => {
     expect(flash()).not.toBeNull()
   })
 
+  it('holds a preview flash until its images are in, and never draws a superseded one', async () => {
+    // The reader's bug: a Markdown change that is a picture flashed a box measured BEFORE the picture had
+    // inlined. The box was the collapsed block's, and it drifted as the image resolved. The flash now waits
+    // for the image pass; and a jump/file the reader has moved to since replaces the request, so the old
+    // block is never flashed after the fact.
+    localStorage.setItem('diff-approval:md-preview', '1')
+    const fileA = entry({
+      id: 'entry-md-image-a',
+      path: '/repo/a.md',
+      oldText: '# A\n\n![shot](images/a-old.png)\n',
+      newText: '# A\n\n![shot](images/a-new.png)\n',
+    })
+    const fileB = entry({
+      id: 'entry-md-image-b',
+      path: '/repo/b.md',
+      oldText: '# B\n\nold words\n',
+      newText: '# B\n\n![shot](images/b-new.png)\n',
+    })
+    let releaseA: ((value: string | undefined) => void) | undefined
+    let releaseB: ((value: string | undefined) => void) | undefined
+    const pendingA = new Promise<string | undefined>((resolve) => { releaseA = resolve })
+    const pendingB = new Promise<string | undefined>((resolve) => { releaseB = resolve })
+    const props = panelProps({ read: true, files: [fileA, fileB], busy: new Set() })
+    props.onPreviewImage = vi.fn((_sessionId: SessionId, path: string) => path.includes('a-') ? pendingA : pendingB)
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('a.md'))
+
+    // jsdom has no layout: the pane and its changed blocks get real boxes, and the blocks' rects follow the
+    // scroll exactly like a rendered element's own box would.
+    const flash = (): HTMLElement | null => document.querySelector('[data-diff-block-flash]')
+    const body = document.querySelector('[data-diff-md-preview-body]') as HTMLElement
+    let scrolled = 0
+    Object.defineProperty(body, 'scrollTop', {
+      configurable: true,
+      get: () => scrolled,
+      set: (value: number) => { scrolled = value },
+    })
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 300 })
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 1000 })
+    const rect = (top: number, bottom: number, left = 24, right = 376): DOMRect =>
+      ({ top, bottom, left, right, width: right - left, height: bottom - top, x: left, y: top, toJSON: () => ({}) }) as DOMRect
+    const originalRect = Element.prototype.getBoundingClientRect
+    Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
+      if (this.hasAttribute('data-diff-md-preview-body')) return rect(0, 300, 0, 400)
+      if (this.hasAttribute('data-md-block')) return rect(200 - scrolled, 260 - scrolled)
+      return originalRect.call(this)
+    }
+    try {
+      // The picture is still resolving: no flash yet. Switching files replaces the pending request — the
+      // second file's own picture is what the reader is waiting on now.
+      expect(flash()).toBeNull()
+      expect(releaseA).toBeDefined()
+      fireEvent.click(screen.getByText('b.md'))
+      expect(flash()).toBeNull()
+      expect(releaseB).toBeDefined()
+
+      // The first file's image resolves after the reader left it: nothing may flash for the block they no
+      // longer look at.
+      await act(async () => { releaseA!('data:image/png;base64,AAAA'); await new Promise(resolve => { setTimeout(resolve, 30) }) })
+      expect(flash()).toBeNull()
+
+      // The second file's image settles: its flash is measured now, and it outlines the settled block.
+      await act(async () => { releaseB!('data:image/png;base64,AAAA') })
+      await waitFor(() => { expect(flash()).not.toBeNull() })
+      expect(flash()!.style.top).toBe('44px')
+      expect(flash()!.style.height).toBe('60px')
+      expect(flash()!.style.left).toBe('24px')
+      expect(flash()!.style.right).toBe('24px')
+    } finally {
+      Element.prototype.getBoundingClientRect = originalRect
+    }
+  })
+
   it('jumps and flashes in the double-column preview too', () => {
     // The double-column preview is this component's own rendering, NOT the split
     // view — but the jump used to be routed to the split view whenever
