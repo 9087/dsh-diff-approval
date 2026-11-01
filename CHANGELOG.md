@@ -1,5 +1,7 @@
 # Changelog
 
+## [0.37.1](https://github.com/9087/dsh-diff-approval/compare/v0.37.0...v0.37.1) (2026-11-01)
+
 ## [0.37.0](https://github.com/9087/dsh-diff-approval/compare/v0.36.1...v0.37.0) (2026-11-01)
 
 ### Features
