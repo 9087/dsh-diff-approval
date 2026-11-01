@@ -69,6 +69,22 @@ describe('flow preview block ranges', () => {
     expect(html).toContain('mdFlowCodeBannerLang')
   })
 
+  it('keeps untouched list items in context when a sibling edit makes the list loose', () => {
+    // An image inside one item makes `marked` wrap EVERY item of the list in a <p> (a loose list). That is a
+    // list-layout change, not a change of the untouched items: only the item that gained the image and the
+    // reworded one may be drawn as differences, and the untouched item must stay a single context row.
+    const oldText = '## Features\n\n- alpha item\n- beta item\n- gamma item\n'
+    const newText = '## Features\n\n- alpha item\n\n  ![shot](a.png)\n\n- beta item now reworded\n- gamma item\n'
+    const blocks = flowPreviewBlocks(oldText, newText)
+    expect(blocks).toHaveLength(1)
+    const root = document.createElement('div')
+    root.innerHTML = renderFlowMerged(oldText, newText)
+    const rows = [...root.querySelectorAll('.mdFlowRow')]
+    const gammaRows = rows.filter(row => row.textContent?.includes('gamma item'))
+    expect(gammaRows).toHaveLength(1)
+    expect(gammaRows[0]!.classList.contains('mdFlowRow-context')).toBe(true)
+  })
+
   it('keeps a WHOLE new/deleted file as ONE block even across tables and fences', () => {
     const newDoc = '# 标题\n\n段落。\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n```js\nconst a = 1\n```\n'
     const added = flowPreviewBlocks('', newDoc).map(block => ({
@@ -147,6 +163,20 @@ describe('flow character-level runs', () => {
     document.body.innerHTML = renderFlowMerged(OLD, NEW)
     const cells = [...document.querySelectorAll('td .mdWordAdd')].map(element => element.textContent)
     expect(cells).toEqual(['新'])
+  })
+
+  it('never paints a highlight for whitespace-only runs (added newlines bring no visible word)', () => {
+    // Adding an indented image inside one item re-wraps the list and brings newline runs into the item's text
+    // diff. Those are layout breaks: wrapping them paints an empty coloured box, which reads as a phantom diff.
+    const oldText = '## 功能\n\n- Markdown 预览：旧说明。\n- 不变条目\n'
+    const newText = '## 功能\n\n- Markdown 预览：新说明。\n\n  ![截图](a.png)\n\n- 不变条目\n'
+    document.body.innerHTML = renderFlowMerged(oldText, newText)
+    const texts = [...document.querySelectorAll('.mdWordDel, .mdWordAdd')]
+      .map(element => element.textContent ?? '')
+    // The visible change is still washed…
+    expect(texts.some(text => text.includes('新'))).toBe(true)
+    // …and no run is an invisible (whitespace-only) span.
+    expect(texts.every(text => text.trim() !== '')).toBe(true)
   })
 
   it('levels wrapped rows of one double-column block slot by slot', () => {

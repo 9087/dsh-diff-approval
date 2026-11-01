@@ -4668,7 +4668,9 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   // Inline local Markdown images after the preview body renders. The preview is
   // injected as innerHTML, so `<img src="details/x.png">` keeps its relative
   // path; rewrite it (via the host RPC) to a data URI so it actually renders.
-  // Runs whenever the preview mounts, the layout toggles, or the file changes.
+  // The dependency is the HTML ITSELF, not just the file and layout: flipping the
+  // structure renderer (`mdStyle`) re-renders the body with fresh, unresolved
+  // `<img>` nodes, and a narrower list of deps left those broken until a reload.
   // After inlining, bump the tick so the ruler re-measures the images' true
   // heights (a data URI gives the <img> a real size).
   useEffect(() => {
@@ -4677,7 +4679,7 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
     if (body === null) return
     void resolvePreviewImages(body, file.path, workspacePath, (path) => onPreviewImage(file.sessionId, path))
       .then(() => setMdImageTick(tick => tick + 1))
-  }, [previewActive, splitView, file.path, file.sessionId, workspacePath, onPreviewImage])
+  }, [previewActive, previewHtml, file.path, file.sessionId, workspacePath, onPreviewImage])
 
   // Overview-ruler markers: one per maximal run of same-kind changed rows, as
   // row runs. Each surface converts them: the code view reads the height table

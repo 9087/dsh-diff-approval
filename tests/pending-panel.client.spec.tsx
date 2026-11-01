@@ -20,7 +20,7 @@ import { codeFontCss } from '../src/client/code-font.ts'
 import { actionTooltip, closeShortcut, shortcutOf, withChord } from '../src/client/chords.ts'
 import { zh, en } from '../src/client/locales.ts'
 import { dismissedUpdateVersion, lastPanelFile, panelFileOffset, rememberedPlacedThreads, rememberedThreads, rememberJumpAway, removalAskQuiet, resetPanelMemory } from '../src/client/panel-memory.ts'
-import { chipMenuEnabled, diffLineHeight, navLeadRows, setCommentModeEnabled, setConfirmFileRemoveEnabled } from '../src/client/settings.ts'
+import { chipMenuEnabled, diffLineHeight, navLeadRows, setCommentModeEnabled, setConfirmFileRemoveEnabled, TEMP_PREVIEW_V2_CHANGED_EVENT } from '../src/client/settings.ts'
 import { DiffDockBody, SHOW_PANEL_EVENT } from '../src/client/dock.tsx'
 import { DiffApprovalHeaderEntry } from '../src/client/header-entry.tsx'
 import { DiffApprovalSettingsTab } from '../src/client/SettingsTab.tsx'
@@ -14469,6 +14469,43 @@ describe('PendingPanel', () => {
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('README.md'))
     expect(document.querySelector('[data-diff-md-preview-body]')).not.toBeNull()
+  })
+
+  it('inlines local preview images again when the structure renderer is flipped while the preview is open', async () => {
+    // The reader's bug: the preview's own `<img src="images/a.png">` are rewritten to data URIs after each
+    // body render. Flipping the structure renderer re-renders that body with fresh, unresolved nodes; the
+    // resolver has to run again, or the images stay broken until a reload.
+    localStorage.setItem('diff-approval:md-preview', '1')
+    const file = entry({
+      id: 'entry-md-images',
+      path: '/repo/README.md',
+      oldText: '# T\n\n![shot](images/old.png)\n',
+      newText: '# T\n\n![shot](images/new.png)\n',
+    })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    props.onPreviewImage = vi.fn(async (_sessionId: SessionId, path: string) => `data:image/png;base64,${Buffer.from(path).toString('base64')}`)
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+
+    /** Every image in the preview body is inlined (no relative src is left behind). */
+    const resolved = (): boolean => {
+      const body = document.querySelector('[data-diff-md-preview-body]')
+      if (body === null) return false
+      const images = [...body.querySelectorAll('img[src]')]
+      return images.length > 0 && images.every(image => image.getAttribute('src')?.startsWith('data:image/') === true)
+    }
+    await waitFor(() => { expect(resolved()).toBe(true) })
+    const callsAfterFirstRender = (props.onPreviewImage as unknown as { mock: { calls: unknown[][] } }).mock.calls.length
+
+    // Flip the renderer the settings row flips: the body is re-rendered, so the images are new nodes.
+    act(() => {
+      localStorage.setItem('diff-approval:temp-preview-v2', '0')
+      window.dispatchEvent(new CustomEvent(TEMP_PREVIEW_V2_CHANGED_EVENT))
+    })
+    await waitFor(() => { expect(resolved()).toBe(true) })
+    expect((props.onPreviewImage as unknown as { mock: { calls: unknown[][] } }).mock.calls.length)
+      .toBeGreaterThan(callsAfterFirstRender)
   })
 
   it('shows source code (not the Markdown preview) for a non-Markdown file even when the preview setting is on', () => {

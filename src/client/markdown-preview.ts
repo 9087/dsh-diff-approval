@@ -2317,6 +2317,31 @@ function wrapOwnRange(el: HTMLElement, start: number, end: number, cls: string):
 }
 
 /**
+ * The visible pieces of one changed run: the whitespace inside and around it is a layout break, not a word.
+ *
+ * Wrapping a run's whole span paints the newline characters too, and a run that ENDS with a newline (an added
+ * paragraph sentence brings one) leaves an empty highlighted box at the line's end — the "phantom difference"
+ * readers reported. Only non-whitespace stretches are words the reader can see, so only those are wrapped.
+ * @param run - one diff run, partitioning one side's text.
+ * @param offset - where the run starts in that side's text.
+ * @returns `[from, to)` character ranges to wrap.
+ */
+function visibleRunRanges(run: IntraRun, offset: number): [number, number][] {
+  const ranges: [number, number][] = []
+  let at = 0
+  while (at < run.text.length) {
+    if (/\s/.test(run.text[at]!)) {
+      at++
+      continue
+    }
+    const from = at
+    while (at < run.text.length && !/\s/.test(run.text[at]!)) at++
+    ranges.push([offset + from, offset + at])
+  }
+  return ranges
+}
+
+/**
  * Wrap one side's changed characters INSIDE the element's own text, leaving nested structure alone.
  *
  * The runs partition the element's whole own text (unchanged runs included), so they are placed by walking
@@ -2330,7 +2355,9 @@ function wrapOwnRange(el: HTMLElement, start: number, end: number, cls: string):
 function wrapOwnChangedRuns(el: HTMLElement, runs: readonly IntraRun[], cls: string): void {
   let cursor = 0
   for (const run of runs) {
-    if (run.kind !== 'same' && run.text !== '') wrapOwnRange(el, cursor, cursor + run.text.length, cls)
+    if (run.kind !== 'same') {
+      for (const [from, to] of visibleRunRanges(run, cursor)) wrapOwnRange(el, from, to, cls)
+    }
     cursor += run.text.length
   }
 }
@@ -2408,7 +2435,9 @@ function wrapSubtreeRange(el: HTMLElement, start: number, end: number, cls: stri
 function wrapSubtreeChangedRuns(el: HTMLElement, runs: readonly IntraRun[], cls: string): void {
   let cursor = 0
   for (const run of runs) {
-    if (run.kind !== 'same' && run.text !== '') wrapSubtreeRange(el, cursor, cursor + run.text.length, cls)
+    if (run.kind !== 'same') {
+      for (const [from, to] of visibleRunRanges(run, cursor)) wrapSubtreeRange(el, from, to, cls)
+    }
     cursor += run.text.length
   }
 }

@@ -527,6 +527,27 @@ function sameType(oldNode: MarkdownTreeNode, newNode: MarkdownTreeNode): boolean
   return oldNode.type === newNode.type
 }
 
+/**
+ * Whether a node is one of Markdown's two ways of wrapping block prose: a `paragraph` (a loose list item, a
+ * top-level paragraph) or the bare `text` token `marked` gives a TIGHT list item's content.
+ *
+ * The same sentence in a tight list and in a loose list is the SAME document content, wrapped differently by
+ * the parser: adding one blank line anywhere in a list makes `marked` wrap every item in a `<p>`. Pairing the
+ * two wrapper types as equivalent is what keeps "the list became loose" from reading as "every item changed".
+ * @param node - one parsed node.
+ * @returns whether the node is a prose wrapper.
+ */
+function isProseWrapper(node: MarkdownTreeNode): boolean {
+  return node.type === 'paragraph' || node.type === 'text'
+}
+
+/** Whether two nodes may be paired: same type, or the tight/loose prose wrappers of the same content. */
+function compatibleForPair(oldNode: MarkdownTreeNode, newNode: MarkdownTreeNode): boolean {
+  return sameType(oldNode, newNode)
+    || (isProseWrapper(oldNode) && isProseWrapper(newNode)
+      && nodeVisibleText(oldNode) === nodeVisibleText(newNode))
+}
+
 /** How alike two nodes are: the similarity of their visible text (1 = identical, 0 = nothing in common). */
 export function nodeSimilarity(oldNode: MarkdownTreeNode, newNode: MarkdownTreeNode): number {
   return textSimilarity(nodeMatchText(oldNode), nodeMatchText(newNode))
@@ -653,8 +674,9 @@ function alignGap(oldGap: readonly MarkdownTreeNode[], newGap: readonly Markdown
         : { value: skipNew.value, kind: 'new' }
       const oldNode = oldGap[row]!
       const newNode = newGap[column]!
-      if (sameType(oldNode, newNode)) {
-        // Same type is a match by the user's rule; similarity only chooses the BEST type-matched partner.
+      if (compatibleForPair(oldNode, newNode)) {
+        // A type match (or a tight/loose prose-wrapper match) is a match by the user's rule; similarity only
+        // chooses the BEST compatible partner.
         const value = table[row + 1]![column + 1]!.value + 1 + nodeSimilarity(oldNode, newNode)
         if (value > best.value + 1e-9) best = { value, kind: 'pair' }
       }
@@ -722,6 +744,10 @@ function attrsEqual(oldNode: MarkdownTreeNode, newNode: MarkdownTreeNode): boole
     // A cell's column alignment is the TABLE's attribute (already compared on the table pair): two cells with
     // the same content are fully matched even when their column was re-aligned.
     if (key === 'align' && oldNode.type === 'table_cell') continue
+    // Loose/tight is a property of the list's layout, not of one item's content: marked flips it on EVERY item
+    // when one blank line is inserted anywhere in the list (see `isProseWrapper`), and counting it would make
+    // a list going loose read as every item changing.
+    if (key === 'loose' && (oldNode.type === 'list_item' || oldNode.type === 'list')) continue
     if (oldNode.attrs[key] !== newNode.attrs[key]) return false
   }
   return true
@@ -736,7 +762,9 @@ function attrsEqual(oldNode: MarkdownTreeNode, newNode: MarkdownTreeNode): boole
  * cell is not merged as a whole, while its matched rows still can be (see `siblingRuns`).
  */
 export function pairFullyMatched(pair: TreeMatchPair): boolean {
-  if (pair.old.type !== pair.new.type) return false
+  // A tight item's `text` and a loose item's `paragraph` are the same content in two wrappers; either side of
+  // a list going loose would otherwise make every UNCHANGED item read as changed (see `isProseWrapper`).
+  if (pair.old.type !== pair.new.type && !(isProseWrapper(pair.old) && isProseWrapper(pair.new))) return false
   if (!attrsEqual(pair.old, pair.new)) return false
   // Leaf nodes (a rule, a comment line, an inline text): the source itself must be unchanged.
   if (pair.old.children.length === 0 && pair.new.children.length === 0) return pair.exact

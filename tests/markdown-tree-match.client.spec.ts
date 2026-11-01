@@ -315,6 +315,18 @@ describe('Markdown syntax tree: fully-matched runs', () => {
     expect(runs.map(run => run.ops.length)).toEqual([1, 1, 1])
   })
 
+  it('does not make every item a change just because the list became loose', () => {
+    // Adding one blank line / block (an image) anywhere in a list makes `marked` wrap EVERY item in a <p>.
+    // That is a layout change of the list, not a content change of the untouched items: b and c must still
+    // merge into context; only a (which gained an image) is a difference.
+    const tight = '- a\n- b\n- c\n'
+    const loose = '- a\n\n  ![shot](a.png)\n\n- b\n- c\n'
+    const list = rootPair(matchMarkdownTrees(tight, loose), 'list')
+    const runs = siblingRuns(list.children)
+    expect(runs.map(run => run.merged)).toEqual([false, true])
+    expect(runs[1]!.ops).toHaveLength(2)
+  })
+
   it('matches a table row only when EVERY cell matches, and a whole table only with header + body', () => {
     const oldText = '| k | v |\n|---|---|\n| a | 1 |\n| b | 2 |\n'
     const newText = '| k | v |\n|---|---|\n| a | 1 |\n| b | TWO |\n'
