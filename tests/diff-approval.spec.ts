@@ -903,6 +903,91 @@ describe('block keep/revert', () => {
     expect(files).toEqual([])
   })
 
+  it('resolves a block whose change includes an added blank line', async () => {
+    // The reader's bug: the new side adds a blank line outside the changed words (a removed comment line,
+    // then a blank line). The block range is old 2..2 / new 2..2; folding it must leave both sides equal —
+    // with a row list that DROPS the blank line, the fold splices the wrong line and the block stays.
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess(
+      '/repo/a.txt',
+      'function f()\r\n-- 注释\r\n\r\n    self:CloseSelf()\r\n',
+      'function f()\n\n\n    self:CloseSelf()\n',
+    ))
+    const [entry] = await listEntries(handle, 'session-1')
+    await expect(handle('block-keep', {
+      sessionId: 'session-1',
+      id: entry!.id,
+      block: { oldStart: 2, oldEnd: 2, newStart: 2, newEnd: 2 },
+      removeWhenResolved: true,
+    }, signal())).resolves.toEqual({ ok: true, value: { outcome: 'kept', resolved: true } })
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+  })
+
+  it('keeps a final blank line, and a deletion at the end, with the new text\'s newline convention', async () => {
+    // A file's final blank line is a LINE (it is the second terminating newline); folding a block that
+    // reaches the end must take the new text's convention or that line stays pending forever.
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess('/repo/a.txt', 'a', 'b\n\n'))
+    let [entry] = await listEntries(handle, 'session-1')
+    await expect(handle('block-keep', {
+      sessionId: 'session-1', id: entry!.id, block: { oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 2 },
+    }, signal())).resolves.toEqual({ ok: true, value: { outcome: 'kept', resolved: true } })
+    let [kept] = await listEntries(handle, 'session-1')
+    expect(kept!.oldText).toBe('b\n\n')
+
+    // A pure deletion at the end of a file whose new text ends blank: old 4..4 / new 5..4.
+    const second = await harness()
+    emitResult(second.ctx, editExec(), editSuccess('/repo/a.txt', 'a\nb\n\nc', 'a\nb\n\n'))
+    ;[entry] = await listEntries(second.handle, 'session-1')
+    await expect(second.handle('block-keep', {
+      sessionId: 'session-1', id: entry!.id, block: { oldStart: 4, oldEnd: 4, newStart: 5, newEnd: 4 },
+      removeWhenResolved: true,
+    }, signal())).resolves.toEqual({ ok: true, value: { outcome: 'kept', resolved: true } })
+    expect(await listEntries(second.handle, 'session-1')).toEqual([])
+  })
+
+  it('resolves the screenshot case — deleted lead-in lines plus a final blank line — one block at a time', async () => {
+    // old: comment, function, self, end — new: self, end, blank. The hidden final blank line used to make the
+    // identical `end` a del+add; with the row list right, the change is two honest blocks: the lead-in
+    // deletion, then the added blank line at EOF.
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess(
+      '/repo/a.txt',
+      '--- 确认按钮：关闭面板\nfunction f()\n    self:CloseSelf()\nend\n',
+      '    self:CloseSelf()\nend\n\n',
+    ))
+    const [entry] = await listEntries(handle, 'session-1')
+    await expect(handle('block-keep', {
+      sessionId: 'session-1', id: entry!.id, block: { oldStart: 1, oldEnd: 2, newStart: 1, newEnd: 0 },
+    }, signal())).resolves.toEqual({ ok: true, value: { outcome: 'kept' } })
+    const [afterLead] = await listEntries(handle, 'session-1')
+    // The lead-in is gone from the baseline; only the EOF blank line remains pending.
+    expect(afterLead!.oldText).toBe('    self:CloseSelf()\nend\n')
+    await expect(handle('block-keep', {
+      sessionId: 'session-1', id: entry!.id, block: { oldStart: 3, oldEnd: 2, newStart: 3, newEnd: 3 },
+      removeWhenResolved: true,
+    }, signal())).resolves.toEqual({ ok: true, value: { outcome: 'kept', resolved: true } })
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+  })
+
+  it('resolves a blank line added in the MIDDLE of a change with one keep', async () => {
+    // One line removed and one blank line added — a single contiguous block, not at the end of the file.
+    // The hidden blank line used to make this look like a pure deletion (and leave the blank pending after
+    // the keep); now the block's new range owns that line, so one keep resolves it.
+    const { ctx, handle } = await harness()
+    emitResult(ctx, editExec(), editSuccess(
+      '/repo/a.txt',
+      'function f()\n    self:CloseSelf()\n-- 注释\nend\nkeep\n',
+      'function f()\n    self:CloseSelf()\n\nend\nkeep\n',
+    ))
+    const [entry] = await listEntries(handle, 'session-1')
+    await expect(handle('block-keep', {
+      sessionId: 'session-1', id: entry!.id, block: { oldStart: 3, oldEnd: 3, newStart: 3, newEnd: 3 },
+      removeWhenResolved: true,
+    }, signal())).resolves.toEqual({ ok: true, value: { outcome: 'kept', resolved: true } })
+    expect(await listEntries(handle, 'session-1')).toEqual([])
+  })
+
   it('keeps the entry with no pending diff when the last block is reverted', async () => {
     const { ctx, fs, handle } = await harness()
     const entry = await twoBlocks({ ctx, fs, handle })

@@ -127,6 +127,70 @@ describe('computeWholeFileDiff', () => {
     expect(diff.removed).toBe(0)
     expect(diff.added).toBe(0)
   })
+
+  it('keeps a blank line inside a changed middle, so both sides add up and ranges stay true', () => {
+    // The reader's bug: a removed comment followed by an added blank line. The middle used to be diffed as a
+    // JOINED string, and an empty line at the edge of that string reads as "no line" — so the new side lost
+    // a row, the following line numbers shifted, and identical lines showed as an unrelated del+add. Every
+    // line of both sides must appear exactly once (here 4 old and 4 new lines), and the change block must
+    // own exactly the removed line and the added blank one.
+    const diff = computeWholeFileDiff(
+      'function f()\r\n-- 注释\r\n\r\n    self:CloseSelf()\r\n',
+      'function f()\n\n\n    self:CloseSelf()\n',
+    )
+    expect(diff.rows.map(row => `${row.kind}:${String(row.oldLine)}:${String(row.newLine)}`)).toEqual([
+      'context:1:1',
+      'del:2:undefined',
+      'add:undefined:2',
+      'context:3:3',
+      'context:4:4',
+    ])
+    expect(diff.removed).toBe(1)
+    expect(diff.added).toBe(1)
+    expect(blockRangesOf(diff.rows, { start: 1, end: 2 }))
+      .toEqual({ oldStart: 2, oldEnd: 2, newStart: 2, newEnd: 2 })
+  })
+
+  it('keeps a final blank line, so the last unchanged line is not shown as a del+add', () => {
+    // The reader's screenshot: the last line is `end` on both sides, but the new side also ends with a BLANK
+    // line (its second terminating newline). Diffed as a joined string that blank line read as "no line", so
+    // the new string ended with a newline the old one lacked — and the identical `end` line came out as a
+    // delete plus an add. The row list has to carry the blank line itself.
+    const oldText = '--- 确认按钮：关闭面板\nfunction f()\n    self:CloseSelf()\nend\n'
+    const newText = '    self:CloseSelf()\nend\n\n'
+    const diff = computeWholeFileDiff(oldText, newText)
+    expect(diff.rows.map(row => `${row.kind}:${String(row.oldLine)}:${String(row.newLine)}:${JSON.stringify(row.text)}`)).toEqual([
+      'del:1:undefined:"--- 确认按钮：关闭面板"',
+      'del:2:undefined:"function f()"',
+      'context:3:1:"    self:CloseSelf()"',
+      'context:4:2:"end"',
+      'add:undefined:3:""',
+    ])
+    expect(diff.removed).toBe(2)
+    expect(diff.added).toBe(1)
+  })
+
+  it('carries a blank line added in the MIDDLE of a change — not just at EOF', () => {
+    // The reader remembers no blank line because the bug never drew one: a blank line added when one comment
+    // line was removed, in the middle of the file, is the LAST line of the changed middle (the lines after
+    // it are unchanged context). Joined into a string it vanished, so the change looked like a pure deletion,
+    // the new-side line numbers skipped a number, and keeping it left the blank line pending.
+    const oldText = 'function f()\n    self:CloseSelf()\n-- 注释\nend\nkeep\n'
+    const newText = 'function f()\n    self:CloseSelf()\n\nend\nkeep\n'
+    const diff = computeWholeFileDiff(oldText, newText)
+    expect(diff.rows.map(row => `${row.kind}:${String(row.oldLine)}:${String(row.newLine)}:${JSON.stringify(row.text)}`)).toEqual([
+      'context:1:1:"function f()"',
+      'context:2:2:"    self:CloseSelf()"',
+      'del:3:undefined:"-- 注释"',
+      'add:undefined:3:""',
+      'context:4:4:"end"',
+      'context:5:5:"keep"',
+    ])
+    expect(diff.removed).toBe(1)
+    expect(diff.added).toBe(1)
+    expect(blockRangesOf(diff.rows, { start: 2, end: 3 }))
+      .toEqual({ oldStart: 3, oldEnd: 3, newStart: 3, newEnd: 3 })
+  })
 })
 
 describe('blockRangesOf', () => {

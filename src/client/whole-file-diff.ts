@@ -6,7 +6,7 @@
  * @module dsh-diff-approval/client/whole-file-diff
  */
 
-import { diffArrays, structuredPatch } from 'diff'
+import { diffArrays } from 'diff'
 import type { DiffApprovalBlockRange } from '../types.ts'
 
 /** One rendered body line of the whole-file view. */
@@ -391,25 +391,33 @@ export function computeWholeFileDiff(oldText: string, newText: string): WholeFil
     removed += aligned.removed
     added += aligned.added
   } else {
-    const context = Math.max(1, midOld.length, midNew.length)
-    const patch = structuredPatch('', '', midOld.join('\n'), midNew.join('\n'), undefined, undefined, { context })
+    // Compare the middle as LINES, not as a joined string. `structuredPatch`/`diffLines` read an empty
+    // string as an empty FILE (zero lines) and a trailing newline as a terminator, so a changed middle
+    // that starts or ends with an empty line lost that line from the row list: the two sides no longer
+    // added up, and every line range after it pointed one line off — the "identical lines shown as
+    // changed, and Keep leaves the block behind" bug. `diffArrays` compares the line arrays themselves, so
+    // an empty line is a line.
+    const changes = diffArrays(midOld, midNew)
     let oldLine = start
     let newLine = start
-    for (const hunk of patch.hunks) {
-      for (const line of hunk.lines) {
-        if (line.startsWith('\\')) continue
-        if (line.startsWith('-')) {
+    for (const change of changes) {
+      if (change.removed === true) {
+        for (const text of change.value) {
           oldLine++
-          rows.push({ kind: 'del', text: line.slice(1), oldLine, newLine: undefined })
+          rows.push({ kind: 'del', text, oldLine, newLine: undefined })
           removed++
-        } else if (line.startsWith('+')) {
+        }
+      } else if (change.added === true) {
+        for (const text of change.value) {
           newLine++
-          rows.push({ kind: 'add', text: line.slice(1), oldLine: undefined, newLine })
+          rows.push({ kind: 'add', text, oldLine: undefined, newLine })
           added++
-        } else {
+        }
+      } else {
+        for (const text of change.value) {
           oldLine++
           newLine++
-          rows.push({ kind: 'context', text: line.slice(1), oldLine, newLine })
+          rows.push({ kind: 'context', text, oldLine, newLine })
         }
       }
     }

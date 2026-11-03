@@ -3028,7 +3028,20 @@ export function apply(ctx: Context, config?: DiffApprovalConfig): void {
         let updatedOld: string
         if (chars === undefined || !charSpansStayOnOneLine(entry.oldText, entry.newText, chars)) {
           const accepted = contentRangeOf(entry.newText, blockTarget.block.newStart, blockTarget.block.newEnd)
-          updatedOld = replaceContentLines(entry.oldText, blockTarget.block.oldStart, blockTarget.block.oldEnd, accepted)
+          // A fold that reaches the new text's end has to take ITS trailing-newline convention: the
+          // file's final blank line is a line in the model, and only the source convention can say the
+          // second terminating newline is there. Keeping the old convention would leave that blank line
+          // pending forever — a block keep the reader presses again and again. A pure deletion at the end
+          // counts too: its empty new range is the insertion point AFTER the last line.
+          const newLineCount = contentLinesOf(entry.newText).length
+          const reachesEnd = newLineCount > 0 && blockTarget.block.newEnd >= newLineCount
+          updatedOld = replaceContentLines(
+            entry.oldText,
+            blockTarget.block.oldStart,
+            blockTarget.block.oldEnd,
+            accepted,
+            reachesEnd ? entry.newText : entry.oldText,
+          )
         } else {
           const accepted = entry.newText.slice(chars.new.start, chars.new.end)
           const spliced = spliceChars(entry.oldText, chars.old.start, chars.old.end, accepted)
@@ -3720,19 +3733,21 @@ function contentRangeOf(text: string, start: number, end: number): string[] {
 /**
  * Replace the content lines [start..end] (1-based) of `text` with `replacement`
  * lines. An empty range (`start > end`) inserts before line `start`. Out-of-range
- * bounds clamp; the trailing-newline convention of `text` is preserved.
+ * bounds clamp; the trailing-newline convention of `trailingFrom` (default `text`)
+ * is preserved — a caller folding a block that reaches the new text's end passes
+ * the new text, because its final blank line lives only in that convention.
  */
-function replaceContentLines(text: string, start: number, end: number, replacement: string[]): string {
+function replaceContentLines(text: string, start: number, end: number, replacement: string[], trailingFrom: string = text): string {
   const lines = contentLinesOf(text)
   const count = lines.length
   if (start > end) {
     const at = Math.min(Math.max(start, 1), count + 1)
-    return fromContentLines(text, [...lines.slice(0, at - 1), ...replacement, ...lines.slice(at - 1)])
+    return fromContentLines(trailingFrom, [...lines.slice(0, at - 1), ...replacement, ...lines.slice(at - 1)])
   }
   const s = Math.min(Math.max(start, 1), count + 1)
   const e = Math.min(Math.max(end, 1), count)
   if (s > e) return text
-  return fromContentLines(text, [...lines.slice(0, s - 1), ...replacement, ...lines.slice(e)])
+  return fromContentLines(trailingFrom, [...lines.slice(0, s - 1), ...replacement, ...lines.slice(e)])
 }
 
 /** Narrow a wire payload to one block keep/revert target. */

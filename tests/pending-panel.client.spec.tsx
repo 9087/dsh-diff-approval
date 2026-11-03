@@ -2569,8 +2569,41 @@ describe('PendingPanel', () => {
     expect(props.onKeep).toHaveBeenCalledWith(FILE.sessionId, FILE.id, false)
   })
 
-  it('reverts through the owning session by id', () => {
-    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+  it('draws a blank line added in the MIDDLE of a single-column change instead of duplicating its neighbour', () => {
+    // The reader's screenshot is the SINGLE column (old rows and new rows in one list, two gutters). A blank
+    // line added where a comment line was removed is the last row of the changed run; the old row list lost
+    // it, so the new-side line numbers skipped one and the identical `end` line came out as a del+add.
+    const file = entry({
+      id: 'entry-blank-mid',
+      path: '/repo/blank.lua',
+      oldText: 'function f()\n    self:CloseSelf()\n-- 注释\nend\nkeep\n',
+      newText: 'function f()\n    self:CloseSelf()\n\nend\nkeep\n',
+    })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('blank.lua'))
+    expect(document.querySelector('[data-diff-split]')).toBeNull()
+    const rows = [...document.querySelectorAll('[data-diff-row]')].map(row => {
+      const gutters = [...row.querySelectorAll('[data-diff-gutter]')].map(gutter => gutter.textContent ?? '')
+      return [
+        row.getAttribute('data-diff-line') ?? '',
+        gutters[0] ?? '',
+        gutters[1] ?? '',
+        row.querySelector('[data-diff-code]')?.textContent ?? '',
+      ].join('|')
+    })
+    expect(rows).toEqual([
+      'context|1|1|function f()',
+      'context|2|2|    self:CloseSelf()',
+      'del|3||-- 注释',
+      'add||3|\u00a0',
+      'context|4|4|end',
+      'context|5|5|keep',
+    ])
+  })
+
+  it('reverts through the owning session by id', () => {    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))
@@ -14943,7 +14976,10 @@ describe('PendingPanel', () => {
       id: 'entry-md-jump-double',
       path: '/repo/README.md',
       oldText: '# T\nkeep one\nkeep two\nkeep three\nkeep four\nkeep five\n',
-      newText: '# T edited\nkeep one\nkeep two\nkeep four\nkeep five\n',
+      // Both changes are REPLACEMENTS: each renders on both sides, one element per column (the deleted line
+      // used to be paired with a re-added neighbour by the old string-based middle diff; the line-array diff
+      // keeps the unchanged neighbour as context, which is the true minimal edit).
+      newText: '# T edited\nkeep one\nkeep two\nkeep 3\nkeep four\nkeep five\n',
     })
     // This case drives the FRAGMENT renderer's aligned double rows (`.mdDoubleRow`). The structure renderer
     // draws two whole documents side by side instead — the jump machinery is shared, but the geometry this
