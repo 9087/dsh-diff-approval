@@ -197,4 +197,27 @@ describe('flow character-level runs', () => {
     // The table is still rendered as one table per column (no inline span foster-parented above it).
     expect(document.querySelectorAll('table')).toHaveLength(2)
   })
+
+  it('gives both columns the same table-row slots, with a hidden placeholder for a row one side lacks', () => {
+    // The screenshot's SPEC table: rows pair by content, an inserted row exists only on one side, and a wrapped
+    // cell on one side is taller. Both columns must keep the same slot sequence so the panel can level each
+    // pair; a row one side does not have is a hidden placeholder occupying its side of the slot.
+    const oldTable = '| 项目 | 内容 |\n| --- | --- |\n| A | 1 |\n| B | 2 |\n| C | 3 |\n'
+    const newTable = '| 项目 | 内容 |\n| --- | --- |\n| A | 1 |\n| X | 9 |\n| B | 2 |\n| C | 3 |\n'
+    document.body.innerHTML = renderFlowDouble(oldTable, newTable)
+    const unit = document.querySelector<HTMLElement>('.mdFlowDoubleRow-table')
+    expect(unit).not.toBeNull()
+    const tables = [...unit!.querySelectorAll<HTMLElement>('table')]
+    expect(tables).toHaveLength(2)
+    const slotsOf = (table: HTMLElement): (string | undefined)[] =>
+      [...table.querySelectorAll<HTMLElement>('tr')].map(row => row.dataset.mdTableSlot)
+    expect(slotsOf(tables[0]!)).toEqual(slotsOf(tables[1]!))
+    expect(slotsOf(tables[0]!).filter(slot => slot !== undefined)).toHaveLength(5)
+    const placeholdersOf = (table: HTMLElement): (string | undefined)[] =>
+      [...table.querySelectorAll<HTMLElement>('tr.mdFlowTrPlaceholder')].map(row => row.dataset.mdTableSlot)
+    // The inserted row X is new-only: the old table holds its slot with a placeholder and the new table has
+    // the real row; every other row is paired and has no placeholder.
+    expect(placeholdersOf(tables[0]!)).toHaveLength(1)
+    expect(placeholdersOf(tables[1]!)).toHaveLength(0)
+  })
 })

@@ -2603,7 +2603,48 @@ describe('PendingPanel', () => {
     ])
   })
 
-  it('reverts through the owning session by id', () => {    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
+  it('levels matched table rows of the double-column preview so one tall cell keeps the rest on line', async () => {
+    localStorage.setItem('diff-approval:md-preview', '1')
+    localStorage.setItem('diff-approval:tree-diff', '1')
+    const file = entry({
+      id: 'entry-level-table',
+      path: '/repo/table.md',
+      oldText: '# T\n\n| 项目 | 内容 |\n| --- | --- |\n| 文档版本 | v1.0 说明：旧 |\n| 不变 | 一样 |\n',
+      newText: '# T\n\n| 项目 | 内容 |\n| --- | --- |\n| 文档版本 | v1.0 说明：旧内容再加上更多文字让这一行走两行 |\n| 不变 | 一样 |\n',
+    })
+    const originalRect = Element.prototype.getBoundingClientRect
+    Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
+      if (this instanceof HTMLTableRowElement && this.dataset.mdTableSlot !== undefined) {
+        const height = (this.textContent ?? '').length > 20 ? 60 : 24
+        return {
+          top: 0, bottom: height, left: 0, right: 100, width: 100, height, x: 0, y: 0, toJSON: () => ({}),
+        } as DOMRect
+      }
+      return originalRect.call(this)
+    }
+    try {
+      render(<PendingPanel {...panelProps({ read: true, files: [file], busy: new Set() })} />)
+      fireEvent.click(screen.getByLabelText('panel.aria'))
+      fireEvent.click(screen.getByText('table.md'))
+      // The double column is the STRUCTURE style's two documents; the table row pairing and the leveling
+      // pass live under `.mdFlowDoubleRow-table`.
+      fireEvent.click(document.querySelector('[data-diff-toggle-view]') as HTMLElement)
+      const unit = document.querySelector('.mdFlowDoubleRow-table')
+      expect(unit).not.toBeNull()
+      const changed = [...unit!.querySelectorAll<HTMLElement>('tr[data-md-block]')]
+      expect(changed).toHaveLength(2)
+      // The old cell is short, the new one wraps tall; both rows are leveled to the taller side, so the next
+      // matched row starts on the same line in both columns.
+      await waitFor(() => {
+        for (const row of changed) expect(row.style.height).toBe('60px')
+      })
+    } finally {
+      Element.prototype.getBoundingClientRect = originalRect
+    }
+  })
+
+  it('reverts through the owning session by id', () => {
+    const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     fireEvent.click(screen.getByText('a.txt'))

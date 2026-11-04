@@ -5887,6 +5887,34 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
       // Side-by-side: a changed table row's colour fills its OWN column width (never the other side), measured
       // per row under the table so a narrow table inside a wide column still gets a full-column band.
       for (const unit of body.querySelectorAll<HTMLElement>('.mdFlowDoubleRow-table')) {
+        // The renderer gives every row slot a <tr> on BOTH sides (a hidden placeholder where this column has
+        // no row for that slot), so the slot ids pair across the two tables. Level each pair to the taller
+        // side: a wrapped cell, or a row only one side has, must not push the matched rows below it out of
+        // line. Clear first — a previous leveling would otherwise be measured as the natural height.
+        const tables = [...unit.querySelectorAll<HTMLElement>('table')]
+        const slotRows = tables.map(table => {
+          const bySlot = new Map<string, HTMLElement>()
+          for (const row of table.querySelectorAll<HTMLElement>('tr[data-md-table-slot]')) {
+            if (row.dataset.mdTableSlot !== undefined) bySlot.set(row.dataset.mdTableSlot, row)
+          }
+          return bySlot
+        })
+        if (slotRows.length === 2) {
+          const slots = [...new Set([...slotRows[0]!.keys(), ...slotRows[1]!.keys()])]
+            .sort((left, right) => Number(left) - Number(right))
+          for (const rows of slotRows) for (const row of rows.values()) row.style.height = ''
+          for (const slot of slots) {
+            const oldRow = slotRows[0]!.get(slot)
+            const newRow = slotRows[1]!.get(slot)
+            const height = Math.max(
+              oldRow?.getBoundingClientRect().height ?? 0,
+              newRow?.getBoundingClientRect().height ?? 0,
+            )
+            if (height <= 0) continue
+            if (oldRow !== undefined) oldRow.style.height = `${height}px`
+            if (newRow !== undefined) newRow.style.height = `${height}px`
+          }
+        }
         for (const stale of [...unit.children]) {
           if (stale.classList.contains('mdFlowDoubleTintLayer')) stale.remove()
         }

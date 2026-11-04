@@ -65,6 +65,25 @@ const IMAGE_NEW = [
 /** A real (if plain) SVG so the host's preview-image read returns bytes the browser lays out. */
 const SHOT_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="160"><rect width="240" height="160" fill="#dbeafe"/></svg>'
 
+// The SPEC table's case: a value grows from one word to a wrapped sentence and a row exists on one side only.
+// The two columns' tables must keep the same row slots and level each pair's height (see the last test).
+const TABLE_OLD = [
+  '# 表格', '',
+  '| 项目 | 内容 |', '| --- | --- |',
+  '| 文档版本 | v1.0 |',
+  '| 日期 | 2026-10-31 |',
+  '| 不变 | 一样 |',
+  '| 读者 | 旧读者 |', '',
+].join('\n')
+const TABLE_NEW = [
+  '# 表格', '',
+  '| 项目 | 内容 |', '| --- | --- |',
+  '| 文档版本 | v4.0（新增「设置 → 任务闸机」实验性开关：全量劫持 todo 列表，宿主持久化；劫持引擎待实现） |',
+  '| 日期 | 2026-11-03 |',
+  '| 不变 | 一样 |',
+  '| 参考实现 | `dsh-diff-approval`（工程结构 / connection RPC / wake-up 卡片投递）、`dsh-shortcut`（LLM 标题生成） |', '',
+].join('\n')
+
 let fixture: Fixture
 let browser: Browser
 let page: Page
@@ -75,6 +94,7 @@ let revertId: string
 let addId: string
 let delId: string
 let imageId: string
+let tableId: string
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => { setTimeout(resolve, ms) })
 
@@ -94,6 +114,7 @@ test.describe('flow preview', () => {
       { name: 'flow-add.md', oldText: '', newText: ADD_NEW },
       { name: 'flow-delete.md', oldText: DEL_OLD, newText: '' },
       { name: 'flow-image.md', oldText: IMAGE_OLD, newText: IMAGE_NEW },
+      { name: 'flow-table.md', oldText: TABLE_OLD, newText: TABLE_NEW },
     ]
     fixture = makeFixture('flow-preview')
     const workspaceId = await bootstrapHome(dsh, fixture)
@@ -114,6 +135,7 @@ test.describe('flow preview', () => {
     addId = seeded.entries[2]!.id
     delId = seeded.entries[3]!.id
     imageId = seeded.entries[4]!.id
+    tableId = seeded.entries[5]!.id
     // The image itself is a workspace file, not a pending one: the preview's image read only needs it on
     // disk at the path the Markdown names (the seeded file's own folder).
     writeFileSync(join(fixture.workspace, 'shot.svg'), SHOT_SVG)
@@ -306,5 +328,37 @@ test.describe('flow preview', () => {
     expect(boxes).not.toBeNull()
     expect(Math.abs(boxes!.flashTop - boxes!.blockTop)).toBeLessThan(2)
     expect(Math.abs(boxes!.flashBottom - boxes!.blockBottom)).toBeLessThan(2)
+  })
+
+  test('double column: matched table rows share a line, even when one cell wraps or a row is one-sided', async () => {
+    test.setTimeout(300_000)
+    await openPreview(tableId)
+    await ensureDouble()
+    await expect(page.locator('.mdFlowDoubleRow-table')).toHaveCount(1, { timeout: 20_000 })
+    // Let the row-leveling pass settle (it re-runs on the ResizeObserver once the level heights land).
+    await page.waitForTimeout(700)
+    const slots = await page.evaluate(() => {
+      const tables = [...document.querySelectorAll<HTMLElement>('.mdFlowDoubleRow-table table')]
+      if (tables.length !== 2) return null
+      const rowsOf = (table: HTMLElement): Map<string, DOMRect> => new Map(
+        [...table.querySelectorAll<HTMLElement>('tr[data-md-table-slot]')]
+          .map(row => [row.dataset.mdTableSlot ?? '', row.getBoundingClientRect()] as const),
+      )
+      const oldRows = rowsOf(tables[0]!)
+      const newRows = rowsOf(tables[1]!)
+      return [...oldRows.keys()].filter(slot => newRows.has(slot)).map(slot => ({
+        slot,
+        oldTop: oldRows.get(slot)!.top,
+        newTop: newRows.get(slot)!.top,
+        oldHeight: oldRows.get(slot)!.height,
+        newHeight: newRows.get(slot)!.height,
+      }))
+    })
+    expect(slots).not.toBeNull()
+    expect(slots!.length).toBeGreaterThan(3)
+    for (const slot of slots!) {
+      expect(Math.abs(slot.oldTop - slot.newTop), `row slot ${slot.slot} top`).toBeLessThan(2)
+      expect(Math.abs(slot.oldHeight - slot.newHeight), `row slot ${slot.slot} height`).toBeLessThan(2)
+    }
   })
 })

@@ -5494,6 +5494,11 @@
 .mdPreviewBody :global(.mdFlowDoubleRow-table) :global(.mdFlowTr-new > *) {
   background-color: transparent;
 }
+/* A slot the other column has and this one does not: hidden, but still the leveled height, so the next
+   matching row starts on the same line in both columns. */
+.mdPreviewBody :global(.mdFlowDoubleRow-table) :global(.mdFlowTrPlaceholder) {
+  visibility: hidden;
+}
 /* A changed CODE LINE keeps its own tint inside the code card, so one whole fence stays ONE card per column. */
 .mdPreviewBody :global(.mdFlowDoubleRow-code) {
   position: relative;

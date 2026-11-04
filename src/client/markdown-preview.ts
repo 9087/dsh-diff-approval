@@ -5004,13 +5004,26 @@ function flowRowGroupText(cells: readonly MarkdownTreeNode[]): string {
   return cells.map(cell => nodeVisibleText(cell)).join('\u0001')
 }
 
-/** LCS alignment of old/new table row groups by their visible text. */
+/**
+ * LCS alignment of old/new table row groups.
+ *
+ * A row is identified by its FIRST cell when that cell reads as a label (项目 / 日期 / 包名 …): the value
+ * beside it may grow from `v1.0` to a whole sentence without making it another row, which is exactly the
+ * SPEC table's case — the old whole-row-text rule left 文档版本/日期 unpaired and side-by-side rows drifted.
+ * Tables whose first column is not a label fall back to comparing the whole row's visible text.
+ */
 function flowAlignTableRows(
   oldRows: readonly MarkdownTreeNode[][],
   newRows: readonly MarkdownTreeNode[][],
 ): { oldCells?: MarkdownTreeNode[] | undefined; newCells?: MarkdownTreeNode[] | undefined }[] {
-  const same = (left: readonly MarkdownTreeNode[], right: readonly MarkdownTreeNode[]): boolean =>
-    textSimilarity(flowRowGroupText(left), flowRowGroupText(right)) >= 0.5
+  const cellsTextOf = (cells: readonly MarkdownTreeNode[]): string[] => cells.map(cell => nodeVisibleText(cell))
+  const same = (left: readonly MarkdownTreeNode[], right: readonly MarkdownTreeNode[]): boolean => {
+    if (left.length !== right.length) return false
+    const leftText = cellsTextOf(left)
+    const rightText = cellsTextOf(right)
+    if (leftText[0] !== undefined && rightText[0] !== undefined && textSimilarity(leftText[0], rightText[0]) >= 0.5) return true
+    return textSimilarity(flowRowGroupText(left), flowRowGroupText(right)) >= 0.5
+  }
   const table: number[][] = Array.from({ length: oldRows.length + 1 }, () => new Array<number>(newRows.length + 1).fill(0))
   for (let row = oldRows.length - 1; row >= 0; row--) {
     for (let column = newRows.length - 1; column >= 0; column--) {
@@ -6282,12 +6295,18 @@ export function renderFlowDouble(oldText: string, newText: string): string {
     return wrap
   }
 
-  /** One changed table's side: a real table for this column, its changed rows tinted by their side class. */
+  /** One changed table's side: a real table for this column, its changed rows tinted by their side class.
+   *
+   * Every flow row of the table gets a `<tr data-md-table-slot>` on BOTH sides: a row this side does not carry
+   * gets a hidden placeholder row instead. That keeps the two tables' slot sequences identical, so the panel
+   * can level each pair's height and matching rows stay on the same line even when one side wraps more (or has
+   * a row the other side does not). */
   const tableSideOf = (start: number, end: number, side: 'old' | 'new', doc: RenderedDoc): HTMLElement => {
     const table = document.createElement('table')
     table.className = 'mdFlowTable'
     const body = document.createElement('tbody')
     const head = document.createElement('thead')
+    const columns = flowTableColumnCount(rows[start]!.table!.source)
     let headerChanged = false
     for (let at = start; at < end; at++) {
       const row = rows[at]!
@@ -6301,8 +6320,19 @@ export function renderFlowDouble(oldText: string, newText: string): string {
       const cellEntries = (row.tableCells ?? [])
         .map(cell => ({ cell, node: side === 'old' ? cell.oldCell : cell.newCell }))
         .filter((entry): entry is { cell: NonNullable<FlowRow['tableCells']>[number]; node: MarkdownTreeNode } => entry.node !== undefined)
-      if (cellEntries.length === 0) continue
+      if (cellEntries.length === 0) {
+        // The header exists on both sides whenever the table does; a body row may not. Placeholder keeps
+        // this side's slot in step with the other side (hidden, but it takes the leveled height).
+        if (row.tableHeader === true) continue
+        const placeholder = document.createElement('tr')
+        placeholder.className = 'mdFlowTrPlaceholder'
+        placeholder.dataset.mdTableSlot = String(at)
+        for (let column = 0; column < columns; column++) placeholder.append(document.createElement('td'))
+        body.append(placeholder)
+        continue
+      }
       const tr = document.createElement('tr')
+      tr.dataset.mdTableSlot = String(at)
       for (const { cell, node } of cellEntries) {
         const element = flowNodeElement(doc, node, side)
         if (element === undefined) continue
