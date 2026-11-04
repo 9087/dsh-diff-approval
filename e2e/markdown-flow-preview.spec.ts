@@ -49,7 +49,8 @@ const REVERT_NEW = [
   FENCE + 'py', "print('language changed')", FENCE, '',
 ].join('\n')
 
-const ADD_NEW = '# 全新增\n\n新增段落。\n'
+// The fence is on purpose: a whole-file addition must not paint a ghost card for it in the EMPTY old column.
+const ADD_NEW = ['# 全新增', '', '新增段落。', '', FENCE + 'ts', 'const x = 1', FENCE, ''].join('\n')
 const DEL_OLD = '# 全删除\n\n删除段落。\n'
 
 // A picture's change: the block's height comes from the image, which is inlined AFTER the body renders. The
@@ -290,6 +291,10 @@ test.describe('flow preview', () => {
     await expect(page.locator('.mdFlowDoubleRow-diff')).toHaveAttribute('data-md-kind', 'add')
     await expect(page.locator('.mdFlowDoubleCell-old.mdFlowDoubleCell-empty')).toHaveCount(1)
     await expect(page.locator('.mdFlowDoubleCell-new .mdFlowDoubleContent')).toHaveCount(1)
+    // The new document has a fence; the EMPTY old column must not show a card (whose banner would carry the
+    // new side's language) for code it does not contain.
+    const emptyOldCell = page.locator('.mdFlowDoubleCell-old').first()
+    await expect(emptyOldCell.locator('.mdFlowCodeBlock, .mdFlowCodeBanner')).toHaveCount(0)
 
     await openPreview(delId)
     await ensureDouble()

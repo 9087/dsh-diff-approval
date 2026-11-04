@@ -6558,7 +6558,11 @@ export function renderFlowDouble(oldText: string, newText: string): string {
         const codeId = row.code.id
         let codeEnd = at
         while (codeEnd < end && rows[codeEnd]!.code?.id === codeId) codeEnd++
-        content.append(codeSideOf(at, codeEnd, side, doc))
+        // This column gets a card only when the fence has lines on THIS side. A whole-file addition has no
+        // old code, but an empty card still draws the NEW side's language banner ("ts") in the empty column;
+        // the reader sees a ghost code block that exists nowhere. The slot is still consumed, so both
+        // columns' pair numbering stays in step.
+        if (codeLinesOf(at, codeEnd, side).length > 0) content.append(codeSideOf(at, codeEnd, side, doc))
         pairSlot++
         at = codeEnd
         continue

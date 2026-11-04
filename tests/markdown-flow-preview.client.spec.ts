@@ -220,4 +220,18 @@ describe('flow character-level runs', () => {
     expect(placeholdersOf(tables[0]!)).toHaveLength(1)
     expect(placeholdersOf(tables[1]!)).toHaveLength(0)
   })
+
+  it('draws NO phantom code card in the empty column of a whole-file addition', () => {
+    // The reader's screenshot: a newly created Markdown file's prose contains a ```ts fence. The old column is
+    // empty, but the code branch drew a card for it with zero lines — only the NEW side's language banner — so
+    // a ghost "ts" block appeared at the top of the empty column.
+    const added = '# 标题\n\n```ts\nconst x = 1\n```\n\n段落。\n'
+    document.body.innerHTML = renderFlowDouble('', added)
+    const cells = [...document.querySelectorAll<HTMLElement>('.mdFlowDoubleCell')]
+    expect(cells).toHaveLength(2)
+    expect(cells[0]!.classList.contains('mdFlowDoubleCell-empty')).toBe(true)
+    expect(cells[0]!.querySelectorAll('.mdFlowCodeBlock, .mdFlowCodeBanner')).toHaveLength(0)
+    // The new column keeps its one real card.
+    expect(cells[1]!.querySelectorAll('.mdFlowCodeBlock')).toHaveLength(1)
+  })
 })
