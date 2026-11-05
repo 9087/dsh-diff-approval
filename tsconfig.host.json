@@ -34,6 +34,7 @@
     "src/comment-skill.ts",
     "src/comments.ts",
     "src/font-slices.ts",
+    "src/home-paths.ts",
     "src/index.ts",
     "src/open.ts",
     "src/pending.ts",

@@ -50,4 +50,16 @@ describe('the manifest and the seats the client half fills', () => {
     expect(declaredClientInject()).toContain('@deepseek-ai/dsh-client-ui-sidebar')
     expect(declaredClientInject()).toContain('@deepseek-ai/dsh-client-runtime')
   })
+
+  it('never declares a host-core package as a runtime dependency', () => {
+    // Issue #10: a `@deepseek-ai/dsh-*` dependency is a HOST package. pnpm hoists the plugin's copy into the
+    // profile, where the host's own row can resolve it instead of the core's matching copy — and the version
+    // gate then disables that row and every service injecting it. Host packages belong to the host runtime;
+    // only ordinary third-party libraries may be runtime dependencies.
+    const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
+      dependencies?: Record<string, string>
+    }
+    const hostPackages = Object.keys(manifest.dependencies ?? {}).filter(name => name.startsWith('@deepseek-ai/'))
+    expect(hostPackages).toEqual([])
+  })
 })

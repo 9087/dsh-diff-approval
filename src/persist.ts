@@ -19,7 +19,7 @@
 import { readFile, readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { writeJsonAtomic } from './atomic-write.ts'
-import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { dshHomePath } from './home-paths.ts'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { PendingEntry, SessionLineage } from './types.ts'
 

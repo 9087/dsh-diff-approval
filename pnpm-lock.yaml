@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@deepseek-ai/dsh-home-paths':
-        specifier: ^0.1.0-rc.5
-        version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))
       '@shikijs/langs':
         specifier: ^4.4.3
         version: 4.4.3
