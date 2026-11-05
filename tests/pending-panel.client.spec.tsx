@@ -5286,19 +5286,24 @@ describe('PendingPanel', () => {
     expect(source).toMatch(/useLayoutEffect\(\(\) => \{\s*measureFloatBoxRef\.current\(\)\s*\}, \[/)
   })
 
-  it('steps the code view\'s vertical bar a nudge more solid, without touching its size or its air', () => {
-    // Asked for as "a bit more opaque", which is not available here: the app's thumb token is opaque already
-    // (measured `#e5e5e5`, no alpha channel), so the step is taken from the colour — 10% towards the theme's
-    // label, a nudge rather than a new colour. Only the VERTICAL bar: the horizontal one is a rare guest in
-    // the code view and stays the app's, as do the width and the rounding.
+  it('doubles the diff\'s vertical bar while keeping its old corner radius and its 10% colour step', () => {
+    // The reader asked for a wider vertical bar (at least twice) with the change colours on it more legible,
+    // and the SAME corner radius. One token carries the width to both diff surfaces (the code view, single and
+    // side-by-side, and the Markdown preview). The corner is pinned to what the app's 999px radius looked like
+    // on the old 5px bar — 2.5px — because at twice the width that same 999px would render a visibly rounder
+    // corner (half the bar). The rule therefore names the radius; it does not re-use the app's token.
     const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
+    expect(/\.diff \{[^}]*--diff-scrollbar-width: calc\(var\(--dsh-scrollbar-width, 5px\) \* 2\)/.test(sheet)).toBe(true)
+    expect(/\.diff \{[^}]*--diff-scrollbar-radius: calc\(var\(--dsh-scrollbar-width, 5px\) \/ 2\)/.test(sheet)).toBe(true)
+    expect(/\.diffBody::-webkit-scrollbar,\s*\.mdPreviewBody::-webkit-scrollbar \{\s*width: var\(--diff-scrollbar-width\)/.test(sheet)).toBe(true)
+    // The colour step asked for before is unchanged: 10% towards the theme's label, on the vertical bar only.
     expect(sheet).toMatch(/\.diffBody::-webkit-scrollbar-thumb:vertical \{\s*background: color-mix\(in srgb, var\(--dsh-scrollbar-thumb\) 90%, var\(--dsw-alias-label-secondary\) 10%\)/)
     expect(sheet).toMatch(/\.diffBody::-webkit-scrollbar-thumb:vertical:hover \{\s*background: color-mix\(in srgb, var\(--dsh-scrollbar-thumb-hover\) 90%, var\(--dsw-alias-label-secondary\) 10%\)/)
-    // No width rule of ours: the bar keeps the app's own size.
-    expect(/\.diffBody::-webkit-scrollbar \{\s*width:/.test(sheet)).toBe(false)
-    // A pixel of air on each side of the vertical bar, and it is the CODE's surface that shows through it:
-    // the thumb paints inside a transparent border on both sides, and the track beneath carries the code
-    // background. Insets on the thumb rather than a narrower bar, so the app keeps owning the width.
+    // The pinned corner: both diff surfaces' thumbs take the half-app-bar radius; no 999px of ours survives
+    // that would grow with the width. The same 2.5px is also the old corner of the horizontal bar (5px thick).
+    expect(/\.diffBody::-webkit-scrollbar-thumb,\s*\.mdPreviewBody::-webkit-scrollbar-thumb \{\s*border-radius: var\(--diff-scrollbar-radius\)/.test(sheet)).toBe(true)
+    expect(sheet).not.toContain('border-radius: 999px')
+    // A pixel of air on each side of the vertical bar, and it is the CODE's surface that shows through it.
     const thumb = /\.diffBody::-webkit-scrollbar-thumb:vertical \{([^}]*)\}/.exec(sheet)?.[1] ?? ''
     expect(thumb).toContain('border-left: 1px solid transparent')
     expect(thumb).toContain('border-right: 1px solid transparent')
@@ -5306,30 +5311,41 @@ describe('PendingPanel', () => {
     expect(sheet).toMatch(/\.diffBody::-webkit-scrollbar-track \{\s*background: var\(--dsw-alias-bg-base\)/)
   })
 
-  it('keeps the changed-line ruler quiet, because its marks are a map and not a second diff', () => {
-    // Only the markers paint in that strip, so its opacity is what sets how loud they are. They sat at half the
-    // theme's own error/success colours, which read as bands laid over the code rather than as marks. A wider
-    // bar was tried and reverted: the bar and its thumb are the app's own, unchanged.
+  it('lays the ruler as one centred 2px strip (single) or two adjacent 2px strips (double), never a second diff', () => {
+    // Only the markers paint in that strip, so its opacity sets how loud they are. The 0.35 of the narrow
+    // 5px bar was too easy to miss; the marks are raised to 0.6 and given a 3px floor. The single column is
+    // ONE 2px strip centred on the bar; the double column is TWO adjacent 2px strips (left = old pane, right
+    // = new pane) — no gap between them — centred as one 4px group. The add colour is the reader's configured
+    // green, darkened by a fixed formula.
     const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
-    const ruler = /^\.overviewRuler \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
-    expect(ruler).toContain('opacity: 0.35')
-    // AS WIDE AS THE BAR, not a hard-coded 4px: the strip overlays the scrollbar's own track, and the bar's
-    // width is the app's token. The split view's strip spans one bar too, and each of its two halves is
-    // 50% of it (half a bar per pane), so the two panes' marks never add up past the bar.
-    expect(ruler).toContain('width: calc(var(--dsh-ruler-bar, 8px) / 2)')
-    expect(ruler).toContain('right: calc(var(--dsh-ruler-bar, 8px) / 4)')
-    const splitRuler = /^\.overviewRulerSplit \{([^}]*)\}/m.exec(sheet)?.[1] ?? ''
-    expect(splitRuler).toContain('right: 0')
-    // Both views read the MEASURED bar the panel publishes (`--dsh-ruler-bar`), because the app declares no
-    // `--dsh-scrollbar-width`: before this, every width here was the 8px fallback, whatever the bar drew.
-    expect(splitRuler).toContain('width: var(--dsh-ruler-bar, 8px)')
-    for (const half of ['markerSplitDel', 'markerSplitAdd']) {
-      const rule = new RegExp(`^\\.${half} \\{([^}]*)\\}`, 'm').exec(sheet)?.[1] ?? ''
-      expect(rule, `${half} takes half a bar`).toContain('width: 50%')
-    }
-    // …and the colours themselves stay the theme's, one per kind.
-    expect(sheet).toMatch(/\.markerDel \{\s*background-color: var\(--dsw-alias-state-error-primary\)/)
-    expect(sheet).toMatch(/\.markerAdd \{\s*background-color: var\(--dsw-alias-state-success-primary\)/)
+    const rule = (name: string): string => new RegExp(`^\\.${name} \\{([^}]*)\\}`, 'm').exec(sheet)?.[1] ?? ''
+    const ruler = rule('overviewRuler')
+    expect(ruler).toContain('opacity: 0.6')
+    expect(ruler).toContain('width: 2px')
+    expect(ruler).toContain('right: calc((var(--dsh-ruler-bar, 8px) - 2px) / 2)')
+    const marker = rule('overviewMarker')
+    expect(marker).toContain('min-height: 3px')
+    // The double column's pair: 2px + 2px ADJACENT (no gap) = 4px, centred on the measured bar.
+    const two = rule('overviewRulerTwo')
+    expect(two).toContain('width: 4px')
+    expect(two).toContain('right: calc((var(--dsh-ruler-bar, 8px) - 4px) / 2)')
+    const splitRuler = rule('overviewRulerSplit')
+    expect(splitRuler).toContain('width: 4px')
+    expect(splitRuler).toContain('right: calc((var(--dsh-ruler-bar, 8px) - 4px) / 2)')
+    expect(splitRuler).toContain('bottom: calc(var(--dsh-ruler-bar, 8px) + 1px)')
+    // Each side takes exactly one 2px strip: left at the group's start, right at its end; 4px total means the
+    // two strips touch, with no gap between them.
+    expect(rule('markerSplitDel')).toContain('width: 2px')
+    expect(rule('markerSplitDel')).toContain('left: 0')
+    expect(rule('markerSplitDel')).toContain('right: auto')
+    expect(rule('markerSplitAdd')).toContain('width: 2px')
+    expect(rule('markerSplitAdd')).toContain('right: 0')
+    expect(rule('markerSplitAdd')).toContain('left: auto')
+    // BOTH colours follow the reader's configuration: the deletion colour is the CONFIGURED red (not the raw
+    // theme token), the addition colour the configured green darkened by a fixed formula.
+    expect(rule('markerDel')).toContain('background-color: var(--md-diff-del-color, var(--dsw-alias-state-error-primary))')
+    const addRule = rule('markerAdd')
+    expect(addRule).toContain('background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 80%, black)')
   })
 
   it('keeps the turns rigid, so the card measurement reads the content and not its own reservation', () => {
@@ -7447,11 +7463,12 @@ describe('PendingPanel', () => {
     expect(rule('gotoLayer')).toContain('position: absolute')
     expect(rule('gotoLayer')).toContain('place-items: center')
     // Side by side, the centring is against the right pane — the column that is read there — with the two
-    // things in that half that are not code left out: the scroller's own bar and the pinned strips row.
+    // things in that half that are not code left out: the scroller's own bar (the panel's doubled vertical
+    // bar) and the pinned strips row.
     const right = rule('gotoLayerRight')
     expect(right).toContain('left: 50%')
-    expect(right).toContain('right: var(--dsh-scrollbar-width, 8px)')
-    expect(right).toContain('bottom: calc(var(--dsh-scrollbar-width, 8px) + 1px)')
+    expect(right).toContain('right: var(--diff-scrollbar-width)')
+    expect(right).toContain('bottom: calc(var(--diff-scrollbar-width) + 1px)')
     expect(rule('gotoAction')).toContain('white-space: nowrap')
     expect(rule('gotoAction')).toContain('flex: none')
     expect(rule('gotoInput')).toContain('width: 9em')
@@ -7506,11 +7523,11 @@ describe('PendingPanel', () => {
     expect(add.style.height).toBe('50%')
   })
 
-  it('marks the side-by-side view\'s own ruler, one half per pane', () => {
+  it('marks the side-by-side view\'s own ruler, one 2px strip per pane', () => {
     // The two columns are aligned, so a change that renders on both sides — the deleted line with the
-    // added one beside it — shares one band, and the strip is read as two columns: its left half is the
-    // left (old) pane, its right half the right (new) one. A deletion marks the left half, an addition the
-    // right, and an aligned change fills both, instead of one colour painting over the other.
+    // added one beside it — shares one band. The double ruler is TWO 2px strips with a 2px gap: the left
+    // strip is the left (old) pane, the right strip the right (new) one. A deletion marks the left strip, an
+    // addition the right, and an aligned change fills both, instead of one colour painting over the other.
     // Positions come from the pair height table, which is what this view's offsets measure (a row fraction
     // would be wrong here: a del row and its add are two rows but one pair).
     localStorage.setItem('diff-approval:split-mode', '1')
@@ -7526,34 +7543,36 @@ describe('PendingPanel', () => {
 
     const ruler = document.querySelector('[data-diff-approval-ruler]') as HTMLElement
     expect(ruler).not.toBeNull()
+    expect(ruler.dataset.diffRulerLayout).toBe('two')
     const markers = [...ruler.querySelectorAll('[data-diff-ruler-marker]')] as HTMLElement[]
     // Four pairs: [alpha|alpha] [keep|keep] [beta|beta] [keep two|keep two]. Two changes, each a deletion
-    // on the left half and an addition on the right half of the same band.
+    // on the left strip and an addition on the right strip of the same band.
     expect(markers.map(marker => marker.dataset.diffRulerMarker)).toEqual(['del', 'add', 'del', 'add'])
     expect(markers.map(marker => marker.dataset.diffRulerSide)).toEqual(['left', 'right', 'left', 'right'])
     expect(markers.map(marker => marker.style.top)).toEqual(['0%', '0%', '50%', '50%'])
     expect(markers.map(marker => marker.style.height)).toEqual(['25%', '25%', '25%', '25%'])
-    // Each marker is one half of the strip, so the two halves of a band sit side by side rather than on
-    // top of each other (the class carries that; jsdom has no layout to measure it with).
+    // Each marker carries its own side's strip class, so the two strips of a band sit side by side (touching,
+    // with no gap) rather than on top of each other (the class carries that; jsdom has no layout to measure
+    // it with).
     expect(markers[0]!.className).not.toBe(markers[1]!.className)
   })
 
-  it('keeps the side-by-side ruler two-column: the full bar, halves after the base marker', () => {
+  it('keeps the side-by-side ruler two-strip: a 4px pair of adjacent 2px strips after the base marker', () => {
     // jsdom computes no cascade and lays nothing out, so neither of these can be caught by rendering: the
-    // split strip has to span the whole bar (each half 4px, or a 2px half is hard to see), and its
-    // half-width rules have to come AFTER `.overviewMarker` in the sheet — that rule sets `width: 100%`
-    // and `right: 0` at the same specificity, so an earlier definition loses the cascade and every marker
-    // covers the whole strip again, with the later one painting over the earlier. That is exactly how the
-    // left half went missing in the browser, so the sheet is asserted here.
+    // pair is 4px wide (2px + 2px, adjacent), and the strip-width rules have to come AFTER `.overviewMarker`
+    // in the sheet — that rule sets `width: 100%` and `right: 0` at the same specificity, so an earlier
+    // definition loses the cascade and every marker covers the whole pair again, with the later one painting
+    // over the earlier. That is exactly how the left strip went missing in the browser, so the sheet is
+    // asserted here.
     const sheet = readFileSync(join(process.cwd(), 'src', 'client', 'PendingPanel.module.css'), 'utf8')
     const rule = (name: string): string => new RegExp(`^\\.${name} \\{([^}]*)\\}`, 'm').exec(sheet)?.[1] ?? ''
-    expect(rule('overviewRulerSplit')).toContain('width: var(--dsh-ruler-bar, 8px)')
+    expect(rule('overviewRulerSplit')).toContain('width: 4px')
     // The rule the halves have to beat.
     expect(rule('overviewMarker')).toContain('width: 100%')
     const base = sheet.indexOf('.overviewMarker {')
     for (const name of ['markerSplitDel', 'markerSplitAdd']) {
       expect(sheet.indexOf(`.${name} {`)).toBeGreaterThan(base)
-      expect(rule(name)).toContain('width: 50%')
+      expect(rule(name)).toContain('width: 2px')
     }
   })
 
@@ -8113,15 +8132,16 @@ describe('PendingPanel', () => {
     expect(document.querySelector('[data-diff-block-flash]')!.style.width).toBe('200px')
   })
 
-  it("publishes the bar it measures, instead of trusting a token the app never declares", () => {
+  it('publishes the bar it measures, instead of trusting a token', () => {
     const props = panelProps({ read: true, files: [FILE], busy: new Set() })
     render(<PendingPanel {...props} />)
     fireEvent.click(screen.getByLabelText('panel.aria'))
     const body = document.querySelector('[data-diff-body]') as HTMLElement
     const panel = body.closest('section') as HTMLElement
-    // The app declares no `--dsh-scrollbar-width` anywhere (its package was searched), so every CSS
-    // `var(..., 8px)` is a guess about a bar Chromium owns. The panel measures the real bar and publishes
-    // it as `--dsh-ruler-bar`, which the ruler's rules read first; only a changed value is written.
+    // The app declares `--dsh-scrollbar-width`, but the panel draws its diff's vertical bar twice as wide for
+    // the ruler's marks; neither a token nor a copy of it is proof of what Chromium drew. The panel measures
+    // the real bar and publishes it as `--dsh-ruler-bar`, which the ruler's rules read first; only a changed
+    // value is written.
     Object.defineProperty(body, 'clientWidth', { value: 200, configurable: true })
     Object.defineProperty(body, 'offsetWidth', { value: 212, configurable: true })
     Object.defineProperty(body, 'offsetHeight', { value: 120, configurable: true })
@@ -14310,9 +14330,12 @@ describe('PendingPanel', () => {
     expect(tagged.length).toBeGreaterThan(0)
     expect(tagged.every(element => element.tagName === 'SPAN')).toBe(true)
     expect((body.querySelector('.mdWordAdd')!.closest('p') as HTMLElement).hasAttribute('data-md-block')).toBe(false)
-    // The preview shows the diff ruler beside the scrollbar (both layouts do).
-    expect(document.querySelector('[data-diff-approval-ruler]')).not.toBeNull()
+    // The preview shows the SINGLE ruler beside the scrollbar: one strip, no side classes.
+    const singleRuler = document.querySelector('[data-diff-approval-ruler]') as HTMLElement
+    expect(singleRuler).not.toBeNull()
+    expect(singleRuler.dataset.diffRulerLayout).toBe('one')
     expect(document.querySelector('[data-diff-ruler-marker]')).not.toBeNull()
+    expect(document.querySelector('[data-diff-ruler-side]')).toBeNull()
     // The language dropdown and word-wrap toggle are source-diff only.
     expect(document.querySelector('[data-diff-lang]')).toBeNull()
     expect(document.querySelector('[data-diff-wrap]')).toBeNull()
@@ -14327,10 +14350,16 @@ describe('PendingPanel', () => {
     expect(dbl.querySelectorAll('.mdDoubleCol .mdWordDel').length).toBeGreaterThan(0)
     expect(dbl.querySelectorAll('.mdDoubleCol .mdWordAdd').length).toBeGreaterThan(0)
     expect(dbl.querySelectorAll('.mdDoubleCol .mdDel, .mdDoubleCol .mdAdd').length).toBe(0)
-    // The ruler is measured in both preview layouts: the double column's rows are
-    // aligned, so their cells share the vertical extent a marker is placed by.
-    expect(document.querySelector('[data-diff-approval-ruler]')).not.toBeNull()
-    expect(document.querySelector('[data-diff-ruler-marker]')).not.toBeNull()
+    // The ruler is measured in both preview layouts: the double column's rows are aligned, so their cells
+    // share the vertical extent a marker is placed by — and the double ruler is the TWO-strip pair, each
+    // marker told which column's strip it belongs to.
+    const doubleRuler = document.querySelector('[data-diff-approval-ruler]') as HTMLElement
+    expect(doubleRuler).not.toBeNull()
+    expect(doubleRuler.dataset.diffRulerLayout).toBe('two')
+    const sides = [...doubleRuler.querySelectorAll('[data-diff-ruler-marker]')]
+      .map(marker => marker.getAttribute('data-diff-ruler-side'))
+    expect(sides).toContain('left')
+    expect(sides).toContain('right')
 
     // Toggle back to the source diff.
     fireEvent.click(document.querySelector('[data-diff-md-preview]') as HTMLButtonElement)
@@ -14609,6 +14638,29 @@ describe('PendingPanel', () => {
     await waitFor(() => { expect(resolved()).toBe(true) })
     expect((props.onPreviewImage as unknown as { mock: { calls: unknown[][] } }).mock.calls.length)
       .toBeGreaterThan(callsAfterFirstRender)
+  })
+
+  it('holds the overview ruler back while a preview picture has no box yet', () => {
+    // The reader's report: the ruler calculated on the first render is inaccurate because a picture is still
+    // loading (everything below it is collapsed). An inaccurate map is worse than none, so the marks are
+    // withheld until every <img> has a bitmap; this test pins that hold-back.
+    localStorage.setItem('diff-approval:md-preview', '1')
+    const file = entry({
+      id: 'entry-md-ruler-pending',
+      path: '/repo/README.md',
+      oldText: '# T\n\n![shot](images/a.png)\n\nkeep\n',
+      newText: '# T\n\n![shot](images/b.png)\n\nkeep\n',
+    })
+    const props = panelProps({ read: true, files: [file], busy: new Set() })
+    props.onPreviewImage = vi.fn(() => new Promise<string | undefined>(() => {}))
+    render(<PendingPanel {...props} />)
+    fireEvent.click(screen.getByLabelText('panel.aria'))
+    fireEvent.click(screen.getByText('README.md'))
+
+    const body = document.querySelector('[data-diff-md-preview-body]')
+    expect(body?.querySelector('img[src]')).not.toBeNull()
+    // No markers while the picture is unresolved.
+    expect(document.querySelector('[data-diff-approval-ruler]')).toBeNull()
   })
 
   it('shows source code (not the Markdown preview) for a non-Markdown file even when the preview setting is on', () => {

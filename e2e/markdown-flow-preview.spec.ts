@@ -85,6 +85,14 @@ const TABLE_NEW = [
   '| 参考实现 | `dsh-diff-approval`（工程结构 / connection RPC / wake-up 卡片投递）、`dsh-shortcut`（LLM 标题生成） |', '',
 ].join('\n')
 
+// A long document, so the preview body really overflows and its vertical bar can be measured in the browser.
+const LONG_PARAGRAPHS = Array.from(
+  { length: 120 },
+  (_unused, index) => `第 ${index + 1} 段：这一段不变，只用来让预览出现垂直滚动。`,
+).join('\n\n')
+const LONG_OLD = `# 长文\n\n${LONG_PARAGRAPHS}\n\n最后一段：旧。\n`
+const LONG_NEW = `# 长文\n\n${LONG_PARAGRAPHS}\n\n最后一段：新。\n`
+
 let fixture: Fixture
 let browser: Browser
 let page: Page
@@ -96,6 +104,7 @@ let addId: string
 let delId: string
 let imageId: string
 let tableId: string
+let longId: string
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => { setTimeout(resolve, ms) })
 
@@ -116,6 +125,7 @@ test.describe('flow preview', () => {
       { name: 'flow-delete.md', oldText: DEL_OLD, newText: '' },
       { name: 'flow-image.md', oldText: IMAGE_OLD, newText: IMAGE_NEW },
       { name: 'flow-table.md', oldText: TABLE_OLD, newText: TABLE_NEW },
+      { name: 'flow-long.md', oldText: LONG_OLD, newText: LONG_NEW },
     ]
     fixture = makeFixture('flow-preview')
     const workspaceId = await bootstrapHome(dsh, fixture)
@@ -137,6 +147,7 @@ test.describe('flow preview', () => {
     delId = seeded.entries[3]!.id
     imageId = seeded.entries[4]!.id
     tableId = seeded.entries[5]!.id
+    longId = seeded.entries[6]!.id
     // The image itself is a workspace file, not a pending one: the preview's image read only needs it on
     // disk at the path the Markdown names (the seeded file's own folder).
     writeFileSync(join(fixture.workspace, 'shot.svg'), SHOT_SVG)
@@ -333,6 +344,36 @@ test.describe('flow preview', () => {
     expect(boxes).not.toBeNull()
     expect(Math.abs(boxes!.flashTop - boxes!.blockTop)).toBeLessThan(2)
     expect(Math.abs(boxes!.flashBottom - boxes!.blockBottom)).toBeLessThan(2)
+    // The ruler is measured only once the picture has a box: each mark's band matches its block's rendered
+    // position. A measurement taken while the image was still loading would have put the marks below it too
+    // high (a collapsed document), which is the inaccurate first ruler this case guards.
+    await expect(page.locator('[data-diff-approval-ruler]')).toHaveCount(1, { timeout: 20_000 })
+    const bands = await page.evaluate(() => {
+      const body = document.querySelector<HTMLElement>('[data-diff-md-preview-body]')
+      const ruler = document.querySelector<HTMLElement>('[data-diff-approval-ruler]')
+      if (body === null || ruler === null) return null
+      const markers = [...ruler.querySelectorAll<HTMLElement>('[data-diff-ruler-marker]')]
+      const blocks = [...body.querySelectorAll<HTMLElement>(
+        '.mdBlock.mdAdd, .mdBlock.mdDel, .mdFlowGroup-old, .mdFlowGroup-new',
+      )]
+      const bodyRect = body.getBoundingClientRect()
+      return {
+        markerTops: markers.map(marker => Number.parseFloat(marker.style.top)),
+        markerKinds: markers.map(marker => marker.dataset.diffRulerMarker),
+        blockTops: blocks.map(block =>
+          ((block.getBoundingClientRect().top - bodyRect.top + body.scrollTop) / body.scrollHeight) * 100),
+      }
+    })
+    expect(bands).not.toBeNull()
+    expect(bands!.markerTops.length).toBeGreaterThan(0)
+    expect(bands!.markerTops).toHaveLength(bands!.blockTops.length)
+    // The structured block's two versions are their own bands: a deletion (old paragraph) and an addition
+    // (the picture), so the ruler carries both colours rather than one wrapper's kind.
+    expect(bands!.markerKinds).toContain('del')
+    expect(bands!.markerKinds).toContain('add')
+    for (let index = 0; index < bands!.markerTops.length; index++) {
+      expect(Math.abs(bands!.markerTops[index]! - bands!.blockTops[index]!)).toBeLessThan(1)
+    }
   })
 
   test('double column: matched table rows share a line, even when one cell wraps or a row is one-sided', async () => {
@@ -365,5 +406,141 @@ test.describe('flow preview', () => {
       expect(Math.abs(slot.oldTop - slot.newTop), `row slot ${slot.slot} top`).toBeLessThan(2)
       expect(Math.abs(slot.oldHeight - slot.newHeight), `row slot ${slot.slot} height`).toBeLessThan(2)
     }
+  })
+
+  test('the preview scrollbar is twice the app bar, and its change marks are louder', async () => {
+    test.setTimeout(300_000)
+    // The previous case left the double column up; this one measures a single scrolling column.
+    await ensureSingle()
+    await openPreview(longId)
+    const measured = await page.evaluate(() => {
+      const body = document.querySelector<HTMLElement>('[data-diff-md-preview-body]')
+      if (body === null) return null
+      const appToken = Number.parseFloat(getComputedStyle(document.body).getPropertyValue('--dsh-scrollbar-width'))
+      const ruler = document.querySelector<HTMLElement>('[data-diff-approval-ruler]')
+      // Headless Chromium draws OVERLAY scrollbars here, so the bar takes no layout width (offset − client is
+      // 0); the computed `::-webkit-scrollbar` pseudo-element is what the browser will actually paint, and it
+      // is the honest number to compare. `height` is the horizontal bar's thickness and stays the app's.
+      const scrollbar = getComputedStyle(body, '::-webkit-scrollbar')
+      const thumb = getComputedStyle(body, '::-webkit-scrollbar-thumb')
+      return {
+        appToken,
+        scrolls: body.scrollHeight > body.clientHeight,
+        opacity: ruler === null ? null : Number.parseFloat(getComputedStyle(ruler).opacity),
+        markers: document.querySelectorAll('[data-diff-ruler-marker]').length,
+        rulerWidth: ruler === null ? 0 : ruler.getBoundingClientRect().width,
+        verticalBar: scrollbar.width,
+        horizontalBar: scrollbar.height,
+        thumbRadius: thumb.borderRadius,
+      }
+    })
+    expect(measured).not.toBeNull()
+    expect(measured!.scrolls).toBe(true)
+    expect(measured!.appToken).toBeGreaterThan(0)
+    // The vertical bar is exactly twice the app's, while the horizontal thickness stays the app's.
+    expect(measured!.verticalBar).toBe(`${measured!.appToken * 2}px`)
+    expect(measured!.horizontalBar).toBe(`${measured!.appToken}px`)
+    // The CORNER is the app's old radius on its narrow bar (2.5px), not half of the new one (5px).
+    expect(measured!.thumbRadius).toBe(`${measured!.appToken / 2}px`)
+    // The diff marks are drawn and readable: in the single column the ruler is ONE 2px strip.
+    expect(measured!.markers).toBeGreaterThan(0)
+    expect(measured!.opacity).toBeCloseTo(0.6, 2)
+    expect(measured!.rulerWidth).toBe(2)
+  })
+
+  test('double column: the ruler is two centred adjacent 2px strips, one per column', async () => {
+    test.setTimeout(300_000)
+    // Open the long file explicitly (this case must also run on its own), then switch it to the double column.
+    await openPreview(longId)
+    await ensureDouble()
+    await expect(page.locator('[data-diff-approval-ruler][data-diff-ruler-layout="two"]')).toHaveCount(1, { timeout: 20_000 })
+    await page.waitForTimeout(500)
+    const geometry = await page.evaluate(() => {
+      const ruler = document.querySelector<HTMLElement>('[data-diff-approval-ruler]')
+      if (ruler === null) return null
+      const markers = [...ruler.querySelectorAll<HTMLElement>('[data-diff-ruler-marker]')]
+      const boxesOf = (side: 'left' | 'right'): DOMRect[] => markers
+        .filter(marker => marker.dataset.diffRulerSide === side)
+        .map(marker => marker.getBoundingClientRect())
+      const del = boxesOf('left')
+      const add = boxesOf('right')
+      const group = ruler.getBoundingClientRect()
+      const body = document.querySelector<HTMLElement>('[data-diff-md-preview-body]')
+      const panel = body?.closest('section')
+      return {
+        layout: ruler.dataset.diffRulerLayout,
+        groupWidth: group.width,
+        groupRight: group.right,
+        bodyRight: body?.getBoundingClientRect().right ?? 0,
+        rulerBar: panel === null || panel === undefined
+          ? 0
+          : Number.parseFloat(getComputedStyle(panel).getPropertyValue('--dsh-ruler-bar')),
+        delCount: del.length,
+        addCount: add.length,
+        delWidth: del[0]?.width ?? 0,
+        addWidth: add[0]?.width ?? 0,
+        gap: del[0] === undefined || add[0] === undefined ? 0 : add[0].left - del[0].right,
+        delTop: del[0]?.top ?? 0,
+        delBottom: del[0]?.bottom ?? 0,
+        addTop: add[0]?.top ?? 0,
+        addBottom: add[0]?.bottom ?? 0,
+      }
+    })
+    expect(geometry).not.toBeNull()
+    expect(geometry!.layout).toBe('two')
+    // Two adjacent 2px strips (NO gap); the 4px group is centred on the measured bar, so it keeps equal air
+    // on both sides of the pair.
+    expect(geometry!.groupWidth).toBe(4)
+    expect(geometry!.delCount).toBeGreaterThan(0)
+    expect(geometry!.addCount).toBeGreaterThan(0)
+    expect(geometry!.delWidth).toBe(2)
+    expect(geometry!.addWidth).toBe(2)
+    expect(geometry!.gap).toBe(0)
+    const margin = (geometry!.bodyRight - geometry!.groupRight)
+    const expectedMargin = (geometry!.rulerBar - geometry!.groupWidth) / 2
+    expect(Math.abs(margin - expectedMargin)).toBeLessThan(1)
+    // The paired markers sit in the same band: the left strip's deletion and the right strip's addition align.
+    expect(Math.abs(geometry!.delTop - geometry!.addTop)).toBeLessThan(2)
+    expect(Math.abs(geometry!.delBottom - geometry!.addBottom)).toBeLessThan(2)
+  })
+
+  test('side-by-side code view: its ruler is the same two 2px strips, aligned', async () => {
+    test.setTimeout(300_000)
+    // Closing the rendered preview leaves the source diff, whose view toggle is still on side-by-side.
+    await page.locator('[data-diff-md-preview]').click({ timeout: 20_000 })
+    await expect(page.locator('[data-diff-split-row]').first()).toBeVisible({ timeout: 20_000 })
+    await expect(page.locator('[data-diff-approval-ruler][data-diff-ruler-layout="two"]')).toHaveCount(1, { timeout: 20_000 })
+    await page.waitForTimeout(400)
+    const geometry = await page.evaluate(() => {
+      const ruler = document.querySelector<HTMLElement>('[data-diff-approval-ruler]')
+      if (ruler === null) return null
+      const markers = [...ruler.querySelectorAll<HTMLElement>('[data-diff-ruler-marker]')]
+      const boxesOf = (side: 'left' | 'right'): DOMRect[] => markers
+        .filter(marker => marker.dataset.diffRulerSide === side)
+        .map(marker => marker.getBoundingClientRect())
+      const del = boxesOf('left')
+      const add = boxesOf('right')
+      return {
+        groupWidth: ruler.getBoundingClientRect().width,
+        delCount: del.length,
+        addCount: add.length,
+        delWidth: del[0]?.width ?? 0,
+        addWidth: add[0]?.width ?? 0,
+        gap: del[0] === undefined || add[0] === undefined ? 0 : add[0].left - del[0].right,
+        delTop: del[0]?.top ?? 0,
+        addTop: add[0]?.top ?? 0,
+        delBottom: del[0]?.bottom ?? 0,
+        addBottom: add[0]?.bottom ?? 0,
+      }
+    })
+    expect(geometry).not.toBeNull()
+    expect(geometry!.groupWidth).toBe(4)
+    expect(geometry!.delCount).toBeGreaterThan(0)
+    expect(geometry!.addCount).toBeGreaterThan(0)
+    expect(geometry!.delWidth).toBe(2)
+    expect(geometry!.addWidth).toBe(2)
+    expect(geometry!.gap).toBe(0)
+    expect(Math.abs(geometry!.delTop - geometry!.addTop)).toBeLessThan(2)
+    expect(Math.abs(geometry!.delBottom - geometry!.addBottom)).toBeLessThan(2)
   })
 })

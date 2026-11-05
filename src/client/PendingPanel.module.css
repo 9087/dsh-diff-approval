@@ -2796,6 +2796,14 @@
      rules): the code view and every other diff surface keep reading the real value. */
   --md-diff-del-color: var(--dsh-diff-del-color, var(--dsw-alias-state-error-primary));
   --md-diff-add-color: var(--dsh-diff-add-color, var(--dsw-alias-state-success-primary));
+  /* The diff's VERTICAL scrollbar is TWICE the app's bar, as asked: at the app's 5px the change marks in the
+     overview ruler over it were too small to read at a glance. The width is ours; the colours stay the app's.
+     Every declaration that needs the bar's real width (the bar itself, the preview's bar, the go-to popup's
+     inset) reads this one token. */
+  --diff-scrollbar-width: calc(var(--dsh-scrollbar-width, 5px) * 2);
+  /* The radius the app's 999px thumb produced on its 5px bar: 2.5px. The doubled bar must keep THAT corner,
+     not pick up the bigger one a 999px radius makes at twice the width (half the bar = 5px). */
+  --diff-scrollbar-radius: calc(var(--dsh-scrollbar-width, 5px) / 2);
 }
 
 .diffHeader {
@@ -2906,13 +2914,13 @@
 
 /* Side by side there are two code boxes rather than one, and the reader reads the RIGHT one, so the popup
    is centred on that pane: the two columns split the root evenly, and the right half starts at its middle.
-   What is not code is cut off inside that half too — the scroller's own vertical bar along its right edge,
-   and the pinned strips row along the bottom of the root (the theme's bar width plus its 1px border-top:
-   5px + 1px on the host measured, headless Chromium 153, Windows, DPR 1; 8px only as the fallback). */
+   What is not code is cut off inside that half too — the scroller's own VERTICAL bar along its right edge
+   (the panel's bar, twice the app's: `--diff-scrollbar-width`), and the pinned strips row along the bottom of
+   the root (the bar width plus its 1px border-top). */
 .gotoLayerRight {
   left: 50%;
-  right: var(--dsh-scrollbar-width, 8px);
-  bottom: calc(var(--dsh-scrollbar-width, 8px) + 1px);
+  right: var(--diff-scrollbar-width);
+  bottom: calc(var(--diff-scrollbar-width) + 1px);
 }
 
 /* A press anywhere at all dismisses it — the code view's own area included — and this layer paints
@@ -3193,12 +3201,22 @@
   cursor: default;
 }
 
+/* The VERTICAL bar of both diff surfaces — the code view (single and side-by-side) and the rendered
+   Markdown preview — is the panel's own width: TWICE the app's, so the change marks in the overview ruler
+   over it are legible at a glance. `width` is the vertical bar's thickness (its horizontal counterpart's
+   is `height`, which stays the app's). The thumb's corner is pinned below: the app's 999px radius would
+   render as a visibly rounder shape at twice the width, and the want is the same corner, not the same token. */
+.diffBody::-webkit-scrollbar,
+.mdPreviewBody::-webkit-scrollbar {
+  width: var(--diff-scrollbar-width);
+}
+
 /* The code view's VERTICAL bar, a nudge more solid than the app's thumb.
    Slightly more visible was asked for as "opacity", but the app's thumb token is opaque already (measured
    `#e5e5e5`, no alpha channel), so there is no opacity to raise: the same effect is taken from the colour
    instead — 10% towards the theme's label, which deepens the grey without changing what colour it is. Kept
    to the vertical bar on purpose: the horizontal one is a rare guest in the code view, and one decision
-   should move one bar. The width and the hover colour stay the app's. */
+   should move one bar. The hover colour stays the app's; the width is the panel's and is set above. */
 /* The gutter behind the vertical bar paints the code's own surface, so the strip between the bar and the
    rows reads as code rather than as a second, paler column. */
 .diffBody::-webkit-scrollbar-track {
@@ -3207,13 +3225,21 @@
 
 .diffBody::-webkit-scrollbar-thumb:vertical {
   background: color-mix(in srgb, var(--dsh-scrollbar-thumb) 90%, var(--dsw-alias-label-secondary) 10%);
-  /* A pixel of air on each side of the bar. The thumb keeps the app's width (no `::-webkit-scrollbar`
-     rule of ours — see the spec that forbids one); the inset is taken out of its PAINT by a transparent
-     border on each side, with `background-clip: padding-box` keeping the colour inside that border. What
-     shows through the gap is the track above, which is the code's own surface. */
+  /* A pixel of air on each side of the bar, taken out of its PAINT by a transparent border on each side
+     with `background-clip: padding-box` keeping the colour inside that border. What shows through the gap
+     is the track above, which is the code's own surface. */
   border-left: 1px solid transparent;
   border-right: 1px solid transparent;
   background-clip: padding-box;
+}
+
+/* The SAME corner as before the widening: the app's 999px radius on its 5px bar is a 2.5px corner, and left
+   at 999px on the 10px bar it would read as a 5px corner — visibly rounder, which is not what was asked. Pin
+   the thumbs to that old figure (half the APP's bar). The horizontal bar keeps the app's 5px thickness, so
+   the same 2.5px radius is its old corner too. */
+.diffBody::-webkit-scrollbar-thumb,
+.mdPreviewBody::-webkit-scrollbar-thumb {
+  border-radius: var(--diff-scrollbar-radius);
 }
 
 .diffBody::-webkit-scrollbar-thumb:vertical:hover {
@@ -4300,69 +4326,79 @@
 .overviewRuler {
   position: absolute;
   top: 0;
-  /* HALF THE BAR, CENTRED ON IT: the strip is a map of the bar's track, and half a bar reads the marks
-     without covering the thumb. Centred means (bar - half) / 2 = a quarter of the bar on each side, so
-     `right` is a quarter and `width` a half. Both follow the app's token — this file never sets
-     `::-webkit-scrollbar`'s width — and the 1px of air the bar keeps for itself (the thumb's own inset, see
-     the scrollbar rules above) plays no part in this. The split view still spans the whole bar, split into
-     two halves. */
-  right: calc(var(--dsh-ruler-bar, 8px) / 4);
+  /* ONE 2px STRIP, CENTRED ON THE BAR: the strip is a map of the bar's track, and 2px reads the marks without
+     covering the thumb. `right` centres it: (bar − 2) / 2. The bar width is what the panel measured
+     (`--dsh-ruler-bar`, see the effect), so this follows the real bar whatever the app's token is. */
+  right: calc((var(--dsh-ruler-bar, 8px) - 2px) / 2);
   bottom: 0;
-  width: calc(var(--dsh-ruler-bar, 8px) / 2);
+  width: 2px;
   pointer-events: none;
-  /* ONLY THE CHANGED-LINE MARKS PAINT IN THIS STRIP, so this opacity is what sets how loud they are. Half
-     was too loud for something read in the corner of the eye: the ruler is a map of where the changes are,
-     not a second diff, and at 0.35 the theme's error/success colours read as marks rather than as bands
-     over the code. */
-  opacity: 0.35;
+  /* ONLY THE CHANGED-LINE MARKS PAINT IN THIS STRIP, so this opacity is what sets how loud they are. It used
+     to sit at 0.35 — a map read in the corner of the eye — but at the app's 5px bar the marks were too easy to
+     miss. The bar is twice as wide now (see `--diff-scrollbar-width`), and the marks are raised to 0.6: still
+     marks rather than a second diff, but the deletion/addition colours are readable at a glance. */
+  opacity: 0.6;
 }
 
-/* The side-by-side view's ruler, over that view's own vertical bar. Two differences from the single
-   column's strip, both because it is read as two columns: it spans the WHOLE bar (each half is 4px, so a
-   deletion and the addition beside it are both legible — only the markers paint, so the thumb stays
-   visible wherever nothing changed), and it stops above the pinned horizontal row BELOW the scroller
-   rather than above a bar inside it (that row is a sibling, not part of the scroller). */
+/* The DOUBLE column's ruler: TWO 2px strips, one per column, ADJACENT (no gap between them), centred on the
+   bar as one pair — 4px in total. The container itself paints nothing; the del markers take the left strip,
+   the add markers the right one (see the split classes below), so an aligned change is one red 2px mark and
+   one green 2px mark touching edge to edge. */
+.overviewRulerTwo {
+  right: calc((var(--dsh-ruler-bar, 8px) - 4px) / 2);
+  width: 4px;
+}
+
+/* The side-by-side CODE view's pair, over that view's own bar. The geometry is the preview double column's;
+   the difference is that it stops above the pinned horizontal row BELOW the scroller rather than above a bar
+   inside it (that row is a sibling, not part of the scroller). */
 .overviewRulerSplit {
-  /* This one spans the WHOLE bar, so the single-column centring above must not apply to it. */
-  right: 0;
-  width: var(--dsh-ruler-bar, 8px);
+  right: calc((var(--dsh-ruler-bar, 8px) - 4px) / 2);
+  width: 4px;
   bottom: calc(var(--dsh-ruler-bar, 8px) + 1px);
 }
 
-/* One changed-line marker; a 2px floor keeps a single changed line visible
-   on a long file even though its fraction is tiny. */
+/* One changed-line marker; a 3px floor keeps a single changed line visible on a long file even though its
+   fraction is tiny (2px on the old, narrower bar was easy to miss). */
 .overviewMarker {
   position: absolute;
   right: 0;
   width: 100%;
-  min-height: 2px;
+  min-height: 3px;
   border-radius: 2px;
 }
 
 .markerDel {
-  background-color: var(--dsw-alias-state-error-primary);
+  /* The deletion colour is the reader's CONFIGURED del colour too — the same variable the rendered diff's red
+     tint reads — so the ruler and the blocks it maps agree even after a custom colour is set. The theme's
+     error token is only the fallback. */
+  background-color: var(--md-diff-del-color, var(--dsw-alias-state-error-primary));
 }
 
 .markerAdd {
-  background-color: var(--dsw-alias-state-success-primary);
+  /* The add colour is the reader's CONFIGURED green (`--md-diff-add-color` resolves the settings value, with
+     the theme's success token only as the fallback). On the ruler it is darkened by a fixed formula — 20%
+     towards black lowers its lightness, so the 2px mark reads on the bar without changing which colour family
+     the reader chose. */
+  background-color: color-mix(in srgb, var(--md-diff-add-color, var(--dsw-alias-state-success-primary)) 80%, black);
 }
 
-/* A split-view marker takes one half of that strip, like the pane it stands for: the left half is the
-   left (old) pane, the right half the right (new) one, so an aligned change fills both halves in the same
-   band — a red bar beside a green one — instead of one colour painting over the other.
-   These come AFTER `.overviewMarker` on purpose: that rule sets `width: 100%` and `right: 0`, and they
-   share its specificity, so an earlier definition would lose the cascade and every marker would cover the
-   whole strip again (which is exactly how the left half went missing once). */
+/* A double-column marker takes ONE 2px strip of the 4px pair: the left strip is the left (old) pane, the right
+   strip the right (new) one, so an aligned change shows a red bar and a green bar beside it in the same band
+   instead of one colour painting over the other. The two strips touch — no gap between them.
+   These come AFTER `.overviewMarker` on purpose: that rule sets `width: 100%` and `right: 0`, and they share
+   its specificity, so an earlier definition would lose the cascade and every marker would cover the whole pair
+   again (which is exactly how the left strip went missing once). */
 .markerSplitDel {
   left: 0;
   right: auto;
-  width: 50%;
+  width: 2px;
 }
 
 .markerSplitAdd {
   left: auto;
   right: 0;
-  width: 50%;
+  width: 2px;
 }
 
 /* No wrapping, no word-break: a diff is read by its indentation. A table

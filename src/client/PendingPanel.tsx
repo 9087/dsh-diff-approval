@@ -652,18 +652,18 @@ export function makeMeasurer(font: string | undefined): ((text: string) => numbe
     return width
   }
 }
-/** The fallback width of the VERTICAL BAR in px, which is what the two places below keep clear of: the
- *  stylesheet states `var(--dsh-scrollbar-width, 8px)` for the bar, and the single-column ruler is half of it
- *  and centred (see `.overviewRuler`), so the strip reserved here is the whole gutter the ruler lives in. It
- *  is the fallback because the theme normally publishes the token; it is read from the element when it does. */
+/** The fallback width of the VERTICAL BAR in px, which is what the two places below keep clear of. The
+ *  panel makes the diff's bar twice the app's (`--diff-scrollbar-width`, see the sheet), and publishes the
+ *  REAL measured bar as `--dsh-ruler-bar`; this constant is only the no-DOM fallback. */
 const OVERVIEW_RULER_WIDTH_PX = 8
-/** The bar's width as the app states it on the element (`--dsh-scrollbar-width`), so the two places that
- *  have to stay clear of the ruler follow the theme's own number instead of a copy of it. */
+/** The bar's width as the panel measured it (`--dsh-ruler-bar`) or, failing that, the app's own token
+ *  (`--dsh-scrollbar-width`), so the two places that have to stay clear of the ruler follow the real number
+ *  instead of a copy of it. */
 function scrollbarWidthPxOf(element: HTMLElement | null): number {
   if (element === null) return OVERVIEW_RULER_WIDTH_PX
   const style = getComputedStyle(element)
   // The measured bar first (the panel publishes it, see the `--dsh-ruler-bar` effect), then the app's own
-  // token if a host ever starts declaring it, then the constant.
+  // token, then the constant.
   for (const name of ['--dsh-ruler-bar', '--dsh-scrollbar-width']) {
     const parsed = Number.parseFloat(style.getPropertyValue(name))
     if (Number.isFinite(parsed) && parsed > 0) return parsed
@@ -3570,12 +3570,17 @@ export const SplitDiff = forwardRef<SplitDiffHandle, {
           below, which is a sibling of the scroller rather than a bar inside it — hence its own class
           (see `.overviewRulerSplit`); the single column measures an inner scrollbar instead.
 
-          The strip is read as TWO columns, like the panes it overlays: its left half is the left pane
-          (what the file had) and its right half the right pane (what it has now), so a deletion marks
-          the left half, an addition the right, and an aligned change fills both — instead of one colour
+          The ruler is TWO 2px strips with a 2px gap, like the panes it overlays: the left strip is the left
+          pane (what the file had) and the right strip the right pane (what it has now), so a deletion marks
+          the left strip, an addition the right, and an aligned change fills both — instead of one colour
           painting over the other in a single band (see `.markerSplitDel` / `.markerSplitAdd`). */}
       {rulerMarkersNow.length > 0 && (
-        <div className={`${css.overviewRuler} ${css.overviewRulerSplit}`} data-diff-approval-ruler aria-hidden="true">
+        <div
+          className={`${css.overviewRuler} ${css.overviewRulerSplit}`}
+          data-diff-approval-ruler
+          data-diff-ruler-layout="two"
+          aria-hidden="true"
+        >
           {rulerMarkersNow.map((marker, index) => (
             <div
               key={index}
@@ -4151,25 +4156,84 @@ function previewRulerMarkersOf(
 }
 
 /**
- * Measure the single-column preview's change blocks to position its ruler
- * markers by RENDERED height, so a tall block (an inline image, a large code
- * fence) is not miscounted by source-line fractions. `offsetTop`/`offsetHeight`
- * are relative to `.mdPreviewBody` (which is the blocks' positioned parent);
- * each change block was rendered as one run, so one marker per block. A floor
- * keeps a thin block visible on a long document.
+ * Measure the preview's change blocks to position its ruler markers by RENDERED height, so a tall block (an
+ * inline image, a large code fence) is not miscounted by source-line fractions. A floor keeps a thin block
+ * visible on a long document.
+ *
+ * SINGLE column: each changed element is one marker, offset from the body (`offsetTop`, the body is the
+ * blocks' positioned parent). The legacy blocks renderer marks `.mdBlock`s directly; the structured renderer
+ * wraps both versions in one `.mdFlowBlock`, whose `.mdFlowGroup-old` / `.mdFlowGroup-new` children are the
+ * two bands — measuring only the wrapper would give a mixed block one colour and one combined height.
+ *
+ * DOUBLE column: the two cells are separate documents, so measuring each side's block independently leaves the
+ * two strips a fraction of a line apart (margin collapsing, a wrapped cell) — the very misalignment a
+ * two-strip ruler must not have. Instead each rendered change ROW is measured ONCE and contributes a marker to
+ * each side the row actually changed: the row's `data-md-kind` says old-only / new-only / mixed, and for a
+ * table or fence unit (which carries no block of its own) the cells' own change tags are inspected. Both
+ * strips of a replacement therefore share one band exactly.
  * @param container - the rendered preview body.
  * @returns markers positioned as fractions of the content's scroll height.
  */
 function markdownPreviewMarkers(container: HTMLElement): PreviewRulerMarker[] {
   const total = container.scrollHeight
   if (total === 0) return []
-  const markers: PreviewRulerMarker[] = []
-  for (const el of Array.from(container.querySelectorAll<HTMLElement>('.mdBlock.mdAdd, .mdBlock.mdDel'))) {
-    markers.push({
-      top: (el.offsetTop / total) * 100,
-      height: Math.max((el.offsetHeight / total) * 100, 0.5),
-      kind: el.classList.contains('mdDel') ? 'del' : 'add',
-    })
+  // Positions are measured as RECTS against the body's content top, never as `offsetTop`: the structured
+  // renderer's `.mdFlowBlock`/`.mdFlowGroup` are `position: relative` (their tint is painted with a
+  // pseudo-element), so their `offsetTop` is relative to their own block — a few pixels, not the position in
+  // the document. Using it put every mark near the top of its block, which is the ruler this fixes.
+  const bodyTop = container.getBoundingClientRect().top - container.scrollTop
+  const pushTarget: PreviewRulerMarker[] = []
+  const pushBand = (element: HTMLElement, kind: 'del' | 'add'): void => {
+    const rect = element.getBoundingClientRect()
+    const top = ((rect.top - bodyTop) / total) * 100
+    const height = Math.max((rect.height / total) * 100, 0.5)
+    pushTarget.push({ top, height, kind })
+  }
+  if (container.dataset.diffMdMode !== 'double') {
+    for (const element of Array.from(container.querySelectorAll<HTMLElement>('.mdBlock.mdAdd, .mdBlock.mdDel'))) {
+      pushBand(element, element.classList.contains('mdDel') ? 'del' : 'add')
+    }
+    // The STRUCTURED single renderer wraps both versions of one change in `.mdFlowBlock`: its old/new groups
+    // are the two bands, not the wrapper. Measuring the wrapper alone would colour a mixed block with one
+    // side's mark only, and would take the block's height (which the picture may still be filling) as one
+    // band. Groups also give the correct band height once an image has loaded.
+    for (const block of Array.from(container.querySelectorAll<HTMLElement>('.mdFlowBlock[data-md-block]'))) {
+      const groups = Array.from(block.children).filter(child =>
+        child.classList.contains('mdFlowGroup-old') || child.classList.contains('mdFlowGroup-new'))
+      if (groups.length === 0) {
+        pushBand(block, block.dataset.mdKind === 'del' ? 'del' : 'add')
+        continue
+      }
+      for (const group of groups) {
+        pushBand(group as HTMLElement, group.classList.contains('mdFlowGroup-old') ? 'del' : 'add')
+      }
+    }
+    return pushTarget.sort((left, right) => left.top - right.top)
+  }
+  // The double column's rows live inside a centred document column too, so the same rect measurement applies.
+  const markers = pushTarget
+  for (const unit of Array.from(container.querySelectorAll<HTMLElement>('.mdFlowDoubleRow'))) {
+    if (!unit.classList.contains('mdFlowDoubleRegion-diff')) continue
+    const kind = unit.dataset.mdKind
+    const kinds = new Set<'del' | 'add'>()
+    if (kind === 'mixed') {
+      kinds.add('del')
+      kinds.add('add')
+    } else if (kind === 'del' || kind === 'add') {
+      kinds.add(kind)
+    } else {
+      const changedIn = (cellClass: string): boolean => {
+        const cell = Array.from(unit.children).find(child => child.classList.contains(cellClass))
+        return cell !== undefined && cell.querySelector('[data-md-block]') !== null
+      }
+      if (changedIn('mdFlowDoubleCell-old')) kinds.add('del')
+      if (changedIn('mdFlowDoubleCell-new')) kinds.add('add')
+    }
+    if (kinds.size === 0) continue
+    const rect = unit.getBoundingClientRect()
+    const top = ((rect.top - bodyTop) / total) * 100
+    const height = Math.max((rect.height / total) * 100, 0.5)
+    for (const side of kinds) markers.push({ top, height, kind: side })
   }
   return markers
 }
@@ -4769,13 +4833,52 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
   // Falls back to the source-line `rulerMarkers` when the blocks cannot be laid
   // out (jsdom), so the ruler still appears while keeping height-aware positions
   // in a real browser.
+  //
+  // PICTURES ARRIVE LATE, and a picture without a bitmap yet has no box: measuring at that moment puts every
+  // marker below the picture too high (the whole document sits collapsed), which is exactly the inaccurate
+  // first ruler the reader sees. An inaccurate map is worse than no map, so the marks are held back while any
+  // <img> is still loading and the measurement re-runs when it lands (an observer on the content wrapper and
+  // the images themselves covers a late decode as well as the inline pass's one-shot tick).
   useLayoutEffect(() => {
-    if (!previewActive) return
+    if (!previewActive) {
+      setMdRulerMarkers([])
+      return
+    }
     const body = mdPreviewBodyRef.current
     if (body === null) return
-    const measured = markdownPreviewMarkers(body)
-    setMdRulerMarkers(measured.length > 0 ? measured : previewRulerMarkersOf(rulerMarkers, model.diff.rows.length))
-  }, [previewActive, splitView, file.oldText, file.newText, mdImageTick, rulerMarkers])
+    const imagesPending = (): boolean => Array.from(body.querySelectorAll<HTMLImageElement>('img'))
+      .some(image => !image.complete || image.naturalWidth === 0)
+    const clear = (): void => {
+      setMdRulerMarkers(current => current.length === 0 ? current : [])
+    }
+    const measure = (): void => {
+      if (imagesPending()) {
+        clear()
+        return
+      }
+      const measured = markdownPreviewMarkers(body)
+      setMdRulerMarkers(measured.length > 0 ? measured : previewRulerMarkersOf(rulerMarkers, model.diff.rows.length))
+    }
+    measure()
+    // The body is a scroll box whose own border box does not grow with its content; the content wrapper does,
+    // so that is what is observed (plus every picture, whose own box appears on load).
+    const content = body.firstElementChild
+    const images = Array.from(body.querySelectorAll<HTMLImageElement>('img'))
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => measure())
+    if (content !== null) observer?.observe(content)
+    for (const image of images) {
+      observer?.observe(image)
+      image.addEventListener('load', measure)
+      image.addEventListener('error', measure)
+    }
+    return () => {
+      observer?.disconnect()
+      for (const image of images) {
+        image.removeEventListener('load', measure)
+        image.removeEventListener('error', measure)
+      }
+    }
+  }, [previewActive, splitView, file.oldText, file.newText, mdImageTick, rulerMarkers, previewHtml])
 
   // Syntax highlighting is windowed (see the hook): only the lines near the
   // viewport are tokenized, so opening a large file no longer pays for a
@@ -9554,12 +9657,18 @@ function PendingDiff({ file, sessionId, busy, workspacePath, jumpSignal, undoFla
               </div>
             ) : null}
             {mdRulerMarkers.length > 0 && (
-              <div className={css.overviewRuler} data-diff-approval-ruler aria-hidden="true">
+              <div
+                className={`${css.overviewRuler}${splitView ? ` ${css.overviewRulerTwo}` : ''}`}
+                data-diff-approval-ruler
+                data-diff-ruler-layout={splitView ? 'two' : 'one'}
+                aria-hidden="true"
+              >
                 {mdRulerMarkers.map((marker, index) => (
                   <div
                     key={index}
-                    className={`${css.overviewMarker} ${marker.kind === 'del' ? css.markerDel : css.markerAdd}`}
+                    className={`${css.overviewMarker} ${marker.kind === 'del' ? css.markerDel : css.markerAdd}${splitView ? ` ${marker.kind === 'del' ? css.markerSplitDel : css.markerSplitAdd}` : ''}`}
                     data-diff-ruler-marker={marker.kind}
+                    data-diff-ruler-side={splitView ? (marker.kind === 'del' ? 'left' : 'right') : undefined}
                     style={{ top: `${marker.top}%`, height: `${marker.height}%` }}
                   />
                 ))}
@@ -10692,12 +10801,12 @@ export function PendingPanel({
   const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight)
   const panelRef = useRef<HTMLElement>(null)
   /**
-   * THE BAR'S REAL WIDTH, published for the ruler. The app declares no `--dsh-scrollbar-width` anywhere
-   * (its whole package was searched: no declaration), so every `var(--dsh-scrollbar-width, 8px)` in the
-   * stylesheet resolves to that 8px fallback — a guess that only happens to match a bar Chromium draws 8px
-   * wide. One measurement of the scrolling box feeds BOTH views through `--dsh-ruler-bar`, which the ruler
-   * rules read first, so the strip is half a real bar (centred) in one column and a whole real bar in the
-   * split view. Only a changed value is written, and it is a style property, never state: no render, no loop.
+   * THE BAR'S REAL WIDTH, published for the ruler. The app declares `--dsh-scrollbar-width` (5px on the
+   * measured host), but the panel doubles the diff's bar for legibility (see `--diff-scrollbar-width`), and a
+   * measured number cannot disagree with what Chromium actually drew: one measurement of the scrolling box
+   * feeds BOTH views through `--dsh-ruler-bar`, which the ruler rules read first, so the strip is half a real
+   * bar (centred) in one column and a whole real bar in the split view. Only a changed value is written, and
+   * it is a style property, never state: no render, no loop.
    */
   useLayoutEffect(() => {
     const panel = panelRef.current
