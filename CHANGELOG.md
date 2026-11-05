@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.37.4](https://github.com/9087/dsh-diff-approval/compare/v0.37.3...v0.37.4) (2026-11-05)
+
+### Bug Fixes
+
+* **deps:** stop shipping the host home-paths package ([12c87b6](https://github.com/9087/dsh-diff-approval/commit/12c87b684788e6810a9b430ff652b48dd2cdd9bc)), closes [#10](https://github.com/9087/dsh-diff-approval/issues/10)
+
 ## [0.37.3](https://github.com/9087/dsh-diff-approval/compare/v0.37.1...v0.37.3) (2026-11-05)
 
 ### Bug Fixes
