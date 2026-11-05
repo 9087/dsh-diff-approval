@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.37.2](https://github.com/9087/dsh-diff-approval/compare/v0.37.1...v0.37.2) (2026-11-05)
+
+### Bug Fixes
+
+* **diff:** keep blank lines inside a changed region ([2da8c52](https://github.com/9087/dsh-diff-approval/commit/2da8c52632e6ce8caa5f920fb114eabde028684f))
+* **preview:** draw no code card in the empty column of a whole-file addition ([59706db](https://github.com/9087/dsh-diff-approval/commit/59706dbf50d85c3174f32c759a3b1ed2eee7654f))
+* **preview:** keep matching table rows on one line in the double column ([40b26f4](https://github.com/9087/dsh-diff-approval/commit/40b26f48cbcca4a6b7858cab89a3262185f879d1))
+* **preview:** widen the diff bar and rework the overview ruler ([2ecfc48](https://github.com/9087/dsh-diff-approval/commit/2ecfc482e0e2dd03d693c1b85e97785f6fb947a2))
+
 ## [0.37.1](https://github.com/9087/dsh-diff-approval/compare/v0.37.0...v0.37.1) (2026-11-01)
 
 ## [0.37.0](https://github.com/9087/dsh-diff-approval/compare/v0.36.1...v0.37.0) (2026-11-01)
