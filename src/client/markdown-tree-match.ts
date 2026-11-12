@@ -348,10 +348,24 @@ function buildNode(options: {
   const childId = (at: number): string => `${id}.${at}`
 
   if (type === 'table') {
+    // Every table CELL on one row shares the row's LINE; a cell with no text has nothing to search for, so it
+    // must be placed on its own row by the table's own line offsets. Falling back to `start` (the table's first
+    // line) put an empty cell on the header row, where the renderer then picked a header cell for it.
+    const rowLineStarts: number[] = []
+    {
+      let offset = start
+      for (const line of raw.split('\n')) {
+        rowLineStarts.push(offset)
+        offset += line.length + 1
+      }
+    }
     const cells: MarkdownTreeNode[] = []
-    const buildCell = (cell: TokenLike, header: boolean): void => {
+    const buildCell = (cell: TokenLike, header: boolean, rowIndex: number): void => {
       const cellRaw = typeof cell.text === 'string' ? cell.text : ''
-      const cellStart = cellRaw === '' ? start : childAt(cellRaw)
+      // Line 0 is the header row, line 1 the delimiter row, so body row N starts on line N + 2.
+      const rowLine = header ? 0 : rowIndex + 2
+      const lineStart = rowLineStarts[rowLine] ?? start
+      const cellStart = cellRaw === '' ? lineStart : childAt(cellRaw)
       const cellNode: MarkdownTreeNode = {
         id: childId(cells.length),
         type: 'table_cell',
@@ -372,8 +386,10 @@ function buildNode(options: {
       }
       cells.push(cellNode)
     }
-    for (const cell of token.header ?? []) buildCell(cell, true)
-    for (const row of token.rows ?? []) for (const cell of row) buildCell(cell, false)
+    for (const cell of token.header ?? []) buildCell(cell, true, 0)
+    for (const [rowIndex, row] of (token.rows ?? []).entries()) {
+      for (const cell of row) buildCell(cell, false, rowIndex)
+    }
     node.children = cells
     return node
   }
@@ -457,11 +473,16 @@ function repairSwallowedTableLinesForTree(text: string): { text: string; lineMap
 
 /** Parse one side into a forest, dropping the `space` tokens that only separate blocks. */
 export function parseMarkdownTree(text: string): MarkdownTreeNode[] {
-  const index = indexOfSource(text)
+  // `marked` returns `token.raw` with LF line endings even for a CRLF document. Lexing the CRLF source while
+  // locating those LF raw strings by `indexOf` made every multi-line token unsearchable, so the cursor fallback
+  // shifted the whole tree (tables lost their header, cells read the first column). Normalize before lexing:
+  // the line count — and therefore every line number and Keep/Revert range — is unchanged.
+  const source = text.replace(/\r\n?/g, '\n')
+  const index = indexOfSource(source)
   // Front matter is not Markdown content: `marked` would read its `---` fences as rules/headings. The renderer
   // masks it, and so does the tree — with SPACES, so every later offset stays exactly where it was — and the
   // metadata becomes ONE `front_matter` node spanning the block (a change there is invisible content, not text).
-  const lines = text.split('\n')
+  const lines = source.split('\n')
   let frontEnd = 0
   if (lines[0]?.trim() === '---') {
     const close = lines.findIndex((line, at) => at > 0 && line.trim() === '---')
@@ -470,8 +491,8 @@ export function parseMarkdownTree(text: string): MarkdownTreeNode[] {
     }
   }
   const masked = frontEnd === 0
-    ? text
-    : text.slice(0, frontEnd).replace(/[^\n]/g, ' ') + text.slice(frontEnd)
+    ? source
+    : source.slice(0, frontEnd).replace(/[^\n]/g, ' ') + source.slice(frontEnd)
   // The same swallowed-table repair the renderer applies, with a map back to the ORIGINAL line of every token.
   const repaired = repairSwallowedTableLinesForTree(masked)
   const lexText = repaired.text
@@ -479,11 +500,11 @@ export function parseMarkdownTree(text: string): MarkdownTreeNode[] {
   const tokens = marked.lexer(lexText) as unknown as TokenLike[]
   const nodes: MarkdownTreeNode[] = []
   if (frontEnd > 0) {
-    const frontLines = text.slice(0, frontEnd).split('\n').length - 1
+    const frontLines = source.slice(0, frontEnd).split('\n').length - 1
     nodes.push({
       id: '0',
       type: 'front_matter',
-      raw: text.slice(0, frontEnd),
+      raw: source.slice(0, frontEnd),
       text: '',
       attrs: {},
       children: [],

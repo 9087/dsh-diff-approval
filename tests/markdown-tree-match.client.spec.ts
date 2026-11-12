@@ -125,6 +125,28 @@ describe('Markdown syntax tree: parsing', () => {
     expect(root[1]!.lines).toEqual({ start: 6, end: 6 })
     expect(root[2]!.lines.start).toBe(8)
   })
+
+  it('parses a CRLF document exactly like its LF twin, multi-line tokens included', () => {
+    const crlf = parseMarkdownTree(TEXT.replace(/\n/g, '\r\n'))
+    const lf = parseMarkdownTree(TEXT)
+    expect(typesOf(crlf)).toEqual(typesOf(lf))
+    expect(flatNodes(crlf).map(node => node.lines)).toEqual(flatNodes(lf).map(node => node.lines))
+    // The table is the symptom: marked's LF raw could not be found in the CRLF source, so the header and rows
+    // were lost and the cells fell back to the wrong lines.
+    expect(crlf[4]!.children.map(cell => cell.text)).toEqual(['a', 'b', '1', '2'])
+  })
+
+  it('places empty table cells on their own row instead of the table header', () => {
+    const text = '| 阶段一 |  |  |\n|---|---|---|\n| x |  |  |\n'
+    const table = parseMarkdownTree(text)[0]!
+    expect(table.type).toBe('table')
+    const header = table.children.filter(cell => cell.attrs.header === true)
+    const body = table.children.filter(cell => cell.attrs.header !== true)
+    // No text to search for: the empty cells need the row's own line offset, not the table's start.
+    expect(header.map(cell => cell.lines.start)).toEqual([1, 1, 1])
+    expect(body.map(cell => cell.lines.start)).toEqual([3, 3, 3])
+    expect(body.map(cell => cell.text)).toEqual(['x', '', ''])
+  })
 })
 
 describe('Markdown syntax tree: outer-first matching', () => {

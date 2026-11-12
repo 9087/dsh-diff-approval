@@ -1935,7 +1935,12 @@ function repairSwallowedTableLines(text: string): { text: string; lineMap: numbe
  * @returns the rendered tree and every element that stands for a known line span.
  */
 function renderAnnotated(text: string): RenderedDoc {
-  const masked = maskFrontMatter(text)
+  // `marked` lexes with LF: every `token.raw` it returns has `\n` line endings even for a CRLF document. The
+  // tokens are located in this text by `indexOf(raw)`, so parsing the CRLF document itself made every
+  // MULTI-LINE raw unsearchable (a table, a list, a fence) and the cursor fell back to the wrong place. Parse a
+  // normalized copy: line endings do not change the line count, so line numbers and every range stay the same.
+  const normalized = text.replace(/\r\n?/g, '\n')
+  const masked = maskFrontMatter(normalized)
   const repaired = repairSwallowedTableLines(masked)
   const rendered = repaired.text
   const root = document.createElement('div')
@@ -1944,7 +1949,8 @@ function renderAnnotated(text: string): RenderedDoc {
   const tokens = marked.lexer(rendered) as unknown as MdToken[]
   const starts = lineStartsOf(rendered)
   // The ORIGINAL lines, so an element's stamped source is the document the reader is diffing (the front
-  // matter's own text included, which is what a dot's hover text shows).
+  // matter's own text included, which is what a dot's hover text shows). The line numbers are shared because
+  // normalization never adds or removes a line.
   const lines = text.split('\n')
   /** A repaired line's index as the ORIGINAL document numbers it (an inserted blank line maps to -1). */
   const originalLine = (line: number): number => {
