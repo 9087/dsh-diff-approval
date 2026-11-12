@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.37.5](https://github.com/9087/dsh-diff-approval/compare/v0.37.4...v0.37.5) (2026-11-12)
+
+### Bug Fixes
+
+* **preview:** render tables from CRLF files and empty table cells ([9b12034](https://github.com/9087/dsh-diff-approval/commit/9b12034533bef20677c2cba47759b4c58979b5ad))
+
 ## [0.37.4](https://github.com/9087/dsh-diff-approval/compare/v0.37.3...v0.37.4) (2026-11-05)
 
 ### Bug Fixes
